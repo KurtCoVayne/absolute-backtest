@@ -41,6 +41,8 @@ pub enum Code {
     W1,
     /// Warning: unused parameter.
     W2,
+    /// Warning: declared relation with no defining rule.
+    W3,
 }
 
 impl Code {
@@ -61,6 +63,7 @@ impl Code {
             "X" => Code::X,
             "W1" => Code::W1,
             "W2" => Code::W2,
+            "W3" => Code::W3,
             _ => return None,
         })
     }
@@ -81,6 +84,7 @@ impl Code {
             Code::X => "WF-10 resolution",
             Code::W1 => "dead rule",
             Code::W2 => "unused parameter",
+            Code::W3 => "undefined relation",
         }
     }
 }
@@ -343,7 +347,7 @@ impl<'a> Checker<'a> {
     }
 
     pub fn diag(&mut self, code: Code, unit: &str, rule: Option<String>, span: Span, message: impl Into<String>) {
-        let severity = if matches!(code, Code::W1 | Code::W2) { Severity::Warning } else { Severity::Error };
+        let severity = if matches!(code, Code::W1 | Code::W2 | Code::W3) { Severity::Warning } else { Severity::Error };
         self.diags.push(Diagnostic {
             code,
             severity,
@@ -691,6 +695,24 @@ impl<'a> Checker<'a> {
                     self.diag(Code::W1, &root_name, None, sig.span, format!("derived relation `{}` is not reached by any decide rule", sig.name));
                 }
             }
+        }
+        // W3: a declared relation that no rule defines is empty for ever, so
+        // every rule reading it positively can never fire (adv-12).
+        let decls: Vec<Signature> = self.root.rels.clone();
+        for sig in decls {
+            if self.reserved_declared.contains(&sig.name) || self.rules.iter().any(|r| r.head.name == sig.name) {
+                continue;
+            }
+            self.diag(
+                Code::W3,
+                &root_name,
+                None,
+                sig.span,
+                format!(
+                    "derived relation `{}` is declared but no rule defines it; it is always empty, so every rule reading it positively can never fire",
+                    sig.name
+                ),
+            );
         }
         // W2: unused parameters.
         let mut used: HashSet<(String, String)> = HashSet::new();

@@ -333,7 +333,9 @@ only through resample; there is no implicit alignment and no coarse-to-fine
 direction in v1.
 
 **Warnings, not errors.** A derived relation that no decide rule reaches is
-reported as dead. A parameter never used is reported. Neither affects validity.
+reported as dead. A parameter never used is reported. A declared relation
+that no rule defines is reported: it is always empty, so every rule reading
+it positively can never fire. None of these affects validity.
 
 ## 6. Environment interface and kernel loop
 
@@ -481,6 +483,7 @@ produce), and `corpus/strategies/` must check clean.
 | WF-10 Resolution | X | body atoms share the head's resolution; resample strictly finer to coarser, aligned, with `min K` | `bad_resolution_mix` |
 | Dead rules | W1 | derived relation not reached from decide | (warning) |
 | Unused parameter | W2 | parameter not referenced | (warning) |
+| Undefined relation | W3 | declared relation with no defining rule | (warning) |
 
 The six negative cases the first draft asked for before the typed checker was
 built (an unbound head variable, an unbound `+` argument, a Price + Scalar

@@ -108,7 +108,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | S | WF-8 | no cycle through `not` or an aggregate |
 | Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode, in decide heads and in `decided` patterns; decide's T is a positive atom's key |
 | X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
-| W1, W2 | warnings | dead derived relation; unused parameter |
+| W1, W2, W3 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty) |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
 first error reported is the earliest offending relation.
