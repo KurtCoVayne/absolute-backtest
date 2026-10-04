@@ -134,6 +134,23 @@ naming the rule, the tuple and the expression. `cash` is populated at the
 first bar with the initial cash so that cash-aware rules can fire from the
 start.
 
+A decision the executor cannot fill (no price for the instrument at the next
+bar) is reported as dropped, is still recorded in `decided`, and is not
+retried by the kernel; whether the strategy retries it depends on how the
+rule is written. A point test on history, `lag(T, hold, T0), decided(T0,
+buy(A, _))`, is one-shot: `lag` is many-to-one and partial over the bar
+domain, so it fires at most once per entry and never for an entry whose `T0
++ hold` falls on a weekend or holiday, and it can land on an older entry of
+the same instrument. A test of the current state is retried every bar, which
+is why the corpus writes every time-based exit in the window form:
+
+```
+decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
+```
+
+This sells at the first bar strictly later than `hold` after the entry,
+closes every entry, and fires again if a fill was dropped.
+
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
 solution at `t`; `verify_causality` re-runs truncated instances for sampled
 bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus

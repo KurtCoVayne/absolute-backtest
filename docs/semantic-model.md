@@ -221,6 +221,23 @@ them are causal.
 a rule using them does not fire for the first bars, which is the intended
 behaviour rather than a warm-up special case.
 
+`lag` is a function of T that is many-to-one and partial over the bar domain:
+when T − N falls in a gap (a weekend, a holiday), every T whose T − N falls in
+the same gap lands on the same T1, and a bar T0 is reached by `lag(T, N, T0)`
+only when some bar T has T0 ≤ T − N < next(T0). A point test on history such
+as `lag(T, hold, T0), decided(T0, buy(A, _))` therefore fires at most once per
+entry and, for an entry whose T0 + N is not a bar, never; it can also land on
+an older entry of the same instrument. A time-based exit is written as a
+window test on the current state, which is evaluated afresh at every bar:
+
+```
+decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
+```
+
+with `bought_within` a complete derived relation counting `decided` buys over
+`prior_window(T, hold, min 1)`. It fires at the first bar strictly later than
+T0 + hold, for every entry, and again if the executor could not carry it out.
+
 **Decisions.** The output relation `decide(@T, D)` takes a decision value D
 built from one constructor of the strategy's declared mode:
 
@@ -367,6 +384,16 @@ close T, after fills of decisions made at prev(T); `fill(A, T, Q, P)` records
 those fills; `cash(T, C)` is cash after them; `decided(T0, D)` holds every
 decision the strategy emitted at T0. A decision rule at T therefore sees the
 result of its decision at prev(T), and never its own.
+
+`decided` records what the strategy emitted, not what the executor did: a
+decision the executor could not carry out (no price at the fill bar) is still
+in `decided` and is not retried by the kernel. Whether it is retried is the
+strategy's choice of exit form: a rule that tests `decided` at one point in
+time (`lag(T, hold, T0), decided(T0, buy(A, _))`) is one-shot, while a rule
+that tests the current state (`held(A, T, Q)`, `position`, `not
+bought_within(A, T, hold)`) is re-evaluated at every bar until the state
+changes, so a dropped exit is decided again at the next bar (section 4,
+temporal builtins).
 
 In delta mode a decision is a signed order; in target mode the executor
 computes the order as the difference between the target and position at the
