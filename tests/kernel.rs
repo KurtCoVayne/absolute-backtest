@@ -414,7 +414,15 @@ fn a_missing_fill_price_drops_the_decision() {
     // universe and volume rows stay, so the bar still exists.
     let gone = day("2024-01-10");
     ds.facts.get_mut("close").unwrap().retain(|tu| tu[1] != Value::Time(gone));
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..Default::default() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
     assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
     // Thursday's log return needs Wednesday's close too, so the next buy is

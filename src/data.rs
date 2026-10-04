@@ -1,34 +1,47 @@
 //! Environment instances from CSV files, and a deterministic synthetic
 //! market for tests and demos.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::check::Program;
 use crate::ir::*;
-use crate::kernel::time::{days_from_civil, format_timestamp, parse_timestamp, weekday, DAY};
+use crate::kernel::time::{bucket, days_from_civil, format_timestamp, parse_timestamp, weekday, DAY};
 use crate::kernel::{Dataset, Value};
 
 /// Load one CSV per primitive relation of the program's environment from
 /// `dir` (`<relation>.csv`, header row naming the signature's arguments).
-/// Missing files leave the relation empty and are reported in the result.
+///
+/// A row is identified by its inputs, its key and its entity-typed outputs
+/// (the identity columns of section 3; `universe(-A, @T)` enumerates A), and
+/// the value outputs are bound by the call: a second row for the same
+/// identity with different outputs is an error naming both lines, and an
+/// identical row is dropped. The temporal key is stored as the label of the
+/// bucket containing it at the relation's resolution (section 3
+/// "Resolution": at @1d the trading date), so `2022-01-03T16:00:00` and
+/// `2022-01-03` label one @1d bar. A missing or header-only file leaves the
+/// relation empty and is reported in the returned notes.
 pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>), String> {
+    if !dir.is_dir() {
+        return Err(format!("{}: directory not found", dir.display()));
+    }
     let mut ds = Dataset::new();
-    let mut missing = Vec::new();
+    let mut notes = Vec::new();
     for (name, sig) in &prog.relations {
         if !matches!(sig.kind, Kind::Primitive { .. }) {
             continue;
         }
         let path = dir.join(format!("{}.csv", name));
         if !path.exists() {
-            missing.push(path.display().to_string());
+            notes.push(format!("no file {}; relation left empty", path.display()));
             continue;
         }
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+        let mut lines = text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty());
         let header: Vec<String> = lines
             .next()
             .ok_or_else(|| format!("{}: empty file", path.display()))?
+            .1
             .split(',')
             .map(|h| h.trim().to_lowercase())
             .collect();
@@ -42,17 +55,63 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
                     .ok_or_else(|| format!("{}: header lacks column `{}`", path.display(), a.name))
             })
             .collect::<Result<_, _>>()?;
-        for (ln, line) in lines.enumerate() {
+        let key_pos = sig.key_pos();
+        // Inputs, the key and entity-typed outputs identify a row (section 3:
+        // `universe(-A, @T)` enumerates A); the value outputs are a function of them.
+        let identity: Vec<usize> = sig.args.iter().enumerate().filter(|(_, a)| a.mode != Mode::Out || a.ty.is_entity()).map(|(i, _)| i).collect();
+        // The identity columns of every row kept so far, with its line and tuple.
+        let mut seen: HashMap<Vec<Value>, (usize, Vec<Value>)> = HashMap::new();
+        let mut rows = 0usize;
+        for (ln, line) in lines {
+            let lineno = ln + 1;
             let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
             let mut tuple = Vec::with_capacity(sig.args.len());
-            for (arg, &c) in sig.args.iter().zip(cols.iter()) {
-                let raw = fields.get(c).ok_or_else(|| format!("{}:{}: missing column `{}`", path.display(), ln + 2, arg.name))?;
-                tuple.push(parse_value(&mut ds, &arg.ty, raw).ok_or_else(|| format!("{}:{}: `{}` is not a {}", path.display(), ln + 2, raw, arg.ty))?);
+            for (i, (arg, &c)) in sig.args.iter().zip(cols.iter()).enumerate() {
+                let raw = fields.get(c).ok_or_else(|| format!("{}:{}: missing column `{}`", path.display(), lineno, arg.name))?;
+                let mut v = parse_value(&mut ds, &arg.ty, raw).ok_or_else(|| format!("{}:{}: `{}` is not a {}", path.display(), lineno, raw, arg.ty))?;
+                if let (Some(res), Value::Time(t)) = (sig.res.filter(|_| key_pos == Some(i)), &v) {
+                    v = Value::Time(bucket(res, *t));
+                }
+                tuple.push(v);
             }
-            ds.add(name, tuple);
+            rows += 1;
+            let id: Vec<Value> = identity.iter().map(|&i| tuple[i].clone()).collect();
+            match seen.get(&id) {
+                Some((_, prev)) if *prev == tuple => continue,
+                Some((first, _)) => {
+                    let shown: Vec<String> = id.iter().map(|v| field(&ds, v)).collect();
+                    return Err(format!(
+                        "{}:{}: duplicate tuple for ({}) with different outputs; line {} already binds them (`{}` is a function of its inputs and key)",
+                        path.display(),
+                        lineno,
+                        shown.join(", "),
+                        first,
+                        name
+                    ));
+                }
+                None => {
+                    seen.insert(id, (lineno, tuple.clone()));
+                    ds.add(name, tuple);
+                }
+            }
+        }
+        if rows == 0 {
+            notes.push(format!("{} has no rows; relation left empty", path.display()));
         }
     }
-    Ok((ds, missing))
+    Ok((ds, notes))
+}
+
+/// One CSV field for a value.
+fn field(ds: &Dataset, v: &Value) -> String {
+    match v {
+        Value::Equity(s) => ds.symbols.name(*s).to_string(),
+        Value::Time(t) => format_timestamp(*t),
+        Value::Num(x) => format!("{}", x),
+        Value::Count(c) => format!("{}", c),
+        Value::Dur(d) => format!("{}", d),
+        Value::Decision(_) => String::new(),
+    }
 }
 
 fn parse_value(ds: &mut Dataset, ty: &Ty, raw: &str) -> Option<Value> {
@@ -76,17 +135,7 @@ pub fn write_csv_dir(prog: &Program, ds: &Dataset, dir: &Path) -> Result<(), Str
         out.push_str(&sig.args.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(","));
         out.push('\n');
         for tu in tuples {
-            let fields: Vec<String> = tu
-                .iter()
-                .map(|v| match v {
-                    Value::Equity(s) => ds.symbols.name(*s).to_string(),
-                    Value::Time(t) => format_timestamp(*t),
-                    Value::Num(x) => format!("{}", x),
-                    Value::Count(c) => format!("{}", c),
-                    Value::Dur(d) => format!("{}", d),
-                    Value::Decision(_) => String::new(),
-                })
-                .collect();
+            let fields: Vec<String> = tu.iter().map(|v| field(ds, v)).collect();
             out.push_str(&fields.join(","));
             out.push('\n');
         }

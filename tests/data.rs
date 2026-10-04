@@ -57,7 +57,7 @@ fn conflicting_duplicate_rows_are_rejected_naming_the_line() {
             ("universe", "A,T\nAAA,2022-01-03\n"),
         ],
     );
-    let err = load_csv_dir(&prog, &dir).err().expect("two prices for one (A, T) must be rejected");
+    let err = load_csv_dir(&prog, &dir).expect_err("two prices for one (A, T) must be rejected");
     assert!(err.contains("close.csv:3"), "{}", err);
     assert!(err.contains("duplicate"), "{}", err);
     assert!(err.contains("AAA") && err.contains("2022-01-03"), "{}", err);
@@ -78,6 +78,25 @@ fn identical_duplicate_rows_are_dropped() {
     let (ds, _) = load_csv_dir(&prog, &dir).unwrap();
     assert_eq!(ds.facts["close"].len(), 1);
     assert_eq!(ds.facts["universe"].len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn two_symbols_on_one_day_are_distinct_tuples() {
+    // `universe(-A, @T)` enumerates A: an entity-typed output identifies.
+    let prog = program();
+    let dir = csv_dir(
+        "twosyms",
+        &[
+            ("close", "A,T,P\nAAA,2022-01-03,10.0\nBBB,2022-01-03,20.0\n"),
+            ("volume", "A,T,V\nAAA,2022-01-03,1000\nBBB,2022-01-03,2000\n"),
+            ("universe", "A,T\nAAA,2022-01-03\nBBB,2022-01-03\n"),
+        ],
+    );
+    let (ds, notes) = load_csv_dir(&prog, &dir).unwrap();
+    assert!(notes.is_empty(), "{:?}", notes);
+    assert_eq!(ds.facts["close"].len(), 2);
+    assert_eq!(ds.facts["universe"].len(), 2);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -112,7 +131,7 @@ fn a_time_of_day_does_not_hide_a_conflicting_duplicate() {
             ("universe", "A,T\nAAA,2022-01-03\n"),
         ],
     );
-    let err = load_csv_dir(&prog, &dir).err().expect("the two rows label the same @1d bar");
+    let err = load_csv_dir(&prog, &dir).expect_err("the two rows label the same @1d bar");
     assert!(err.contains("close.csv:3") && err.contains("duplicate"), "{}", err);
     let _ = fs::remove_dir_all(&dir);
 }

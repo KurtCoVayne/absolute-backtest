@@ -139,12 +139,12 @@ fn main() {
             let dataset = if args.flags.contains("synthetic") {
                 synthetic_for(&prog, &args.opts)
             } else if let Some(dir) = args.opts.get("data") {
-                let (ds, missing) = data::load_csv_dir(&prog, Path::new(dir)).unwrap_or_else(|e| {
+                let (ds, notes) = data::load_csv_dir(&prog, Path::new(dir)).unwrap_or_else(|e| {
                     eprintln!("{}", e);
                     exit(2)
                 });
-                for m in missing {
-                    eprintln!("note: no file {}; relation left empty", m);
+                for n in notes {
+                    eprintln!("note: {}", n);
                 }
                 ds
             } else {

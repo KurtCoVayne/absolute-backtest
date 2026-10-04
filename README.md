@@ -139,6 +139,28 @@ solution at `t`; `verify_causality` re-runs truncated instances for sampled
 bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus
 strategies.
 
+## Environment instances as CSV
+
+`abt run --data DIR` loads one `<relation>.csv` per primitive of the
+strategy's environment; `abt synth` writes the same layout. The header names
+the signature's arguments (case-insensitive), fields are comma-separated, and
+a timestamp is `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
+` HH:MM[:SS]`. The loader enforces what the signature promises:
+
+- The temporal key is stored as the label of the bar containing it at the
+  relation's resolution (spec section 3: at @1d the trading date), so
+  `2022-01-03T16:00:00` in `close.csv` and `2022-01-03` in `universe.csv`
+  are one bar and share one time domain.
+- A relation is a function of its identity columns (its inputs, its key and
+  its entity-typed outputs; spec section 3): two rows for one identity with
+  different value outputs are an error naming both lines, such as
+  `close.csv:3: duplicate tuple for (AAA, 2022-01-03) with different outputs;
+  line 2 already binds them`. A row identical to an earlier one is dropped.
+- A field that does not parse as its type, a header lacking a column and a
+  short row are errors naming the file and line.
+- A missing or header-only file leaves the relation empty and prints a
+  `note:`; `--data DIR` must be an existing directory.
+
 ## Decisions taken where the model left room
 
 These are the places where implementing the model required a choice; each is
