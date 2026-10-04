@@ -533,3 +533,60 @@ fn corpus_time_exit_is_retried_after_a_dropped_fill() {
     assert_eq!(r.fills.len(), 2, "{:?}", r.fills);
     assert!(r.final_positions.is_empty(), "position stuck after a dropped exit: {:?}", r.final_positions);
 }
+
+/// Four symbols, five consecutive weekdays, one fixed close per symbol.
+fn cross_section(closes: &[(&str, f64)]) -> Dataset {
+    let mut ds = Dataset::new();
+    for d in ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"] {
+        let t = day(d);
+        for (name, p) in closes {
+            let s = ds.intern(name);
+            ds.add("close", vec![Value::Equity(s), Value::Time(t), Value::Num(*p)]);
+            ds.add("volume", vec![Value::Equity(s), Value::Time(t), Value::Num(1000.0)]);
+            ds.add("universe", vec![Value::Equity(s), Value::Time(t)]);
+        }
+    }
+    ds
+}
+
+fn quantile_cut(q: f64) -> String {
+    format!(
+        r#"
+strategy cut {{
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  param q : Scalar = {}
+  rel cut(@T: Timestamp, -H: Price<USD>, -M: Price<USD>)
+  cut(T, H, M) :- bar(T), H = quantile(P, q) over (universe(A, T), close(A, T, P)),
+      M = median(P1) over (universe(A1, T), close(A1, T, P1)).
+  decide(T, target_weight(A, 0.1)) :- universe(A, T), close(A, T, P), cut(T, H, M), H = M, P > H.
+}}
+"#,
+        q
+    )
+}
+
+/// `quantile` interpolates linearly between order statistics and `median`
+/// is the midpoint on an even count, so the two agree at 0.5; a level
+/// outside [0, 1] halts the run naming the whole aggregate (portfolio-10).
+#[test]
+fn quantile_conventions_and_the_aggregate_halt() {
+    let ds = cross_section(&[("A", 1.0), ("B", 2.0), ("C", 3.0), ("D", 4.0)]);
+    let (prog, _) = program(&quantile_cut(0.5), "cut");
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    // quantile(0.5) of [1, 2, 3, 4] is 2.5, as is the median: C and D are above it.
+    let first: Vec<String> = r.decisions.iter().filter(|d| format_timestamp(d.t) == "2024-01-08").map(|d| r.describe_decision(&d.decision)).collect();
+    assert_eq!(first, vec!["target_weight(C, 0.1)", "target_weight(D, 0.1)"]);
+
+    let (prog, _) = program(&quantile_cut(1.5), "cut");
+    match run(&prog, &ds, ExecConfig::default()) {
+        Err(RunError::Arithmetic { rule, expr, message, .. }) => {
+            assert_eq!(rule, "cut::cut#1");
+            assert_eq!(expr, "quantile(P, q) over (...)");
+            assert_eq!(message, "quantile level 1.5 is outside [0, 1]");
+        }
+        other => panic!("expected an arithmetic halt, got {:?}", other.map(|r| r.decisions.len())),
+    }
+}
