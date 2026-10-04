@@ -363,6 +363,13 @@ impl Parser {
             }
             if s.len() == 3 && s.chars().all(|c| c.is_ascii_uppercase()) {
                 self.bump();
+                // `60 USD/share` (or `/shares`) is a price: currency per share
+                // (section 2). A `/` followed by anything else is division.
+                if self.at(&Tok::Slash) && matches!(self.peek_at(1), Tok::Ident(u) if u == "share" || u == "shares") {
+                    self.bump();
+                    self.bump();
+                    return Ok(Lit::Price(x, s));
+                }
                 return Ok(Lit::Money(x, s));
             }
         }

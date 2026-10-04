@@ -27,8 +27,8 @@ abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market a
 | `src/bin/abt.rs` | The command line. |
 | `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
-| `corpus/strategies` | 16 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
-| `corpus/negative` | 17 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
+| `corpus/strategies` | 17 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
+| `corpus/negative` | 18 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
 
@@ -70,9 +70,11 @@ strategy sma_crossover {
   (output, bound by the call) or `@` (the temporal key, exactly one). A
   relation's resolution follows the signature (`@1d`); in a library or
   strategy it defaults to the unit's `resolution`.
-- Literals carry units: `100 shares`, `5_000_000 USD`, `20d`, `3mo`, `1y`,
-  `0.02`, `"SPY"` (an equity). A bare integer is a Count or a Scalar from
-  context; a bare decimal is a Scalar.
+- Literals carry units: `100 shares`, `5_000_000 USD`, `60 USD/share` (a
+  `Price<USD>`, so `param floor : Price<USD> = 60 USD/share` compares with
+  `close` and `sma`), `20d`, `3mo`, `1y`, `0.02`, `"SPY"` (an equity). A
+  bare `60 USD` is a `Notional<USD>`. A bare integer is a Count or a Scalar
+  from context; a bare decimal is a Scalar.
 - Body literals, in the order written: positive atom, `not` atom, comparison,
   `X = expr`, `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
   `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
@@ -178,7 +180,7 @@ small and easy to flip.
 ## Development
 
 ```
-cargo test            # 31 tests: type algebra, time, corpus, kernel
+cargo test            # 41 tests: type algebra, time, corpus, kernel, literals
 cargo build --release
 ```
 
