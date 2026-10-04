@@ -357,7 +357,14 @@ fn every_corpus_strategy_runs_and_is_deterministic() {
         assert_eq!(a.final_cash.to_bits(), b.final_cash.to_bits(), "{} is not deterministic", name);
         let modes: BTreeSet<_> = a.decisions.iter().map(|d| d.decision.ctor.mode()).collect();
         assert!(modes.iter().all(|m| *m == prog.mode), "{} emitted decisions outside its mode", name);
-        assert!(a.dropped.is_empty(), "{} dropped decisions: {:?}", name, a.dropped);
+        // Every bar has a price, so the only drops are last-bar decisions.
+        let last = *a.bars.last().unwrap();
+        assert!(
+            a.dropped.iter().all(|(t, _, reason)| *t == last && reason == "no next bar"),
+            "{} dropped decisions: {:?}",
+            name,
+            a.dropped
+        );
     }
 }
 
@@ -423,12 +430,16 @@ fn a_missing_fill_price_drops_the_decision() {
         },
     )
     .unwrap();
-    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
-    assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
     // Thursday's log return needs Wednesday's close too, so the next buy is
-    // Friday's, which has no bar left to fill it: no fills at all.
+    // Friday's, which has no bar left to fill it: no fills at all, and both
+    // decisions are dropped, each with its reason.
     let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
     assert_eq!(decisions, vec!["2024-01-09", "2024-01-12"]);
+    assert_eq!(r.dropped.len(), 2, "{:?}", r.dropped);
+    assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
+    assert_eq!(r.dropped[0].2, "no price for X at 2024-01-10");
+    assert_eq!(format_timestamp(r.dropped[1].0), "2024-01-12");
+    assert_eq!(r.dropped[1].2, "no next bar");
     assert!(r.fills.is_empty(), "{:?}", r.fills);
     assert_eq!(r.final_cash, 1000.0);
 }

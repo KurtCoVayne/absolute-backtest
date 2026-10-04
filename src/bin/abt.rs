@@ -1,7 +1,7 @@
 //! `abt`: check strategies, run backtests, explain rules.
 //!
 //!   abt check <files...>
-//!   abt run --strategy NAME [--data DIR | --synthetic] [--cash X] [--slippage-bps X] [--commission X] <files...>
+//!   abt run --strategy NAME [--data DIR | --synthetic] [--cash X] [--slippage-bps X] [--commission X] [--all] [--fills] [--quiet] <files...>
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--data DIR | --synthetic] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 
@@ -36,7 +36,7 @@ fn parse_args() -> Args {
     while i < rest.len() {
         let a = std::mem::take(&mut rest[i]);
         if let Some(name) = a.strip_prefix("--") {
-            if matches!(name, "synthetic" | "verify-causality" | "quiet") {
+            if matches!(name, "synthetic" | "verify-causality" | "quiet" | "all" | "fills") {
                 flags.insert(name.to_string());
             } else {
                 i += 1;
@@ -57,7 +57,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--verify-causality] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>"
     );
     exit(code)
 }
@@ -254,11 +254,20 @@ fn main() {
                 println!("{:>14}: {:.4}", k, v);
             }
             if !args.flags.contains("quiet") {
-                for d in result.decisions.iter().take(20) {
+                let shown = if args.flags.contains("all") { result.decisions.len() } else { 20 };
+                for d in result.decisions.iter().take(shown) {
                     println!("  {} {} (rule {})", format_timestamp(d.t), result.describe_decision(&d.decision), prog.rule_label(d.rule));
                 }
-                if result.decisions.len() > 20 {
-                    println!("  ... {} more", result.decisions.len() - 20);
+                if result.decisions.len() > shown {
+                    println!("  ... {} more (--all prints every decision)", result.decisions.len() - shown);
+                }
+                if args.flags.contains("fills") {
+                    for f in &result.fills {
+                        println!("  fill {} {} {:+} @ {:.4}", format_timestamp(f.t), result.symbols[f.equity as usize], f.quantity, f.price);
+                    }
+                }
+                for (t, d, reason) in &result.dropped {
+                    println!("  dropped {} {}: {}", format_timestamp(*t), result.describe_decision(d), reason);
                 }
             }
             println!(

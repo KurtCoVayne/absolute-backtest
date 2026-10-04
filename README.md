@@ -10,6 +10,7 @@ loop with a simulated executor. One Rust crate, no dependencies.
 abt check corpus/                                   # every strategy and library in the corpus
 abt run --strategy momentum_top_n --synthetic corpus/   # backtest on a synthetic market
 abt run --strategy sma_crossover --data ./csv corpus/ --verify-causality
+abt run --strategy momentum_top_n --synthetic --all --fills corpus/  # every decision, and the fills
 abt explain --strategy breakout_52w --rule 'decide#1' --at 2023-02-24 --synthetic corpus/
 abt explain --strategy breakout_52w --rule 'decide#2' --at 2023-02-24 --bind A=SPY --synthetic corpus/
 abt explain --strategy breakout_52w --rule 'features::sma#1' --at 2023-02-24 --inputs SPY,20d,10 --synthetic corpus/
@@ -136,6 +137,16 @@ naming the rule, the tuple and the expression. `cash` is populated at the
 first bar with the initial cash so that cash-aware rules can fire from the
 start.
 
+A decision the executor cannot carry out is dropped with a reason in
+`RunResult.dropped`: a decision on the last bar has no bar to fill at (`no
+next bar`), and an instrument with no price at the fill bar cannot be filled
+(`no price for AAA at 2022-02-09`); both are still recorded in `decided`.
+`abt run` prints the counts and then each dropped decision with its reason,
+so that `decisions = fills + dropped`, except that in target mode a decision
+whose order is zero (the target is already held) makes neither a fill nor a
+drop. `--all` prints every decision instead of the first twenty, `--fills`
+prints the fills, and `--quiet` prints the summary only.
+
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
 solution at `t`. `t` must be a bar of the rule's time domain (a weekend, a
 date before the data, or a label between two resample buckets is refused
@@ -187,6 +198,12 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **An unpriced position is marked at its last price.** When the price
+  relation has no tuple for a held instrument at a bar (a delisting that
+  removes its rows), the equity curve and `target_weight` sizing value it at
+  the last price seen for it, its last close or fill, rather than at zero.
+  The executor never trades at that stale price: a decision on the
+  instrument is dropped with `no price for ...` until a price reappears.
 
 ## Development
 

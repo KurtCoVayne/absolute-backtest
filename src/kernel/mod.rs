@@ -532,6 +532,15 @@ impl<'p> Kernel<'p> {
                     self.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
                 }
                 self.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(cash)]);
+            } else {
+                // A decision on the last bar has no bar to fill at: it is
+                // recorded in `decided` like any other, and dropped here so
+                // that decisions = fills + dropped.
+                for ds in by_equity.values() {
+                    for (d, _) in ds {
+                        result.dropped.push((t, d.clone(), "no next bar".to_string()));
+                    }
+                }
             }
         }
         result.final_cash = cash;
