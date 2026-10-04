@@ -230,13 +230,29 @@ pub fn rule_label(rules: &[Rule], i: usize) -> String {
 }
 
 /// Check every strategy and library in the workspace.
+///
+/// A library is checked in the scope of every strategy that uses it and once
+/// on its own, so a diagnostic on a library rule that does not depend on the
+/// using strategy would be reported once per check; identical diagnostics are
+/// kept once. Diagnostics that differ (an X error naming the using strategy's
+/// decision resolution, say) are all kept.
 pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
+    let mut out: Vec<Diagnostic> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |d: Diagnostic, out: &mut Vec<Diagnostic>| {
+        if seen.insert(d.to_string()) {
+            out.push(d);
+        }
+    };
     for s in ws.strategies() {
-        out.extend(check_program(ws, &s.name).1);
+        for d in check_program(ws, &s.name).1 {
+            push(d, &mut out);
+        }
     }
     for l in ws.libraries() {
-        out.extend(check_library(ws, &l.name));
+        for d in check_library(ws, &l.name) {
+            push(d, &mut out);
+        }
     }
     out
 }
