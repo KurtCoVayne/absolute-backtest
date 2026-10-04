@@ -319,6 +319,24 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         continue;
                     }
                     self.ctor(c, subs, *sp, ctx == AtomCtx::Negative || arg.mode == Mode::In, arg.mode == Mode::In);
+                    // WF-9 (C): `decided` holds only this strategy's own
+                    // decisions, so a pattern with the other mode's
+                    // constructor can never match (adv-18). A library has no
+                    // mode: its patterns are judged by whoever uses them.
+                    if atom.name == "decided" && self.rule.unit == self.cx.root.name {
+                        if let (Some(mode), Some(m)) = (self.cx.mode, ctor_mode(c)) {
+                            if m != mode {
+                                self.err(
+                                    Code::C,
+                                    *sp,
+                                    format!(
+                                        "`{}` is a {} constructor but this strategy declares `mode {}`; `decided` holds only this strategy's own decisions, so `decided({}, {}(...))` can never match",
+                                        c, m, mode, atom.terms[0], c
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

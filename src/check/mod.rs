@@ -223,6 +223,23 @@ impl Program {
     }
 }
 
+/// Order two literals of one type, for a parameter's range (section 3):
+/// numbers by value, money of one currency by amount, durations by
+/// calendar length. `None` when they are not comparable.
+fn lit_order(a: &Lit, b: &Lit) -> Option<std::cmp::Ordering> {
+    let num = |l: &Lit| match l {
+        Lit::Int(i) => Some(*i as f64),
+        Lit::Float(x) | Lit::Shares(x) => Some(*x),
+        _ => None,
+    };
+    match (a, b) {
+        (Lit::Money(x, cx), Lit::Money(y, cy)) if cx == cy => x.partial_cmp(y),
+        (Lit::Duration(x), Lit::Duration(y)) => x.approx_days().partial_cmp(&y.approx_days()),
+        (Lit::Money(..), _) | (_, Lit::Money(..)) | (Lit::Duration(_), _) | (_, Lit::Duration(_)) | (Lit::Equity(_), _) | (_, Lit::Equity(_)) => None,
+        _ => num(a)?.partial_cmp(&num(b)?),
+    }
+}
+
 pub fn rule_label(rules: &[Rule], i: usize) -> String {
     let r = &rules[i];
     let k = rules[..i].iter().filter(|o| o.unit == r.unit && o.head.name == r.head.name).count() + 1;
@@ -437,6 +454,22 @@ impl<'a> Checker<'a> {
                 if let Some((lo, hi)) = &p.range {
                     if !types::compat(&p.ty, &lo.ty()) || !types::compat(&p.ty, &hi.ty()) {
                         self.diag(Code::T, &u.name, None, p.span, format!("range of parameter `{}` must be {}", p.name, p.ty));
+                    } else if lit_order(lo, hi) == Some(std::cmp::Ordering::Greater) {
+                        self.diag(
+                            Code::T,
+                            &u.name,
+                            None,
+                            p.span,
+                            format!("range of parameter `{}` is inverted: `{}..{}` has its lower bound above its upper bound", p.name, lo, hi),
+                        );
+                    } else if lit_order(lo, &p.value) == Some(std::cmp::Ordering::Greater) || lit_order(&p.value, hi) == Some(std::cmp::Ordering::Greater) {
+                        self.diag(
+                            Code::T,
+                            &u.name,
+                            None,
+                            p.span,
+                            format!("default of parameter `{}` is `{}`, outside its declared range `{}..{}`", p.name, p.value, lo, hi),
+                        );
                     }
                 }
                 pm.insert(p.name.clone(), p.clone());

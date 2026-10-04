@@ -147,8 +147,9 @@ define it.
 
 **Parameters.** A `param` is a named constant with a type and an optional range
 (`param n : Duration = 20d in 5d..250d`). Within rules it behaves as a bound
-value of that type. Parameters are the only values the kernel may vary between
-runs of the same program.
+value of that type. The range is ordered and contains the default (a default
+outside it is a type error, WF-3). Parameters are the only values the kernel
+may vary between runs of the same program.
 
 **Identity columns.** For reductions (WF-7) the checker needs to know which
 arguments identify a tuple. v1 rule: the identity of a tuple is its
@@ -309,7 +310,11 @@ Temporal recursion through positive atoms is allowed by WF-4; recursion
 through `not` or through an aggregate is not.
 
 **WF-9 Decisions.** A strategy declares exactly one decision mode and every
-decide rule uses constructors of that mode; the head of a decide rule has the
+decide rule uses constructors of that mode, as does every `decided` pattern
+written in the strategy (`decided` holds only the strategy's own decisions,
+so a pattern with the other mode's constructor could never match; a library
+has no mode and its patterns are judged by the strategies that reach them);
+the head of a decide rule has the
 form `decide(T, D)` with T a variable that is the temporal key of at least one
 positive body atom; a strategy with no decide rule is rejected; and a decide
 rule may not refer to `decided(T, ·)` at its own T (this is WF-6's strictness,
