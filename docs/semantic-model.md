@@ -234,9 +234,11 @@ whether, it is carried out. Decision constructors may be pattern-matched in
 
 **Libraries and strategies.** A library is a set of rules with no `decide`; a
 strategy is a set of rules with at least one `decide`, a declared mode, and
-parameters. Both name the environment they are written against. A strategy may
-use any number of libraries; name resolution is strategy, then libraries in
-`uses` order, then the environment's primitives, then builtins.
+parameters. Both name the environment they are written against, and a strategy
+may use only libraries written against its own environment (judgment E
+otherwise). A strategy may use any number of libraries; name resolution is
+strategy, then libraries in `uses` order, then the environment's primitives,
+then builtins.
 
 ## 5. Well-formedness judgments
 

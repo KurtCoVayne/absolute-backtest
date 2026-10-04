@@ -111,7 +111,16 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | W1, W2 | warnings | dead derived relation; unused parameter |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
-first error reported is the earliest offending relation.
+first error reported is the earliest offending relation; diagnostics about a
+whole unit (a missing or mismatched environment or library, no decide rule)
+come before any rule's. One root cause is one diagnostic: when the
+environment or a used library is missing from the workspace, the checker
+reports that once and does not report the names that may live there; a
+library written against another environment is one E error on the `uses`
+line; a relation that does not resolve binds its variables with unknown type
+and unknown time, so nothing after it is judged against them; and when a
+rule's head time is itself bound outside a temporal-key position, only the
+head is reported, not every atom keyed by it.
 
 ## Reading the kernel
 
@@ -174,6 +183,10 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **A library is usable only on its own environment.** Section 4 says both
+  libraries and strategies name the environment they are written against; a
+  `uses` of a library written against another environment is one E error,
+  even when the two environments share primitive names.
 
 ## Development
 
