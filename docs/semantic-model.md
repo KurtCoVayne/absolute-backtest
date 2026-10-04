@@ -85,6 +85,16 @@ volatility in the usual sense is `std` of a Scalar return and is therefore
 Scalar at the program's resolution. v1 does not scale volatility across
 resolutions, so no Θ^−½ exponent is produced; that is reserved for v2.
 
+**Aggregate conventions.** `median` of an even count is the midpoint of the
+two middle values. `quantile(e, q)` takes a bound Scalar level q in [0, 1] and
+interpolates linearly between order statistics at position q · (n − 1) of the
+sorted group, so `quantile(e, 0.5)` equals `median(e)` on every count; a level
+outside [0, 1] is partial arithmetic (section 7). `std`, `cov`, `corr` and
+`ols_beta` are sample statistics (divisor n − 1) and need at least two
+observations; `corr` of a constant series and `ols_beta` against a constant
+regressor have no result. `sum`, `mean`, `max`, `min` and `median` are total on
+a non-empty group.
+
 **Time.** Timestamp admits only comparison (`<`, `<=`, `=`) and the builtins
 `prev`, `lag`, `window`, `prior_window`. Timestamp − Timestamp is not an
 expression in v1; a bar distance is obtained with `lag`. Timestamp-typed
@@ -474,9 +484,12 @@ counterpart of the checker's static report and is the main debugging tool the
 LLM will have.
 
 **Partial arithmetic.** `x / 0`, `log` of a non-positive value, `sqrt` of a
-negative value, and `std` of fewer than two observations have no result. The
-kernel halts the run with a diagnostic naming the rule, the tuple, and the
-offending expression. A degenerate feature is a data problem the author must
+negative value, `std`, `cov`, `corr` or `ols_beta` of fewer than two
+observations, `corr` of a constant series, `ols_beta` against a constant
+regressor, and a `quantile` level outside [0, 1] have no result. The kernel
+halts the run with a diagnostic naming the rule, the tuple, and the offending
+expression; for an aggregate the expression is the whole aggregate
+(`quantile(P, q) over (...)`), not its argument. A degenerate feature is a data problem the author must
 see; it is never a silent non-firing, which would let a strategy appear to
 work while a condition quietly never triggers.
 

@@ -129,8 +129,12 @@ difference between the target and the position at execution; `target_weight`
 sizes from cash plus marked positions at the execution bar, truncated to
 whole shares. Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
-negative, `std` of one observation, and a non-positive delta quantity halt it
-naming the rule, the tuple and the expression. `cash` is populated at the
+negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
+a constant series, a `quantile` level outside [0, 1], and a non-positive delta
+quantity halt it naming the rule, the tuple and the expression (for an
+aggregate, the whole aggregate: `quantile(P, q) over (...)`). `median` of an
+even count is the midpoint of the two middle values and `quantile` interpolates
+linearly between order statistics, so `quantile(e, 0.5)` is the median. `cash` is populated at the
 first bar with the initial cash so that cash-aware rules can fire from the
 start.
 
