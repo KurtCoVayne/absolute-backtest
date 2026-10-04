@@ -710,6 +710,10 @@ pub struct Unit {
     pub uses: Vec<(String, Span)>,
     pub resolution: Option<(Resolution, Span)>,
     pub mode: Option<(DecisionMode, Span)>,
+    /// Header lines written more than once (`env`, `resolution` or `mode`):
+    /// the keyword and the span of each later line. The first stays in
+    /// effect; the checker reports the others.
+    pub redeclared: Vec<(String, Span)>,
     pub params: Vec<Param>,
     /// Primitive signatures (environment) or derived relation declarations (library, strategy).
     pub rels: Vec<Signature>,
@@ -739,6 +743,72 @@ pub const AGGREGATES: &[&str] = &["sum", "mean", "std", "median", "quantile", "m
 pub const RESAMPLE_AGGREGATES: &[&str] = &["first", "last", "max", "min", "sum", "mean", "count"];
 /// Scalar functions (section 2).
 pub const SCALAR_FUNCTIONS: &[&str] = &["log", "exp", "sqrt", "abs", "least", "greatest"];
+
+/// Names a relation may not be declared with: the temporal builtins, the
+/// literal-form and unit keywords, the kernel's output and state relations
+/// and the decision constructors (section 4). The aggregates and scalar
+/// functions are reserved too, so that a body atom is never mistaken for one.
+pub const RESERVED_NAMES: &[&str] = &[
+    "prev",
+    "lag",
+    "month_start",
+    "day_start",
+    "window",
+    "prior_window",
+    "top",
+    "resample",
+    "decide",
+    "decided",
+    "not",
+    "in",
+    "min",
+    "by",
+    "over",
+    "as",
+    "to",
+    "asc",
+    "desc",
+    "environment",
+    "library",
+    "strategy",
+    "env",
+    "uses",
+    "resolution",
+    "mode",
+    "param",
+    "rel",
+    "complete",
+    "delta",
+    "target",
+    "buy",
+    "sell",
+    "short",
+    "cover",
+    "target_weight",
+    "target_quantity",
+    "sum",
+    "mean",
+    "std",
+    "median",
+    "quantile",
+    "max",
+    "count",
+    "corr",
+    "cov",
+    "ols_beta",
+    "first",
+    "last",
+    "log",
+    "exp",
+    "sqrt",
+    "abs",
+    "least",
+    "greatest",
+];
+
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
 
 /// The executor and kernel-state relations every strategy sees at its
 /// decision resolution (section 6).

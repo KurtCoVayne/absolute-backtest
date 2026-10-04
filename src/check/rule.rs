@@ -46,7 +46,32 @@ struct Analyzer<'c, 'a> {
     pending_windows: HashMap<String, TimeProv>,
 }
 
+/// A rule whose head or body names a relation declared with a reserved name
+/// is not judged: the declaration was already reported (U), and the parser
+/// has read every body occurrence as the builtin it names.
+fn mentions_reserved(cx: &Checker, rule: &Rule) -> bool {
+    fn lit(cx: &Checker, l: &Literal) -> bool {
+        match l {
+            Literal::Builtin(b, _) => cx.reserved_declared.contains(match b {
+                Builtin::Prev { .. } => "prev",
+                Builtin::Lag { .. } => "lag",
+                Builtin::MonthStart { .. } => "month_start",
+                Builtin::DayStart { .. } => "day_start",
+            }),
+            Literal::Atom(a) | Literal::Neg(a) => cx.reserved_declared.contains(&a.name),
+            Literal::Top { atom, .. } => cx.reserved_declared.contains(&atom.name),
+            Literal::Resample { inner, .. } => cx.reserved_declared.contains(&inner.name),
+            Literal::Agg { conj, .. } => conj.iter().any(|l| lit(cx, l)),
+            Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => false,
+        }
+    }
+    cx.reserved_declared.contains(&rule.head.name) || rule.body.iter().any(|l| lit(cx, l))
+}
+
 pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleInfo> {
+    if mentions_reserved(cx, rule) {
+        return None;
+    }
     let label = super::rule_label(&cx.rules, idx);
     let unit_res = cx.unit_res.get(&rule.unit).copied().unwrap_or(cx.resolution);
     let mut an = Analyzer {

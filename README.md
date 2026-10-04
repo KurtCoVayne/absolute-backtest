@@ -96,7 +96,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 
 | Code | Judgment | What the rule checks |
 | --- | --- | --- |
-| U | name resolution | relation or parameter declared in the strategy, a used library, or the environment; heads define relations declared in their own unit |
+| U | name resolution | relation or parameter declared in the strategy, a used library, or the environment; heads define relations declared in their own unit; one unit per (kind, name) in the workspace; `env` declared once; no builtin or keyword as a relation name |
 | E | environment | the primitive belongs to the declared environment, not another one |
 | B | WF-1 | every head, negated, compared or assigned variable is bound, left to right |
 | M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions |
@@ -106,8 +106,8 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | F | WF-6 | every temporal key is T or derived from T by a causal builtin; `decided` strictly earlier |
 | D | WF-7 | `top` has `by`; the keys cover every identity column; the key is bound; no `first`/`last` outside resample |
 | S | WF-8 | no cycle through `not` or an aggregate |
-| Z, C | WF-9 | at least one decide; one mode; constructors of that mode; decide's T is a positive atom's key |
-| X | WF-10 | body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
+| Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode; decide's T is a positive atom's key |
+| X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
 | W1, W2 | warnings | dead derived relation; unused parameter |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the

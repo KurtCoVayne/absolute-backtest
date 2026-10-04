@@ -117,7 +117,8 @@ strategy uses_dup {
 
 #[test]
 fn a_relation_named_after_a_keyword_is_a_u_error() {
-    for name in ["lag", "top", "resample", "window", "buy", "mode"] {
+    // (A unit keyword such as `mode` is already a parse error in head position.)
+    for name in ["lag", "top", "resample", "window", "buy", "sum"] {
         let src = format!(
             r#"
 strategy kw {{

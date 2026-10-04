@@ -232,11 +232,19 @@ pub fn rule_label(rules: &[Rule], i: usize) -> String {
 /// Check every strategy and library in the workspace.
 pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    // A name declared twice is checked once; the clash itself is reported by
+    // that check (adv-02).
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for s in ws.strategies() {
-        out.extend(check_program(ws, &s.name).1);
+        if seen.insert(&s.name) {
+            out.extend(check_program(ws, &s.name).1);
+        }
     }
+    seen.clear();
     for l in ws.libraries() {
-        out.extend(check_library(ws, &l.name));
+        if seen.insert(&l.name) {
+            out.extend(check_library(ws, &l.name));
+        }
     }
     out
 }
@@ -289,6 +297,9 @@ pub(crate) struct Checker<'a> {
     pub env_name: String,
     /// Unit resolutions by unit name.
     pub unit_res: HashMap<String, Resolution>,
+    /// Relations declared with a reserved name (reported once at the
+    /// declaration; rules mentioning them are not judged).
+    pub reserved_declared: HashSet<String>,
     scc_order: Option<Sccs>,
     complete_set: BTreeSet<String>,
 }
@@ -308,6 +319,7 @@ impl<'a> Checker<'a> {
             mode: None,
             env_name: String::new(),
             unit_res: HashMap::new(),
+            reserved_declared: HashSet::new(),
             scc_order: None,
             complete_set: BTreeSet::new(),
         }
@@ -330,6 +342,8 @@ impl<'a> Checker<'a> {
     fn resolve(&mut self) {
         let root = self.root;
         let root_name = root.name.clone();
+        self.unique_in_workspace(root.kind, &root.name, &root_name, None);
+        self.redeclarations(root);
         match root.resolution {
             Some((r, _)) => self.resolution = r,
             None => self.diag(
@@ -350,9 +364,10 @@ impl<'a> Checker<'a> {
         match &root.env {
             Some((e, sp)) => match self.ws.find(UnitKind::Environment, e) {
                 Some(env) => {
+                    self.unique_in_workspace(UnitKind::Environment, e, &root_name, Some(*sp));
                     self.env_name = env.name.clone();
                     for sig in &env.rels {
-                        self.declare(sig.clone(), &root_name);
+                        self.declare_named(sig.clone(), &root_name);
                     }
                 }
                 None => self.diag(Code::U, &root_name, None, *sp, format!("environment `{}` is not in the workspace", e)),
@@ -372,6 +387,7 @@ impl<'a> Checker<'a> {
                         self.diag(Code::U, &root_name, None, *sp, format!("library `{}` is used twice", l));
                         continue;
                     }
+                    self.unique_in_workspace(UnitKind::Library, l, &root_name, Some(*sp));
                     units.push(lib);
                 }
                 None => self.diag(Code::U, &root_name, None, *sp, format!("library `{}` is not in the workspace", l)),
@@ -389,6 +405,9 @@ impl<'a> Checker<'a> {
                 }
             };
             self.unit_res.insert(u.name.clone(), ures);
+            if u.name != root.name {
+                self.redeclarations(u);
+            }
             if let Some((e, sp)) = &u.env {
                 if u.kind == UnitKind::Library && *e != self.env_name && self.ws.find(UnitKind::Environment, e).is_none() {
                     self.diag(Code::U, &u.name, None, *sp, format!("environment `{}` is not in the workspace", e));
@@ -399,7 +418,7 @@ impl<'a> Checker<'a> {
                 if sig.res.is_none() {
                     sig.res = Some(ures);
                 }
-                self.declare(sig, &u.name);
+                self.declare_named(sig, &u.name);
             }
             let mut pm = BTreeMap::new();
             for p in &u.params {
@@ -428,6 +447,72 @@ impl<'a> Checker<'a> {
             }
         }
         self.units = units;
+    }
+
+    /// A header line (`env`, `resolution`, `mode`) written twice in one unit
+    /// (adv-01): the first stays in effect, every later one is an error of
+    /// the judgment that owns the declaration (U, X, C).
+    fn redeclarations(&mut self, u: &Unit) {
+        for (what, sp) in &u.redeclared {
+            let (code, first) = match what.as_str() {
+                "mode" => (Code::C, u.mode.map(|(m, s)| format!("`mode {}` at {}", m, s))),
+                "resolution" => (Code::X, u.resolution.map(|(r, s)| format!("`resolution {}` at {}", r, s))),
+                _ => (Code::U, u.env.as_ref().map(|(e, s)| format!("`env {}` at {}", e, s))),
+            };
+            self.diag(
+                code,
+                &u.name,
+                None,
+                *sp,
+                format!(
+                    "`{}` is declared twice in {} `{}`; {} stays in effect, remove this line",
+                    what,
+                    u.kind,
+                    u.name,
+                    first.unwrap_or_default()
+                ),
+            );
+        }
+    }
+
+    /// Two units with one (kind, name) in the workspace (adv-02): a U error
+    /// naming every declaration, reported at `span` or, for the root unit
+    /// itself, at its last declaration.
+    fn unique_in_workspace(&mut self, kind: UnitKind, name: &str, reporting_unit: &str, span: Option<Span>) {
+        let spans: Vec<Span> = self.ws.units.iter().filter(|u| u.kind == kind && u.name == name).map(|u| u.span).collect();
+        if spans.len() < 2 {
+            return;
+        }
+        let at: Vec<String> = spans.iter().map(|s| s.to_string()).collect();
+        let span = span.unwrap_or(*spans.last().unwrap());
+        self.diag(
+            Code::U,
+            reporting_unit,
+            None,
+            span,
+            format!("{} `{}` is declared twice in the workspace (at {}); rename or remove one", kind, name, at.join(" and ")),
+        );
+    }
+
+    /// Declare a user-named relation (a primitive or a `rel`): a reserved
+    /// name is a U error (adv-16) and the relation is not declared.
+    fn declare_named(&mut self, sig: Signature, reporting_unit: &str) {
+        if is_reserved(&sig.name) {
+            let unit = match &sig.kind {
+                Kind::Derived { unit } => unit.clone(),
+                _ => reporting_unit.to_string(),
+            };
+            self.diag(
+                Code::U,
+                &unit,
+                None,
+                sig.span,
+                format!("`{}` is a builtin or keyword and cannot be declared as a relation; choose another name", sig.name),
+            );
+            self.reserved_declared.insert(sig.name);
+            return;
+        }
+        self.declare(sig, reporting_unit);
     }
 
     fn declare(&mut self, sig: Signature, reporting_unit: &str) {
@@ -569,7 +654,7 @@ impl<'a> Checker<'a> {
             }
             let decls: Vec<Signature> = self.root.rels.clone();
             for sig in decls {
-                if !reach.contains(&sig.name) {
+                if !reach.contains(&sig.name) && !self.reserved_declared.contains(&sig.name) {
                     self.diag(Code::W1, &root_name, None, sig.span, format!("derived relation `{}` is not reached by any decide rule", sig.name));
                 }
             }
