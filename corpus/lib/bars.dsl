@@ -1,5 +1,9 @@
 # Standard daily bars from minute closes (section 4, resampling semantics).
-# Each bucket needs at least 300 minute bars; a short session yields no bar.
+# Each bucket needs at least 300 minute bars; a short session yields no bar
+# in open_d/close_d/high_d/low_d/volume_d. It still yields universe_d and
+# bar_d (min 1) and stays in the @1d time domain (section 6): prev from the
+# next day lands on it, and the executor fills there at its last minute
+# close. `min K` removes a bar from a relation, never a day from the domain.
 library bars {
   env equities_1m
   resolution @1d

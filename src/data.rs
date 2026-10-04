@@ -21,6 +21,12 @@ use crate::kernel::{Dataset, Value};
 /// "Resolution": at @1d the trading date), so `2022-01-03T16:00:00` and
 /// `2022-01-03` label one @1d bar. A missing or header-only file leaves the
 /// relation empty and is reported in the returned notes.
+///
+/// Timestamps are bar labels, and a label is the bar's close instant
+/// (section 3): a 09:30 to 09:31 minute bar is `09:31`, a session's last bar
+/// `16:00`, a daily bar its date. The loader does not check the intraday
+/// convention; open-labelled minute data misaligns every resampled bucket by
+/// one bar.
 pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>), String> {
     if !dir.is_dir() {
         return Err(format!("{}: directory not found", dir.display()));

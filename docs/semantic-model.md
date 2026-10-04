@@ -73,7 +73,7 @@ A quantity type is a vector of integer or half-integer exponents (c, s, θ).
 - `log`, `exp`: require and return Scalar. `log(P)` for a price is rejected; `log(P1 / P0)` is accepted.
 - `sqrt`: halves every exponent; the result must have exponents in ½ℤ.
 - `abs`, `least`, `greatest`: preserve the dimension; all arguments must agree.
-- Literals carry units: `100 shares`, `5_000_000 USD`, `252d`, `0.02`. A bare number is Scalar.
+- Literals carry units: `100 shares`, `5_000_000 USD` (Notional), `60 USD/share` (Price: currency per share), `252d`, `0.02`. A bare number is Scalar.
 - Count converts to Scalar only through explicit division (`W = 1 / N` is accepted because 1 / Count is defined as Scalar); Count + Scalar is rejected.
 
 **Aggregate typing.** `sum`, `mean`, `max`, `min`, `std` preserve the dimension
@@ -84,6 +84,16 @@ their dimensions; `cov(e1, e2)` has dimension d(e1) + d(e2), and
 volatility in the usual sense is `std` of a Scalar return and is therefore
 Scalar at the program's resolution. v1 does not scale volatility across
 resolutions, so no Θ^−½ exponent is produced; that is reserved for v2.
+
+**Aggregate conventions.** `median` of an even count is the midpoint of the
+two middle values. `quantile(e, q)` takes a bound Scalar level q in [0, 1] and
+interpolates linearly between order statistics at position q · (n − 1) of the
+sorted group, so `quantile(e, 0.5)` equals `median(e)` on every count; a level
+outside [0, 1] is partial arithmetic (section 7). `std`, `cov`, `corr` and
+`ols_beta` are sample statistics (divisor n − 1) and need at least two
+observations; `corr` of a constant series and `ols_beta` against a constant
+regressor have no result. `sum`, `mean`, `max`, `min` and `median` are total on
+a non-empty group.
 
 **Time.** Timestamp admits only comparison (`<`, `<=`, `=`) and the builtins
 `prev`, `lag`, `window`, `prior_window`. Timestamp − Timestamp is not an
@@ -168,13 +178,17 @@ judge these seven.
 | Negated atom | `not R(t1, ..., tn)` | nothing | R must be complete (WF-5); all terms bound |
 | Comparison | `e1 op e2` | nothing | op in `<`, `<=`, `=`, `>`, `>=`; both sides bound, same dimension |
 | Assignment | `X = e` | X | e built from bound variables, params, literals, scalar functions |
-| Aggregation | `X = agg(e) over (conj)` | X | conj is a conjunction of positive atoms and temporal constraints; e uses variables bound inside conj; variables shared with the outer rule are inputs to the group |
+| Aggregation | `X = agg(e) over (conj)` | X | conj is a conjunction of positive atoms, temporal constraints, and comparisons and assignments over variables bound inside it; e uses variables bound inside conj; variables shared with the outer rule are inputs to the group |
 | Reduction | `top(N, R(...), by (k1 dir, ..., km dir))` | R's variables | Keeps at most N tuples per group of bound outer variables; the order must be total (WF-7) |
 | Resample | `resample(R(...) to @r as T, min K, X1 = agg1(e1), ...)` | R's entity variables, the bucket label T, each Xi | R strictly finer than and aligned to @r; aggregates in `first`, `last`, `max`, `min`, `sum`, `mean`, `count`; a group below K yields no bucket (WF-10) |
 
 **Aggregation semantics.** `agg(e) over (conj)` evaluates conj with the outer
 bound variables fixed, collects the multiset of e over the resulting tuples,
-and applies the aggregate. The group is empty when conj has no solutions;
+and applies the aggregate. conj is judged like a rule body (WF-1 to WF-3,
+WF-6): its atoms are positive atoms of the rule, and a comparison or an
+assignment inside it filters or extends the group's tuples, so "since entry"
+and "above a threshold" groups are written as `TE <= T1` or `Cost = P * Q,
+Cost > limit` inside the conjunction. The group is empty when conj has no solutions;
 `count` of an empty group is 0, every other aggregate over an empty group
 yields no tuple (the rule does not fire). This is what makes `sma` undefined,
 rather than zero, before the window is full. A windowed group holding fewer
@@ -220,6 +234,23 @@ them are causal.
 `prev` and `lag` fail (no tuple) when the data does not reach back far enough;
 a rule using them does not fire for the first bars, which is the intended
 behaviour rather than a warm-up special case.
+
+`lag` is a function of T that is many-to-one and partial over the bar domain:
+when T − N falls in a gap (a weekend, a holiday), every T whose T − N falls in
+the same gap lands on the same T1, and a bar T0 is reached by `lag(T, N, T0)`
+only when some bar T has T0 ≤ T − N < next(T0). A point test on history such
+as `lag(T, hold, T0), decided(T0, buy(A, _))` therefore fires at most once per
+entry and, for an entry whose T0 + N is not a bar, never; it can also land on
+an older entry of the same instrument. A time-based exit is written as a
+window test on the current state, which is evaluated afresh at every bar:
+
+```
+decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
+```
+
+with `bought_within` a complete derived relation counting `decided` buys over
+`prior_window(T, hold, min 1)`. It fires at the first bar strictly later than
+T0 + hold, for every entry, and again if the executor could not carry it out.
 
 **Decisions.** The output relation `decide(@T, D)` takes a decision value D
 built from one constructor of the strategy's declared mode:
@@ -272,7 +303,7 @@ step is rejected; there is no fixpoint iteration over value-creating rules.
 **WF-5 Completeness.** Define complete(R) as the least relation satisfying:
 
 - complete(R) if R is a primitive declared complete, or kernel state, or the output relation;
-- complete(R) if R is derived and, for every rule of R, every positive atom in the body is complete (negated atoms are complete by WF-5 itself; comparisons and assignments do not affect completeness);
+- complete(R) if R is derived and, for every rule of R, every positive atom in the body is complete (negated atoms are complete by WF-5 itself; comparisons and assignments do not affect completeness). The atoms inside an aggregation's conjunction and the inner relation of a resample are positive atoms of the rule for this purpose: `N = count(P) over (close(A, T1, P), ...)` makes its rule incomplete even though `count` yields 0 on an empty group, because a missing `close` leaves the count unknown, not small;
 - complete(R) if every rule of R is a reduction rule (a `top` over any relation yields a complete relation: the kernel knows exactly which tuples it kept).
 
 The judgment: `not R(...)` is permitted only when complete(R). The effect is
@@ -368,11 +399,28 @@ those fills; `cash(T, C)` is cash after them; `decided(T0, D)` holds every
 decision the strategy emitted at T0. A decision rule at T therefore sees the
 result of its decision at prev(T), and never its own.
 
+`decided` records what the strategy emitted, not what the executor did: a
+decision the executor could not carry out (no price at the fill bar) is still
+in `decided` and is not retried by the kernel. Whether it is retried is the
+strategy's choice of exit form: a rule that tests `decided` at one point in
+time (`lag(T, hold, T0), decided(T0, buy(A, _))`) is one-shot, while a rule
+that tests the current state (`held(A, T, Q)`, `position`, `not
+bought_within(A, T, hold)`) is re-evaluated at every bar until the state
+changes, so a dropped exit is decided again at the next bar (section 4,
+temporal builtins).
+
 In delta mode a decision is a signed order; in target mode the executor
 computes the order as the difference between the target and position at the
 time of execution, using the bar's close for `target_weight`. Conflicting
 decisions for one instrument at one T halt the run with a diagnostic naming
 both rules.
+
+When the decision resolution is coarser than the price data, the executor's
+"close of the next bar" is the last fine close inside the next decision
+bucket, for whichever fine tuples the data holds: the strategy's own bar
+rules and their `min K` do not apply to execution, so a decision can be
+filled on a day the bars library yields no bar for. A bucket with no fine
+tuple for the instrument has no price, and the decision is dropped.
 
 **Availability convention (v1).** Every fact at resolution r is available at
 the close of its bar; a resampled bar is available at the close of its bucket.
@@ -388,6 +436,24 @@ resolution reached by resample, it is the set of bucket labels that contain at
 least one finer timestamp. `prev`, `lag`, `window`, and `month_start` are
 defined over the domain of the rule's resolution, so holidays, half-days, and
 missing bars need no calendar primitive.
+
+The domain is a property of the data, not of any relation: a resample's `min
+K` removes a bucket from that relation when it holds fewer than K fine tuples,
+but the bucket stays in the time domain as long as it holds one. A half-day
+with 150 minute bars under a `min 300` bars library is therefore a @1d bar
+with no `close_d`: `prev` from the next day lands on it, `day_start` and
+`month_start` count it, the executor fills there (execution contract), and a
+rule that needs `close_d` at prev(T) does not fire on the day after it. A
+strategy that wants to skip bar-less days reaches back with `lag` or a
+window, or resamples with `min 1` and a `count` output and gates on the count
+itself.
+
+Timestamps are bar labels, and a label is the bar's close instant (section
+3): the 09:30 to 09:31 minute bar is labelled 09:31, the session's last bar
+16:00, and a daily bar its date. Data supplied to the kernel must follow this
+convention; minute data labelled by open time (09:30 to 15:59) puts the first
+bar of each day in a bucket of its own and shifts every other bucket by one
+bar, silently.
 
 Market data and the executor's state enter the strategy as relations;
 decisions leave as a set, are recorded as `decided`, and are filled at the next
@@ -447,9 +513,17 @@ counterpart of the checker's static report and is the main debugging tool the
 LLM will have.
 
 **Partial arithmetic.** `x / 0`, `log` of a non-positive value, `sqrt` of a
-negative value, and `std` of fewer than two observations have no result. The
-kernel halts the run with a diagnostic naming the rule, the tuple, and the
-offending expression. A degenerate feature is a data problem the author must
+negative value, `std`, `cov`, `corr` or `ols_beta` of fewer than two
+observations, `corr` of a constant series, `ols_beta` against a constant
+regressor, and a `quantile` level outside [0, 1] have no result. The kernel
+halts the run with a diagnostic naming the rule, the tuple, and the offending
+expression; for an aggregate the expression is the whole aggregate
+(`quantile(P, q) over (...)`), not its argument. The kernel evaluates the
+model top-down, restricted to what the decisions need, so the halt is
+guaranteed for every degenerate tuple that some `decide(t, ·)` demands; a
+degenerate tuple no decision requests (an unguarded `W = 1 / N` in a rule
+only called once something has been selected) is never evaluated and does
+not halt the run. A degenerate feature is a data problem the author must
 see; it is never a silent non-firing, which would let a strategy appear to
 work while a condition quietly never triggers.
 
