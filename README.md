@@ -28,8 +28,9 @@ abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market a
 | `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
 | `corpus/strategies` | 16 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
-| `corpus/negative` | 17 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
+| `corpus/negative` | 19 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
+| `tests/checker_messages.rs` | Diagnostics pinned exactly: one diagnostic per root cause, library diagnostics reported once, and the wording of the messages for builtins, wildcards and resolution mismatches. |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
 
 ## The surface syntax in one page
@@ -111,7 +112,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | D | WF-7 | `top` has `by`; the keys cover every identity column; the key is bound; no `first`/`last` outside resample |
 | S | WF-8 | no cycle through `not` or an aggregate |
 | Z, C | WF-9 | at least one decide; one mode; constructors of that mode; decide's T is a positive atom's key |
-| X | WF-10 | body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
+| X | WF-10 | body atoms share the head's resolution; resample goes strictly finer to coarser with `min K`. The kernel's `position`, `cash`, `fill` and `decided` are at the strategy's decision resolution, so a library that reads them is usable only by strategies deciding at its resolution; the error names the strategy |
 | W1, W2 | warnings | dead derived relation; unused parameter |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
@@ -195,7 +196,7 @@ small and easy to flip.
 ## Development
 
 ```
-cargo test            # 31 tests: type algebra, time, corpus, kernel
+cargo test            # 52 tests: type algebra, time, corpus, kernel, checker messages
 cargo build --release
 ```
 

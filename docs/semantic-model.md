@@ -466,8 +466,8 @@ produce), and `corpus/strategies/` must check clean.
 
 | Judgment | Code | Checks | Corpus case |
 | --- | --- | --- | --- |
-| Name resolution | U | relation declared in strategy, a used library, or the environment | `bad_undeclared` |
-| Environment | E | primitive provided by the declared environment | `bad_tier2_in_tier1` |
+| Name resolution | U | relation declared in strategy, a used library, or the environment; a builtin is not a relation | `bad_undeclared`, `bad_negated_builtin` |
+| Environment | E | primitive provided by the declared environment; used libraries written against it | `bad_tier2_in_tier1` |
 | WF-1 Range restriction | B | every head/negated/compared/assigned variable bound, in the order written | `bad_unbound_head` |
 | WF-2 Modes | M | `+` arguments bound at call site; `_` only in `-` positions | `bad_unbound_input` |
 | WF-3 Types | T | dimensions balance; signatures match; constructors typed | `bad_price_plus_scalar` |
@@ -477,7 +477,7 @@ produce), and `corpus/strategies/` must check clean.
 | WF-7 Determinism | D | `top` has `by`; keys cover identity columns; no `first`/`any` | `bad_nondeterministic_reduction`, `bad_unordered_top`, `bad_top_missing_identity` |
 | WF-8 Stratification | S | no cycle through `not` or an aggregate | `bad_negation_cycle` |
 | WF-9 Decisions | Z, C | at least one decide; one declared mode; constructors match mode | `bad_no_decision`, `bad_mixed_modes` |
-| WF-10 Resolution | X | body atoms share the head's resolution; resample strictly finer to coarser, aligned, with `min K` | `bad_resolution_mix` |
+| WF-10 Resolution | X | body atoms share the head's resolution; resample strictly finer to coarser, aligned, with `min K` | `bad_resolution_mix`, `bad_lib_executor_resolution` |
 | Dead rules | W1 | derived relation not reached from decide | (warning) |
 | Unused parameter | W2 | parameter not referenced | (warning) |
 

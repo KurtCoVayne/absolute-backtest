@@ -374,15 +374,29 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             }
             if let Some(r) = sig.res {
                 if r != self.res {
-                    let head_t = self.rule.head.name.clone();
-                    self.err(
-                        Code::X,
-                        atom.span,
+                    let head_name = self.rule.head.name.clone();
+                    let kernel_supplied = matches!(sig.kind, Kind::Executor | Kind::KernelState | Kind::Output);
+                    let root = self.cx.root;
+                    let msg = if kernel_supplied && self.rule.unit != root.name {
+                        // An executor relation sits at the decision resolution of
+                        // the strategy being checked (section 6), which a library
+                        // rule cannot see from its own text.
+                        format!(
+                            "`{}` is at {}, the decision resolution of {} `{}`, but this rule (head `{}`) is at {}; library `{}` ({}) can only read executor relations from a {} that decides at {}",
+                            atom.name, r, root.kind, root.name, head_name, self.res, self.rule.unit, self.res, root.kind, self.res
+                        )
+                    } else if kernel_supplied {
+                        format!(
+                            "`{}` is at {}, the decision resolution of {} `{}`, but this rule (head `{}`) is at {}; executor relations are read at the decision resolution only",
+                            atom.name, r, root.kind, root.name, head_name, self.res
+                        )
+                    } else {
                         format!(
                             "`{}` is at {} but this rule (head `{}`) is at {}; two resolutions meet only through resample",
-                            atom.name, r, head_t, self.res
-                        ),
-                    );
+                            atom.name, r, head_name, self.res
+                        )
+                    };
+                    self.err(Code::X, atom.span, msg);
                 }
             }
         }
