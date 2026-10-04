@@ -89,7 +89,9 @@ resolutions, so no Θ^−½ exponent is produced; that is reserved for v2.
 `prev`, `lag`, `window`, `prior_window`. Timestamp − Timestamp is not an
 expression in v1; a bar distance is obtained with `lag`. Timestamp-typed
 arguments of a relation other than its temporal key (section 3) are ordinary
-values and can be compared freely.
+values and can be compared freely; a bound time is carried into such a column
+by assignment (`TE = T`), which copies the value and none of its causal
+provenance.
 
 **What this buys.** The validity of an operation is decided by arithmetic on
 exponents, so the type checker has no table of allowed pairs to maintain, and
@@ -197,7 +199,10 @@ they are deterministic; the other aggregates are as in section 2. A group with
 fewer than K tuples yields no bucket. The result's temporal key is the bucket
 label, available at the bucket's close, so a resampled tuple depends only on
 fine tuples at or before it and WF-6 holds by construction. R may be a
-primitive or a derived relation. Standard bars are one rule each:
+primitive or a derived relation; a stored R is grouped by every entity
+variable left fresh in its atom, whatever that argument's mode, while a
+derived R is a call whose `+` inputs must be bound before the form (WF-2).
+Standard bars are one rule each:
 
 ```
 open_d(A, T, O)   :- resample(close_m(A, T1, P) to @1d as T, min 300, O = first(P)).

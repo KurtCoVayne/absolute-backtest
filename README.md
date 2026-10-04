@@ -28,7 +28,7 @@ abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market a
 | `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
 | `corpus/strategies` | 16 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
-| `corpus/negative` | 17 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
+| `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
 
@@ -74,7 +74,9 @@ strategy sma_crossover {
   `0.02`, `"SPY"` (an equity). A bare integer is a Count or a Scalar from
   context; a bare decimal is a Scalar.
 - Body literals, in the order written: positive atom, `not` atom, comparison,
-  `X = expr`, `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
+  `X = expr` (including `TE = T`, which copies a bound time into a value
+  column such as an entry date; the copy is a value, not a temporal key),
+  `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
   `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
   plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
@@ -99,7 +101,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | U | name resolution | relation or parameter declared in the strategy, a used library, or the environment; heads define relations declared in their own unit; one unit per (kind, name) in the workspace; `env` declared once; no builtin or keyword as a relation name |
 | E | environment | the primitive belongs to the declared environment, not another one |
 | B | WF-1 | every head, negated, compared or assigned variable is bound, left to right |
-| M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions |
+| M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions; inside a resample, a fresh entity variable in a `+` position of a stored relation is bound by the grouping |
 | T | WF-3 | dimensions balance; terms match signatures; constructors typed; a parameter's default lies within its ordered range |
 | R | WF-4 | every positive cycle steps strictly back in time through `prev` or `lag` |
 | N | WF-5 | `not R` only when R is complete; completeness propagates; reductions close |
@@ -174,11 +176,21 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **A resample groups a stored inner relation by every fresh entity
+  variable**, including one in a `+` position (`resample(close_m(A, T1, P)
+  to @5m as T, ...)` with `A` fresh yields one bucket per symbol), because
+  section 4 says the form binds R's entity variables by grouping and a stored
+  relation can be enumerated. A derived inner relation is a call: its `+`
+  inputs must be bound before the resample (M), or it is declared with `-A`.
+- **`X = T` copies a bound Timestamp** into a value column (the "held since"
+  idiom, `entry(A, T, E, TE) :- fill(A, T, Q, P), ..., TE = T`); the copy
+  carries no causal provenance, so it compares freely but cannot serve as a
+  body atom's temporal key.
 
 ## Development
 
 ```
-cargo test            # 31 tests: type algebra, time, corpus, kernel
+cargo test            # 53 tests: type algebra, time, corpus, checker, kernel
 cargo build --release
 ```
 

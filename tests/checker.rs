@@ -244,7 +244,12 @@ strategy held_since {
     // the first sell comes once a bar 30 calendar days before T is at or
     // after that entry, so at least 30 days after the fill.
     let first_fill = r.fills[0].t;
-    assert!(sells[0].t - first_fill >= 30 * 86_400, "first sell {} vs first fill {}", format_timestamp(sells[0].t), format_timestamp(first_fill));
+    assert!(
+        sells[0].t - first_fill >= 30 * 86_400,
+        "first sell {} vs first fill {}",
+        format_timestamp(sells[0].t),
+        format_timestamp(first_fill)
+    );
 }
 
 // intraday-03: a resample over a stored relation binds its entity variables
@@ -270,7 +275,12 @@ fn a_resample_over_a_primitive_groups_a_fresh_input_entity() {
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
     // One bucket per symbol: both are bought at the first five-minute bar and
     // then held, so exactly two decisions, at one bar, for two instruments.
-    assert_eq!(r.decisions.len(), 2, "{:?}", r.decisions.iter().map(|d| (format_timestamp(d.t), r.describe_decision(&d.decision))).collect::<Vec<_>>());
+    assert_eq!(
+        r.decisions.len(),
+        2,
+        "{:?}",
+        r.decisions.iter().map(|d| (format_timestamp(d.t), r.describe_decision(&d.decision))).collect::<Vec<_>>()
+    );
     assert_eq!(r.decisions[0].t, r.decisions[1].t);
     let names: std::collections::BTreeSet<String> = r.decisions.iter().map(|d| r.describe_decision(&d.decision)).collect();
     assert_eq!(names.len(), 2);

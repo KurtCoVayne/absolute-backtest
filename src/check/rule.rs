@@ -259,11 +259,28 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 ),
                             );
                         } else if arg.mode == Mode::In {
-                            self.err(
-                                Code::M,
-                                *sp,
-                                format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
-                            );
+                            // A resample groups a stored relation by its entity
+                            // columns (section 4), so a fresh entity variable in
+                            // a `+` position is bound by the grouping; a derived
+                            // relation is a call and must have its inputs bound.
+                            let grouped = ctx == AtomCtx::ResampleInner && arg.ty.is_entity();
+                            let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
+                            if grouped && !stored {
+                                self.err(
+                                    Code::M,
+                                    *sp,
+                                    format!(
+                                        "`+{}` of `{}` is an input, and `{}` is a derived relation, so `{}` must be bound before the resample; a resample groups only a stored relation by a fresh entity variable (or declare `{}` with `-{}`)",
+                                        arg.name, atom.name, atom.name, v, atom.name, arg.name
+                                    ),
+                                );
+                            } else if !grouped {
+                                self.err(
+                                    Code::M,
+                                    *sp,
+                                    format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
+                                );
+                            }
                         }
                         let prov = if is_key {
                             if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
@@ -653,8 +670,16 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     }
                 } else {
                     let t = self.expr_ty(expr);
-                    if t == Some(Ty::Timestamp) {
-                        self.err(Code::T, *span, "a Timestamp cannot be assigned; bind times with prev, lag, window or prior_window");
+                    // A bound time may be copied into a value column (`TE = T`,
+                    // section 2: non-key timestamps are ordinary values); it is
+                    // not computed, so anything else of type Timestamp is an
+                    // error. The copy has no provenance: using it as a key is F.
+                    if t == Some(Ty::Timestamp) && !matches!(expr, Expr::Var(..)) {
+                        self.err(
+                            Code::T,
+                            *span,
+                            "a Timestamp cannot be computed; copy a bound time with `X = T` or bind times with prev, lag, window or prior_window",
+                        );
                     }
                     self.bind(var, t, TimeProv::Other);
                 }
