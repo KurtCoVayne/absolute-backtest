@@ -203,6 +203,25 @@ strategy at_15m {
     assert_ne!(on_flat_m[0].message, on_flat_m[1].message);
 }
 
+/// intraday-08: a library rule reading an executor relation under a strategy
+/// at another decision resolution is an X error that names the strategy and
+/// its decision resolution, since the library checks clean on its own.
+#[test]
+fn an_executor_relation_in_a_library_names_the_strategy_that_sets_its_resolution() {
+    let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/negative/bad_lib_executor_resolution.dsl")).unwrap();
+    let diags = check(&src, "bad_lib_executor_resolution");
+    let errs = errors(&diags);
+    assert_eq!(errs.len(), 3, "flat_m#1, held_m#1 and decide#1, got:\n{}", text(&diags));
+    assert!(errs.iter().all(|d| d.code == Code::X), "got:\n{}", text(&diags));
+    let in_lib: Vec<&&Diagnostic> = errs.iter().filter(|d| d.unit == "features_m").collect();
+    assert_eq!(in_lib.len(), 2, "got:\n{}", text(&diags));
+    for d in in_lib {
+        assert!(d.message.contains("`position` is at @5m, the decision resolution of strategy `bad_lib_executor_resolution`"), "{}", d);
+        assert!(d.message.contains("library `features_m` (@1m)"), "{}", d);
+        assert!(d.message.contains("decides at @1m"), "{}", d);
+    }
+}
+
 /// portfolio-06: the bound position of prev and lag is an output (section 4,
 /// "Binds"), so `_` is permitted there (WF-2) and means the same as a fresh
 /// variable that is never read.
