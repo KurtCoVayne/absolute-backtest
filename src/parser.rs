@@ -139,6 +139,7 @@ impl Parser {
             uses: vec![],
             resolution: None,
             mode: None,
+            redeclared: vec![],
             params: vec![],
             rels: vec![],
             rules: vec![],
@@ -167,7 +168,11 @@ impl Parser {
                 Tok::Ident(s) if s == "env" => {
                     self.bump();
                     let (e, sp) = self.ident()?;
-                    unit.env = Some((e, sp));
+                    if unit.env.is_some() {
+                        unit.redeclared.push(("env".to_string(), sp));
+                    } else {
+                        unit.env = Some((e, sp));
+                    }
                 }
                 Tok::Ident(s) if s == "uses" => {
                     self.bump();
@@ -183,7 +188,13 @@ impl Parser {
                     self.bump();
                     let sp = self.span();
                     match self.bump().tok {
-                        Tok::Res(r) => unit.resolution = Some((r, sp)),
+                        Tok::Res(r) => {
+                            if unit.resolution.is_some() {
+                                unit.redeclared.push(("resolution".to_string(), sp));
+                            } else {
+                                unit.resolution = Some((r, sp));
+                            }
+                        }
                         t => {
                             return Err(ParseError {
                                 span: sp,
@@ -205,7 +216,11 @@ impl Parser {
                             })
                         }
                     };
-                    unit.mode = Some((mode, sp));
+                    if unit.mode.is_some() {
+                        unit.redeclared.push(("mode".to_string(), sp));
+                    } else {
+                        unit.mode = Some((mode, sp));
+                    }
                 }
                 Tok::Ident(s) if s == "param" => {
                     self.bump();
@@ -363,6 +378,13 @@ impl Parser {
             }
             if s.len() == 3 && s.chars().all(|c| c.is_ascii_uppercase()) {
                 self.bump();
+                // `60 USD/share` (or `/shares`) is a price: currency per share
+                // (section 2). A `/` followed by anything else is division.
+                if self.at(&Tok::Slash) && matches!(self.peek_at(1), Tok::Ident(u) if u == "share" || u == "shares") {
+                    self.bump();
+                    self.bump();
+                    return Ok(Lit::Price(x, s));
+                }
                 return Ok(Lit::Money(x, s));
             }
         }

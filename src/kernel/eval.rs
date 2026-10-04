@@ -357,7 +357,10 @@ impl<'p> Kernel<'p> {
                 let value = match aggregate(agg, &cols) {
                     Ok(Some(v)) => v,
                     Ok(None) => return Ok(()),
-                    Err(m) => return Err(self.arith(cr, env, &args[0], &m)),
+                    Err(m) => {
+                        let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+                        return Err(self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), &m));
+                    }
                 };
                 let mut e = env.clone();
                 e[cr.slots[var]] = Some(value);
@@ -437,7 +440,7 @@ impl<'p> Kernel<'p> {
                         match aggregate(agg, &[col]) {
                             Ok(Some(v)) => e[cr.slots[x]] = Some(v),
                             Ok(None) => ok = false,
-                            Err(m) => return Err(self.arith(cr, &e, expr, &m)),
+                            Err(m) => return Err(self.arith_text(cr, &e, format!("{}({})", agg, expr), &m)),
                         }
                     }
                     if ok {
@@ -450,13 +453,19 @@ impl<'p> Kernel<'p> {
     }
 
     fn arith(&self, cr: &CompiledRule, env: &Env, expr: &Expr, message: &str) -> RunError {
+        self.arith_text(cr, env, expr.to_string(), message)
+    }
+
+    /// The partial-arithmetic halt of section 7, with the offending
+    /// expression given as text (an aggregate names the whole aggregate).
+    fn arith_text(&self, cr: &CompiledRule, env: &Env, expr: String, message: &str) -> RunError {
         let mut names: Vec<(&String, &usize)> = cr.slots.iter().collect();
         names.sort_by_key(|(_, s)| **s);
         let bindings: Vec<String> = names.iter().filter_map(|(n, s)| env[**s].as_ref().map(|v| format!("{}={}", n, self.show(v)))).collect();
         RunError::Arithmetic {
             rule: cr.label.clone(),
             bindings: bindings.join(", "),
-            expr: expr.to_string(),
+            expr,
             message: message.to_string(),
         }
     }

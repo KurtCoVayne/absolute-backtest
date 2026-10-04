@@ -1,4 +1,5 @@
-# Buy a volume spike on an up day; hold for a fixed number of days.
+# Buy a volume spike on an up day; sell at the first bar more than `hold`
+# after the entry (the window form of a time-based exit, see breakout_52w).
 strategy volume_spike {
   env equities_1d
   uses features
@@ -18,5 +19,5 @@ strategy volume_spike {
       V > AvgV * mult, logret(A, T, R), R > min_ret.
 
   decide(T, buy(A, qty)) :- spike(A, T), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), lag(T, hold, T0), decided(T0, buy(A, _)).
+  decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
 }

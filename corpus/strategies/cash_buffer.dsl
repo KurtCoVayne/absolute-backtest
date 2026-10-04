@@ -1,5 +1,6 @@
 # Momentum entries that are only taken when cash after the order keeps a
 # buffer; the strategy observes the executor's cash, not an intended cash.
+# The time-based exit is the window form (see breakout_52w).
 strategy cash_buffer {
   env equities_1d
   uses features
@@ -20,5 +21,5 @@ strategy cash_buffer {
   entry_signal(A, T) :- universe(A, T), momentum(A, T, lookback, skip, M), M > threshold.
 
   decide(T, buy(A, qty)) :- entry_signal(A, T), flat(A, T), affordable(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), lag(T, hold, T0), decided(T0, buy(A, _)).
+  decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
 }
