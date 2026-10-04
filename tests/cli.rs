@@ -233,3 +233,56 @@ fn run_prints_every_decision_and_the_fills_on_request() {
     assert_eq!(fill_lines, fills, "stdout: {}", stdout);
     assert!(stdout.lines().any(|l| l.trim_start().starts_with("fill ") && l.contains(" @ ")), "stdout: {}", stdout);
 }
+
+/// trend-09: `--param name=value` (repeatable) overrides a parameter on
+/// `abt run` and `abt explain`; a value outside the declared range or of the
+/// wrong type is a usage error.
+#[test]
+fn run_takes_parameter_overrides() {
+    let files = strategy_files("sma_crossover");
+    let run_with = |extra: &[&str]| {
+        let mut args = vec!["run", "--strategy", "sma_crossover", "--synthetic", "--seed", "1", "--days", "300", "--quiet"];
+        args.extend(extra);
+        args.extend(files.iter().map(|s| s.as_str()));
+        abt(&args)
+    };
+    let out = run_with(&[]);
+    let (base, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", base, stderr);
+    let out = run_with(&["--param", "fast=10d", "--param", "qty=250 shares"]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    let summary = |s: &str| s.lines().find(|l| l.starts_with("decisions:")).unwrap().to_string();
+    assert_ne!(summary(&base), summary(&stdout), "the overrides should change the run:\n{}", stdout);
+
+    let out = run_with(&["--param", "fast=5d"]);
+    let (_, stderr) = text(&out);
+    assert!(!out.status.success() && stderr.contains("fast") && stderr.contains("10d..60d"), "stderr: {}", stderr);
+    let out = run_with(&["--param", "fast=12"]);
+    let (_, stderr) = text(&out);
+    assert!(!out.status.success() && stderr.contains("fast") && stderr.contains("Duration"), "stderr: {}", stderr);
+    let out = run_with(&["--param", "nope=1d"]);
+    let (_, stderr) = text(&out);
+    assert!(!out.status.success() && stderr.contains("`nope`"), "stderr: {}", stderr);
+
+    let mut args = vec![
+        "explain",
+        "--strategy",
+        "sma_crossover",
+        "--rule",
+        "decide#1",
+        "--at",
+        "2022-04-14",
+        "--param",
+        "fast=10d",
+        "--synthetic",
+        "--seed",
+        "1",
+        "--days",
+        "120",
+    ];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success() && stdout.contains("rule sma_crossover::decide#1"), "stdout: {}\nstderr: {}", stdout, stderr);
+}

@@ -12,6 +12,7 @@ use absolute_backtest::check::{check_program, Program, Workspace};
 use absolute_backtest::data::{synthetic_daily, synthetic_minute};
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
 use absolute_backtest::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, RunError, Value};
+use absolute_backtest::{Duration, Lit};
 
 fn program(extra: &str, name: &str) -> (Program, Workspace) {
     let mut ws = corpus::base_workspace();
@@ -469,4 +470,51 @@ fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
     assert_eq!(r.describe_decision(d), "sell(X, 10)");
     assert!(reason.contains("no next bar"), "{}", reason);
     assert_eq!(r.decisions.len(), r.fills.len() + r.dropped.len());
+}
+
+/// trend-09: parameters are the only values the kernel may vary between
+/// runs of one program (section 3) and its sweep axis (section 1):
+/// `ExecConfig.param_overrides` replaces a default, checked against the
+/// parameter's type and range.
+#[test]
+fn parameter_overrides_change_the_run_within_type_and_range() {
+    let src = r#"
+strategy hold_n {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param hold : Duration = 1d in 1d..5d
+  param qty : Quantity<Shares> = 10 shares
+  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not bought_within(A, T, 30d).
+  decide(T, sell(A, Q)) :- held(A, T, Q), lag(T, hold, T0), decided(T0, buy(A, _)).
+}
+"#;
+    let (prog, _) = program(src, "hold_n");
+    let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let with = |overrides: Vec<(&str, Lit)>| {
+        run(
+            &prog,
+            &ds,
+            ExecConfig {
+                param_overrides: overrides.into_iter().map(|(n, l)| (n.to_string(), l)).collect(),
+                ..Default::default()
+            },
+        )
+    };
+    let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect() };
+    let days = |n: i64| Lit::Duration(Duration { months: 0, days: n });
+    assert_eq!(show(&with(vec![]).unwrap()), vec!["2024-01-08 buy(X, 10)", "2024-01-09 sell(X, 10)"]);
+    assert_eq!(show(&with(vec![("hold", days(3))]).unwrap()), vec!["2024-01-08 buy(X, 10)", "2024-01-11 sell(X, 10)"]);
+    assert_eq!(
+        show(&with(vec![("hold", days(3)), ("qty", Lit::Shares(25.0))]).unwrap()),
+        vec!["2024-01-08 buy(X, 25)", "2024-01-11 sell(X, 25)"]
+    );
+    // Outside the range, of another type, or not a parameter: a request error, not a run.
+    let err = with(vec![("hold", days(10))]).err().map(|e| e.to_string()).expect("10d is outside 1d..5d");
+    assert!(err.contains("hold") && err.contains("1d..5d") && !err.contains("internal"), "{}", err);
+    let err = with(vec![("hold", Lit::Int(3))]).err().map(|e| e.to_string()).expect("3 is not a Duration");
+    assert!(err.contains("hold") && err.contains("Duration") && !err.contains("internal"), "{}", err);
+    let err = with(vec![("nope", days(3))]).err().map(|e| e.to_string()).expect("no such parameter");
+    assert!(err.contains("`nope`") && err.contains("hold_n") && !err.contains("internal"), "{}", err);
 }
