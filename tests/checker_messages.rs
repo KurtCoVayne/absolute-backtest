@@ -202,3 +202,49 @@ strategy at_15m {
     assert_eq!(on_flat_m.len(), 2, "one X per using strategy, got:\n{}", text(&diags));
     assert_ne!(on_flat_m[0].message, on_flat_m[1].message);
 }
+
+/// trend-12: `not month_start(T)` is rejected as an undeclared relation, and
+/// the message says why (a builtin is not a relation) and shows the idiom,
+/// which checks clean.
+#[test]
+fn a_negated_builtin_explains_itself_and_names_the_idiom() {
+    let diags = check(
+        r#"
+strategy not_builtin {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not month_start(T).
+  decide(T, sell(A, Q)) :- held(A, T, Q), month_start(T).
+}
+"#,
+        "not_builtin",
+    );
+    let errs = errors(&diags);
+    assert_eq!(errs.len(), 1, "got:\n{}", text(&diags));
+    assert_eq!(errs[0].code, Code::U);
+    let m = &errs[0].message;
+    assert!(m.contains("`month_start` is a temporal builtin, not a relation"), "{}", m);
+    assert!(m.contains("mstart(T) :- bar(T), month_start(T)."), "{}", m);
+    assert!(m.contains("not mstart(T)"), "{}", m);
+
+    let diags = check(
+        r#"
+strategy mstart_idiom {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  rel mstart(@T: Timestamp)
+  mstart(T) :- bar(T), month_start(T).
+  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not mstart(T).
+  decide(T, sell(A, Q)) :- held(A, T, Q), mstart(T).
+}
+"#,
+        "mstart_idiom",
+    );
+    assert!(diags.is_empty(), "the idiom checks clean, got:\n{}", text(&diags));
+}
