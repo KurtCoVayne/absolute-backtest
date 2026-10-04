@@ -150,8 +150,9 @@ define it.
 **Parameters.** A `param` is a named constant with a type and an optional range
 (`param n : Duration = 20d in 5d..250d`). Within rules it behaves as a bound
 value of that type. The range is ordered and contains the default (a default
-outside it is a type error, WF-3). Parameters are the only values the kernel
-may vary between runs of the same program.
+outside it is a type error, WF-3; a calendar duration has no single length in
+days, so `1mo` lies within `31d..60d` and outside `32d..60d`). Parameters are
+the only values the kernel may vary between runs of the same program.
 
 **Identity columns.** For reductions (WF-7) the checker needs to know which
 arguments identify a tuple. v1 rule: the identity of a tuple is its
@@ -318,7 +319,8 @@ through `not` or through an aggregate is not.
 decide rule uses constructors of that mode, as does every `decided` pattern
 written in the strategy (`decided` holds only the strategy's own decisions,
 so a pattern with the other mode's constructor could never match; a library
-has no mode and its patterns are judged by the strategies that reach them);
+has no mode and its patterns are judged by the strategies whose decide rules
+reach them, each reporting at the library's rule);
 the head of a decide rule has the
 form `decide(T, D)` with T a variable that is the temporal key of at least one
 positive body atom; a strategy with no decide rule is rejected; and a decide

@@ -339,7 +339,8 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     // WF-9 (C): `decided` holds only this strategy's own
                     // decisions, so a pattern with the other mode's
                     // constructor can never match (adv-18). A library has no
-                    // mode: its patterns are judged by whoever uses them.
+                    // mode: its patterns are judged by each strategy that
+                    // reaches them, in `Checker::program_checks`.
                     if atom.name == "decided" && self.rule.unit == self.cx.root.name {
                         if let (Some(mode), Some(m)) = (self.cx.mode, ctor_mode(c)) {
                             if m != mode {

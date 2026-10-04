@@ -314,9 +314,20 @@ impl Duration {
     pub fn is_zero(&self) -> bool {
         self.months == 0 && self.days == 0
     }
-    /// Approximate length in days, for range comparison of parameters.
+    /// Approximate length in days, for ordering durations in the kernel.
     pub fn approx_days(&self) -> f64 {
         self.months as f64 * 30.4375 + self.days as f64
+    }
+    /// The shortest calendar length in days this duration can take: a month
+    /// spans 28 to 31 days and twelve consecutive months 365 or 366, so a
+    /// parameter's range (section 3) rejects a default only when it falls
+    /// outside under every length.
+    pub fn min_days(&self) -> i64 {
+        (self.months / 12) * 365 + (self.months % 12) * 28 + self.days
+    }
+    /// The longest calendar length in days this duration can take.
+    pub fn max_days(&self) -> i64 {
+        (self.months / 12) * 366 + (self.months % 12) * 31 + self.days
     }
 }
 

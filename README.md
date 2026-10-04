@@ -182,6 +182,10 @@ small and easy to flip.
   section 4 says the form binds R's entity variables by grouping and a stored
   relation can be enumerated. A derived inner relation is a call: its `+`
   inputs must be bound before the resample (M), or it is declared with `-A`.
+- **A duration parameter's range is judged under every calendar length**:
+  a month is 28 to 31 days and a year 365 or 366, so `1mo in 31d..60d` is
+  accepted and `1mo in 32d..60d` is a T error; the kernel still orders
+  durations by their mean length.
 - **`X = T` copies a bound Timestamp** into a value column (the "held since"
   idiom, `entry(A, T, E, TE) :- fill(A, T, Q, P), ..., TE = T`); the copy
   carries no causal provenance, so it compares freely but cannot serve as a
@@ -190,7 +194,7 @@ small and easy to flip.
 ## Development
 
 ```
-cargo test            # 53 tests: type algebra, time, corpus, checker, kernel
+cargo test            # 58 tests: type algebra, time, corpus, checker, kernel
 cargo build --release
 ```
 

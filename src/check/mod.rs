@@ -229,8 +229,12 @@ impl Program {
 
 /// Order two literals of one type, for a parameter's range (section 3):
 /// numbers by value, money of one currency by amount, durations by
-/// calendar length. `None` when they are not comparable.
+/// calendar length. A calendar duration has no single length, so two
+/// durations are ordered only when every length of one lies on the same
+/// side of every length of the other (`1mo` is neither above nor below
+/// `30d`). `None` when they are not comparable.
 fn lit_order(a: &Lit, b: &Lit) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
     let num = |l: &Lit| match l {
         Lit::Int(i) => Some(*i as f64),
         Lit::Float(x) | Lit::Shares(x) => Some(*x),
@@ -238,10 +242,35 @@ fn lit_order(a: &Lit, b: &Lit) -> Option<std::cmp::Ordering> {
     };
     match (a, b) {
         (Lit::Money(x, cx), Lit::Money(y, cy)) if cx == cy => x.partial_cmp(y),
-        (Lit::Duration(x), Lit::Duration(y)) => x.approx_days().partial_cmp(&y.approx_days()),
+        (Lit::Duration(x), Lit::Duration(y)) if x == y => Some(Ordering::Equal),
+        (Lit::Duration(x), Lit::Duration(y)) if x.min_days() > y.max_days() => Some(Ordering::Greater),
+        (Lit::Duration(x), Lit::Duration(y)) if x.max_days() < y.min_days() => Some(Ordering::Less),
         (Lit::Money(..), _) | (_, Lit::Money(..)) | (Lit::Duration(_), _) | (_, Lit::Duration(_)) | (Lit::Equity(_), _) | (_, Lit::Equity(_)) => None,
         _ => num(a)?.partial_cmp(&num(b)?),
     }
+}
+
+/// The decision constructors written in `decided` patterns of a body, each
+/// with the pattern's time term and span, including those inside an
+/// aggregation's conjunction.
+fn decided_patterns(body: &[Literal]) -> Vec<(&str, &Term, Span)> {
+    fn atom<'a>(a: &'a Atom, out: &mut Vec<(&'a str, &'a Term, Span)>) {
+        if a.name == "decided" && a.terms.len() == 2 {
+            if let Term::Ctor(c, _, sp) = &a.terms[1] {
+                out.push((c, &a.terms[0], *sp));
+            }
+        }
+    }
+    fn lit<'a>(l: &'a Literal, out: &mut Vec<(&'a str, &'a Term, Span)>) {
+        match l {
+            Literal::Atom(a) | Literal::Neg(a) | Literal::Top { atom: a, .. } | Literal::Resample { inner: a, .. } => atom(a, out),
+            Literal::Agg { conj, .. } => conj.iter().for_each(|l| lit(l, out)),
+            Literal::Builtin(..) | Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    body.iter().for_each(|l| lit(l, &mut out));
+    out
 }
 
 pub fn rule_label(rules: &[Rule], i: usize) -> String {
@@ -693,6 +722,33 @@ impl<'a> Checker<'a> {
             for sig in decls {
                 if !reach.contains(&sig.name) && !self.reserved_declared.contains(&sig.name) {
                     self.diag(Code::W1, &root_name, None, sig.span, format!("derived relation `{}` is not reached by any decide rule", sig.name));
+                }
+            }
+            // WF-9 (C): a library has no mode, so a `decided` pattern written
+            // in one is judged by each strategy that reaches the rule, against
+            // that strategy's mode; the strategy's own patterns are judged in
+            // `rule::analyze` (adv-18).
+            if let Some(mode) = self.mode {
+                let rules = self.rules.clone();
+                for (i, r) in rules.iter().enumerate() {
+                    if r.unit == root_name || !reach.contains(&r.head.name) {
+                        continue;
+                    }
+                    for (c, t, sp) in decided_patterns(&r.body) {
+                        if let Some(m) = ctor_mode(c).filter(|m| *m != mode) {
+                            let label = rule_label(&rules, i);
+                            self.diag(
+                                Code::C,
+                                &r.unit,
+                                Some(label),
+                                sp,
+                                format!(
+                                    "`{}` is a {} constructor but strategy `{}`, which reaches this rule, declares `mode {}`; `decided` holds only that strategy's own decisions, so `decided({}, {}(...))` can never match there",
+                                    c, m, root_name, mode, t, c
+                                ),
+                            );
+                        }
+                    }
                 }
             }
         }
