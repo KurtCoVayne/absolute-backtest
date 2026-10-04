@@ -181,3 +181,27 @@ strategy on_bound {
     let diags = check(src, "on_bound");
     assert!(errors(&diags).is_empty(), "{}", text(&diags));
 }
+
+// adv-12: a declared relation that no rule defines is empty for ever, so
+// every rule reading it positively is dead; that deserves a warning.
+
+#[test]
+fn a_declared_relation_with_no_rules_is_warned_about() {
+    let src = r#"
+strategy ghost_rel {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  rel ghost(-A: Equity, @T: Timestamp)
+  decide(T, buy(A, qty)) :- universe(A, T), ghost(A, T), flat(A, T).
+}
+"#;
+    let diags = check(src, "ghost_rel");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let w: Vec<&Diagnostic> = diags.iter().filter(|d| d.severity == Severity::Warning).collect();
+    assert_eq!(w.len(), 1, "exactly one warning, for `ghost`:\n{}", text(&diags));
+    assert!(w[0].message.contains("`ghost`") && w[0].message.contains("no rule"), "{}", w[0]);
+    assert_eq!(w[0].span.line, 8, "reported at the declaration: {}", w[0]);
+}
