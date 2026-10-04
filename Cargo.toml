@@ -1,0 +1,19 @@
+[package]
+name = "absolute-backtest"
+version = "0.1.0"
+edition = "2021"
+description = "Strategy DSL v1: typed IR, well-formedness checker, and backtesting kernel"
+license = "MIT"
+
+[lib]
+name = "absolute_backtest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "abt"
+path = "src/bin/abt.rs"
+
+[dependencies]
+
+[profile.release]
+debug = false
