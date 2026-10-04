@@ -14,6 +14,13 @@ abt explain --strategy breakout_52w --rule 'breakout#1' --at 2023-02-24 --synthe
 abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market as CSV
 ```
 
+Data is one CSV per primitive relation (`close.csv`, `volume.csv`, ...), with
+a header row naming the signature's arguments. Timestamps are bar close
+instants: a 09:30 to 09:31 minute bar is labelled `09:31`, the last bar of a
+session `16:00`, and a daily bar by its date. `abt synth` writes this
+convention; minute data labelled by open time silently misaligns every
+resampled bucket.
+
 ## Layout
 
 | Path | What it is |
@@ -28,7 +35,7 @@ abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market a
 | `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
 | `corpus/strategies` | 16 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
-| `corpus/negative` | 17 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
+| `corpus/negative` | 18 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
 
@@ -72,7 +79,11 @@ strategy sma_crossover {
   strategy it defaults to the unit's `resolution`.
 - Literals carry units: `100 shares`, `5_000_000 USD`, `20d`, `3mo`, `1y`,
   `0.02`, `"SPY"` (an equity). A bare integer is a Count or a Scalar from
-  context; a bare decimal is a Scalar.
+  context; a bare decimal is a Scalar. A number is digits with optional `_`
+  separators, an optional fraction with digits on both sides of the point,
+  an optional exponent (`1e5`, `2.5e-3`) and an optional leading `-`; `.5`
+  and `+0.5` are not numbers. Durations are whole numbers of `d`, `w`, `mo`
+  or `y`.
 - Body literals, in the order written: positive atom, `not` atom, comparison,
   `X = expr`, `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
   `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
@@ -120,7 +131,10 @@ decision resolution's time domain, and every derived relation is requested
 with its temporal key and inputs bound and memoised by them. Because WF-4
 makes all positive recursion strictly time-decreasing and WF-8 keeps
 negation and aggregation acyclic, every request terminates and the result is
-the unique model of section 7 restricted to what the decisions need.
+the unique model of section 7 restricted to what the decisions need. The
+partial-arithmetic halt follows the same restriction: a degenerate tuple
+halts the run when a decision demands it, and a tuple no decision requests
+is never evaluated.
 
 The executor fills a bar's decisions at the next bar's close (slippage and
 commission from `ExecConfig`), then writes `fill`, `position` and `cash` at
@@ -195,11 +209,23 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **`min K` removes a bar from a relation, not from the time domain.** The
+  @1d domain over minute data is every day with at least one minute bar
+  (section 6), so a half-day with fewer than the bars library's 300 bars
+  has no `close_d` but is still a bar: `prev` from the next day lands on
+  it, and a rule needing `close_d` at prev(T) does not fire on the day
+  after it either. Skip bar-less days with `lag` or a window, or resample
+  with `min 1` and a `count` output and gate on the count.
+- **The executor prices from the data, not from the strategy's bars.** When
+  the decision resolution is coarser than the price data, a decision is
+  filled at the last fine close inside the next decision bucket, whatever
+  `min K` the strategy's bar rules declare; a bucket with no fine tuple for
+  the instrument drops the decision.
 
 ## Development
 
 ```
-cargo test            # 31 tests: type algebra, time, corpus, kernel
+cargo test            # type algebra, time, corpus, kernel, syntax
 cargo build --release
 ```
 

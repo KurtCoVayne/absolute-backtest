@@ -178,13 +178,17 @@ judge these seven.
 | Negated atom | `not R(t1, ..., tn)` | nothing | R must be complete (WF-5); all terms bound |
 | Comparison | `e1 op e2` | nothing | op in `<`, `<=`, `=`, `>`, `>=`; both sides bound, same dimension |
 | Assignment | `X = e` | X | e built from bound variables, params, literals, scalar functions |
-| Aggregation | `X = agg(e) over (conj)` | X | conj is a conjunction of positive atoms and temporal constraints; e uses variables bound inside conj; variables shared with the outer rule are inputs to the group |
+| Aggregation | `X = agg(e) over (conj)` | X | conj is a conjunction of positive atoms, temporal constraints, and comparisons and assignments over variables bound inside it; e uses variables bound inside conj; variables shared with the outer rule are inputs to the group |
 | Reduction | `top(N, R(...), by (k1 dir, ..., km dir))` | R's variables | Keeps at most N tuples per group of bound outer variables; the order must be total (WF-7) |
 | Resample | `resample(R(...) to @r as T, min K, X1 = agg1(e1), ...)` | R's entity variables, the bucket label T, each Xi | R strictly finer than and aligned to @r; aggregates in `first`, `last`, `max`, `min`, `sum`, `mean`, `count`; a group below K yields no bucket (WF-10) |
 
 **Aggregation semantics.** `agg(e) over (conj)` evaluates conj with the outer
 bound variables fixed, collects the multiset of e over the resulting tuples,
-and applies the aggregate. The group is empty when conj has no solutions;
+and applies the aggregate. conj is judged like a rule body (WF-1 to WF-3,
+WF-6): its atoms are positive atoms of the rule, and a comparison or an
+assignment inside it filters or extends the group's tuples, so "since entry"
+and "above a threshold" groups are written as `TE <= T1` or `Cost = P * Q,
+Cost > limit` inside the conjunction. The group is empty when conj has no solutions;
 `count` of an empty group is 0, every other aggregate over an empty group
 yields no tuple (the rule does not fire). This is what makes `sma` undefined,
 rather than zero, before the window is full. A windowed group holding fewer
@@ -299,7 +303,7 @@ step is rejected; there is no fixpoint iteration over value-creating rules.
 **WF-5 Completeness.** Define complete(R) as the least relation satisfying:
 
 - complete(R) if R is a primitive declared complete, or kernel state, or the output relation;
-- complete(R) if R is derived and, for every rule of R, every positive atom in the body is complete (negated atoms are complete by WF-5 itself; comparisons and assignments do not affect completeness);
+- complete(R) if R is derived and, for every rule of R, every positive atom in the body is complete (negated atoms are complete by WF-5 itself; comparisons and assignments do not affect completeness). The atoms inside an aggregation's conjunction and the inner relation of a resample are positive atoms of the rule for this purpose: `N = count(P) over (close(A, T1, P), ...)` makes its rule incomplete even though `count` yields 0 on an empty group, because a missing `close` leaves the count unknown, not small;
 - complete(R) if every rule of R is a reduction rule (a `top` over any relation yields a complete relation: the kernel knows exactly which tuples it kept).
 
 The judgment: `not R(...)` is permitted only when complete(R). The effect is
@@ -411,6 +415,13 @@ time of execution, using the bar's close for `target_weight`. Conflicting
 decisions for one instrument at one T halt the run with a diagnostic naming
 both rules.
 
+When the decision resolution is coarser than the price data, the executor's
+"close of the next bar" is the last fine close inside the next decision
+bucket, for whichever fine tuples the data holds: the strategy's own bar
+rules and their `min K` do not apply to execution, so a decision can be
+filled on a day the bars library yields no bar for. A bucket with no fine
+tuple for the instrument has no price, and the decision is dropped.
+
 **Availability convention (v1).** Every fact at resolution r is available at
 the close of its bar; a resampled bar is available at the close of its bucket.
 A strategy that reads a @1d open to decide at the open (the corpus case
@@ -425,6 +436,24 @@ resolution reached by resample, it is the set of bucket labels that contain at
 least one finer timestamp. `prev`, `lag`, `window`, and `month_start` are
 defined over the domain of the rule's resolution, so holidays, half-days, and
 missing bars need no calendar primitive.
+
+The domain is a property of the data, not of any relation: a resample's `min
+K` removes a bucket from that relation when it holds fewer than K fine tuples,
+but the bucket stays in the time domain as long as it holds one. A half-day
+with 150 minute bars under a `min 300` bars library is therefore a @1d bar
+with no `close_d`: `prev` from the next day lands on it, `day_start` and
+`month_start` count it, the executor fills there (execution contract), and a
+rule that needs `close_d` at prev(T) does not fire on the day after it. A
+strategy that wants to skip bar-less days reaches back with `lag` or a
+window, or resamples with `min 1` and a `count` output and gates on the count
+itself.
+
+Timestamps are bar labels, and a label is the bar's close instant (section
+3): the 09:30 to 09:31 minute bar is labelled 09:31, the session's last bar
+16:00, and a daily bar its date. Data supplied to the kernel must follow this
+convention; minute data labelled by open time (09:30 to 15:59) puts the first
+bar of each day in a bucket of its own and shifts every other bucket by one
+bar, silently.
 
 Market data and the executor's state enter the strategy as relations;
 decisions leave as a set, are recorded as `decided`, and are filled at the next
@@ -489,7 +518,12 @@ observations, `corr` of a constant series, `ols_beta` against a constant
 regressor, and a `quantile` level outside [0, 1] have no result. The kernel
 halts the run with a diagnostic naming the rule, the tuple, and the offending
 expression; for an aggregate the expression is the whole aggregate
-(`quantile(P, q) over (...)`), not its argument. A degenerate feature is a data problem the author must
+(`quantile(P, q) over (...)`), not its argument. The kernel evaluates the
+model top-down, restricted to what the decisions need, so the halt is
+guaranteed for every degenerate tuple that some `decide(t, ·)` demands; a
+degenerate tuple no decision requests (an unguarded `W = 1 / N` in a rule
+only called once something has been selected) is never evaluated and does
+not halt the run. A degenerate feature is a data problem the author must
 see; it is never a silent non-firing, which would let a strategy appear to
 work while a condition quietly never triggers.
 

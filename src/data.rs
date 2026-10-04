@@ -12,6 +12,11 @@ use crate::kernel::{Dataset, Value};
 /// Load one CSV per primitive relation of the program's environment from
 /// `dir` (`<relation>.csv`, header row naming the signature's arguments).
 /// Missing files leave the relation empty and are reported in the result.
+///
+/// Timestamps are bar labels, and a label is the bar's close instant
+/// (section 3): a 09:30 to 09:31 minute bar is `09:31`, a session's last bar
+/// `16:00`, a daily bar its date. The loader does not check the convention;
+/// open-labelled minute data misaligns every resampled bucket by one bar.
 pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>), String> {
     let mut ds = Dataset::new();
     let mut missing = Vec::new();
