@@ -1,14 +1,21 @@
 //! `abt`: check strategies, run backtests, explain rules.
 //!
 //!   abt check <files...>
-//!   abt run --strategy NAME [--data DIR | --synthetic] [--cash X] [--slippage-bps X] [--commission X] <files...>
-//!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--data DIR | --synthetic] <files...>
+//!   abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+//!           [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--verify-causality] [--quiet] <files...>
+//!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...) [--price-relation REL] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
+//!
+//! Exit codes: 0 success; 1 the strategy does not check, the run halted or
+//! the usage is wrong; 2 an input could not be read or parsed (a source
+//! file, a data directory, an option value).
 
 #![allow(clippy::result_large_err)]
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::exit;
+use std::str::FromStr;
 
 use absolute_backtest::check::{check_program, check_workspace, Severity, Workspace};
 use absolute_backtest::data;
@@ -18,27 +25,50 @@ use absolute_backtest::kernel::{ExecConfig, Kernel, Value};
 struct Args {
     cmd: String,
     files: Vec<PathBuf>,
-    opts: std::collections::HashMap<String, String>,
-    flags: std::collections::HashSet<String>,
+    opts: HashMap<String, String>,
+    flags: HashSet<String>,
 }
+
+const FLAGS: [&str; 3] = ["synthetic", "verify-causality", "quiet"];
+const OPTIONS: [&str; 13] = [
+    "strategy",
+    "data",
+    "rule",
+    "at",
+    "env",
+    "out",
+    "days",
+    "symbols",
+    "seed",
+    "cash",
+    "slippage-bps",
+    "commission",
+    "price-relation",
+];
 
 fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     let cmd = it.next().unwrap_or_else(|| usage(1));
     let mut files = Vec::new();
-    let mut opts = std::collections::HashMap::new();
-    let mut flags = std::collections::HashSet::new();
+    let mut opts = HashMap::new();
+    let mut flags = HashSet::new();
     let mut rest: Vec<String> = it.collect();
     let mut i = 0;
     while i < rest.len() {
         let a = std::mem::take(&mut rest[i]);
         if let Some(name) = a.strip_prefix("--") {
-            if matches!(name, "synthetic" | "verify-causality" | "quiet") {
+            if FLAGS.contains(&name) {
                 flags.insert(name.to_string());
-            } else {
+            } else if OPTIONS.contains(&name) {
                 i += 1;
-                let v = rest.get(i).cloned().unwrap_or_else(|| usage(1));
+                let v = rest.get(i).cloned().unwrap_or_else(|| {
+                    eprintln!("--{} needs a value", name);
+                    usage(1)
+                });
                 opts.insert(name.to_string(), v);
+            } else {
+                eprintln!("unknown option --{}", name);
+                usage(1)
             }
         } else {
             files.push(PathBuf::from(a));
@@ -49,8 +79,22 @@ fn parse_args() -> Args {
 }
 
 fn usage(code: i32) -> ! {
-    eprintln!("usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--verify-causality] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>");
+    eprintln!(
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--verify-causality] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)"
+    );
     exit(code)
+}
+
+/// The value of `--name` parsed as `T`, or `default` when absent. A value
+/// that does not parse is an input error (exit 2), never a silent default.
+fn option<T: FromStr>(opts: &HashMap<String, String>, name: &str, what: &str, default: T) -> T {
+    match opts.get(name) {
+        None => default,
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            eprintln!("--{}: `{}` is not {}", name, v, what);
+            exit(2)
+        }),
+    }
 }
 
 fn workspace(files: &[PathBuf]) -> Workspace {
@@ -90,22 +134,29 @@ fn collect_dsl(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn synthetic_for(prog: &absolute_backtest::check::Program, opts: &std::collections::HashMap<String, String>) -> absolute_backtest::kernel::Dataset {
-    let symbols: Vec<String> = opts
-        .get("symbols")
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
-        .unwrap_or_else(|| vec!["AAA".into(), "BBB".into(), "CCC".into(), "DDD".into(), "SPY".into()]);
+fn synthetic_for(prog: &absolute_backtest::check::Program, opts: &HashMap<String, String>) -> absolute_backtest::kernel::Dataset {
+    let symbols: Vec<String> = match opts.get("symbols") {
+        None => vec!["AAA".into(), "BBB".into(), "CCC".into(), "DDD".into(), "SPY".into()],
+        Some(s) => {
+            let syms: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
+            if syms.iter().any(|x| x.is_empty()) {
+                eprintln!("--symbols: `{}` is not a comma-separated list of symbols", s);
+                exit(2)
+            }
+            syms
+        }
+    };
     let syms: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
-    let seed: u64 = opts.get("seed").and_then(|s| s.parse().ok()).unwrap_or(7);
+    let seed: u64 = option(opts, "seed", "a non-negative integer", 7);
     let minute = prog
         .relations
         .values()
         .any(|s| matches!(s.kind, absolute_backtest::Kind::Primitive { .. }) && s.res == Some(absolute_backtest::Resolution::M1));
     if minute {
-        let days: usize = opts.get("days").and_then(|s| s.parse().ok()).unwrap_or(40);
+        let days: usize = option(opts, "days", "a number of days", 40);
         data::synthetic_minute(&syms, (2024, 1, 2), days, 390, seed)
     } else {
-        let days: usize = opts.get("days").and_then(|s| s.parse().ok()).unwrap_or(500);
+        let days: usize = option(opts, "days", "a number of days", 500);
         data::synthetic_daily(&syms, (2022, 1, 3), days, seed)
     }
 }
@@ -151,14 +202,18 @@ fn main() {
                 usage(1)
             };
             let cfg = ExecConfig {
-                initial_cash: args.opts.get("cash").and_then(|s| s.parse().ok()).unwrap_or(1_000_000.0),
-                slippage_bps: args.opts.get("slippage-bps").and_then(|s| s.parse().ok()).unwrap_or(0.0),
-                commission_per_share: args.opts.get("commission").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                initial_cash: option(&args.opts, "cash", "an amount", 1_000_000.0),
+                slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", 0.0),
+                commission_per_share: option(&args.opts, "commission", "an amount per share", 0.0),
                 price_relation: args.opts.get("price-relation").cloned(),
             };
             if args.cmd == "explain" {
                 let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
-                let at = args.opts.get("at").and_then(|s| parse_timestamp(s)).unwrap_or_else(|| usage(1));
+                let at_text = args.opts.get("at").cloned().unwrap_or_else(|| usage(1));
+                let at = parse_timestamp(&at_text).unwrap_or_else(|| {
+                    eprintln!("--at: `{}` is not a timestamp (YYYY-MM-DD, optionally THH:MM[:SS])", at_text);
+                    exit(2)
+                });
                 let rule_idx = (0..prog.rules.len())
                     .find(|&i| prog.rule_label(i) == label || prog.rule_label(i).ends_with(&format!("::{}", label)))
                     .unwrap_or_else(|| {

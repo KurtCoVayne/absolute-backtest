@@ -31,6 +31,7 @@ abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market a
 | `corpus/negative` | 17 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
+| `tests/data.rs`, `tests/cli.rs` | The CSV loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
 
 ## The surface syntax in one page
 
@@ -139,6 +140,36 @@ solution at `t`; `verify_causality` re-runs truncated instances for sampled
 bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus
 strategies.
 
+## The command line
+
+```
+abt check <files...>
+abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+        [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL]
+        [--verify-causality] [--quiet] <files...>
+abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
+        [--price-relation REL] <files...>
+abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
+```
+
+`<files...>` are `.dsl` files or directories searched recursively. The
+synthetic market is seeded (`--seed`, default 7) and deterministic.
+`--price-relation REL` names the primitive the executor fills at; by default
+it is the `close`-like primitive at the decision resolution (or the finest
+one below it, whose last tuple in the bucket is used). `REL` must be a
+primitive with an equity argument and a `Price<...>` output no coarser than
+the decision resolution; anything else halts the run before it starts
+rather than dropping every order.
+
+Every option value is validated: `--days abc`, `--cash lots`, `--symbols ""`
+or `--at yesterday` are errors naming the option, never a silent default,
+and an unknown `--option` prints the usage. `explain` at a timestamp that is
+not a bar reports `2030-01-01 is not a bar of the @1d time domain (2022-01-03
+to 2023-12-01)` instead of a missing literal. Exit codes: 0 success; 1 the
+strategy does not check, the run halted, or the usage is wrong; 2 an input
+could not be read or parsed (a source file, a data directory, an option
+value).
+
 ## Environment instances as CSV
 
 `abt run --data DIR` loads one `<relation>.csv` per primitive of the
@@ -200,7 +231,7 @@ small and easy to flip.
 ## Development
 
 ```
-cargo test            # 31 tests: type algebra, time, corpus, kernel
+cargo test            # type algebra, time, corpus, kernel, CSV loader, command line
 cargo build --release
 ```
 
