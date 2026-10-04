@@ -110,3 +110,126 @@ fn explain_binds_a_body_variable() {
     let (_, stderr) = text(&out);
     assert!(!out.status.success() && stderr.contains("ZZZ"), "stderr: {}", stderr);
 }
+
+/// A CSV market for `equities_1d` with one symbol over five weekdays, with
+/// no close on 2024-01-10, next to a strategy that buys on an up day and
+/// sells the day after; written under a fresh temporary directory.
+fn delisted_market(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("abt-cli-{}-{}", tag, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let days = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"];
+    let prices = [10.0, 11.0, 10.0, 12.0, 13.0];
+    let mut close = String::from("A,T,P\n");
+    let mut volume = String::from("A,T,V\n");
+    let mut universe = String::from("A,T\n");
+    for (d, p) in days.iter().zip(prices) {
+        if *d != "2024-01-10" {
+            close.push_str(&format!("X,{},{}\n", d, p));
+        }
+        volume.push_str(&format!("X,{},1000\n", d));
+        universe.push_str(&format!("X,{}\n", d));
+    }
+    std::fs::write(dir.join("close.csv"), close).unwrap();
+    std::fs::write(dir.join("volume.csv"), volume).unwrap();
+    std::fs::write(dir.join("universe.csv"), universe).unwrap();
+    std::fs::write(
+        dir.join("up_down.dsl"),
+        r#"
+strategy up_down {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 10 shares
+  rel up(-A: Equity, @T: Timestamp)
+  up(A, T) :- universe(A, T), logret(A, T, R), R > 0.
+  decide(T, buy(A, qty)) :- up(A, T), flat(A, T).
+  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).
+}
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+/// portfolio-04, adv-09, trend-14: `abt run` lists every dropped decision
+/// with the kernel's reason, including a last-bar decision that has no next
+/// bar, so that decisions = fills + dropped is visible; `--quiet` keeps the
+/// counts only.
+#[test]
+fn run_lists_dropped_decisions_with_their_reasons() {
+    let dir = delisted_market("dropped");
+    let (env, lib) = (corpus("env"), corpus("lib"));
+    let strategy = dir.join("up_down.dsl");
+    let args = [
+        "run",
+        "--strategy",
+        "up_down",
+        "--data",
+        dir.to_str().unwrap(),
+        env.to_str().unwrap(),
+        lib.to_str().unwrap(),
+        strategy.to_str().unwrap(),
+    ];
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(stdout.contains("decisions: 2   fills: 0   dropped: 2"), "stdout: {}", stdout);
+    let dropped: Vec<&str> = stdout.lines().filter(|l| l.trim_start().starts_with("dropped ")).collect();
+    assert_eq!(dropped.len(), 2, "stdout: {}", stdout);
+    assert!(
+        dropped[0].contains("2024-01-09") && dropped[0].contains("buy(X, 10)") && dropped[0].contains("no price for X at 2024-01-10"),
+        "{}",
+        dropped[0]
+    );
+    assert!(
+        dropped[1].contains("2024-01-12") && dropped[1].contains("buy(X, 10)") && dropped[1].contains("no next bar"),
+        "{}",
+        dropped[1]
+    );
+
+    let mut quiet = args.to_vec();
+    quiet.insert(1, "--quiet");
+    let out = abt(&quiet);
+    let (stdout, _) = text(&out);
+    assert!(out.status.success() && stdout.contains("dropped: 2") && !stdout.contains("no price for"), "stdout: {}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// trend-16: `--all` prints every decision instead of the first twenty, and
+/// `--fills` prints the fills.
+#[test]
+fn run_prints_every_decision_and_the_fills_on_request() {
+    let files = strategy_files("sma_crossover");
+    let base = ["run", "--strategy", "sma_crossover", "--synthetic", "--seed", "1", "--days", "300"];
+    let count = |stdout: &str, key: &str| -> usize {
+        let line = stdout.lines().find(|l| l.starts_with("decisions:")).unwrap_or_else(|| panic!("no summary line in {}", stdout));
+        let field = line.split_whitespace().skip_while(|w| *w != key).nth(1).unwrap_or_else(|| panic!("no {} in {}", key, line));
+        field.parse().unwrap()
+    };
+    let decision_lines = |stdout: &str| stdout.lines().filter(|l| l.contains("(rule ")).count();
+
+    let mut args = base.to_vec();
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    let decisions = count(&stdout, "decisions:");
+    let fills = count(&stdout, "fills:");
+    assert!(decisions > 20, "the case needs more than twenty decisions: {}", stdout);
+    assert_eq!(decision_lines(&stdout), 20, "stdout: {}", stdout);
+    assert!(stdout.contains(&format!("... {} more", decisions - 20)), "stdout: {}", stdout);
+    assert!(!stdout.contains("  fill "), "stdout: {}", stdout);
+
+    let mut args = base.to_vec();
+    args.extend(["--all", "--fills"]);
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert_eq!(decision_lines(&stdout), decisions, "stdout: {}", stdout);
+    assert!(!stdout.contains(" more"), "stdout: {}", stdout);
+    let fill_lines = stdout.lines().filter(|l| l.trim_start().starts_with("fill ")).count();
+    assert_eq!(fill_lines, fills, "stdout: {}", stdout);
+    assert!(stdout.lines().any(|l| l.trim_start().starts_with("fill ") && l.contains(" @ ")), "stdout: {}", stdout);
+}

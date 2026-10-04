@@ -432,3 +432,30 @@ fn a_missing_fill_price_drops_the_decision() {
     assert!(r.fills.is_empty(), "{:?}", r.fills);
     assert_eq!(r.final_cash, 1000.0);
 }
+
+/// trend-14: a decision on the last bar has no next bar to fill at (section
+/// 6), so it is recorded as dropped with that reason and the run's
+/// arithmetic closes: decisions = fills + dropped.
+#[test]
+fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
+    let (prog, _) = program(UP_DOWN, "up_down");
+    let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // 01-09 buy, 01-10 sell, 01-11 buy, 01-12 sell: the last cannot fill.
+    assert_eq!(r.decisions.len(), 4);
+    assert_eq!(r.fills.len(), 3);
+    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
+    let (t, d, reason) = &r.dropped[0];
+    assert_eq!(format_timestamp(*t), "2024-01-12");
+    assert_eq!(r.describe_decision(d), "sell(X, 10)");
+    assert!(reason.contains("no next bar"), "{}", reason);
+    assert_eq!(r.decisions.len(), r.fills.len() + r.dropped.len());
+}
