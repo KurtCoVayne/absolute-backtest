@@ -501,6 +501,7 @@ strategy hold_n {
                 ..Default::default()
             },
         )
+        .map_err(|e| e.to_string())
     };
     let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect() };
     let days = |n: i64| Lit::Duration(Duration { months: 0, days: n });
@@ -511,10 +512,10 @@ strategy hold_n {
         vec!["2024-01-08 buy(X, 25)", "2024-01-11 sell(X, 25)"]
     );
     // Outside the range, of another type, or not a parameter: a request error, not a run.
-    let err = with(vec![("hold", days(10))]).err().map(|e| e.to_string()).expect("10d is outside 1d..5d");
+    let err = with(vec![("hold", days(10))]).expect_err("10d is outside 1d..5d");
     assert!(err.contains("hold") && err.contains("1d..5d") && !err.contains("internal"), "{}", err);
-    let err = with(vec![("hold", Lit::Int(3))]).err().map(|e| e.to_string()).expect("3 is not a Duration");
+    let err = with(vec![("hold", Lit::Int(3))]).expect_err("3 is not a Duration");
     assert!(err.contains("hold") && err.contains("Duration") && !err.contains("internal"), "{}", err);
-    let err = with(vec![("nope", days(3))]).err().map(|e| e.to_string()).expect("no such parameter");
+    let err = with(vec![("nope", days(3))]).expect_err("no such parameter");
     assert!(err.contains("`nope`") && err.contains("hold_n") && !err.contains("internal"), "{}", err);
 }

@@ -71,6 +71,11 @@ pub struct ExecConfig {
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
+    /// Parameter values replacing the program's defaults (section 3: the
+    /// only values the kernel may vary between runs of one program). A name
+    /// is `param` in the strategy or `unit::param`; each value must be of
+    /// the parameter's type and within its declared range.
+    pub param_overrides: Vec<(String, Lit)>,
 }
 
 impl Default for ExecConfig {
@@ -80,6 +85,7 @@ impl Default for ExecConfig {
             slippage_bps: 0.0,
             commission_per_share: 0.0,
             price_relation: None,
+            param_overrides: Vec::new(),
         }
     }
 }
@@ -286,6 +292,11 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        for (_, l) in &cfg.param_overrides {
+            if let Lit::Equity(s) = l {
+                symbols.intern(s);
+            }
+        }
         for rule in &prog.rules {
             for_each_lit(rule, &mut |l| {
                 if let Lit::Equity(s) = l {
@@ -372,6 +383,35 @@ impl<'p> Kernel<'p> {
             for (name, p) in ps {
                 params.insert((unit.clone(), name.clone()), lit_value(&p.value, &mut sym_tmp));
             }
+        }
+        for (name, value) in &cfg.param_overrides {
+            let (unit, pname) = name.split_once("::").unwrap_or((prog.strategy.as_str(), name.as_str()));
+            let Some(p) = prog.param(unit, pname) else {
+                let known: Vec<String> = prog
+                    .params
+                    .iter()
+                    .flat_map(|(u, ps)| ps.keys().map(move |n| if *u == prog.strategy { n.clone() } else { format!("{}::{}", u, n) }))
+                    .collect();
+                return Err(RunError::Request(format!(
+                    "no parameter `{}` in `{}`; the parameters are {}",
+                    name,
+                    unit,
+                    if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                )));
+            };
+            if !crate::check::types::compat(&p.ty, &value.ty()) {
+                return Err(RunError::Request(format!("parameter `{}` of `{}` is {}, and `{}` is {}", pname, unit, p.ty, value, value.ty())));
+            }
+            if let Some((lo, hi)) = &p.range {
+                let within = match (lit_magnitude(value), lit_magnitude(lo), lit_magnitude(hi)) {
+                    (Some(v), Some(l), Some(h)) => l <= v && v <= h,
+                    _ => true,
+                };
+                if !within {
+                    return Err(RunError::Request(format!("parameter `{}` of `{}` = {} is outside its range {}..{}", pname, unit, value, lo, hi)));
+                }
+            }
+            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp));
         }
         // Price relation for the executor.
         let price_rel = match &cfg.price_relation {
@@ -744,6 +784,16 @@ fn l_num(l: &Lit) -> f64 {
         Lit::Int(i) => *i as f64,
         Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) => *x,
         Lit::Duration(_) | Lit::Equity(_) => f64::NAN,
+    }
+}
+
+/// The magnitude a literal is ranged by: its number, or a duration's
+/// approximate length in days; an equity has none.
+fn lit_magnitude(l: &Lit) -> Option<f64> {
+    match l {
+        Lit::Duration(d) => Some(d.approx_days()),
+        Lit::Equity(_) => None,
+        _ => Some(l_num(l)),
     }
 }
 

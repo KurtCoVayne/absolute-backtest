@@ -11,6 +11,7 @@ abt check corpus/                                   # every strategy and library
 abt run --strategy momentum_top_n --synthetic corpus/   # backtest on a synthetic market
 abt run --strategy sma_crossover --data ./csv corpus/ --verify-causality
 abt run --strategy momentum_top_n --synthetic --all --fills corpus/  # every decision, and the fills
+abt run --strategy breakout_52w --synthetic --param hold=21d --param qty='50 shares' corpus/
 abt explain --strategy breakout_52w --rule 'decide#1' --at 2023-02-24 --synthetic corpus/
 abt explain --strategy breakout_52w --rule 'decide#2' --at 2023-02-24 --bind A=SPY --synthetic corpus/
 abt explain --strategy breakout_52w --rule 'features::sma#1' --at 2023-02-24 --inputs SPY,20d,10 --synthetic corpus/
@@ -146,6 +147,15 @@ so that `decisions = fills + dropped`, except that in target mode a decision
 whose order is zero (the target is already held) makes neither a fill nor a
 drop. `--all` prints every decision instead of the first twenty, `--fills`
 prints the fills, and `--quiet` prints the summary only.
+
+Parameters are the kernel's sweep axis (section 1) and the only values it
+may vary between runs of one program (section 3): `ExecConfig.param_overrides`
+replaces defaults by name (`hold`, or `unit::name` for a library's), and
+`abt run` and `abt explain` take a repeatable `--param name=value` whose
+value is a literal in the DSL's grammar (`21d`, `50 shares`, `0.02`, `"SPY"`
+or a bare identifier for an equity). An override must be of the parameter's
+declared type and within its declared range, or the run is refused before it
+starts.
 
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
 solution at `t`. `t` must be a bar of the rule's time domain (a weekend, a

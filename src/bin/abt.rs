@@ -1,8 +1,8 @@
 //! `abt`: check strategies, run backtests, explain rules.
 //!
 //!   abt check <files...>
-//!   abt run --strategy NAME [--data DIR | --synthetic] [--cash X] [--slippage-bps X] [--commission X] [--all] [--fills] [--quiet] <files...>
-//!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--data DIR | --synthetic] <files...>
+//!   abt run --strategy NAME [--data DIR | --synthetic] [--cash X] [--slippage-bps X] [--commission X] [--param NAME=VALUE]... [--all] [--fills] [--quiet] <files...>
+//!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... [--data DIR | --synthetic] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 
 #![allow(clippy::result_large_err)]
@@ -41,7 +41,7 @@ fn parse_args() -> Args {
             } else {
                 i += 1;
                 let v = rest.get(i).cloned().unwrap_or_else(|| usage(1));
-                if matches!(name, "bind") {
+                if matches!(name, "bind" | "param") {
                     multi.entry(name.to_string()).or_default().push(v);
                 } else {
                     opts.insert(name.to_string(), v);
@@ -57,7 +57,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--param NAME=VALUE]... [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>"
     );
     exit(code)
 }
@@ -164,6 +164,31 @@ fn main() {
                 slippage_bps: args.opts.get("slippage-bps").and_then(|s| s.parse().ok()).unwrap_or(0.0),
                 commission_per_share: args.opts.get("commission").and_then(|s| s.parse().ok()).unwrap_or(0.0),
                 price_relation: args.opts.get("price-relation").cloned(),
+                param_overrides: args
+                    .multi
+                    .get("param")
+                    .map(|ps| {
+                        ps.iter()
+                            .map(|p| {
+                                let (name, raw) = p.split_once('=').unwrap_or_else(|| {
+                                    eprintln!("--param takes NAME=VALUE, not `{}`", p);
+                                    exit(1)
+                                });
+                                let (name, raw) = (name.trim(), raw.trim());
+                                // A literal in the DSL's grammar; a bare identifier is an equity.
+                                let lit = absolute_backtest::parser::parse_lit(raw).unwrap_or_else(|e| {
+                                    if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
+                                        absolute_backtest::Lit::Equity(raw.to_string())
+                                    } else {
+                                        eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
+                                        exit(1)
+                                    }
+                                });
+                                (name.to_string(), lit)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             };
             if args.cmd == "explain" {
                 let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
@@ -238,7 +263,10 @@ fn main() {
             }
             let verify = args.flags.contains("verify-causality");
             let result = absolute_backtest::kernel::run(&prog, &dataset, cfg.clone()).unwrap_or_else(|e| {
-                eprintln!("run halted: {}", e);
+                match e {
+                    RunError::Request(m) => eprintln!("{}", m),
+                    e => eprintln!("run halted: {}", e),
+                }
                 exit(1)
             });
             println!(
