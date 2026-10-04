@@ -138,3 +138,46 @@ strategy kw {{
         assert!(errors(&diags).iter().any(|d| d.message.contains(name)), "{}: {}", name, text(&diags));
     }
 }
+
+// adv-13: a parameter's range must be ordered and contain the default.
+
+#[test]
+fn an_inverted_parameter_range_is_a_t_error() {
+    let src = r#"
+strategy inverted {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  param n : Count = 3 in 10..1
+  rel pick(-A: Equity, @T: Timestamp)
+  pick(A, T) :- universe(A, T), top(n, momentum(A, T, 3mo, 0d, M), by (M desc, A asc)).
+  decide(T, buy(A, qty)) :- pick(A, T), flat(A, T).
+}
+"#;
+    let diags = check(src, "inverted");
+    assert_only(&diags, Code::T);
+    assert!(errors(&diags).iter().any(|d| d.message.contains("`n`")), "{}", text(&diags));
+}
+
+#[test]
+fn a_default_on_the_range_bound_is_accepted() {
+    let src = r#"
+strategy on_bound {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  param lb : Duration = 1mo in 1mo..1y
+  param k : Count = 1 in 1..50
+  param z : Scalar = -1.0 in -4.0..-1.0
+  rel m(-A: Equity, @T: Timestamp, -M: Price<USD>)
+  m(A, T, M) :- universe(A, T), M = mean(P) over (T1 in window(T, lb, min k), close(A, T1, P)), M > 0 USD / 1 shares, z < 0.
+  decide(T, buy(A, qty)) :- m(A, T, _), flat(A, T).
+}
+"#;
+    let diags = check(src, "on_bound");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+}
