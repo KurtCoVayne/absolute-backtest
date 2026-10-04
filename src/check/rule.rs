@@ -556,7 +556,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 Some(v.clone())
             }
             t => {
-                self.err(Code::T, t.span(), format!("{} must be a fresh variable, found `{}`", what, t));
+                self.err(Code::T, t.span(), format!("{} is bound by the builtin and must be a fresh variable, found `{}`", what, t));
                 None
             }
         }
@@ -578,9 +578,15 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 self.atom(a, AtomCtx::Negative);
             }
             Literal::Builtin(b, span) => match b {
+                // The last argument of prev and lag is an output (section 4,
+                // "Binds"): a fresh variable, or `_` when only the existence
+                // of the earlier bar matters (WF-2 permits `_` in `-` positions).
                 Builtin::Prev { t, t1 } => {
                     let base = self.time_var_bound(t, "the first argument of prev");
-                    if let Some(v) = self.time_var_fresh(t1, "prev") {
+                    if matches!(t1, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(t1, "the second argument of prev") {
                         let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), true)).unwrap_or(TimeProv::Other);
                         self.bind(&v, Some(Ty::Timestamp), prov);
                     }
@@ -598,7 +604,10 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         }
                         _ => false,
                     };
-                    if let Some(v) = self.time_var_fresh(t1, "lag") {
+                    if matches!(t1, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(t1, "the third argument of lag") {
                         let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), !zero)).unwrap_or(TimeProv::Other);
                         self.bind(&v, Some(Ty::Timestamp), prov);
                     }

@@ -219,7 +219,9 @@ them are causal.
 
 `prev` and `lag` fail (no tuple) when the data does not reach back far enough;
 a rule using them does not fire for the first bars, which is the intended
-behaviour rather than a warm-up special case.
+behaviour rather than a warm-up special case. The position they bind is an
+output, so it may be `_` (WF-2) when only the existence of the earlier bar
+matters: `prev(T, _)` holds exactly when T has a bar before it.
 
 **Decisions.** The output relation `decide(@T, D)` takes a decision value D
 built from one constructor of the strategy's declared mode:

@@ -65,7 +65,9 @@ strategy sma_crossover {
 ```
 
 - Variables start with an uppercase letter; parameters, relations and
-  keywords are lowercase; `_` is a wildcard (output positions only).
+  keywords are lowercase; `_` is a wildcard (output positions only, which
+  include the bound position of `prev` and `lag`: `prev(T, _)` holds when T
+  has a bar before it).
 - A signature marks each argument `+` (input, bound by the caller), `-`
   (output, bound by the call) or `@` (the temporal key, exactly one). A
   relation's resolution follows the signature (`@1d`); in a library or
