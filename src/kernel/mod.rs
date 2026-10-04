@@ -457,7 +457,7 @@ impl<'p> Kernel<'p> {
                 for ds in by_equity.values() {
                     for (d, _) in ds {
                         let sym = d.equity;
-                        let Some(p) = self.price_at(sym, tn) else {
+                        let Some(p) = self.bar_price(sym, tn) else {
                             result
                                 .dropped
                                 .push((t, d.clone(), format!("no price for {} at {}", self.symbols.name(sym), time::format_timestamp(tn))));
@@ -503,9 +503,19 @@ impl<'p> Kernel<'p> {
         Ok(result)
     }
 
-    /// Price of `sym` at decision bar `t` from the configured price relation:
-    /// the tuple at `t`, or the last fine tuple in its bucket.
+    /// Price of `sym` for marking at decision bar `t`: the bar's price, or
+    /// the last price seen when the bar has none.
     pub fn price_at(&mut self, sym: Sym, t: i64) -> Option<f64> {
+        match self.bar_price(sym, t) {
+            Some(p) => Some(p),
+            None => self.last_price.get(&sym).copied(),
+        }
+    }
+
+    /// Price of `sym` at decision bar `t` from the configured price relation:
+    /// the tuple at `t`, or the last fine tuple in its bucket; `None` when the
+    /// bar has no price, so that the executor drops rather than fills.
+    pub fn bar_price(&mut self, sym: Sym, t: i64) -> Option<f64> {
         let id = self.price_rel?;
         let info = &self.rels[id];
         let entity_pos = *info.entity_positions.first()?;
@@ -524,13 +534,10 @@ impl<'p> Kernel<'p> {
                 .rev()
                 .find_map(|(_, tus)| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)).and_then(|tu| tu[col].as_f64()))
         };
-        match found {
-            Some(p) => {
-                self.last_price.insert(sym, p);
-                Some(p)
-            }
-            None => self.last_price.get(&sym).copied(),
+        if let Some(p) = found {
+            self.last_price.insert(sym, p);
         }
+        found
     }
 
     /// Why rule `rule_idx` did or did not fire at `t` (section 7): the first

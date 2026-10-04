@@ -405,3 +405,22 @@ fn delta_and_target_constructors_are_distinguished() {
     assert_eq!(Ctor::parse("buy").map(|c| c.mode()), Some(absolute_backtest::DecisionMode::Delta));
     assert_eq!(Ctor::parse("target_weight").map(|c| c.mode()), Some(absolute_backtest::DecisionMode::Target));
 }
+
+#[test]
+fn a_missing_fill_price_drops_the_decision() {
+    let (prog, _) = program(UP_DOWN, "up_down");
+    let mut ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    // Remove the close on the bar after the first buy (2024-01-10); the
+    // universe and volume rows stay, so the bar still exists.
+    let gone = day("2024-01-10");
+    ds.facts.get_mut("close").unwrap().retain(|tu| tu[1] != Value::Time(gone));
+    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..Default::default() }).unwrap();
+    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
+    assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
+    // Thursday's log return needs Wednesday's close too, so the next buy is
+    // Friday's, which has no bar left to fill it: no fills at all.
+    let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
+    assert_eq!(decisions, vec!["2024-01-09", "2024-01-12"]);
+    assert!(r.fills.is_empty(), "{:?}", r.fills);
+    assert_eq!(r.final_cash, 1000.0);
+}

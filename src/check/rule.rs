@@ -39,6 +39,11 @@ struct Analyzer<'c, 'a> {
     refs: Vec<AtomRef>,
     params_used: Vec<String>,
     key_vars_positive: HashSet<String>,
+    /// Inside an aggregation: window variables declared later in the same
+    /// conjunction, with the provenance they will have. An atom may bind such
+    /// a variable in its key position before the window literal is reached;
+    /// the window then acts as the constraint (the conjunction is commutative).
+    pending_windows: HashMap<String, TimeProv>,
 }
 
 pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleInfo> {
@@ -54,6 +59,7 @@ pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleI
         refs: vec![],
         params_used: vec![],
         key_vars_positive: HashSet::new(),
+        pending_windows: HashMap::new(),
     };
     let head_sig = an.cx.relations.get(&rule.head.name).cloned();
     if let Some(sig) = &head_sig {
@@ -237,6 +243,8 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         let prov = if is_key {
                             if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
                                 TimeProv::Head
+                            } else if let Some(p) = self.pending_windows.get(v) {
+                                *p
                             } else {
                                 TimeProv::Other
                             }
@@ -298,12 +306,18 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         TimeProv::Other => self.err(
                             Code::F,
                             *sp,
-                            format!("temporal key `{}` of `{}` is not derived from the head time `{}`; bind it first with prev, lag, window or prior_window of `{}` (a window literal must be written before the atoms it bounds)", v, atom.name, head_t, head_t),
+                            format!(
+                                "temporal key `{}` of `{}` is not derived from the head time `{}`; bind it first with prev, lag, window or prior_window of `{}`",
+                                v, atom.name, head_t, head_t
+                            ),
                         ),
                         TimeProv::Head | TimeProv::Causal if atom.name == "decided" => self.err(
                             Code::F,
                             *sp,
-                            format!("`decided` must be read strictly before the head time; `decided({}, ...)` at the rule's own `{}` would let a decision see itself (use prev/lag/prior_window)", v, head_t),
+                            format!(
+                                "`decided` must be read strictly before the head time; `decided({}, ...)` at the rule's own `{}` would let a decision see itself (use prev/lag/prior_window)",
+                                v, head_t
+                            ),
                         ),
                         _ => {}
                     }
@@ -561,10 +575,20 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 let b = self.time_var_bound(base, "the base of the window");
                 self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
                 self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum observation count)");
-                if let Some(v) = self.time_var_fresh(var, "a window") {
-                    let strict = *kind == WindowKind::Prior;
-                    let prov = b.map(|b| Self::derived_prov(self.prov_of(&b), strict)).unwrap_or(TimeProv::Other);
-                    self.bind(&v, Some(Ty::Timestamp), prov);
+                let strict = *kind == WindowKind::Prior;
+                let prov = b.map(|b| Self::derived_prov(self.prov_of(&b), strict)).unwrap_or(TimeProv::Other);
+                match var {
+                    // Already bound by an earlier atom of this conjunction: the window is its constraint.
+                    Term::Var(v, _) if self.pending_windows.contains_key(v) && self.is_bound(v) => {
+                        if let Some(st) = self.vars.get_mut(v) {
+                            st.prov = prov;
+                        }
+                    }
+                    _ => {
+                        if let Some(v) = self.time_var_fresh(var, "a window") {
+                            self.bind(&v, Some(Ty::Timestamp), prov);
+                        }
+                    }
                 }
             }
             Literal::Cmp { op, lhs, rhs, span } => {
@@ -600,9 +624,32 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     self.err(Code::B, *span, format!("aggregate result `{}` is already bound", var));
                 }
                 let saved = self.vars.clone();
+                // Register the conjunction's window variables up front, so that
+                // an atom written before its window (section 4's bivariate
+                // example) is judged by the window's provenance.
+                let saved_pending = std::mem::take(&mut self.pending_windows);
+                for l in conj {
+                    if let Literal::Window {
+                        var: Term::Var(v, _),
+                        kind,
+                        base: Term::Var(b, _),
+                        ..
+                    } = l
+                    {
+                        if !self.is_bound(v) {
+                            let prov = if self.is_bound(b) {
+                                Self::derived_prov(self.prov_of(b), *kind == WindowKind::Prior)
+                            } else {
+                                TimeProv::Other
+                            };
+                            self.pending_windows.insert(v.clone(), prov);
+                        }
+                    }
+                }
                 for l in conj {
                     self.literal(l, true);
                 }
+                self.pending_windows = saved_pending;
                 let mut tys = Vec::new();
                 let mut ok = true;
                 for a in args {

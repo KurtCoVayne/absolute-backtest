@@ -158,10 +158,11 @@ small and easy to flip.
   position(A, T, Q), Q > 0 shares`. Identity columns for WF-7 are therefore
   every entity-typed argument plus the key, not only the inputs, so a
   reduction over such a relation still has to name the entity as a tie-break.
-- **A window is written before the atoms it bounds.** `T1 in window(T, ...)`
-  binds `T1`; an atom whose key is a fresh variable is a WF-6 error. The
-  model's bivariate example writes the window last; the checker's message says
-  what to do.
+- **A window may precede or follow the atoms it bounds.** Inside an
+  aggregation, `T1 in window(T, ...)` is registered before the conjunction is
+  judged, so an atom written ahead of its window (the model's bivariate
+  example) is causal by the window's provenance; the kernel evaluates the
+  window first either way, so the atom is a lookup, never a scan.
 - **A reduction's key is bound before the `top`.** The group of a `top` is
   the bound outer variables, so `bar(T)` (or any atom at the head's
   resolution) precedes `top(n, candidate(A, T, M), ...)`; otherwise the group

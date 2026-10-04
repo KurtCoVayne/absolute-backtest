@@ -17,7 +17,7 @@ strategy pairs_trading {
 
   rel beta(@T: Timestamp, -B: Scalar)
   beta(T, B) :- bar(T),
-      B = ols_beta(RY, RX) over (T1 in window(T, lb, min lb_min), logret(y, T1, RY), logret(x, T1, RX)).
+      B = ols_beta(RY, RX) over (logret(y, T1, RY), logret(x, T1, RX), T1 in window(T, lb, min lb_min)).
 
   rel spread(@T: Timestamp, -S: Scalar)
   spread(T, S) :- beta(T, B), logret(y, T, RY), logret(x, T, RX), S = RY - B * RX.

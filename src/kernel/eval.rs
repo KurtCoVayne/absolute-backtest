@@ -329,7 +329,8 @@ impl<'p> Kernel<'p> {
                         min_count = min_count.max(k);
                     }
                 }
-                let mut rows = self.solve(cr, conj, vec![env.clone()])?;
+                let order = conj_order(conj);
+                let mut rows = self.solve(cr, &order, vec![env.clone()])?;
                 if (rows.len() as i64) < min_count {
                     return Ok(());
                 }
@@ -542,6 +543,38 @@ impl<'p> Kernel<'p> {
             }
         }
     }
+}
+
+/// A conjunction with each window literal moved ahead of the first atom that
+/// binds its variable in a temporal-key position. The conjunction is
+/// commutative, so this changes nothing but the cost: the window enumerates
+/// the bars and the atom becomes a lookup instead of a scan.
+pub(crate) fn conj_order(conj: &[Literal]) -> Vec<Literal> {
+    let mut out: Vec<Literal> = Vec::with_capacity(conj.len());
+    let mut placed = vec![false; conj.len()];
+    for (i, lit) in conj.iter().enumerate() {
+        if placed[i] {
+            continue;
+        }
+        let key_vars: Vec<&String> = match lit {
+            Literal::Atom(a) | Literal::Neg(a) => a.terms.iter().filter_map(|t| if let Term::Var(v, _) = t { Some(v) } else { None }).collect(),
+            _ => vec![],
+        };
+        for (j, later) in conj.iter().enumerate().skip(i + 1) {
+            if placed[j] {
+                continue;
+            }
+            if let Literal::Window { var: Term::Var(v, _), .. } = later {
+                if key_vars.contains(&v) {
+                    out.push(later.clone());
+                    placed[j] = true;
+                }
+            }
+        }
+        out.push(lit.clone());
+        placed[i] = true;
+    }
+    out
 }
 
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {

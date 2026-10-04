@@ -144,8 +144,6 @@ impl Ord for Value {
             (Value::Time(a), Value::Time(b)) => a.cmp(b),
             (Value::Num(a), Value::Num(b)) => a.total_cmp(b),
             (Value::Count(a), Value::Count(b)) => a.cmp(b),
-            (Value::Num(a), Value::Count(b)) => a.total_cmp(&(*b as f64)),
-            (Value::Count(a), Value::Num(b)) => (*a as f64).total_cmp(b),
             (Value::Dur(a), Value::Dur(b)) => a.approx_days().total_cmp(&b.approx_days()).then(a.cmp(b)),
             (Value::Decision(a), Value::Decision(b)) => a.ctor.cmp(&b.ctor).then(a.equity.cmp(&b.equity)).then(a.amount.total_cmp(&b.amount)),
             _ => rank(self).cmp(&rank(o)),
