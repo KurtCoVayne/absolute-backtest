@@ -46,6 +46,22 @@ struct Analyzer<'c, 'a> {
     pending_windows: HashMap<String, TimeProv>,
 }
 
+/// For a temporal builtin written where a relation is expected: how to get a
+/// relation that holds exactly when the builtin does.
+fn builtin_as_relation_hint(name: &str) -> Option<String> {
+    Some(match name {
+        "month_start" | "day_start" => {
+            let rel = if name == "month_start" { "mstart" } else { "dstart" };
+            format!("define `rel {rel}(@T: Timestamp)` with `{rel}(T) :- bar(T), {name}(T).` (a derived relation over the builtin is complete) and write `not {rel}(T)`")
+        }
+        "prev" | "lag" => {
+            let args = if name == "prev" { "T, T0" } else { "T, N, T0" };
+            format!("`{name}` binds its last argument; define `rel has_{name}(@T: Timestamp)` with `has_{name}(T) :- bar(T), {name}({args}).` and write `not has_{name}(T)`")
+        }
+        _ => return None,
+    })
+}
+
 pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleInfo> {
     let label = super::rule_label(&cx.rules, idx);
     let unit_res = cx.unit_res.get(&rule.unit).copied().unwrap_or(cx.resolution);
@@ -158,6 +174,14 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     fn resolve_rel(&mut self, name: &str, span: Span) -> Option<Signature> {
         if let Some(sig) = self.cx.relations.get(name) {
             return Some(sig.clone());
+        }
+        // A temporal builtin (section 4) is a constraint or a binder, not a
+        // relation: it has no tuples to negate or reduce. The parser accepts
+        // it as an atom only after `not` or inside `top`, so the idiom shown
+        // is a derived relation over the builtin, which is complete (WF-5).
+        if let Some(hint) = builtin_as_relation_hint(name) {
+            self.err(Code::U, span, format!("`{}` is a temporal builtin, not a relation, so it cannot be negated; {}", name, hint));
+            return None;
         }
         if self.cx.scope_incomplete {
             return None;

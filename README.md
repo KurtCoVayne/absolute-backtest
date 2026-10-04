@@ -78,6 +78,8 @@ strategy sma_crossover {
   `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
   plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
+  A builtin is not a relation, so `not month_start(T)` does not resolve; the
+  idiom is `mstart(T) :- bar(T), month_start(T).` and then `not mstart(T)`.
 - Decisions: `decide(T, buy(A, Q))`, `sell`, `short`, `cover` in delta mode;
   `target_weight(A, W)`, `target_quantity(A, Q)` in target mode. The kernel
   supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)` and
