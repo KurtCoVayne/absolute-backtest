@@ -108,6 +108,14 @@ pub enum RunError {
         message: String,
     },
     NoBars,
+    /// An explain request at a timestamp outside the rule's time domain
+    /// (section 6): the nearest bars before and after it, if any.
+    NotABar {
+        t: i64,
+        res: Resolution,
+        before: Option<i64>,
+        after: Option<i64>,
+    },
     Internal(String),
 }
 
@@ -127,6 +135,14 @@ impl std::fmt::Display for RunError {
             ),
             RunError::BadDecision { t, rule, decision, message } => write!(f, "invalid decision {} from rule {} at {}: {}", decision, rule, time::format_timestamp(*t), message),
             RunError::NoBars => write!(f, "the environment instance has no bars at the decision resolution"),
+            RunError::NotABar { t, res, before, after } => {
+                write!(f, "{} is not a bar at {}; ", time::format_timestamp(*t), res)?;
+                match (before, after) {
+                    (Some(b), Some(a)) => write!(f, "nearest bars are {} and {}", time::format_timestamp(*b), time::format_timestamp(*a)),
+                    (Some(b), None) | (None, Some(b)) => write!(f, "the nearest bar is {}", time::format_timestamp(*b)),
+                    (None, None) => write!(f, "the time domain is empty"),
+                }
+            }
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
         }
     }
@@ -548,6 +564,18 @@ impl<'p> Kernel<'p> {
         let cr = self.compiled[rule_idx].clone();
         let rel = self.rel(&rule.head.name)?;
         let info = self.rels[rel].clone();
+        // Only bars of the rule's time domain are ever evaluated (section 6);
+        // a label between two bars would read a phantom bucket.
+        let res = self.prog.infos[rule_idx].resolution;
+        let domain = self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))?;
+        if !domain.contains(&t) {
+            return Err(RunError::NotABar {
+                t,
+                res,
+                before: domain.range(..t).next_back().copied(),
+                after: domain.range(t..).next().copied(),
+            });
+        }
         let mut env: Env = vec![None; cr.nslots];
         if let Term::Var(v, _) = &rule.head.terms[info.key_pos] {
             env[cr.slots[v]] = Some(Value::Time(t));

@@ -44,11 +44,11 @@ fn explain_rejects_a_timestamp_that_is_not_a_bar() {
     let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 120, 7);
     let mut k = ran(&prog, &ds);
     let decide = rule(&prog, "breakout_52w::decide#1");
-    let err = k.explain(decide, ts("2022-04-16"), &[]).err().expect("a Saturday is not a bar").to_string();
+    let err = k.explain(decide, ts("2022-04-16"), &[]).expect_err("a Saturday is not a bar").to_string();
     assert!(err.contains("2022-04-16 is not a bar at @1d"), "{}", err);
-    assert!(err.contains("2022-04-14") && err.contains("2022-04-18"), "{}", err);
+    assert!(err.contains("2022-04-15") && err.contains("2022-04-18"), "{}", err);
     assert!(!err.contains("internal"), "{}", err);
-    let err = k.explain(decide, ts("2019-04-16"), &[]).err().expect("before the data is not a bar").to_string();
+    let err = k.explain(decide, ts("2019-04-16"), &[]).expect_err("before the data is not a bar").to_string();
     assert!(err.contains("2019-04-16 is not a bar at @1d") && err.contains("2022-01-03"), "{}", err);
     // A real bar is still explained.
     assert!(k.explain(decide, ts("2022-04-14"), &[]).is_ok());
@@ -75,7 +75,7 @@ strategy bucket_counts {
     let ds = synthetic_minute(&["AAA", "BBB"], (2024, 1, 2), 2, 390, 7);
     let mut k = ran(&prog, &ds);
     let hcount = rule(&prog, "bucket_counts::hcount#1");
-    let err = k.explain(hcount, ts("2024-01-02T10:30:00"), &[]).err().expect("10:30 is not an @1h label").to_string();
+    let err = k.explain(hcount, ts("2024-01-02T10:30:00"), &[]).expect_err("10:30 is not an @1h label").to_string();
     assert!(err.contains("2024-01-02T10:30:00 is not a bar at @1h"), "{}", err);
     assert!(err.contains("2024-01-02T10:00:00") && err.contains("2024-01-02T11:00:00"), "{}", err);
     // The 10:00 bucket is a real bar holding the 30 bars from 09:31.

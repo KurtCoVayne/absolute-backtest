@@ -135,9 +135,11 @@ first bar with the initial cash so that cash-aware rules can fire from the
 start.
 
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
-solution at `t`; `verify_causality` re-runs truncated instances for sampled
-bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus
-strategies.
+solution at `t`. `t` must be a bar of the rule's time domain (a weekend, a
+date before the data, or a label between two resample buckets is refused
+naming the nearest bars, since no run ever evaluates a rule there).
+`verify_causality` re-runs truncated instances for sampled bars and compares
+`decide(t)`, which `tests/kernel.rs` does for seven corpus strategies.
 
 ## Decisions taken where the model left room
 

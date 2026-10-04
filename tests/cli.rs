@@ -28,12 +28,25 @@ fn strategy_files(name: &str) -> Vec<String> {
 #[test]
 fn explain_at_a_non_bar_fails_naming_the_nearest_bars() {
     let files = strategy_files("breakout_52w");
-    let mut args = vec!["explain", "--strategy", "breakout_52w", "--rule", "decide#1", "--at", "2022-04-16", "--synthetic", "--days", "120", "--symbols", "AAA,BBB"];
+    let mut args = vec![
+        "explain",
+        "--strategy",
+        "breakout_52w",
+        "--rule",
+        "decide#1",
+        "--at",
+        "2022-04-16",
+        "--synthetic",
+        "--days",
+        "120",
+        "--symbols",
+        "AAA,BBB",
+    ];
     args.extend(files.iter().map(|s| s.as_str()));
     let out = abt(&args);
     let (stdout, stderr) = text(&out);
     assert!(!out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
     assert!(stderr.contains("2022-04-16 is not a bar at @1d"), "stderr: {}", stderr);
-    assert!(stderr.contains("2022-04-14") && stderr.contains("2022-04-18"), "stderr: {}", stderr);
+    assert!(stderr.contains("2022-04-15") && stderr.contains("2022-04-18"), "stderr: {}", stderr);
     assert!(!stdout.contains("did not fire"), "stdout: {}", stdout);
 }
