@@ -36,6 +36,21 @@ pub fn parse_units(src: &str) -> PResult<Vec<Unit>> {
     Ok(units)
 }
 
+/// Parse one literal value on its own (`100 shares`, `20d`, `0.02`, `"SPY"`),
+/// as the command line takes parameter overrides and explain inputs.
+pub fn parse_lit(src: &str) -> PResult<Lit> {
+    let toks = lex(src)?;
+    let mut p = Parser { toks, pos: 0, unit: String::new() };
+    let lit = p.lit()?;
+    if !p.at(&Tok::Eof) {
+        return Err(ParseError {
+            span: p.span(),
+            message: format!("unexpected {} after the literal", p.peek()),
+        });
+    }
+    Ok(lit)
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,

@@ -55,7 +55,20 @@ fn explain_at_a_non_bar_fails_naming_the_nearest_bars() {
 /// options placed before the files.
 fn explain_trailing_stop(rule: &str, extra: &[&str]) -> Output {
     let files = strategy_files("trailing_stop");
-    let mut args = vec!["explain", "--strategy", "trailing_stop", "--rule", rule, "--at", "2022-04-14", "--synthetic", "--days", "120", "--symbols", "AAA,BBB"];
+    let mut args = vec![
+        "explain",
+        "--strategy",
+        "trailing_stop",
+        "--rule",
+        rule,
+        "--at",
+        "2022-04-14",
+        "--synthetic",
+        "--days",
+        "120",
+        "--symbols",
+        "AAA,BBB",
+    ];
     args.extend(extra);
     args.extend(files.iter().map(|s| s.as_str()));
     abt(&args)

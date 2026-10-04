@@ -10,7 +10,9 @@ loop with a simulated executor. One Rust crate, no dependencies.
 abt check corpus/                                   # every strategy and library in the corpus
 abt run --strategy momentum_top_n --synthetic corpus/   # backtest on a synthetic market
 abt run --strategy sma_crossover --data ./csv corpus/ --verify-causality
-abt explain --strategy breakout_52w --rule 'breakout#1' --at 2023-02-24 --synthetic corpus/
+abt explain --strategy breakout_52w --rule 'decide#1' --at 2023-02-24 --synthetic corpus/
+abt explain --strategy breakout_52w --rule 'decide#2' --at 2023-02-24 --bind A=SPY --synthetic corpus/
+abt explain --strategy breakout_52w --rule 'features::sma#1' --at 2023-02-24 --inputs SPY,20d,10 --synthetic corpus/
 abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market as CSV
 ```
 
@@ -137,7 +139,16 @@ start.
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
 solution at `t`. `t` must be a bar of the rule's time domain (a weekend, a
 date before the data, or a label between two resample buckets is refused
-naming the nearest bars, since no run ever evaluates a rule there).
+naming the nearest bars, since no run ever evaluates a rule there). A rule
+with `+` arguments needs their values: `abt explain --inputs SPY,20d,10`
+passes them in signature order, parsed by the signature's types, and asking
+without them names the inputs the rule takes. The literal reported is the
+first with no solution over *every* binding that survived the literals
+before it, so for a multi-instrument rule it can be the literal that fails
+for the last surviving instrument rather than for the one you are asking
+about; `Kernel::explain_with(rule, t, inputs, bindings)` and `--bind A=SPY`
+(repeatable; an equity, a timestamp, or a literal, a bare integer being a
+Count) pre-bind body variables so the explanation is about that instrument.
 `verify_causality` re-runs truncated instances for sampled bars and compares
 `decide(t)`, which `tests/kernel.rs` does for seven corpus strategies.
 

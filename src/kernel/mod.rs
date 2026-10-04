@@ -116,6 +116,10 @@ pub enum RunError {
         before: Option<i64>,
         after: Option<i64>,
     },
+    /// A request the kernel cannot serve as asked: missing or ill-typed
+    /// explain inputs, a binding of a variable the rule does not have, a
+    /// parameter override outside its type or range.
+    Request(String),
     Internal(String),
 }
 
@@ -143,6 +147,7 @@ impl std::fmt::Display for RunError {
                     (None, None) => write!(f, "the time domain is empty"),
                 }
             }
+            RunError::Request(m) => write!(f, "{}", m),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
         }
     }
@@ -224,6 +229,8 @@ pub type Env = Vec<Option<Value>>;
 pub struct Explanation {
     pub rule: String,
     pub t: i64,
+    /// Variables pre-bound for this explanation, with the shown values.
+    pub bindings: Vec<(String, String)>,
     pub solutions: usize,
     /// Index and text of the first body literal with no solution, if any.
     pub failed_at: Option<(usize, String)>,
@@ -231,9 +238,22 @@ pub struct Explanation {
 
 impl std::fmt::Display for Explanation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let with = if self.bindings.is_empty() {
+            String::new()
+        } else {
+            format!(" with {}", self.bindings.iter().map(|(v, x)| format!("{} = {}", v, x)).collect::<Vec<_>>().join(", "))
+        };
         match &self.failed_at {
-            Some((i, text)) => write!(f, "rule {} did not fire at {}: literal {} `{}` has no solution", self.rule, time::format_timestamp(self.t), i + 1, text),
-            None => write!(f, "rule {} fired at {} with {} solution(s)", self.rule, time::format_timestamp(self.t), self.solutions),
+            Some((i, text)) => write!(
+                f,
+                "rule {} did not fire at {}{}: literal {} `{}` has no solution",
+                self.rule,
+                time::format_timestamp(self.t),
+                with,
+                i + 1,
+                text
+            ),
+            None => write!(f, "rule {} fired at {}{} with {} solution(s)", self.rule, time::format_timestamp(self.t), with, self.solutions),
         }
     }
 }
@@ -556,10 +576,72 @@ impl<'p> Kernel<'p> {
         found
     }
 
+    /// The `+` head arguments of rule `rule_idx`, in signature order: what
+    /// `explain` needs as `inputs`.
+    pub fn rule_inputs(&self, rule_idx: usize) -> Vec<(String, Ty)> {
+        let sig = &self.prog.relations[&self.prog.rules[rule_idx].head.name];
+        sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect()
+    }
+
+    /// Parse a command-line value as an input of type `ty`: an equity by
+    /// identifier, a timestamp, or a literal in the DSL's own grammar.
+    pub fn parse_input(&self, ty: &Ty, raw: &str) -> Result<Value, String> {
+        let raw = raw.trim();
+        match ty {
+            Ty::Equity => self.equity(raw.trim_matches('"')),
+            Ty::Timestamp => time::parse_timestamp(raw)
+                .map(Value::Time)
+                .ok_or_else(|| format!("`{}` is not a Timestamp (YYYY-MM-DD[THH:MM[:SS]])", raw)),
+            Ty::Count => raw.parse().map(Value::Count).map_err(|_| format!("`{}` is not a Count", raw)),
+            Ty::Duration => match crate::parser::parse_lit(raw) {
+                Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
+                _ => Err(format!("`{}` is not a Duration (such as 20d, 3mo or 1y)", raw)),
+            },
+            Ty::Quantity(_) => match crate::parser::parse_lit(raw) {
+                Ok(l @ (Lit::Int(_) | Lit::Float(_))) => Ok(Value::Num(l_num(&l))),
+                Ok(l @ (Lit::Shares(_) | Lit::Money(..))) if crate::check::types::compat(ty, &l.ty()) => Ok(Value::Num(l_num(&l))),
+                Ok(l) => Err(format!("`{}` is {}, not {}", raw, l.ty(), ty)),
+                Err(_) => Err(format!("`{}` is not a {}", raw, ty)),
+            },
+            Ty::Decision | Ty::IntLit => Err(format!("a {} cannot be given on the command line", ty)),
+        }
+    }
+
+    /// Parse a command-line value for a body variable, whose type is not
+    /// declared: an equity of the dataset, a timestamp, or a literal (a bare
+    /// integer is a Count; write a quantity with a decimal point or a unit).
+    pub fn parse_binding(&self, raw: &str) -> Result<Value, String> {
+        let raw = raw.trim();
+        if let Some(s) = self.symbols.get(raw) {
+            return Ok(Value::Equity(s));
+        }
+        if let Some(t) = time::parse_timestamp(raw) {
+            return Ok(Value::Time(t));
+        }
+        match crate::parser::parse_lit(raw) {
+            Ok(Lit::Equity(name)) => self.equity(&name),
+            Ok(Lit::Int(i)) => Ok(Value::Count(i)),
+            Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
+            Ok(l) => Ok(Value::Num(l_num(&l))),
+            Err(_) => Err(format!("`{}` is not an equity of the dataset, a timestamp or a literal", raw)),
+        }
+    }
+
+    fn equity(&self, name: &str) -> Result<Value, String> {
+        self.symbols.get(name).map(Value::Equity).ok_or_else(|| format!("`{}` is not an equity of the dataset", name))
+    }
+
     /// Why rule `rule_idx` did or did not fire at `t` (section 7): the first
     /// body literal with no solution. `inputs` supplies the rule's `+` head
     /// arguments, in signature order (empty for a decide rule).
     pub fn explain(&mut self, rule_idx: usize, t: i64, inputs: &[Value]) -> Result<Explanation, RunError> {
+        self.explain_with(rule_idx, t, inputs, &[])
+    }
+
+    /// `explain` with body variables pre-bound: the explanation is then about
+    /// the bindings that agree with them (one instrument, say) rather than
+    /// about the union of every binding.
+    pub fn explain_with(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<Explanation, RunError> {
         let rule = &self.prog.rules[rule_idx];
         let cr = self.compiled[rule_idx].clone();
         let rel = self.rel(&rule.head.name)?;
@@ -581,12 +663,45 @@ impl<'p> Kernel<'p> {
             env[cr.slots[v]] = Some(Value::Time(t));
         }
         if inputs.len() != info.inputs.len() {
-            return Err(RunError::Internal(format!("rule {} takes {} inputs, {} given", cr.label, info.inputs.len(), inputs.len())));
+            let need: Vec<String> = self.rule_inputs(rule_idx).iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
+            return Err(RunError::Request(format!(
+                "rule {} takes {} inputs ({}), {} given",
+                cr.label,
+                info.inputs.len(),
+                need.join(", "),
+                inputs.len()
+            )));
         }
         for (pos, val) in info.inputs.iter().zip(inputs) {
             if let Term::Var(v, _) = &rule.head.terms[*pos] {
                 env[cr.slots[v]] = Some(val.clone());
             }
+        }
+        let mut shown = Vec::with_capacity(bindings.len());
+        for (var, val) in bindings {
+            let Some(&slot) = cr.slots.get(var) else {
+                let mut vars: Vec<&String> = cr.slots.keys().collect();
+                vars.sort();
+                return Err(RunError::Request(format!(
+                    "rule {} has no variable `{}`; its variables are {}",
+                    cr.label,
+                    var,
+                    vars.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                )));
+            };
+            if let Some(x) = &env[slot] {
+                if x != val {
+                    return Err(RunError::Request(format!(
+                        "`{}` is already {} in rule {} and cannot also be {}",
+                        var,
+                        self.show(x),
+                        cr.label,
+                        self.show(val)
+                    )));
+                }
+            }
+            env[slot] = Some(val.clone());
+            shown.push((var.clone(), self.show(val)));
         }
         let mut envs = vec![env];
         for (i, lit) in rule.body.iter().enumerate() {
@@ -598,6 +713,7 @@ impl<'p> Kernel<'p> {
                 return Ok(Explanation {
                     rule: cr.label.clone(),
                     t,
+                    bindings: shown,
                     solutions: 0,
                     failed_at: Some((i, lit.describe())),
                 });
@@ -607,9 +723,18 @@ impl<'p> Kernel<'p> {
         Ok(Explanation {
             rule: cr.label.clone(),
             t,
+            bindings: shown,
             solutions: envs.len(),
             failed_at: None,
         })
+    }
+}
+
+fn l_num(l: &Lit) -> f64 {
+    match l {
+        Lit::Int(i) => *i as f64,
+        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) => *x,
+        Lit::Duration(_) | Lit::Equity(_) => f64::NAN,
     }
 }
 

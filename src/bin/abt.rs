@@ -2,7 +2,7 @@
 //!
 //!   abt check <files...>
 //!   abt run --strategy NAME [--data DIR | --synthetic] [--cash X] [--slippage-bps X] [--commission X] <files...>
-//!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--data DIR | --synthetic] <files...>
+//!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--data DIR | --synthetic] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 
 #![allow(clippy::result_large_err)]
@@ -13,12 +13,14 @@ use std::process::exit;
 use absolute_backtest::check::{check_program, check_workspace, Severity, Workspace};
 use absolute_backtest::data;
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{ExecConfig, Kernel, Value};
+use absolute_backtest::kernel::{ExecConfig, Kernel, RunError, Value};
 
 struct Args {
     cmd: String,
     files: Vec<PathBuf>,
     opts: std::collections::HashMap<String, String>,
+    /// Repeatable options (`--bind`), in the order given.
+    multi: std::collections::HashMap<String, Vec<String>>,
     flags: std::collections::HashSet<String>,
 }
 
@@ -27,6 +29,7 @@ fn parse_args() -> Args {
     let cmd = it.next().unwrap_or_else(|| usage(1));
     let mut files = Vec::new();
     let mut opts = std::collections::HashMap::new();
+    let mut multi: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut flags = std::collections::HashSet::new();
     let mut rest: Vec<String> = it.collect();
     let mut i = 0;
@@ -38,18 +41,24 @@ fn parse_args() -> Args {
             } else {
                 i += 1;
                 let v = rest.get(i).cloned().unwrap_or_else(|| usage(1));
-                opts.insert(name.to_string(), v);
+                if matches!(name, "bind") {
+                    multi.entry(name.to_string()).or_default().push(v);
+                } else {
+                    opts.insert(name.to_string(), v);
+                }
             }
         } else {
             files.push(PathBuf::from(a));
         }
         i += 1;
     }
-    Args { cmd, files, opts, flags }
+    Args { cmd, files, opts, multi, flags }
 }
 
 fn usage(code: i32) -> ! {
-    eprintln!("usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--verify-causality] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>");
+    eprintln!(
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic) [--cash X] [--slippage-bps X] [--commission X] [--verify-causality] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... (--data DIR | --synthetic) <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>"
+    );
     exit(code)
 }
 
@@ -165,14 +174,55 @@ fn main() {
                         eprintln!("no rule labelled `{}`; labels are unit::head#n, e.g. {}", label, prog.rule_label(0));
                         exit(1)
                     });
-                let inputs: Vec<Value> = Vec::new();
+                let raw_inputs: Vec<String> = args
+                    .opts
+                    .get("inputs")
+                    .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                    .unwrap_or_default();
+                let raw_binds: Vec<(String, String)> = args
+                    .multi
+                    .get("bind")
+                    .map(|bs| {
+                        bs.iter()
+                            .map(|b| {
+                                let (var, val) = b.split_once('=').unwrap_or_else(|| {
+                                    eprintln!("--bind takes VAR=VALUE, not `{}`", b);
+                                    exit(1)
+                                });
+                                (var.trim().to_string(), val.trim().to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let out = std::thread::Builder::new()
                     .stack_size(512 << 20)
                     .spawn(move || {
                         let mut k = Kernel::new(&prog, &dataset, cfg)?;
+                        // The rule's `+` arguments come from --inputs, parsed by the
+                        // signature's types; body variables from --bind.
+                        let need = k.rule_inputs(rule_idx);
+                        if need.len() != raw_inputs.len() {
+                            let shown: Vec<String> = need.iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
+                            return Err(RunError::Request(format!(
+                                "rule {} takes {} inputs ({}), {} given; pass them in signature order with --inputs V1,V2,...",
+                                prog.rule_label(rule_idx),
+                                need.len(),
+                                shown.join(", "),
+                                raw_inputs.len()
+                            )));
+                        }
+                        let inputs: Vec<Value> = need
+                            .iter()
+                            .zip(&raw_inputs)
+                            .map(|((n, ty), raw)| k.parse_input(ty, raw).map_err(|m| RunError::Request(format!("input `{}`: {}", n, m))))
+                            .collect::<Result<_, _>>()?;
+                        let bindings: Vec<(String, Value)> = raw_binds
+                            .iter()
+                            .map(|(var, raw)| k.parse_binding(raw).map(|v| (var.clone(), v)).map_err(|m| RunError::Request(format!("--bind {}: {}", var, m))))
+                            .collect::<Result<_, _>>()?;
                         // Run up to and including `at`, so executor state exists, then explain.
                         let _ = k.run()?;
-                        k.explain(rule_idx, at, &inputs)
+                        k.explain_with(rule_idx, at, &inputs, &bindings)
                     })
                     .unwrap()
                     .join()
