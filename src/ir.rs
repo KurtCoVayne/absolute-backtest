@@ -87,10 +87,20 @@ impl Dim {
         Dim { c2: 0, s2: 0, t2: 0, currency: None }
     }
     pub fn price(code: &str) -> Dim {
-        Dim { c2: 2, s2: -2, t2: 0, currency: Some(code.to_string()) }
+        Dim {
+            c2: 2,
+            s2: -2,
+            t2: 0,
+            currency: Some(code.to_string()),
+        }
     }
     pub fn notional(code: &str) -> Dim {
-        Dim { c2: 2, s2: 0, t2: 0, currency: Some(code.to_string()) }
+        Dim {
+            c2: 2,
+            s2: 0,
+            t2: 0,
+            currency: Some(code.to_string()),
+        }
     }
     pub const fn shares() -> Dim {
         Dim { c2: 0, s2: 2, t2: 0, currency: None }
@@ -111,7 +121,15 @@ impl Dim {
             (Some(a), _) => Some(a.clone()),
             (None, b) => b.clone(),
         };
-        Some(Dim { c2: self.c2 + o.c2, s2: self.s2 + o.s2, t2: self.t2 + o.t2, currency }.normalise())
+        Some(
+            Dim {
+                c2: self.c2 + o.c2,
+                s2: self.s2 + o.s2,
+                t2: self.t2 + o.t2,
+                currency,
+            }
+            .normalise(),
+        )
     }
     /// Dimension of a quotient; `None` when the currency codes disagree.
     pub fn div(&self, o: &Dim) -> Option<Dim> {
@@ -120,14 +138,30 @@ impl Dim {
             (Some(a), _) => Some(a.clone()),
             (None, b) => b.clone(),
         };
-        Some(Dim { c2: self.c2 - o.c2, s2: self.s2 - o.s2, t2: self.t2 - o.t2, currency }.normalise())
+        Some(
+            Dim {
+                c2: self.c2 - o.c2,
+                s2: self.s2 - o.s2,
+                t2: self.t2 - o.t2,
+                currency,
+            }
+            .normalise(),
+        )
     }
     /// Dimension of a square root; `None` when an exponent would leave ½ℤ.
     pub fn sqrt(&self) -> Option<Dim> {
         if self.c2 % 2 != 0 || self.s2 % 2 != 0 || self.t2 % 2 != 0 {
             return None;
         }
-        Some(Dim { c2: self.c2 / 2, s2: self.s2 / 2, t2: self.t2 / 2, currency: self.currency.clone() }.normalise())
+        Some(
+            Dim {
+                c2: self.c2 / 2,
+                s2: self.s2 / 2,
+                t2: self.t2 / 2,
+                currency: self.currency.clone(),
+            }
+            .normalise(),
+        )
     }
 }
 
@@ -148,7 +182,14 @@ impl fmt::Display for Dim {
                         format!("{}/2", x)
                     }
                 };
-                write!(f, "Dim(C^{} S^{} Θ^{}{})", h(self.c2), h(self.s2), h(self.t2), if self.c2 != 0 { format!(", {}", cur) } else { String::new() })
+                write!(
+                    f,
+                    "Dim(C^{} S^{} Θ^{}{})",
+                    h(self.c2),
+                    h(self.s2),
+                    h(self.t2),
+                    if self.c2 != 0 { format!(", {}", cur) } else { String::new() }
+                )
             }
         }
     }
@@ -258,12 +299,7 @@ impl Signature {
     /// counted too, so that a reduction over an enumerable relation still
     /// has to name it as a tie-break.
     pub fn identity_positions(&self) -> Vec<usize> {
-        self.args
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.mode == Mode::Key || a.ty.is_entity())
-            .map(|(i, _)| i)
-            .collect()
+        self.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::Key || a.ty.is_entity()).map(|(i, _)| i).collect()
     }
 }
 
@@ -531,13 +567,47 @@ pub enum Literal {
     Neg(Atom),
     Builtin(Builtin, Span),
     /// `T1 in window(T, N, min K)` / `T1 in prior_window(T, N, min K)`
-    Window { var: Term, kind: WindowKind, base: Term, dur: Expr, min: Expr, span: Span },
-    Cmp { op: CmpOp, lhs: Expr, rhs: Expr, span: Span },
+    Window {
+        var: Term,
+        kind: WindowKind,
+        base: Term,
+        dur: Expr,
+        min: Expr,
+        span: Span,
+    },
+    Cmp {
+        op: CmpOp,
+        lhs: Expr,
+        rhs: Expr,
+        span: Span,
+    },
     /// `X = e`: an assignment when X is unbound, a comparison otherwise.
-    Assign { var: String, expr: Expr, span: Span },
-    Agg { var: String, agg: String, args: Vec<Expr>, conj: Vec<Literal>, span: Span },
-    Top { n: Expr, atom: Atom, by: Option<Vec<(String, Dir, Span)>>, span: Span },
-    Resample { inner: Atom, to: Resolution, as_var: String, min: Expr, aggs: Vec<(String, String, Expr)>, span: Span },
+    Assign {
+        var: String,
+        expr: Expr,
+        span: Span,
+    },
+    Agg {
+        var: String,
+        agg: String,
+        args: Vec<Expr>,
+        conj: Vec<Literal>,
+        span: Span,
+    },
+    Top {
+        n: Expr,
+        atom: Atom,
+        by: Option<Vec<(String, Dir, Span)>>,
+        span: Span,
+    },
+    Resample {
+        inner: Atom,
+        to: Resolution,
+        as_var: String,
+        min: Expr,
+        aggs: Vec<(String, String, Expr)>,
+        span: Span,
+    },
 }
 
 impl Literal {
@@ -545,12 +615,7 @@ impl Literal {
         match self {
             Literal::Atom(a) | Literal::Neg(a) => a.span,
             Literal::Builtin(_, s) => *s,
-            Literal::Window { span, .. }
-            | Literal::Cmp { span, .. }
-            | Literal::Assign { span, .. }
-            | Literal::Agg { span, .. }
-            | Literal::Top { span, .. }
-            | Literal::Resample { span, .. } => *span,
+            Literal::Window { span, .. } | Literal::Cmp { span, .. } | Literal::Assign { span, .. } | Literal::Agg { span, .. } | Literal::Top { span, .. } | Literal::Resample { span, .. } => *span,
         }
     }
     pub fn describe(&self) -> String {
@@ -563,14 +628,7 @@ impl Literal {
                 Builtin::MonthStart { t } => format!("month_start({})", t),
                 Builtin::DayStart { t } => format!("day_start({})", t),
             },
-            Literal::Window { var, kind, base, dur, min, .. } => format!(
-                "{} in {}({}, {}, min {})",
-                var,
-                if *kind == WindowKind::Window { "window" } else { "prior_window" },
-                base,
-                dur,
-                min
-            ),
+            Literal::Window { var, kind, base, dur, min, .. } => format!("{} in {}({}, {}, min {})", var, if *kind == WindowKind::Window { "window" } else { "prior_window" }, base, dur, min),
             Literal::Cmp { op, lhs, rhs, .. } => format!("{} {} {}", lhs, op, rhs),
             Literal::Assign { var, expr, .. } => format!("{} = {}", var, expr),
             Literal::Agg { var, agg, args, .. } => {
@@ -601,7 +659,7 @@ pub struct Param {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DecisionMode {
     Delta,
     Target,

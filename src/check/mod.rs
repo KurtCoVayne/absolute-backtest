@@ -315,7 +315,14 @@ impl<'a> Checker<'a> {
 
     pub fn diag(&mut self, code: Code, unit: &str, rule: Option<String>, span: Span, message: impl Into<String>) {
         let severity = if matches!(code, Code::W1 | Code::W2) { Severity::Warning } else { Severity::Error };
-        self.diags.push(Diagnostic { code, severity, unit: unit.to_string(), rule, span, message: message.into() });
+        self.diags.push(Diagnostic {
+            code,
+            severity,
+            unit: unit.to_string(),
+            rule,
+            span,
+            message: message.into(),
+        });
     }
 
     /// Build the scope: environment primitives, kernel relations, library and
@@ -325,7 +332,13 @@ impl<'a> Checker<'a> {
         let root_name = root.name.clone();
         match root.resolution {
             Some((r, _)) => self.resolution = r,
-            None => self.diag(Code::X, &root_name, None, root.span, format!("{} `{}` declares no resolution; add `resolution @1d` (or another of @1m, @5m, @15m, @30m, @1h)", root.kind, root.name)),
+            None => self.diag(
+                Code::X,
+                &root_name,
+                None,
+                root.span,
+                format!("{} `{}` declares no resolution; add `resolution @1d` (or another of @1m, @5m, @15m, @30m, @1h)", root.kind, root.name),
+            ),
         }
         if root.kind == UnitKind::Strategy {
             match root.mode {
@@ -394,7 +407,13 @@ impl<'a> Checker<'a> {
                     self.diag(Code::U, &u.name, None, p.span, format!("parameter `{}` is declared twice", p.name));
                 }
                 if !types::compat(&p.ty, &p.value.ty()) {
-                    self.diag(Code::T, &u.name, None, p.span, format!("parameter `{}` is declared {} but its default is {}", p.name, p.ty, p.value.ty()));
+                    self.diag(
+                        Code::T,
+                        &u.name,
+                        None,
+                        p.span,
+                        format!("parameter `{}` is declared {} but its default is {}", p.name, p.ty, p.value.ty()),
+                    );
                 }
                 if let Some((lo, hi)) = &p.range {
                     if !types::compat(&p.ty, &lo.ty()) || !types::compat(&p.ty, &hi.ty()) {
@@ -486,7 +505,13 @@ impl<'a> Checker<'a> {
                     let via = if *pol == Polarity::Negative { "negation" } else { "an aggregate" };
                     let label = rule_label(&self.rules, *ri);
                     let unit = self.rules[*ri].unit.clone();
-                    self.diag(Code::S, &unit, Some(label), *span, format!("`{}` depends on itself through {} (via `{}`); recursion through not or an aggregate is not stratifiable", h, via, b));
+                    self.diag(
+                        Code::S,
+                        &unit,
+                        Some(label),
+                        *span,
+                        format!("`{}` depends on itself through {} (via `{}`); recursion through not or an aggregate is not stratifiable", h, via, b),
+                    );
                 }
             }
         }
@@ -502,7 +527,16 @@ impl<'a> Checker<'a> {
                     if r.key_prov != TimeProv::Strict {
                         let label = rule_label(&self.rules, *ri);
                         let unit = self.rules[*ri].unit.clone();
-                        self.diag(Code::R, &unit, Some(label), *span, format!("`{}` is recursive through `{}` but this reference is not at a strictly earlier time; bind its temporal key through prev or lag", h, b));
+                        self.diag(
+                            Code::R,
+                            &unit,
+                            Some(label),
+                            *span,
+                            format!(
+                                "`{}` is recursive through `{}` but this reference is not at a strictly earlier time; bind its temporal key through prev or lag",
+                                h, b
+                            ),
+                        );
                     }
                 }
             }
@@ -560,7 +594,11 @@ impl<'a> Checker<'a> {
         let rank: HashMap<String, usize> = nodes.iter().enumerate().map(|(i, nm)| (nm.clone(), scc_all.rank[i])).collect();
         let rules = self.rules.clone();
         self.diags.sort_by_key(|d| {
-            let r = d.rule.as_ref().and_then(|lbl| rules.iter().enumerate().find(|(i, _)| rule_label(&rules, *i) == *lbl)).map(|(_, r)| rank.get(&r.head.name).copied().unwrap_or(usize::MAX));
+            let r = d
+                .rule
+                .as_ref()
+                .and_then(|lbl| rules.iter().enumerate().find(|(i, _)| rule_label(&rules, *i) == *lbl))
+                .map(|(_, r)| rank.get(&r.head.name).copied().unwrap_or(usize::MAX));
             (d.severity == Severity::Warning, r.unwrap_or(usize::MAX), d.unit.clone(), d.span.line, d.span.col)
         });
         self.scc_order = Some(scc_all);
@@ -619,14 +657,22 @@ impl<'a> Checker<'a> {
             }
             match self.relations.get(&cur).map(|s| &s.kind) {
                 Some(Kind::Primitive { env }) => {
-                    return format!("`{}` is incomplete: `{}` is a primitive of environment `{}` not declared complete, so a missing tuple is unknown, not false", chain.join("` depends on `"), cur, env);
+                    return format!(
+                        "`{}` is incomplete: `{}` is a primitive of environment `{}` not declared complete, so a missing tuple is unknown, not false",
+                        chain.join("` depends on `"),
+                        cur,
+                        env
+                    );
                 }
                 Some(Kind::Derived { .. }) => {
                     let infos_for: Vec<&RuleInfo> = infos.iter().filter(|(_, i)| i.head == cur).map(|(_, i)| i).collect();
                     if infos_for.is_empty() {
                         return format!("`{}` has no rules and is not a complete primitive", cur);
                     }
-                    let next = infos_for.iter().flat_map(|i| i.refs.iter()).find(|r| r.polarity != Polarity::Negative && !r.is_top && !complete.contains(&r.name));
+                    let next = infos_for
+                        .iter()
+                        .flat_map(|i| i.refs.iter())
+                        .find(|r| r.polarity != Polarity::Negative && !r.is_top && !complete.contains(&r.name));
                     match next {
                         Some(r) => {
                             cur = r.name.clone();
@@ -716,7 +762,16 @@ pub fn tarjan(n: usize, adj: &[Vec<usize>]) -> Sccs {
             s.count += 1;
         }
     }
-    let mut s = St { adj, index: vec![None; n], low: vec![0; n], on: vec![false; n], stack: vec![], next: 0, id: vec![0; n], count: 0 };
+    let mut s = St {
+        adj,
+        index: vec![None; n],
+        low: vec![0; n],
+        on: vec![false; n],
+        stack: vec![],
+        next: 0,
+        id: vec![0; n],
+        count: 0,
+    };
     for v in 0..n {
         if s.index[v].is_none() {
             strong(&mut s, v);

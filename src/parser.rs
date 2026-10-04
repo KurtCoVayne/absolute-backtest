@@ -71,7 +71,10 @@ impl Parser {
         t
     }
     fn err<T>(&self, msg: impl Into<String>) -> PResult<T> {
-        Err(ParseError { span: self.span(), message: msg.into() })
+        Err(ParseError {
+            span: self.span(),
+            message: msg.into(),
+        })
     }
     fn expect(&mut self, t: Tok) -> PResult<Span> {
         if self.at(&t) {
@@ -99,7 +102,10 @@ impl Parser {
     fn var(&mut self) -> PResult<(String, Span)> {
         let (s, sp) = self.ident()?;
         if !is_var(&s) {
-            return Err(ParseError { span: sp, message: format!("expected a variable (uppercase initial), found `{}`", s) });
+            return Err(ParseError {
+                span: sp,
+                message: format!("expected a variable (uppercase initial), found `{}`", s),
+            });
         }
         Ok((s, sp))
     }
@@ -125,7 +131,18 @@ impl Parser {
         self.bump();
         let (name, _) = self.ident()?;
         self.unit = name.clone();
-        let mut unit = Unit { kind, name, span, env: None, uses: vec![], resolution: None, mode: None, params: vec![], rels: vec![], rules: vec![] };
+        let mut unit = Unit {
+            kind,
+            name,
+            span,
+            env: None,
+            uses: vec![],
+            resolution: None,
+            mode: None,
+            params: vec![],
+            rels: vec![],
+            rules: vec![],
+        };
         self.expect(Tok::LBrace)?;
         while !self.at(&Tok::RBrace) {
             if self.at(&Tok::Eof) {
@@ -138,7 +155,10 @@ impl Parser {
                     sig.complete = true;
                 }
                 if sig.res.is_none() {
-                    return Err(ParseError { span: sig.span, message: format!("primitive `{}` must declare its native resolution (e.g. @1d)", sig.name) });
+                    return Err(ParseError {
+                        span: sig.span,
+                        message: format!("primitive `{}` must declare its native resolution (e.g. @1d)", sig.name),
+                    });
                 }
                 unit.rels.push(sig);
                 continue;
@@ -164,7 +184,12 @@ impl Parser {
                     let sp = self.span();
                     match self.bump().tok {
                         Tok::Res(r) => unit.resolution = Some((r, sp)),
-                        t => return Err(ParseError { span: sp, message: format!("expected a resolution such as @1d, found {}", t) }),
+                        t => {
+                            return Err(ParseError {
+                                span: sp,
+                                message: format!("expected a resolution such as @1d, found {}", t),
+                            })
+                        }
                     }
                 }
                 Tok::Ident(s) if s == "mode" => {
@@ -173,7 +198,12 @@ impl Parser {
                     let mode = match m.as_str() {
                         "delta" => DecisionMode::Delta,
                         "target" => DecisionMode::Target,
-                        _ => return Err(ParseError { span: sp, message: format!("unknown decision mode `{}` (delta or target)", m) }),
+                        _ => {
+                            return Err(ParseError {
+                                span: sp,
+                                message: format!("unknown decision mode `{}` (delta or target)", m),
+                            })
+                        }
                     };
                     unit.mode = Some((mode, sp));
                 }
@@ -206,7 +236,10 @@ impl Parser {
         } else {
             None
         };
-        Ty::parse(&name, arg.as_deref()).ok_or_else(|| ParseError { span: sp, message: format!("unknown type `{}{}`", name, arg.map(|a| format!("<{}>", a)).unwrap_or_default()) })
+        Ty::parse(&name, arg.as_deref()).ok_or_else(|| ParseError {
+            span: sp,
+            message: format!("unknown type `{}{}`", name, arg.map(|a| format!("<{}>", a)).unwrap_or_default()),
+        })
     }
 
     fn signature(&mut self, kind: Kind) -> PResult<Signature> {
@@ -239,20 +272,36 @@ impl Parser {
         };
         let keys = args.iter().filter(|a| a.mode == Mode::Key).count();
         if keys != 1 {
-            return Err(ParseError { span, message: format!("relation `{}` must mark exactly one argument as the temporal key `@`", name) });
+            return Err(ParseError {
+                span,
+                message: format!("relation `{}` must mark exactly one argument as the temporal key `@`", name),
+            });
         }
         if let Some(k) = args.iter().find(|a| a.mode == Mode::Key) {
             if k.ty != Ty::Timestamp {
-                return Err(ParseError { span, message: format!("temporal key `{}` of `{}` must have type Timestamp", k.name, name) });
+                return Err(ParseError {
+                    span,
+                    message: format!("temporal key `{}` of `{}` must have type Timestamp", k.name, name),
+                });
             }
         }
-        Ok(Signature { name, args, res, complete: false, kind, span })
+        Ok(Signature {
+            name,
+            args,
+            res,
+            complete: false,
+            kind,
+            span,
+        })
     }
 
     fn param(&mut self) -> PResult<Param> {
         let (name, span) = self.ident()?;
         if is_var(&name) {
-            return Err(ParseError { span, message: "parameter names are lowercase".into() });
+            return Err(ParseError {
+                span,
+                message: "parameter names are lowercase".into(),
+            });
         }
         self.expect(Tok::Colon)?;
         let ty = self.ty()?;
@@ -289,12 +338,20 @@ impl Parser {
             Tok::Float(x) => self.unit_suffix(sign * x, Lit::Float(sign * x))?,
             Tok::Duration(d) => {
                 if neg {
-                    return Err(ParseError { span: sp, message: "durations are non-negative".into() });
+                    return Err(ParseError {
+                        span: sp,
+                        message: "durations are non-negative".into(),
+                    });
                 }
                 Lit::Duration(d)
             }
             Tok::Str(s) => Lit::Equity(s),
-            t => return Err(ParseError { span: sp, message: format!("expected a literal, found {}", t) }),
+            t => {
+                return Err(ParseError {
+                    span: sp,
+                    message: format!("expected a literal, found {}", t),
+                })
+            }
         })
     }
 
@@ -326,13 +383,21 @@ impl Parser {
             }
         }
         self.expect(Tok::Dot)?;
-        Ok(Rule { head, body, span, unit: self.unit.clone() })
+        Ok(Rule {
+            head,
+            body,
+            span,
+            unit: self.unit.clone(),
+        })
     }
 
     fn atom(&mut self) -> PResult<Atom> {
         let (name, span) = self.ident()?;
         if is_var(&name) {
-            return Err(ParseError { span, message: format!("expected a relation name, found variable `{}`", name) });
+            return Err(ParseError {
+                span,
+                message: format!("expected a relation name, found variable `{}`", name),
+            });
         }
         self.expect(Tok::LParen)?;
         let mut terms = Vec::new();
@@ -379,7 +444,10 @@ impl Parser {
                 }
             }
             Tok::Int(_) | Tok::Float(_) | Tok::Duration(_) | Tok::Str(_) | Tok::Minus => Ok(Term::Lit(self.lit()?, sp)),
-            t => Err(ParseError { span: sp, message: format!("expected a term, found {}", t) }),
+            t => Err(ParseError {
+                span: sp,
+                message: format!("expected a term, found {}", t),
+            }),
         }
     }
 
@@ -435,7 +503,12 @@ impl Parser {
                     Tok::Eq => CmpOp::Eq,
                     Tok::Gt => CmpOp::Gt,
                     Tok::Ge => CmpOp::Ge,
-                    t => return Err(ParseError { span, message: format!("expected a comparison operator after expression, found {}", t) }),
+                    t => {
+                        return Err(ParseError {
+                            span,
+                            message: format!("expected a comparison operator after expression, found {}", t),
+                        })
+                    }
                 };
                 let rhs = self.expr()?;
                 Ok(Literal::Cmp { op, lhs, rhs, span })
@@ -477,7 +550,12 @@ impl Parser {
         let kind = match k.as_str() {
             "window" => WindowKind::Window,
             "prior_window" => WindowKind::Prior,
-            _ => return Err(ParseError { span: ks, message: format!("expected `window` or `prior_window`, found `{}`", k) }),
+            _ => {
+                return Err(ParseError {
+                    span: ks,
+                    message: format!("expected `window` or `prior_window`, found `{}`", k),
+                })
+            }
         };
         self.expect(Tok::LParen)?;
         let base = self.term()?;
@@ -487,7 +565,14 @@ impl Parser {
         self.expect_kw("min")?;
         let min = self.expr()?;
         self.expect(Tok::RParen)?;
-        Ok(Literal::Window { var: Term::Var(v, vs), kind, base, dur, min, span })
+        Ok(Literal::Window {
+            var: Term::Var(v, vs),
+            kind,
+            base,
+            dur,
+            min,
+            span,
+        })
     }
 
     fn top(&mut self) -> PResult<Literal> {
@@ -507,7 +592,12 @@ impl Parser {
                 let dir = match d.as_str() {
                     "asc" => Dir::Asc,
                     "desc" => Dir::Desc,
-                    _ => return Err(ParseError { span: ds, message: format!("expected `asc` or `desc`, found `{}`", d) }),
+                    _ => {
+                        return Err(ParseError {
+                            span: ds,
+                            message: format!("expected `asc` or `desc`, found `{}`", d),
+                        })
+                    }
                 };
                 keys.push((v, dir, vs));
                 if !self.comma() {
@@ -550,7 +640,10 @@ impl Parser {
         }
         self.expect(Tok::RParen)?;
         if aggs.is_empty() {
-            return Err(ParseError { span, message: "resample needs at least one aggregate (e.g. `C = last(P)`)".into() });
+            return Err(ParseError {
+                span,
+                message: "resample needs at least one aggregate (e.g. `C = last(P)`)".into(),
+            });
         }
         Ok(Literal::Resample { inner, to, as_var, min, aggs, span })
     }
@@ -627,7 +720,10 @@ impl Parser {
                     }
                     self.expect(Tok::RParen)?;
                     if !SCALAR_FUNCTIONS.contains(&s.as_str()) {
-                        return Err(ParseError { span, message: format!("`{}` is not a scalar function (log, exp, sqrt, abs, least, greatest); aggregates need `over (...)`", s) });
+                        return Err(ParseError {
+                            span,
+                            message: format!("`{}` is not a scalar function (log, exp, sqrt, abs, least, greatest); aggregates need `over (...)`", s),
+                        });
                     }
                     Ok(Expr::Call(s, args, span))
                 } else {
@@ -635,7 +731,10 @@ impl Parser {
                     Ok(Expr::Param(s, span))
                 }
             }
-            t => Err(ParseError { span, message: format!("expected an expression, found {}", t) }),
+            t => Err(ParseError {
+                span,
+                message: format!("expected an expression, found {}", t),
+            }),
         }
     }
 }

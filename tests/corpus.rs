@@ -11,7 +11,11 @@ fn corpus_dir() -> PathBuf {
 }
 
 fn dsl_files(sub: &str) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = fs::read_dir(corpus_dir().join(sub)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().map(|e| e == "dsl").unwrap_or(false)).collect();
+    let mut v: Vec<PathBuf> = fs::read_dir(corpus_dir().join(sub))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().map(|e| e == "dsl").unwrap_or(false))
+        .collect();
     v.sort();
     v
 }

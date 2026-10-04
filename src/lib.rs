@@ -3,6 +3,10 @@
 //! The semantics are fixed by `docs/semantic-model.md`; every checker rule
 //! and kernel behaviour cites the section or judgment it implements.
 
+// RunError is deliberately rich (rule, tuple and expression of a halt); its
+// size on the error path does not matter.
+#![allow(clippy::result_large_err)]
+
 pub mod check;
 pub mod data;
 pub mod ir;

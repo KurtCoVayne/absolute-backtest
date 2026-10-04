@@ -7,7 +7,7 @@ strategy mean_reversion_zscore {
   mode delta
 
   param n : Duration = 20d in 10d..60d
-  param k : Count = 15
+  param k : Count = 12
   param entry : Scalar = -2.0 in -4.0..-1.0
   param exit : Scalar = 0.0
   param qty : Quantity<Shares> = 100 shares

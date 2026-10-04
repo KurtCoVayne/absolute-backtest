@@ -219,3 +219,75 @@ pub fn agg_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
         _ => Err(format!("unknown aggregate `{}`", name)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn price() -> Ty {
+        Ty::Quantity(Dim::price("USD"))
+    }
+    fn shares() -> Ty {
+        Ty::Quantity(Dim::shares())
+    }
+    fn notional() -> Ty {
+        Ty::Quantity(Dim::notional("USD"))
+    }
+
+    #[test]
+    fn dimensions_balance_by_arithmetic() {
+        assert_eq!(bin_type(BinOp::Mul, &price(), &shares()).unwrap(), notional());
+        assert_eq!(bin_type(BinOp::Div, &notional(), &price()).unwrap(), shares());
+        assert_eq!(bin_type(BinOp::Div, &price(), &price()).unwrap(), Ty::scalar());
+        assert!(bin_type(BinOp::Add, &price(), &Ty::scalar()).is_err());
+        assert!(bin_type(BinOp::Add, &price(), &Ty::IntLit).is_err());
+        assert_eq!(bin_type(BinOp::Mul, &price(), &Ty::IntLit).unwrap(), price());
+        assert!(bin_type(BinOp::Add, &Ty::Quantity(Dim::price("USD")), &Ty::Quantity(Dim::price("EUR"))).is_err());
+    }
+
+    #[test]
+    fn count_converts_only_through_division() {
+        assert_eq!(bin_type(BinOp::Div, &Ty::IntLit, &Ty::Count).unwrap(), Ty::scalar());
+        assert_eq!(bin_type(BinOp::Div, &Ty::scalar(), &Ty::Count).unwrap(), Ty::scalar());
+        assert!(bin_type(BinOp::Add, &Ty::Count, &Ty::scalar()).is_err());
+        assert!(bin_type(BinOp::Mul, &Ty::Count, &price()).is_err());
+        assert_eq!(bin_type(BinOp::Add, &Ty::Count, &Ty::IntLit).unwrap(), Ty::Count);
+    }
+
+    #[test]
+    fn scalar_functions_and_sqrt() {
+        assert!(call_type("log", &[price()]).is_err());
+        assert_eq!(call_type("log", &[Ty::scalar()]).unwrap(), Ty::scalar());
+        assert_eq!(
+            call_type("sqrt", &[notional()]).unwrap(),
+            Ty::Quantity(Dim {
+                c2: 1,
+                s2: 0,
+                t2: 0,
+                currency: Some("USD".into())
+            })
+        );
+        assert_eq!(call_type("greatest", &[price(), price()]).unwrap(), price());
+        assert!(call_type("greatest", &[price(), shares()]).is_err());
+        assert_eq!(call_type("least", &[Ty::IntLit, Ty::scalar()]).unwrap(), Ty::scalar());
+    }
+
+    #[test]
+    fn aggregates_keep_or_combine_dimensions() {
+        assert_eq!(agg_type("std", &[price()]).unwrap(), price());
+        assert_eq!(agg_type("count", &[Ty::Equity]).unwrap(), Ty::Count);
+        assert_eq!(agg_type("corr", &[price(), shares()]).unwrap(), Ty::scalar());
+        assert_eq!(agg_type("cov", &[price(), shares()]).unwrap(), notional());
+        assert_eq!(agg_type("ols_beta", &[notional(), price()]).unwrap(), shares());
+        assert_eq!(agg_type("mean", &[Ty::Count]).unwrap(), Ty::scalar());
+    }
+
+    #[test]
+    fn comparisons_need_one_dimension() {
+        assert!(cmp_ok(CmpOp::Lt, &price(), &price()).is_ok());
+        assert!(cmp_ok(CmpOp::Lt, &price(), &notional()).is_err());
+        assert!(cmp_ok(CmpOp::Lt, &Ty::Equity, &Ty::Equity).is_err());
+        assert!(cmp_ok(CmpOp::Eq, &Ty::Equity, &Ty::Equity).is_ok());
+        assert!(cmp_ok(CmpOp::Ge, &Ty::Count, &Ty::IntLit).is_ok());
+    }
+}

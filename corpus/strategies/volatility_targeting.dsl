@@ -10,7 +10,7 @@ strategy volatility_targeting {
   param asset : Equity = "SPY"
   param target_vol : Scalar = 0.01 in 0.002..0.05
   param lb : Duration = 20d
-  param lb_min : Count = 15
+  param lb_min : Count = 12
   param max_weight : Scalar = 1.0
 
   rel weight(@T: Timestamp, -W: Scalar)

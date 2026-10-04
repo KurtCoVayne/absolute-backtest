@@ -6,7 +6,7 @@ strategy volume_spike {
   mode delta
 
   param lb : Duration = 20d
-  param lb_min : Count = 15
+  param lb_min : Count = 10
   param mult : Scalar = 2.0
   param min_ret : Scalar = 0.02
   param hold : Duration = 5d

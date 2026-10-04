@@ -114,12 +114,18 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             let mut j = i + 1;
             while j < n && chars[j] != '"' {
                 if chars[j] == '\n' {
-                    return Err(LexError { span, message: "unterminated string literal".into() });
+                    return Err(LexError {
+                        span,
+                        message: "unterminated string literal".into(),
+                    });
                 }
                 j += 1;
             }
             if j >= n {
-                return Err(LexError { span, message: "unterminated string literal".into() });
+                return Err(LexError {
+                    span,
+                    message: "unterminated string literal".into(),
+                });
             }
             let s: String = chars[i + 1..j].iter().collect();
             let k = j + 1 - i;
@@ -169,23 +175,40 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 k += 1;
             }
             let tok = if !suffix.is_empty() {
-                let amount: i64 = text.parse().map_err(|_| LexError { span, message: format!("bad duration amount `{}`", text) })?;
+                let amount: i64 = text.parse().map_err(|_| LexError {
+                    span,
+                    message: format!("bad duration amount `{}`", text),
+                })?;
                 if is_float {
-                    return Err(LexError { span, message: "durations are whole numbers of d, w, mo or y".into() });
+                    return Err(LexError {
+                        span,
+                        message: "durations are whole numbers of d, w, mo or y".into(),
+                    });
                 }
                 let d = match suffix.as_str() {
                     "d" => Duration { months: 0, days: amount },
                     "w" => Duration { months: 0, days: amount * 7 },
                     "mo" => Duration { months: amount, days: 0 },
                     "y" => Duration { months: amount * 12, days: 0 },
-                    _ => return Err(LexError { span, message: format!("unknown unit suffix `{}` (use d, w, mo, y)", suffix) }),
+                    _ => {
+                        return Err(LexError {
+                            span,
+                            message: format!("unknown unit suffix `{}` (use d, w, mo, y)", suffix),
+                        })
+                    }
                 };
                 j = k;
                 Tok::Duration(d)
             } else if is_float {
-                Tok::Float(text.parse().map_err(|_| LexError { span, message: format!("bad number `{}`", text) })?)
+                Tok::Float(text.parse().map_err(|_| LexError {
+                    span,
+                    message: format!("bad number `{}`", text),
+                })?)
             } else {
-                Tok::Int(text.parse().map_err(|_| LexError { span, message: format!("bad integer `{}`", text) })?)
+                Tok::Int(text.parse().map_err(|_| LexError {
+                    span,
+                    message: format!("bad integer `{}`", text),
+                })?)
             };
             let k = j - i;
             advance(&mut i, &mut line, &mut col, k);
@@ -205,7 +228,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 toks.push(Token { tok: Tok::At, span });
                 continue;
             }
-            let r = Resolution::parse(&text).ok_or_else(|| LexError { span, message: format!("unknown resolution `@{}` (use @1m, @5m, @15m, @30m, @1h, @1d)", text) })?;
+            let r = Resolution::parse(&text).ok_or_else(|| LexError {
+                span,
+                message: format!("unknown resolution `@{}` (use @1m, @5m, @15m, @30m, @1h, @1d)", text),
+            })?;
             let k = j - i;
             advance(&mut i, &mut line, &mut col, k);
             toks.push(Token { tok: Tok::Res(r), span });
@@ -248,12 +274,20 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 '-' => (Tok::Minus, 1),
                 '*' => (Tok::Star, 1),
                 '/' => (Tok::Slash, 1),
-                _ => return Err(LexError { span, message: format!("unexpected character `{}`", c) }),
+                _ => {
+                    return Err(LexError {
+                        span,
+                        message: format!("unexpected character `{}`", c),
+                    })
+                }
             },
         };
         advance(&mut i, &mut line, &mut col, len);
         toks.push(Token { tok, span });
     }
-    toks.push(Token { tok: Tok::Eof, span: Span { line, col } });
+    toks.push(Token {
+        tok: Tok::Eof,
+        span: Span { line, col },
+    });
     Ok(toks)
 }
