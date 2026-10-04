@@ -4,7 +4,7 @@
 
 mod corpus;
 
-use absolute_backtest::check::{check_program, check_workspace, Code, Diagnostic, Severity};
+use absolute_backtest::check::{check_library, check_program, check_workspace, Code, Diagnostic, Severity};
 use absolute_backtest::data::{synthetic_daily, synthetic_minute};
 use absolute_backtest::kernel::time::format_timestamp;
 use absolute_backtest::kernel::{run, ExecConfig};
@@ -305,4 +305,134 @@ strategy derived_inner {
     assert_only(&diags, Code::M);
     let d = errors(&diags)[0];
     assert!(d.message.contains("up_m") && d.message.contains("derived"), "{}", d);
+}
+
+// Review of #43: a library has no mode, so a `decided` pattern written in it
+// is judged by each strategy that reaches the rule (WF-9), at the library's
+// span, naming the strategy.
+
+const WAS_BUY_LIB: &str = r#"
+library recall {
+  env equities_1d
+  resolution @1d
+  rel was_buy(-A: Equity, @T: Timestamp)
+  was_buy(A, T) :- universe(A, T), prev(T, T0), decided(T0, buy(A, _)).
+  rel calm(-A: Equity, @T: Timestamp)
+  calm(A, T) :- universe(A, T).
+}
+"#;
+
+fn check_with_lib(src: &str, name: &str) -> Vec<Diagnostic> {
+    let mut ws = corpus::base_workspace();
+    ws.add_source(WAS_BUY_LIB).unwrap();
+    ws.add_source(src).unwrap();
+    check_program(&ws, name).1
+}
+
+#[test]
+fn a_library_decided_pattern_of_the_other_mode_is_a_c_error_in_the_strategy_that_reaches_it() {
+    let src = r#"
+strategy target_recall {
+  env equities_1d
+  uses recall
+  resolution @1d
+  mode target
+  decide(T, target_weight(A, 0.5)) :- was_buy(A, T).
+}
+"#;
+    let diags = check_with_lib(src, "target_recall");
+    assert_only(&diags, Code::C);
+    let e = errors(&diags);
+    assert_eq!(e.len(), 1, "{}", text(&diags));
+    assert_eq!(e[0].unit, "recall", "reported at the library: {}", e[0]);
+    assert_eq!(e[0].span.line, 6, "reported at the pattern: {}", e[0]);
+    assert!(e[0].message.contains("target_recall") && e[0].message.contains("buy"), "{}", e[0]);
+}
+
+#[test]
+fn a_library_decided_pattern_is_fine_for_a_strategy_of_that_mode_or_one_that_does_not_reach_it() {
+    let delta = r#"
+strategy delta_recall {
+  env equities_1d
+  uses recall
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  decide(T, sell(A, qty)) :- was_buy(A, T).
+}
+"#;
+    let diags = check_with_lib(delta, "delta_recall");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let unreached = r#"
+strategy target_calm {
+  env equities_1d
+  uses recall
+  resolution @1d
+  mode target
+  decide(T, target_weight(A, 0.5)) :- calm(A, T).
+}
+"#;
+    let diags = check_with_lib(unreached, "target_calm");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+}
+
+// Review of #43: a calendar duration has no single length in days, so a
+// default is outside its range only when it is outside for every length a
+// month or a year can take.
+
+#[test]
+fn a_calendar_duration_default_is_rejected_only_when_no_month_length_fits() {
+    let strategy = |range: &str| {
+        format!(
+            r#"
+strategy cal {{
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  param lb : Duration = 1mo in {range}
+  rel m(-A: Equity, @T: Timestamp, -M: Price<USD>)
+  m(A, T, M) :- universe(A, T), M = mean(P) over (T1 in window(T, lb, min 1), close(A, T1, P)).
+  decide(T, buy(A, qty)) :- m(A, T, _), flat(A, T).
+}}
+"#
+        )
+    };
+    for ok in ["31d..60d", "10d..28d", "4w..5w", "1mo..1mo", "20d..1y"] {
+        let diags = check(&strategy(ok), "cal");
+        assert!(errors(&diags).is_empty(), "`1mo in {}` should be accepted:\n{}", ok, text(&diags));
+    }
+    for bad in ["32d..60d", "10d..27d", "2mo..1y"] {
+        let diags = check(&strategy(bad), "cal");
+        assert_only(&diags, Code::T);
+        assert!(errors(&diags).iter().any(|d| d.message.contains("`lb`")), "`1mo in {}`: {}", bad, text(&diags));
+    }
+}
+
+// Review of #43 (non-blocking): the W3 and reserved-name judgments apply to
+// a library checked on its own as well.
+
+fn check_library_src(src: &str, name: &str) -> Vec<Diagnostic> {
+    let mut ws = corpus::base_workspace();
+    ws.add_source(src).unwrap();
+    check_library(&ws, name)
+}
+
+#[test]
+fn a_library_declared_relation_with_no_rules_is_warned_about() {
+    let src = "library ghost_lib {\n  env equities_1d\n  resolution @1d\n  rel ghost(-A: Equity, @T: Timestamp)\n}\n";
+    let diags = check_library_src(src, "ghost_lib");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let w: Vec<&Diagnostic> = diags.iter().filter(|d| d.severity == Severity::Warning).collect();
+    assert_eq!(w.len(), 1, "exactly one warning, for `ghost`:\n{}", text(&diags));
+    assert!(w[0].code == Code::W3 && w[0].message.contains("`ghost`"), "{}", w[0]);
+}
+
+#[test]
+fn a_library_relation_named_after_a_builtin_is_a_u_error() {
+    let src = "library kw_lib {\n  env equities_1d\n  resolution @1d\n  rel lag(-A: Equity, @T: Timestamp)\n  lag(A, T) :- universe(A, T).\n}\n";
+    let diags = check_library_src(src, "kw_lib");
+    assert_only(&diags, Code::U);
+    assert!(errors(&diags).iter().any(|d| d.message.contains("`lag`")), "{}", text(&diags));
 }
