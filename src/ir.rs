@@ -349,6 +349,8 @@ pub enum Lit {
     Float(f64),
     Shares(f64),
     Money(f64, String),
+    /// `60 USD/share`: currency per share, Price<code>.
+    Price(f64, String),
     Duration(Duration),
     Equity(String),
 }
@@ -360,6 +362,7 @@ impl Lit {
             Lit::Float(_) => Ty::scalar(),
             Lit::Shares(_) => Ty::Quantity(Dim::shares()),
             Lit::Money(_, c) => Ty::Quantity(Dim::notional(c)),
+            Lit::Price(_, c) => Ty::Quantity(Dim::price(c)),
             Lit::Duration(_) => Ty::Duration,
             Lit::Equity(_) => Ty::Equity,
         }
@@ -373,6 +376,7 @@ impl fmt::Display for Lit {
             Lit::Float(x) => write!(f, "{}", x),
             Lit::Shares(x) => write!(f, "{} shares", x),
             Lit::Money(x, c) => write!(f, "{} {}", x, c),
+            Lit::Price(x, c) => write!(f, "{} {}/share", x, c),
             Lit::Duration(d) => write!(f, "{}", d),
             Lit::Equity(s) => write!(f, "\"{}\"", s),
         }

@@ -14,6 +14,13 @@ abt explain --strategy breakout_52w --rule 'breakout#1' --at 2023-02-24 --synthe
 abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market as CSV
 ```
 
+Data is one CSV per primitive relation (`close.csv`, `volume.csv`, ...), with
+a header row naming the signature's arguments. Timestamps are bar close
+instants: a 09:30 to 09:31 minute bar is labelled `09:31`, the last bar of a
+session `16:00`, and a daily bar by its date. `abt synth` writes this
+convention; minute data labelled by open time silently misaligns every
+resampled bucket.
+
 ## Layout
 
 | Path | What it is |
@@ -27,10 +34,11 @@ abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market a
 | `src/bin/abt.rs` | The command line. |
 | `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
-| `corpus/strategies` | 16 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
+| `corpus/strategies` | 17 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
 | `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
+| `tests/data.rs`, `tests/cli.rs` | The CSV loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
 
 ## The surface syntax in one page
 
@@ -70,9 +78,15 @@ strategy sma_crossover {
   (output, bound by the call) or `@` (the temporal key, exactly one). A
   relation's resolution follows the signature (`@1d`); in a library or
   strategy it defaults to the unit's `resolution`.
-- Literals carry units: `100 shares`, `5_000_000 USD`, `20d`, `3mo`, `1y`,
-  `0.02`, `"SPY"` (an equity). A bare integer is a Count or a Scalar from
-  context; a bare decimal is a Scalar.
+- Literals carry units: `100 shares`, `5_000_000 USD`, `60 USD/share` (a
+  `Price<USD>`, so `param floor : Price<USD> = 60 USD/share` compares with
+  `close` and `sma`), `20d`, `3mo`, `1y`, `0.02`, `"SPY"` (an equity). A
+  bare `60 USD` is a `Notional<USD>`. A bare integer is a Count or a Scalar
+  from context; a bare decimal is a Scalar. A number is digits with optional
+  `_` separators, an optional fraction with digits on both sides of the
+  point, an optional exponent (`1e5`, `2.5e-3`) and an optional leading `-`;
+  `.5` and `+0.5` are not numbers. Durations are whole numbers of `d`, `w`,
+  `mo` or `y`.
 - Body literals, in the order written: positive atom, `not` atom, comparison,
   `X = expr` (including `TE = T`, which copies a bound time into a value
   column such as an entry date; the copy is a value, not a temporal key),
@@ -122,7 +136,10 @@ decision resolution's time domain, and every derived relation is requested
 with its temporal key and inputs bound and memoised by them. Because WF-4
 makes all positive recursion strictly time-decreasing and WF-8 keeps
 negation and aggregation acyclic, every request terminates and the result is
-the unique model of section 7 restricted to what the decisions need.
+the unique model of section 7 restricted to what the decisions need. The
+partial-arithmetic halt follows the same restriction: a degenerate tuple
+halts the run when a decision demands it, and a tuple no decision requests
+is never evaluated.
 
 The executor fills a bar's decisions at the next bar's close (slippage and
 commission from `ExecConfig`), then writes `fill`, `position` and `cash` at
@@ -131,15 +148,88 @@ difference between the target and the position at execution; `target_weight`
 sizes from cash plus marked positions at the execution bar, truncated to
 whole shares. Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
-negative, `std` of one observation, and a non-positive delta quantity halt it
-naming the rule, the tuple and the expression. `cash` is populated at the
+negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
+a constant series, a `quantile` level outside [0, 1], and a non-positive delta
+quantity halt it naming the rule, the tuple and the expression (for an
+aggregate, the whole aggregate: `quantile(P, q) over (...)`). `median` of an
+even count is the midpoint of the two middle values and `quantile` interpolates
+linearly between order statistics, so `quantile(e, 0.5)` is the median. `cash` is populated at the
 first bar with the initial cash so that cash-aware rules can fire from the
 start.
+
+A decision the executor cannot fill (no price for the instrument at the next
+bar) is reported as dropped, is still recorded in `decided`, and is not
+retried by the kernel; whether the strategy retries it depends on how the
+rule is written. A point test on history, `lag(T, hold, T0), decided(T0,
+buy(A, _))`, is one-shot: `lag` is many-to-one and partial over the bar
+domain, so it fires at most once per entry and never for an entry whose `T0
++ hold` falls on a weekend or holiday, and it can land on an older entry of
+the same instrument. A test of the current state is retried every bar, which
+is why the corpus writes every time-based exit in the window form:
+
+```
+decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
+```
+
+This sells at the first bar strictly later than `hold` after the entry,
+closes every entry, and fires again if a fill was dropped.
 
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
 solution at `t`; `verify_causality` re-runs truncated instances for sampled
 bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus
 strategies.
+
+## The command line
+
+```
+abt check <files...>
+abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+        [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL]
+        [--verify-causality] [--quiet] <files...>
+abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
+        [--price-relation REL] <files...>
+abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
+```
+
+`<files...>` are `.dsl` files or directories searched recursively. The
+synthetic market is seeded (`--seed`, default 7) and deterministic.
+`--price-relation REL` names the primitive the executor fills at; by default
+it is the `close`-like primitive at the decision resolution (or the finest
+one below it, whose last tuple in the bucket is used). `REL` must be a
+primitive with an equity argument and a `Price<...>` output no coarser than
+the decision resolution; anything else halts the run before it starts
+rather than dropping every order.
+
+Every option value is validated: `--days abc`, `--cash lots`, `--symbols ""`
+or `--at yesterday` are errors naming the option, never a silent default,
+and an unknown `--option` prints the usage. `explain` at a timestamp that is
+not a bar reports `2030-01-01 is not a bar of the @1d time domain (2022-01-03
+to 2023-12-01)` instead of a missing literal. Exit codes: 0 success; 1 the
+strategy does not check, the run halted, or the usage is wrong; 2 an input
+could not be read or parsed (a source file, a data directory, an option
+value).
+
+## Environment instances as CSV
+
+`abt run --data DIR` loads one `<relation>.csv` per primitive of the
+strategy's environment; `abt synth` writes the same layout. The header names
+the signature's arguments (case-insensitive), fields are comma-separated, and
+a timestamp is `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
+` HH:MM[:SS]`. The loader enforces what the signature promises:
+
+- The temporal key is stored as the label of the bar containing it at the
+  relation's resolution (spec section 3: at @1d the trading date), so
+  `2022-01-03T16:00:00` in `close.csv` and `2022-01-03` in `universe.csv`
+  are one bar and share one time domain.
+- A relation is a function of its identity columns (its inputs, its key and
+  its entity-typed outputs; spec section 3): two rows for one identity with
+  different value outputs are an error naming both lines, such as
+  `close.csv:3: duplicate tuple for (AAA, 2022-01-03) with different outputs;
+  line 2 already binds them`. A row identical to an earlier one is dropped.
+- A field that does not parse as its type, a header lacking a column and a
+  short row are errors naming the file and line.
+- A missing or header-only file leaves the relation empty and prints a
+  `note:`; `--data DIR` must be an existing directory.
 
 ## Decisions taken where the model left room
 
@@ -190,11 +280,23 @@ small and easy to flip.
   idiom, `entry(A, T, E, TE) :- fill(A, T, Q, P), ..., TE = T`); the copy
   carries no causal provenance, so it compares freely but cannot serve as a
   body atom's temporal key.
+- **`min K` removes a bar from a relation, not from the time domain.** The
+  @1d domain over minute data is every day with at least one minute bar
+  (section 6), so a half-day with fewer than the bars library's 300 bars
+  has no `close_d` but is still a bar: `prev` from the next day lands on
+  it, and a rule needing `close_d` at prev(T) does not fire on the day
+  after it either. Skip bar-less days with `lag` or a window, or resample
+  with `min 1` and a `count` output and gate on the count.
+- **The executor prices from the data, not from the strategy's bars.** When
+  the decision resolution is coarser than the price data, a decision is
+  filled at the last fine close inside the next decision bucket, whatever
+  `min K` the strategy's bar rules declare; a bucket with no fine tuple for
+  the instrument drops the decision.
 
 ## Development
 
 ```
-cargo test            # 58 tests: type algebra, time, corpus, checker, kernel
+cargo test            # type algebra, time, corpus, checker, kernel, syntax, CSV loader, command line
 cargo build --release
 ```
 

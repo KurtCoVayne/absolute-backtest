@@ -1,5 +1,8 @@
 # Buy a close above the prior-year high, with a cooldown against re-entry;
-# time-based exit through the kernel's own decision history.
+# time-based exit through the kernel's own decision history: sell once no
+# buy was decided within the last `hold` (a state test, retried every bar;
+# `lag(T, hold, T0), decided(T0, buy(A, _))` would be a point test that
+# misses entries whose T0 + hold is not a bar).
 strategy breakout_52w {
   env equities_1d
   uses features
@@ -16,5 +19,5 @@ strategy breakout_52w {
   breakout(A, T) :- universe(A, T), close(A, T, P), highest(A, T, lookback, lookback_min, H), P > H.
 
   decide(T, buy(A, qty)) :- breakout(A, T), flat(A, T), not bought_within(A, T, cooldown).
-  decide(T, sell(A, Q)) :- held(A, T, Q), lag(T, hold, T0), decided(T0, buy(A, _)).
+  decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
 }
