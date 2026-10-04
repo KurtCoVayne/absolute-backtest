@@ -203,6 +203,53 @@ strategy at_15m {
     assert_ne!(on_flat_m[0].message, on_flat_m[1].message);
 }
 
+/// portfolio-06: the bound position of prev and lag is an output (section 4,
+/// "Binds"), so `_` is permitted there (WF-2) and means the same as a fresh
+/// variable that is never read.
+#[test]
+fn a_wildcard_in_the_bound_position_of_prev_and_lag_is_a_fresh_variable() {
+    let strategy = |wild: bool| {
+        let (p, l) = if wild { ("_", "_") } else { ("T0", "T5") };
+        format!(
+            r#"
+strategy has_history {{
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 10 shares
+  rel bar_before(@T: Timestamp)
+  bar_before(T) :- bar(T), prev(T, {p}).
+  rel deep(@T: Timestamp)
+  deep(T) :- bar(T), lag(T, 5d, {l}).
+  decide(T, buy(A, qty)) :- universe(A, T), bar_before(T), not deep(T), flat(A, T).
+  decide(T, sell(A, Q)) :- held(A, T, Q), deep(T).
+}}
+"#
+        )
+    };
+    let ds = absolute_backtest::data::synthetic_daily(&["AAA"], (2023, 1, 2), 15, 3);
+    let mut outputs = Vec::new();
+    for wild in [true, false] {
+        let mut ws = corpus::base_workspace();
+        ws.add_source(&strategy(wild)).unwrap();
+        let (prog, diags) = check_program(&ws, "has_history");
+        assert!(diags.is_empty(), "wild = {}: should check clean (no errors, no warnings), got:\n{}", wild, text(&diags));
+        let r = absolute_backtest::kernel::run(&prog.unwrap(), &ds, absolute_backtest::kernel::ExecConfig::default()).unwrap();
+        let out: Vec<String> = r
+            .decisions
+            .iter()
+            .map(|d| format!("{} {}", absolute_backtest::kernel::time::format_timestamp(d.t), r.describe_decision(&d.decision)))
+            .collect();
+        outputs.push(out);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    // The second bar has a bar before it and no five days of history: a buy;
+    // once there are, the position is sold.
+    assert_eq!(outputs[0][0], "2023-01-03 buy(AAA, 10)");
+    assert!(outputs[0].iter().any(|d| d.contains("sell(AAA, 10)")), "{:?}", outputs[0]);
+}
+
 /// trend-12: `not month_start(T)` is rejected as an undeclared relation, and
 /// the message says why (a builtin is not a relation) and shows the idiom,
 /// which checks clean.
