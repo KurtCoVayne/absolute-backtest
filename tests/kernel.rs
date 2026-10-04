@@ -4,7 +4,7 @@
 
 mod corpus;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -414,7 +414,15 @@ fn a_missing_fill_price_drops_the_decision() {
     // universe and volume rows stay, so the bar still exists.
     let gone = day("2024-01-10");
     ds.facts.get_mut("close").unwrap().retain(|tu| tu[1] != Value::Time(gone));
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..Default::default() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
     assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
     // Thursday's log return needs Wednesday's close too, so the next buy is
@@ -423,4 +431,105 @@ fn a_missing_fill_price_drops_the_decision() {
     assert_eq!(decisions, vec!["2024-01-09", "2024-01-12"]);
     assert!(r.fills.is_empty(), "{:?}", r.fills);
     assert_eq!(r.final_cash, 1000.0);
+}
+
+/// The corpus strategies with a time-based exit, their `hold` in days and
+/// a synthetic run long enough to enter on every weekday.
+const TIME_EXIT_STRATEGIES: [(&str, i64, u64, usize); 3] = [("volume_spike", 5, 7, 500), ("breakout_52w", 20, 1, 400), ("cash_buffer", 30, 11, 320)];
+
+/// A time-based exit closes every entry, whatever weekday it was entered
+/// on, once `hold` has elapsed since that entry and not before (trend-01).
+#[test]
+fn corpus_time_exits_close_every_entry_after_hold() {
+    use absolute_backtest::kernel::time::{weekday, DAY};
+    for (name, hold, seed, days) in TIME_EXIT_STRATEGIES {
+        let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
+        let (prog, _) = program(&src, name);
+        let ds = synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), days, seed);
+        let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+        let last = *r.bars.last().unwrap();
+        // The latest bar at which an entry decided at t0 must have been
+        // exited: the first bar strictly after t0 + hold, which a weekend can
+        // delay by at most three calendar days.
+        let deadline = |t0: i64| t0 + (hold + 3) * DAY;
+        let mut open: BTreeMap<String, i64> = BTreeMap::new();
+        let mut monday_entries = 0;
+        for d in &r.decisions {
+            let eq = r.symbols[d.decision.equity as usize].clone();
+            match d.decision.ctor {
+                Ctor::Buy => {
+                    assert!(!open.contains_key(&eq), "{}: {} bought again at {} while held", name, eq, format_timestamp(d.t));
+                    if weekday(d.t) == 0 {
+                        monday_entries += 1;
+                    }
+                    open.insert(eq, d.t);
+                }
+                Ctor::Sell => {
+                    let t0 = open.remove(&eq).unwrap_or_else(|| panic!("{}: {} sold at {} without an entry", name, eq, format_timestamp(d.t)));
+                    assert!(
+                        d.t >= t0 + hold * DAY,
+                        "{}: {} entered {} sold {} before hold elapsed",
+                        name,
+                        eq,
+                        format_timestamp(t0),
+                        format_timestamp(d.t)
+                    );
+                    assert!(d.t <= deadline(t0), "{}: {} entered {} sold only at {}", name, eq, format_timestamp(t0), format_timestamp(d.t));
+                }
+                other => panic!("{}: unexpected {:?}", name, other),
+            }
+        }
+        for (eq, t0) in open {
+            let dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday(t0) as usize];
+            assert!(deadline(t0) > last, "{}: {} entered {} ({}) was never exited", name, eq, format_timestamp(t0), dow);
+        }
+        assert!(monday_entries > 0, "{}: no Monday entry in the run, so the weekend case is not exercised", name);
+    }
+}
+
+/// `X` with flat volume and price and one up day on a 3x volume: the corpus
+/// `volume_spike` entry on that day. `closes_removed` names bars whose close
+/// is withheld (the universe and volume rows stay, so the bars exist).
+fn spike_daily(spike_on: &str, closes_removed: &[&str]) -> Dataset {
+    use absolute_backtest::data::business_days;
+    let mut ds = Dataset::new();
+    let x = ds.intern("X");
+    let spike = day(spike_on);
+    let removed: Vec<i64> = closes_removed.iter().map(|d| day(d)).collect();
+    for t in business_days((2024, 1, 8), 25) {
+        let (price, volume) = if t < spike {
+            (10.0, 1000.0)
+        } else if t == spike {
+            (10.5, 3000.0)
+        } else {
+            (10.5, 1000.0)
+        };
+        if !removed.contains(&t) {
+            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(price)]);
+        }
+        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(volume)]);
+        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
+    }
+    ds
+}
+
+/// A dropped fill of a time-based exit does not leave the position stuck:
+/// the exit is a state test, so it is decided again at the next bar
+/// (trend-02).
+#[test]
+fn corpus_time_exit_is_retried_after_a_dropped_fill() {
+    let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies/volume_spike.dsl")).unwrap();
+    let (prog, _) = program(&src, "volume_spike");
+    // A Wednesday entry with hold 5d: the exit is due on the Monday after
+    // next or the day after. Both bars that could fill it lack a close, so
+    // the first exit decision is dropped whichever bar it lands on.
+    let ds = spike_daily("2024-01-31", &["2024-02-06", "2024-02-07"]);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
+    assert_eq!(decisions[0], "2024-01-31 buy(X, 100)", "{:?}", decisions);
+    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
+    let sells = decisions.iter().filter(|d| d.contains("sell")).count();
+    assert_eq!(sells, 2, "the exit must be decided again after the drop: {:?}", decisions);
+    assert_eq!(r.fills.len(), 2, "{:?}", r.fills);
+    assert!(r.final_positions.is_empty(), "position stuck after a dropped exit: {:?}", r.final_positions);
 }
