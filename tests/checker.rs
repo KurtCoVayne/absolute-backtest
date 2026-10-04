@@ -5,6 +5,9 @@
 mod corpus;
 
 use absolute_backtest::check::{check_program, check_workspace, Code, Diagnostic, Severity};
+use absolute_backtest::data::{synthetic_daily, synthetic_minute};
+use absolute_backtest::kernel::time::format_timestamp;
+use absolute_backtest::kernel::{run, ExecConfig};
 
 fn check(src: &str, name: &str) -> Vec<Diagnostic> {
     let mut ws = corpus::base_workspace();
@@ -204,4 +207,92 @@ strategy ghost_rel {
     assert_eq!(w.len(), 1, "exactly one warning, for `ghost`:\n{}", text(&diags));
     assert!(w[0].message.contains("`ghost`") && w[0].message.contains("no rule"), "{}", w[0]);
     assert_eq!(w[0].span.line, 8, "reported at the declaration: {}", w[0]);
+}
+
+fn program(src: &str, name: &str) -> absolute_backtest::check::Program {
+    let mut ws = corpus::base_workspace();
+    ws.add_source(src).unwrap();
+    let (p, diags) = check_program(&ws, name);
+    p.unwrap_or_else(|| panic!("{} should check clean:\n{}", name, text(&diags)))
+}
+
+// trend-11: a bound Timestamp may be copied into a value column with `X = T`
+// (section 2: non-key timestamps are ordinary values).
+
+#[test]
+fn a_bound_timestamp_may_be_assigned_as_a_value() {
+    let src = r#"
+strategy held_since {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  rel entry(+A: Equity, @T: Timestamp, -E: Price<USD>, -TE: Timestamp)
+  entry(A, T, E, TE) :- fill(A, T, Q, P), Q > 0 shares, E = P, TE = T.
+  entry(A, T, E, TE) :- position(A, T, Q), Q > 0 shares, not fill(A, T, _, _), prev(T, T0), entry(A, T0, E, TE).
+  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).
+  decide(T, sell(A, Q)) :- held(A, T, Q), entry(A, T, _, TE), lag(T, 30d, T0), TE <= T0.
+}
+"#;
+    let prog = program(src, "held_since");
+    let ds = synthetic_daily(&["AAA", "BBB"], (2023, 1, 2), 120, 3);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    let sells: Vec<_> = r.decisions.iter().filter(|d| r.describe_decision(&d.decision).starts_with("sell")).collect();
+    assert!(!sells.is_empty(), "the time-based exit should fire");
+    // The first buy is decided on bar 1 and filled on bar 2 (the entry time);
+    // the first sell comes once a bar 30 calendar days before T is at or
+    // after that entry, so at least 30 days after the fill.
+    let first_fill = r.fills[0].t;
+    assert!(sells[0].t - first_fill >= 30 * 86_400, "first sell {} vs first fill {}", format_timestamp(sells[0].t), format_timestamp(first_fill));
+}
+
+// intraday-03: a resample over a stored relation binds its entity variables
+// by grouping, even in `+` positions (section 4); a derived inner relation
+// with a fresh `+` input stays an M error that says why.
+
+const FRESH_INPUT_RESAMPLE: &str = r#"
+strategy five_minute_bars {
+  env equities_1m
+  resolution @5m
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  rel c5(-A: Equity, @T: Timestamp, -C: Price<USD>)
+  c5(A, T, C) :- resample(close_m(A, T1, P) to @5m as T, min 5, C = last(P)).
+  decide(T, buy(A, qty)) :- c5(A, T, _), not position(A, T, _).
+}
+"#;
+
+#[test]
+fn a_resample_over_a_primitive_groups_a_fresh_input_entity() {
+    let prog = program(FRESH_INPUT_RESAMPLE, "five_minute_bars");
+    let ds = synthetic_minute(&["AAA", "BBB"], (2024, 1, 2), 1, 30, 1);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    // One bucket per symbol: both are bought at the first five-minute bar and
+    // then held, so exactly two decisions, at one bar, for two instruments.
+    assert_eq!(r.decisions.len(), 2, "{:?}", r.decisions.iter().map(|d| (format_timestamp(d.t), r.describe_decision(&d.decision))).collect::<Vec<_>>());
+    assert_eq!(r.decisions[0].t, r.decisions[1].t);
+    let names: std::collections::BTreeSet<String> = r.decisions.iter().map(|d| r.describe_decision(&d.decision)).collect();
+    assert_eq!(names.len(), 2);
+}
+
+#[test]
+fn a_resample_over_a_derived_relation_with_a_fresh_input_is_an_m_error() {
+    let src = r#"
+strategy derived_inner {
+  env equities_1m
+  resolution @5m
+  mode delta
+  param qty : Quantity<Shares> = 100 shares
+  rel up_m(+A: Equity, @T: Timestamp) @1m
+  up_m(A, T) :- universe_m(A, T), close_m(A, T, P), prev(T, T0), close_m(A, T0, P0), P > P0.
+  rel ups5(-A: Equity, @T: Timestamp, -N: Count)
+  ups5(A, T, N) :- resample(up_m(A, T1) to @5m as T, min 1, N = count(T1)).
+  decide(T, buy(A, qty)) :- ups5(A, T, N), N > 3.
+}
+"#;
+    let diags = check(src, "derived_inner");
+    assert_only(&diags, Code::M);
+    let d = errors(&diags)[0];
+    assert!(d.message.contains("up_m") && d.message.contains("derived"), "{}", d);
 }
