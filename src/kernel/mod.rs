@@ -126,6 +126,8 @@ pub enum RunError {
     /// explain inputs, a binding of a variable the rule does not have, a
     /// parameter override outside its type or range.
     Request(String),
+    /// An executor configuration the program cannot honour.
+    Config(String),
     Internal(String),
 }
 
@@ -154,6 +156,7 @@ impl std::fmt::Display for RunError {
                 }
             }
             RunError::Request(m) => write!(f, "{}", m),
+            RunError::Config(m) => write!(f, "configuration error: {}", m),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
         }
     }
@@ -415,7 +418,20 @@ impl<'p> Kernel<'p> {
         }
         // Price relation for the executor.
         let price_rel = match &cfg.price_relation {
-            Some(name) => Some(*rel_ids.get(name).ok_or_else(|| RunError::Internal(format!("price relation `{}` is not in the program", name)))?),
+            Some(name) => {
+                let id = *rel_ids.get(name).ok_or_else(|| RunError::Config(format!("price relation `{}` is not in the program", name)))?;
+                let sig = prog.relations.get(name).unwrap();
+                if !matches!(sig.kind, Kind::Primitive { .. }) || price_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
+                    return Err(RunError::Config(format!(
+                        "price relation `{}` must be a primitive with an equity argument and a Price<...> output; `{}` has none",
+                        name, name
+                    )));
+                }
+                if !sig.res.map(|r| r <= prog.resolution).unwrap_or(false) {
+                    return Err(RunError::Config(format!("price relation `{}` is coarser than the decision resolution {}", name, prog.resolution)));
+                }
+                Some(id)
+            }
             None => {
                 let mut cands: Vec<(&String, &Signature)> = prog
                     .relations
@@ -782,7 +798,7 @@ impl<'p> Kernel<'p> {
 fn l_num(l: &Lit) -> f64 {
     match l {
         Lit::Int(i) => *i as f64,
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) => *x,
+        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => *x,
         Lit::Duration(_) | Lit::Equity(_) => f64::NAN,
     }
 }
@@ -806,7 +822,7 @@ fn price_column(sig: &Signature) -> Option<usize> {
 pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols) -> Value {
     match l {
         Lit::Int(i) => Value::Count(*i),
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) => Value::Num(*x),
+        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
         Lit::Duration(d) => Value::Dur(*d),
         Lit::Equity(s) => Value::Equity(symbols.intern(s)),
     }

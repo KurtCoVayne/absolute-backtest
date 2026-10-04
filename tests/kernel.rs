@@ -4,7 +4,7 @@
 
 mod corpus;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -518,4 +518,301 @@ strategy hold_n {
     assert!(err.contains("hold") && err.contains("Duration") && !err.contains("internal"), "{}", err);
     let err = with(vec![("nope", days(3))]).expect_err("no such parameter");
     assert!(err.contains("`nope`") && err.contains("hold_n") && !err.contains("internal"), "{}", err);
+}
+
+/// The corpus strategies with a time-based exit, their `hold` in days and
+/// a synthetic run long enough to enter on every weekday.
+const TIME_EXIT_STRATEGIES: [(&str, i64, u64, usize); 3] = [("volume_spike", 5, 7, 500), ("breakout_52w", 20, 1, 400), ("cash_buffer", 30, 11, 320)];
+
+/// A time-based exit closes every entry, whatever weekday it was entered
+/// on, once `hold` has elapsed since that entry and not before (trend-01).
+#[test]
+fn corpus_time_exits_close_every_entry_after_hold() {
+    use absolute_backtest::kernel::time::{weekday, DAY};
+    for (name, hold, seed, days) in TIME_EXIT_STRATEGIES {
+        let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
+        let (prog, _) = program(&src, name);
+        let ds = synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), days, seed);
+        let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+        let last = *r.bars.last().unwrap();
+        // The latest bar at which an entry decided at t0 must have been
+        // exited: the first bar strictly after t0 + hold, which a weekend can
+        // delay by at most three calendar days.
+        let deadline = |t0: i64| t0 + (hold + 3) * DAY;
+        let mut open: BTreeMap<String, i64> = BTreeMap::new();
+        let mut monday_entries = 0;
+        for d in &r.decisions {
+            let eq = r.symbols[d.decision.equity as usize].clone();
+            match d.decision.ctor {
+                Ctor::Buy => {
+                    assert!(!open.contains_key(&eq), "{}: {} bought again at {} while held", name, eq, format_timestamp(d.t));
+                    if weekday(d.t) == 0 {
+                        monday_entries += 1;
+                    }
+                    open.insert(eq, d.t);
+                }
+                Ctor::Sell => {
+                    let t0 = open.remove(&eq).unwrap_or_else(|| panic!("{}: {} sold at {} without an entry", name, eq, format_timestamp(d.t)));
+                    assert!(
+                        d.t >= t0 + hold * DAY,
+                        "{}: {} entered {} sold {} before hold elapsed",
+                        name,
+                        eq,
+                        format_timestamp(t0),
+                        format_timestamp(d.t)
+                    );
+                    assert!(d.t <= deadline(t0), "{}: {} entered {} sold only at {}", name, eq, format_timestamp(t0), format_timestamp(d.t));
+                }
+                other => panic!("{}: unexpected {:?}", name, other),
+            }
+        }
+        for (eq, t0) in open {
+            let dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday(t0) as usize];
+            assert!(deadline(t0) > last, "{}: {} entered {} ({}) was never exited", name, eq, format_timestamp(t0), dow);
+        }
+        assert!(monday_entries > 0, "{}: no Monday entry in the run, so the weekend case is not exercised", name);
+    }
+}
+
+/// `X` with flat volume and price and one up day on a 3x volume: the corpus
+/// `volume_spike` entry on that day. `closes_removed` names bars whose close
+/// is withheld (the universe and volume rows stay, so the bars exist).
+fn spike_daily(spike_on: &str, closes_removed: &[&str]) -> Dataset {
+    use absolute_backtest::data::business_days;
+    let mut ds = Dataset::new();
+    let x = ds.intern("X");
+    let spike = day(spike_on);
+    let removed: Vec<i64> = closes_removed.iter().map(|d| day(d)).collect();
+    for t in business_days((2024, 1, 8), 25) {
+        let (price, volume) = if t < spike {
+            (10.0, 1000.0)
+        } else if t == spike {
+            (10.5, 3000.0)
+        } else {
+            (10.5, 1000.0)
+        };
+        if !removed.contains(&t) {
+            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(price)]);
+        }
+        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(volume)]);
+        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
+    }
+    ds
+}
+
+/// A dropped fill of a time-based exit does not leave the position stuck:
+/// the exit is a state test, so it is decided again at the next bar
+/// (trend-02).
+#[test]
+fn corpus_time_exit_is_retried_after_a_dropped_fill() {
+    let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies/volume_spike.dsl")).unwrap();
+    let (prog, _) = program(&src, "volume_spike");
+    // A Wednesday entry with hold 5d: the exit is due on the Monday after
+    // next or the day after. Both bars that could fill it lack a close, so
+    // the first exit decision is dropped whichever bar it lands on.
+    let ds = spike_daily("2024-01-31", &["2024-02-06", "2024-02-07"]);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
+    assert_eq!(decisions[0], "2024-01-31 buy(X, 100)", "{:?}", decisions);
+    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
+    let sells = decisions.iter().filter(|d| d.contains("sell")).count();
+    assert_eq!(sells, 2, "the exit must be decided again after the drop: {:?}", decisions);
+    assert_eq!(r.fills.len(), 2, "{:?}", r.fills);
+    assert!(r.final_positions.is_empty(), "position stuck after a dropped exit: {:?}", r.final_positions);
+}
+
+/// Four symbols, five consecutive weekdays, one fixed close per symbol.
+fn cross_section(closes: &[(&str, f64)]) -> Dataset {
+    let mut ds = Dataset::new();
+    for d in ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"] {
+        let t = day(d);
+        for (name, p) in closes {
+            let s = ds.intern(name);
+            ds.add("close", vec![Value::Equity(s), Value::Time(t), Value::Num(*p)]);
+            ds.add("volume", vec![Value::Equity(s), Value::Time(t), Value::Num(1000.0)]);
+            ds.add("universe", vec![Value::Equity(s), Value::Time(t)]);
+        }
+    }
+    ds
+}
+
+fn quantile_cut(q: f64) -> String {
+    format!(
+        r#"
+strategy cut {{
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  param q : Scalar = {}
+  rel cut(@T: Timestamp, -H: Price<USD>, -M: Price<USD>)
+  cut(T, H, M) :- bar(T), H = quantile(P, q) over (universe(A, T), close(A, T, P)),
+      M = median(P1) over (universe(A1, T), close(A1, T, P1)).
+  decide(T, target_weight(A, 0.1)) :- universe(A, T), close(A, T, P), cut(T, H, M), H = M, P > H.
+}}
+"#,
+        q
+    )
+}
+
+/// `quantile` interpolates linearly between order statistics and `median`
+/// is the midpoint on an even count, so the two agree at 0.5; a level
+/// outside [0, 1] halts the run naming the whole aggregate (portfolio-10).
+#[test]
+fn quantile_conventions_and_the_aggregate_halt() {
+    let ds = cross_section(&[("A", 1.0), ("B", 2.0), ("C", 3.0), ("D", 4.0)]);
+    let (prog, _) = program(&quantile_cut(0.5), "cut");
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    // quantile(0.5) of [1, 2, 3, 4] is 2.5, as is the median: C and D are above it.
+    let first: Vec<String> = r.decisions.iter().filter(|d| format_timestamp(d.t) == "2024-01-08").map(|d| r.describe_decision(&d.decision)).collect();
+    assert_eq!(first, vec!["target_weight(C, 0.1)", "target_weight(D, 0.1)"]);
+
+    let (prog, _) = program(&quantile_cut(1.5), "cut");
+    match run(&prog, &ds, ExecConfig::default()) {
+        Err(RunError::Arithmetic { rule, expr, message, .. }) => {
+            assert_eq!(rule, "cut::cut#1");
+            assert_eq!(expr, "quantile(P, q) over (...)");
+            assert_eq!(message, "quantile level 1.5 is outside [0, 1]");
+        }
+        other => panic!("expected an arithmetic halt, got {:?}", other.map(|r| r.decisions.len())),
+    }
+}
+
+/// An aggregation's conjunction admits comparisons and assignments over
+/// the variables bound inside it, and they filter the group (trend-15).
+#[test]
+fn comparisons_and_assignments_inside_an_aggregation_filter_the_group() {
+    let src = r#"
+strategy n_up {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 10 shares
+  rel above_ten(-A: Equity, @T: Timestamp, -N: Count)
+  above_ten(A, T, N) :- universe(A, T),
+      N = count(T1) over (T1 in window(T, 30d, min 1), close(A, T1, P), Cost = P * qty, Cost > 100 USD).
+  decide(T, buy(A, qty)) :- above_ten(A, T, N), N = 3, flat(A, T).
+}
+"#;
+    let (prog, _) = program(src, "n_up");
+    // Closes above 10 within the window: 0, 1, 1, 2, 3 on the five days.
+    let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
+    assert_eq!(decisions, vec!["2024-01-12"]);
+}
+
+/// Evaluation is top-down, so a degenerate tuple halts the run only when a
+/// decision demands it: `1 / N` with N = 0 on the warm-up bars is never
+/// requested, because nothing is selected there (adv-15).
+#[test]
+fn partial_arithmetic_is_only_evaluated_for_demanded_tuples() {
+    let src = r#"
+strategy unguarded {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  param n : Count = 2
+  rel candidate(-A: Equity, @T: Timestamp, -M: Scalar)
+  candidate(A, T, M) :- universe(A, T), momentum(A, T, 6mo, 1mo, M).
+  rel selected(-A: Equity, @T: Timestamp)
+  selected(A, T) :- bar(T), top(n, candidate(A, T, M), by (M desc, A asc)).
+  rel n_selected(@T: Timestamp, -N: Count)
+  n_selected(T, N) :- bar(T), N = count(A) over (selected(A, T)).
+  rel w(@T: Timestamp, -W: Scalar)
+  w(T, W) :- n_selected(T, N), W = 1 / N.
+  decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).
+}
+"#;
+    let (prog, _) = program(src, "unguarded");
+    let ds = synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), 200, 3);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    assert!(!r.decisions.is_empty());
+    // Demanded at every bar, the same tuple halts on the first one.
+    let demanded = src.replace(
+        "decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).",
+        "decide(T, target_weight(A, W)) :- bar(T), w(T, W), selected(A, T).",
+    );
+    let (prog, _) = program(&demanded, "unguarded");
+    match run(&prog, &ds, ExecConfig::default()) {
+        Err(RunError::Arithmetic { rule, message, .. }) => {
+            assert_eq!(rule, "unguarded::w#1");
+            assert_eq!(message, "division by zero");
+        }
+        other => panic!("expected an arithmetic halt, got {:?}", other.map(|r| r.decisions.len())),
+    }
+}
+
+/// Minute bars for `Y` on consecutive weekdays from 2024-01-08:
+/// `bars_per_day[i]` bars on day i from 09:31, closes `start_price + step *
+/// i + 0.01 * bar`. Labels are close instants.
+fn minute_days(bars_per_day: &[usize], start_price: f64, step: f64) -> Dataset {
+    use absolute_backtest::data::business_days;
+    let mut ds = Dataset::new();
+    let y = ds.intern("Y");
+    for (i, (d, &n)) in business_days((2024, 1, 8), bars_per_day.len()).into_iter().zip(bars_per_day).enumerate() {
+        for b in 0..n {
+            let t = d + 9 * 3600 + 31 * 60 + 60 * b as i64;
+            let p = start_price + step * i as f64 + 0.01 * b as f64;
+            ds.add("close_m", vec![Value::Equity(y), Value::Time(t), Value::Num(p)]);
+            ds.add("volume_m", vec![Value::Equity(y), Value::Time(t), Value::Num(100.0)]);
+            ds.add("universe_m", vec![Value::Equity(y), Value::Time(t)]);
+        }
+    }
+    ds
+}
+
+/// `min K` removes a bar from a relation, not from the time domain: a
+/// half-day with fewer than 300 minute bars has no `close_d`, yet it is a
+/// @1d bar, `prev` lands on it, the executor fills there at its last minute
+/// close whatever `min` the bars library asked for, and a rule that needs
+/// `close_d` at prev(T) does not fire on the day after (intraday-06,
+/// intraday-09).
+#[test]
+fn a_short_day_stays_in_the_domain_without_a_bar() {
+    let src = r#"
+strategy up_vs_prev {
+  env equities_1m
+  uses bars
+  resolution @1d
+  mode target
+  rel up(-A: Equity, @T: Timestamp)
+  up(A, T) :- universe_d(A, T), close_d(A, T, C), prev(T, T0), close_d(A, T0, C0), C > C0.
+  decide(T, target_quantity(A, 1 shares)) :- up(A, T).
+}
+"#;
+    let (prog, _) = program(src, "up_vs_prev");
+    // Mon..Fri: full, full, half-day (150 bars), full, full.
+    let ds = minute_days(&[300, 300, 150, 300, 300], 50.0, 1.0);
+    let bars = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap().decision_bars();
+    let days: Vec<String> = bars.iter().map(|t| format_timestamp(*t)).collect();
+    assert_eq!(days, vec!["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"]);
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    // Tuesday fires (Monday has a bar); Wednesday has no close_d; Thursday's
+    // prev is Wednesday, so it does not fire either; Friday fires again.
+    let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
+    assert_eq!(decisions, vec!["2024-01-09", "2024-01-12"]);
+    // Tuesday's decision is filled on the half-day at its last minute close
+    // (bar 149 of the third day: 52 + 1.49).
+    assert_eq!(r.fills.len(), 1);
+    assert_eq!(format_timestamp(r.fills[0].t), "2024-01-10");
+    assert!((r.fills[0].price - 53.49).abs() < 1e-9, "{}", r.fills[0].price);
+}
+
+/// Timestamps are bar close instants: the synthetic minute market labels
+/// the first bar of a session 09:31 and the 390th 16:00, so every @5m
+/// bucket holds whole bars (intraday-07).
+#[test]
+fn synthetic_minute_bars_are_labelled_by_close_instant() {
+    use absolute_backtest::kernel::time::bucket;
+    use absolute_backtest::Resolution;
+    let ds = synthetic_minute(&["AAA"], (2024, 1, 8), 1, 390, 1);
+    let mut times: Vec<i64> = ds.facts["close_m"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
+    times.sort();
+    assert_eq!(format_timestamp(times[0]), "2024-01-08T09:31:00");
+    assert_eq!(format_timestamp(times[389]), "2024-01-08T16:00:00");
+    assert_eq!(bucket(Resolution::M5, times[0]), times[4]);
+    assert_eq!(bucket(Resolution::M5, times[4]), times[4]);
 }

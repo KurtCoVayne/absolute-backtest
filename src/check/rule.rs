@@ -46,7 +46,48 @@ struct Analyzer<'c, 'a> {
     pending_windows: HashMap<String, TimeProv>,
 }
 
+/// For a temporal builtin written where a relation is expected: how to get a
+/// relation that holds exactly when the builtin does.
+fn builtin_as_relation_hint(name: &str) -> Option<String> {
+    Some(match name {
+        "month_start" | "day_start" => {
+            let rel = if name == "month_start" { "mstart" } else { "dstart" };
+            format!("define `rel {rel}(@T: Timestamp)` with `{rel}(T) :- bar(T), {name}(T).` (a derived relation over the builtin is complete) and write `not {rel}(T)`")
+        }
+        "prev" | "lag" => {
+            let args = if name == "prev" { "T, T0" } else { "T, N, T0" };
+            format!("`{name}` binds its last argument; define `rel has_{name}(@T: Timestamp)` with `has_{name}(T) :- bar(T), {name}({args}).` and write `not has_{name}(T)`")
+        }
+        _ => return None,
+    })
+}
+
+/// A rule whose head or body names a relation declared with a reserved name
+/// is not judged: the declaration was already reported (U), and the parser
+/// has read every body occurrence as the builtin it names.
+fn mentions_reserved(cx: &Checker, rule: &Rule) -> bool {
+    fn lit(cx: &Checker, l: &Literal) -> bool {
+        match l {
+            Literal::Builtin(b, _) => cx.reserved_declared.contains(match b {
+                Builtin::Prev { .. } => "prev",
+                Builtin::Lag { .. } => "lag",
+                Builtin::MonthStart { .. } => "month_start",
+                Builtin::DayStart { .. } => "day_start",
+            }),
+            Literal::Atom(a) | Literal::Neg(a) => cx.reserved_declared.contains(&a.name),
+            Literal::Top { atom, .. } => cx.reserved_declared.contains(&atom.name),
+            Literal::Resample { inner, .. } => cx.reserved_declared.contains(&inner.name),
+            Literal::Agg { conj, .. } => conj.iter().any(|l| lit(cx, l)),
+            Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => false,
+        }
+    }
+    cx.reserved_declared.contains(&rule.head.name) || rule.body.iter().any(|l| lit(cx, l))
+}
+
 pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleInfo> {
+    if mentions_reserved(cx, rule) {
+        return None;
+    }
     let label = super::rule_label(&cx.rules, idx);
     let unit_res = cx.unit_res.get(&rule.unit).copied().unwrap_or(cx.resolution);
     let mut an = Analyzer {
@@ -119,6 +160,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     fn derived_prov(base: TimeProv, strict: bool) -> TimeProv {
         match base {
             TimeProv::Other => TimeProv::Other,
+            TimeProv::Unknown => TimeProv::Unknown,
             TimeProv::Strict => TimeProv::Strict,
             TimeProv::Head | TimeProv::Causal => {
                 if strict {
@@ -149,13 +191,32 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     }
 
     /// Name resolution (U) and environment membership (E).
+    ///
+    /// Returns `None` without a diagnostic when the root cause was already
+    /// reported at unit level: the environment or a used library is missing
+    /// from the workspace (the name may live there), or the name is a
+    /// primitive of a used library's own, mismatched environment.
     fn resolve_rel(&mut self, name: &str, span: Span) -> Option<Signature> {
         if let Some(sig) = self.cx.relations.get(name) {
             return Some(sig.clone());
         }
+        // A temporal builtin (section 4) is a constraint or a binder, not a
+        // relation: it has no tuples to negate or reduce. The parser accepts
+        // it as an atom only after `not` or inside `top`, so the idiom shown
+        // is a derived relation over the builtin, which is complete (WF-5).
+        if let Some(hint) = builtin_as_relation_hint(name) {
+            self.err(Code::U, span, format!("`{}` is a temporal builtin, not a relation, so it cannot be negated; {}", name, hint));
+            return None;
+        }
+        if self.cx.scope_incomplete {
+            return None;
+        }
         let declared_env = self.cx.env_name.clone();
         for env in self.cx.ws.units.iter().filter(|u| u.kind == UnitKind::Environment) {
             if env.rels.iter().any(|s| s.name == name) {
+                if self.cx.foreign_envs.contains(&env.name) {
+                    return None;
+                }
                 self.err(
                     Code::E,
                     span,
@@ -193,12 +254,17 @@ impl<'c, 'a> Analyzer<'c, 'a> {
 
     fn atom(&mut self, atom: &Atom, ctx: AtomCtx) -> Option<AtomInfo> {
         let Some(sig) = self.resolve_rel(&atom.name, atom.span) else {
-            // Bind the atom's fresh variables with unknown types to avoid cascades.
+            // Bind the atom's fresh variables with unknown types and unknown
+            // time provenance, so that neither WF-3 nor WF-6 is judged on
+            // what this atom would have bound; parameters passed to it still
+            // count as used (W2).
             for t in &atom.terms {
-                if let Term::Var(v, _) = t {
-                    if !self.is_bound(v) {
-                        self.bind(v, None, TimeProv::Other);
+                match t {
+                    Term::Var(v, _) if !self.is_bound(v) => self.bind(v, None, TimeProv::Unknown),
+                    Term::Param(p, sp) => {
+                        self.param_ty(p, *sp);
                     }
+                    _ => {}
                 }
             }
             return None;
@@ -234,11 +300,28 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 ),
                             );
                         } else if arg.mode == Mode::In {
-                            self.err(
-                                Code::M,
-                                *sp,
-                                format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
-                            );
+                            // A resample groups a stored relation by its entity
+                            // columns (section 4), so a fresh entity variable in
+                            // a `+` position is bound by the grouping; a derived
+                            // relation is a call and must have its inputs bound.
+                            let grouped = ctx == AtomCtx::ResampleInner && arg.ty.is_entity();
+                            let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
+                            if grouped && !stored {
+                                self.err(
+                                    Code::M,
+                                    *sp,
+                                    format!(
+                                        "`+{}` of `{}` is an input, and `{}` is a derived relation, so `{}` must be bound before the resample; a resample groups only a stored relation by a fresh entity variable (or declare `{}` with `-{}`)",
+                                        arg.name, atom.name, atom.name, v, atom.name, arg.name
+                                    ),
+                                );
+                            } else if !grouped {
+                                self.err(
+                                    Code::M,
+                                    *sp,
+                                    format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
+                                );
+                            }
                         }
                         let prov = if is_key {
                             if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
@@ -294,6 +377,25 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         continue;
                     }
                     self.ctor(c, subs, *sp, ctx == AtomCtx::Negative || arg.mode == Mode::In, arg.mode == Mode::In);
+                    // WF-9 (C): `decided` holds only this strategy's own
+                    // decisions, so a pattern with the other mode's
+                    // constructor can never match (adv-18). A library has no
+                    // mode: its patterns are judged by each strategy that
+                    // reaches them, in `Checker::program_checks`.
+                    if atom.name == "decided" && self.rule.unit == self.cx.root.name {
+                        if let (Some(mode), Some(m)) = (self.cx.mode, ctor_mode(c)) {
+                            if m != mode {
+                                self.err(
+                                    Code::C,
+                                    *sp,
+                                    format!(
+                                        "`{}` is a {} constructor but this strategy declares `mode {}`; `decided` holds only this strategy's own decisions, so `decided({}, {}(...))` can never match",
+                                        c, m, mode, atom.terms[0], c
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -303,6 +405,11 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 if let Term::Var(v, sp) = kterm {
                     let head_t = self.head_time.clone().unwrap_or_default();
                     match key_prov {
+                        // The head time itself, bound somewhere other than a
+                        // key position: `head()` reports that once, so no
+                        // "`T` is not derived from `T`" here.
+                        TimeProv::Other if *v == head_t => {}
+                        TimeProv::Unknown => {}
                         TimeProv::Other => self.err(
                             Code::F,
                             *sp,
@@ -328,15 +435,29 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             }
             if let Some(r) = sig.res {
                 if r != self.res {
-                    let head_t = self.rule.head.name.clone();
-                    self.err(
-                        Code::X,
-                        atom.span,
+                    let head_name = self.rule.head.name.clone();
+                    let kernel_supplied = matches!(sig.kind, Kind::Executor | Kind::KernelState | Kind::Output);
+                    let root = self.cx.root;
+                    let msg = if kernel_supplied && self.rule.unit != root.name {
+                        // An executor relation sits at the decision resolution of
+                        // the strategy being checked (section 6), which a library
+                        // rule cannot see from its own text.
+                        format!(
+                            "`{}` is at {}, the decision resolution of {} `{}`, but this rule (head `{}`) is at {}; library `{}` ({}) can only read executor relations from a {} that decides at {}",
+                            atom.name, r, root.kind, root.name, head_name, self.res, self.rule.unit, self.res, root.kind, self.res
+                        )
+                    } else if kernel_supplied {
+                        format!(
+                            "`{}` is at {}, the decision resolution of {} `{}`, but this rule (head `{}`) is at {}; executor relations are read at the decision resolution only",
+                            atom.name, r, root.kind, root.name, head_name, self.res
+                        )
+                    } else {
                         format!(
                             "`{}` is at {} but this rule (head `{}`) is at {}; two resolutions meet only through resample",
-                            atom.name, r, head_t, self.res
-                        ),
-                    );
+                            atom.name, r, head_name, self.res
+                        )
+                    };
+                    self.err(Code::X, atom.span, msg);
                 }
             }
         }
@@ -510,7 +631,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 Some(v.clone())
             }
             t => {
-                self.err(Code::T, t.span(), format!("{} must be a fresh variable, found `{}`", what, t));
+                self.err(Code::T, t.span(), format!("{} is bound by the builtin and must be a fresh variable, found `{}`", what, t));
                 None
             }
         }
@@ -532,9 +653,15 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 self.atom(a, AtomCtx::Negative);
             }
             Literal::Builtin(b, span) => match b {
+                // The last argument of prev and lag is an output (section 4,
+                // "Binds"): a fresh variable, or `_` when only the existence
+                // of the earlier bar matters (WF-2 permits `_` in `-` positions).
                 Builtin::Prev { t, t1 } => {
                     let base = self.time_var_bound(t, "the first argument of prev");
-                    if let Some(v) = self.time_var_fresh(t1, "prev") {
+                    if matches!(t1, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(t1, "the second argument of prev") {
                         let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), true)).unwrap_or(TimeProv::Other);
                         self.bind(&v, Some(Ty::Timestamp), prov);
                     }
@@ -552,7 +679,10 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         }
                         _ => false,
                     };
-                    if let Some(v) = self.time_var_fresh(t1, "lag") {
+                    if matches!(t1, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(t1, "the third argument of lag") {
                         let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), !zero)).unwrap_or(TimeProv::Other);
                         self.bind(&v, Some(Ty::Timestamp), prov);
                     }
@@ -610,8 +740,16 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     }
                 } else {
                     let t = self.expr_ty(expr);
-                    if t == Some(Ty::Timestamp) {
-                        self.err(Code::T, *span, "a Timestamp cannot be assigned; bind times with prev, lag, window or prior_window");
+                    // A bound time may be copied into a value column (`TE = T`,
+                    // section 2: non-key timestamps are ordinary values); it is
+                    // not computed, so anything else of type Timestamp is an
+                    // error. The copy has no provenance: using it as a key is F.
+                    if t == Some(Ty::Timestamp) && !matches!(expr, Expr::Var(..)) {
+                        self.err(
+                            Code::T,
+                            *span,
+                            "a Timestamp cannot be computed; copy a bound time with `X = T` or bind times with prev, lag, window or prior_window",
+                        );
                     }
                     self.bind(var, t, TimeProv::Other);
                 }
@@ -872,7 +1010,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 self.err(Code::T, *sp, format!("head argument `{}` of `{}` is {} but `{}` is {}", arg.name, head.name, arg.ty, v, t));
                             }
                         }
-                        if arg.mode == Mode::Key && st.prov != TimeProv::Head {
+                        if arg.mode == Mode::Key && !matches!(st.prov, TimeProv::Head | TimeProv::Unknown) {
                             self.err(Code::F, *sp, format!("head temporal key `{}` is not bound in a temporal-key position of a positive body atom (or as a resample bucket); its value would not be the time the tuple becomes available", v));
                         }
                     }
@@ -918,7 +1056,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             );
         }
         if let Some(Term::Var(t, sp)) = head.terms.first() {
-            if !self.key_vars_positive.contains(t) {
+            if !self.key_vars_positive.contains(t) && self.prov_of(t) != TimeProv::Unknown {
                 self.err(Code::C, *sp, format!("decide's time `{}` must be the temporal key of at least one positive body atom", t));
             }
         }
