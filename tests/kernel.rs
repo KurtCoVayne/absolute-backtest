@@ -816,3 +816,40 @@ fn synthetic_minute_bars_are_labelled_by_close_instant() {
     assert_eq!(bucket(Resolution::M5, times[0]), times[4]);
     assert_eq!(bucket(Resolution::M5, times[4]), times[4]);
 }
+
+/// A parameter override may not change what the checker judged on the
+/// default: `lag` by a zero duration is causal rather than strict (section 5,
+/// WF-4), so flipping a lag duration between zero and non-zero would turn a
+/// well-formed recursion into a same-time cycle. The kernel refuses it with a
+/// user-facing error instead of halting with an internal one.
+#[test]
+fn a_parameter_override_may_not_flip_a_lag_duration_to_zero() {
+    let src = r#"
+strategy lagz {
+  env equities_1d
+  resolution @1d
+  mode delta
+  param d : Duration = 5d in 0d..30d
+  param qty : Quantity<Shares> = 1 shares
+  rel cnt(+A: Equity, @T: Timestamp, -N: Scalar)
+  cnt(A, T, N) :- universe(A, T), lag(T, d, T1), cnt(A, T1, M), N = M + 1.
+  cnt(A, T, N) :- universe(A, T), N = 0, lag(T, 400d, T1), not universe(A, T1).
+  decide(T, buy(A, qty)) :- universe(A, T), cnt(A, T, N), N > 100.
+}
+"#;
+    let (prog, _) = program(src, "lagz");
+    let ds = synthetic_daily(&["AAA"], (2023, 1, 2), 40, 3);
+    let fine = ExecConfig {
+        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 7 }))],
+        ..Default::default()
+    };
+    run(&prog, &ds, fine).unwrap();
+    let flipped = ExecConfig {
+        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 0 }))],
+        ..Default::default()
+    };
+    match run(&prog, &ds, flipped) {
+        Err(RunError::Request(m)) => assert!(m.contains("lag") && m.contains("zero") && !m.contains("internal"), "{}", m),
+        other => panic!("expected the override to be refused, got {:?}", other.map(|r| r.decisions.len())),
+    }
+}
