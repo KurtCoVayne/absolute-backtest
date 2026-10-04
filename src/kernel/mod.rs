@@ -414,6 +414,17 @@ impl<'p> Kernel<'p> {
                     return Err(RunError::Request(format!("parameter `{}` of `{}` = {} is outside its range {}..{}", pname, unit, value, lo, hi)));
                 }
             }
+            // WF-4 was judged on the default: `lag` by a zero duration is
+            // causal, not strict (section 5), so an override may not change
+            // whether a lag duration is zero.
+            if let (Lit::Duration(d), Lit::Duration(v)) = (&p.value, value) {
+                if d.is_zero() != v.is_zero() && lag_uses_param(prog, unit, pname) {
+                    return Err(RunError::Request(format!(
+                        "parameter `{}` of `{}` is a lag duration and the checker judged WF-4 with its default {}; an override may not change whether it is zero (got {})",
+                        pname, unit, d, v
+                    )));
+                }
+            }
             params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp));
         }
         // Price relation for the executor.
@@ -793,6 +804,18 @@ impl<'p> Kernel<'p> {
             failed_at: None,
         })
     }
+}
+
+/// Whether any `lag` in `unit`'s rules takes parameter `name` as its length.
+fn lag_uses_param(prog: &Program, unit: &str, name: &str) -> bool {
+    fn lit(l: &Literal, name: &str) -> bool {
+        match l {
+            Literal::Builtin(Builtin::Lag { n: Expr::Param(p, _), .. }, _) => p == name,
+            Literal::Agg { conj, .. } => conj.iter().any(|c| lit(c, name)),
+            _ => false,
+        }
+    }
+    prog.rules.iter().filter(|r| r.unit == unit).any(|r| r.body.iter().any(|l| lit(l, name)))
 }
 
 fn l_num(l: &Lit) -> f64 {

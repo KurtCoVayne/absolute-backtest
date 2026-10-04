@@ -192,7 +192,9 @@ replaces defaults by name (`hold`, or `unit::name` for a library's), and
 value is a literal in the DSL's grammar (`21d`, `50 shares`, `0.02`, `"SPY"`
 or a bare identifier for an equity). An override must be of the parameter's
 declared type and within its declared range, or the run is refused before it
-starts.
+starts. An override also may not change what the checker judged on the
+default: a `lag` length may not be overridden between zero and non-zero,
+because WF-4 treats `lag` by a zero duration as causal rather than strict.
 
 A decision the executor cannot fill (no price for the instrument at the next
 bar) is reported as dropped, is still recorded in `decided`, and is not
