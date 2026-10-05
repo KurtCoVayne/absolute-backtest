@@ -16,7 +16,7 @@ Oct 4, 2026 · John Gonzalez
 > | Milestone | Covers | Status |
 > | --- | --- | --- |
 > | M0 | Section 9 (changes forced on the semantic model), W5, W6, this document | implemented |
-> | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | costs, slippage, impact, liquidity and partial fills implemented; margin, funding and borrow planned |
+> | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | implemented (costs, slippage, impact, liquidity, partial fills, margin, funding, borrow proxy); delisting and actions in M2 |
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | planned |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | planned |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | planned |
@@ -237,8 +237,12 @@ write `AAPL`, and the bundle date fixes what that means.
 > liquidity model (participation cap from bar volume, a delta remainder
 > expiring and a target re-issuing itself, square-root impact in
 > participation of ADV, fill ratio and participation reported, fills above a
-> threshold warned) and the ruin, leverage and oversize policies of PR #48
-> (halt by default). The
+> threshold warned), the margin model (gross exposure up to a configured
+> multiple of equity, Reg T as a preset, a maintenance margin call that
+> halts, liquidates or is allowed), funding (interest on cash and on a
+> debit, borrow fee by ADV bucket with the smallest bucket not shortable, a
+> short rebate, the exposure series behind `--nav`) and the ruin, leverage
+> and oversize policies of PR #48 (halt by default). The
 > leverage default stays at 1x gross by the owner's ruling; Reg T (50 %
 > initial, 25 % maintenance) is a configuration preset, not the default.
 

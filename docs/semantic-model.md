@@ -438,7 +438,13 @@ superseded, and impact moves the fill price against the order by a multiple
 of the square root of the filled quantity over average daily volume. A long
 that is bought is sized at the price it will fill at, so the cash it spends
 is the weight of equity; a bar's transaction costs are never leverage, so a
-fully invested book stays fully invested after paying them. Consequently `position(A, T)` is the position held at
+fully invested book stays fully invested after paying them. Buying power is
+configuration as well: gross exposure may reach a configured multiple of
+equity (1 by default, no borrowing; Reg T's 2x with 25% maintenance is a
+preset), a margin call at a bar's mark halts, liquidates pro rata or is
+allowed, and funding accrues over calendar time at constant annual rates on
+cash, on a debit and on short notional by borrow bucket, with the smallest
+bucket not shortable. Consequently `position(A, T)` is the position held at
 close T, after fills of decisions made at prev(T); `fill(A, T, Q, P)` records
 those fills; `cash(T, C)` is cash after them; `decided(T0, D)` holds every
 decision the strategy emitted at T0. A decision rule at T therefore sees the

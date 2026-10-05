@@ -226,7 +226,26 @@ new request) and the mean and maximum participation, and a run with fills
 above 5% of bar volume carries a `market-impact` warning. A cap can leave a
 reduction partially filled while the bar's buys fill to their targets, which
 is leverage: the leverage policy decides (halt by default; `reject` drops the
-buy). Two distinct decisions for one instrument at one bar halt the
+buy).
+
+The margin and funding models (same section) are configuration too. Gross
+exposure may reach `max_gross` times equity after a fill (1 by default: no
+borrowing, as ruled for the executor policies; `ExecConfig::reg_t()` or
+`--margin reg-t` is Reg T: 2x gross, 25% maintenance, orders beyond rejected
+and logged). At every bar's mark, positive equity below `maintenance_margin`
+of gross exposure is a margin call: halt by default, `liquidate` sells the
+fraction of every position that restores maintenance at the bar's close
+(fills flagged forced), `allow` carries on and the run counts the calls.
+Funding accrues over the calendar time between consecutive decision bars at
+annual rates: positive cash earns `cash_rate` (0 in v1 and warned as cash
+management), a debit pays `margin_rate` (5%; a run that paid it is warned
+that the rate is constant), short notional pays the borrow fee of its
+average-daily-volume bucket (below 100k shares: not shortable, the order is
+dropped with `not shortable: ADV ...`; below 1M: 300 bps; above: 25 bps, all
+a proxy and warned) and earns `short_rebate` (0). `RunResult.funding` sums
+the four; `RunResult.exposure` records cash, gross, net, equity and leverage
+at every bar's mark, printed as CSV by `--nav` for the study and the
+reference engine. Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
 negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
 a constant series, a `quantile` level outside [0, 1], and a non-positive delta
@@ -299,6 +318,8 @@ abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [
         [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N]
         [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
         [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
+        [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow]
+        [--cash-rate X] [--margin-rate X] [--short-rebate X] [--nav]
         [--price-relation REL]
         [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow]
         [--on-ruin halt|continue] [--lot whole|fractional]
@@ -448,6 +469,13 @@ small and easy to flip.
   decision names the instrument or the instrument has no price. Re-issues
   are fills without decisions: `decided` still holds only what the strategy
   emitted.
+- **Ruin is not a margin call.** The maintenance check fires on positive
+  equity below the margin of gross exposure; a non-positive equity is ruin
+  and is judged by the ruin policy when an order comes to be filled, so a
+  book that is already ruined and silent is not halted twice over.
+- **A forced liquidation pays commission and fee, not slippage or impact**,
+  and fills at the mark bar's close; it is the kernel's order, flagged
+  `forced`, and never a decision of the strategy.
 - **A non-positive price is a data error**, rejected at load with the file
   and line.
 

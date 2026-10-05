@@ -89,6 +89,14 @@ fn usage_documents_every_option() {
         "--impact",
         "--adv-window",
         "--volume-relation",
+        "--margin",
+        "--max-gross",
+        "--maintenance",
+        "--on-margin-call",
+        "--cash-rate",
+        "--margin-rate",
+        "--short-rebate",
+        "--nav",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

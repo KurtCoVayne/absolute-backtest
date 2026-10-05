@@ -226,6 +226,7 @@ strategy full {
         initial_cash: 1000.0,
         slippage_bps: 100.0,
         impact_coef: 0.0,
+        margin_rate: 0.0,
         ..ExecConfig::default()
     };
     let r = run(&prog, &ds, cfg).unwrap();
@@ -262,7 +263,8 @@ fn a_frictionless_run_is_warned_and_a_default_run_is_not() {
         },
     )
     .unwrap();
-    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    // The v1 cash rate is zero and warned (cash management); no cost model is off.
+    assert!(r.warnings.iter().all(|w| w.bias == "cash-management"), "{:?}", r.warnings);
     // Commission off but the minimum on is still a cost model; slippage off entirely warns once.
     let r = run(
         &prog,
@@ -275,6 +277,6 @@ fn a_frictionless_run_is_warned_and_a_default_run_is_not() {
         },
     )
     .unwrap();
-    let biases: Vec<&str> = r.warnings.iter().map(|w| w.bias.as_str()).collect();
+    let biases: Vec<&str> = r.warnings.iter().map(|w| w.bias.as_str()).filter(|b| *b != "cash-management").collect();
     assert_eq!(biases, vec!["slippage"], "{:?}", r.warnings);
 }
