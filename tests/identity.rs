@@ -70,7 +70,13 @@ fn the_ticker_relation_is_derived_from_the_security_table() {
     let ds = market();
     let rows: Vec<(String, String, String)> = ds.facts["ticker"]
         .iter()
-        .map(|tu| (ds.symbols.name(tu[0].as_equity().unwrap()).to_string(), format_timestamp(tu[1].as_time().unwrap()), ds.label_name(&tu[2]).unwrap().to_string()))
+        .map(|tu| {
+            (
+                ds.symbols.name(tu[0].as_equity().unwrap()).to_string(),
+                format_timestamp(tu[1].as_time().unwrap()),
+                ds.label_name(&tu[2]).unwrap().to_string(),
+            )
+        })
         .collect();
     assert!(rows.contains(&("E2".into(), "2024-01-10".into(), "BBB".into())), "{:?}", rows);
     assert!(rows.contains(&("E2".into(), "2024-01-11".into(), "BBX".into())), "{:?}", rows);
@@ -87,12 +93,19 @@ fn a_ticker_change_keeps_the_position_on_the_same_id() {
     let ds = market();
     let p = program(HOLD_NAMED, "hold_named");
     // As of the bundle date (the last bar) BBB is E3; ask for E2 by its old name as of day 2.
-    let cfg = ExecConfig { initial_cash: 10_000.0, as_of: Some(day(&ds, 1)), ..ExecConfig::frictionless() };
+    let cfg = ExecConfig {
+        initial_cash: 10_000.0,
+        as_of: Some(day(&ds, 1)),
+        ..ExecConfig::frictionless()
+    };
     let r = run(&p, &ds, cfg).unwrap();
     assert_eq!(r.fills.len(), 1, "{:?}", r.fills);
     assert_eq!(r.symbols[r.fills[0].equity as usize], "E2");
     // The rename on day 4 changes nothing about the position.
-    assert_eq!(r.final_positions.iter().map(|(s, q)| (r.symbols[*s as usize].clone(), *q)).collect::<Vec<_>>(), vec![("E2".to_string(), 10.0)]);
+    assert_eq!(
+        r.final_positions.iter().map(|(s, q)| (r.symbols[*s as usize].clone(), *q)).collect::<Vec<_>>(),
+        vec![("E2".to_string(), 10.0)]
+    );
     assert_eq!(r.decisions.len(), 1, "flat(E2) is false after the buy whatever its ticker: {:?}", r.decisions.len());
 }
 
@@ -101,13 +114,30 @@ fn a_reused_ticker_resolves_by_the_bundle_date() {
     let ds = market();
     let p = program(HOLD_NAMED, "hold_named");
     // Default bundle date: the last bar, when BBB is the new listing E3.
-    let r = run(&p, &ds, ExecConfig { initial_cash: 10_000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &p,
+        &ds,
+        ExecConfig {
+            initial_cash: 10_000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     assert_eq!(r.fills.len(), 1, "{:?}", r.fills);
     assert_eq!(r.symbols[r.fills[0].equity as usize], "E3");
     assert_eq!(format_timestamp(r.fills[0].t), "2024-01-15", "E3 is in the universe from day 5; the decision fills on day 6");
     // A bundle date before the listing resolves to E2.
-    let r = run(&p, &ds, ExecConfig { initial_cash: 10_000.0, as_of: Some(day(&ds, 3)), ..ExecConfig::frictionless() }).unwrap();
-    assert_eq!(r.symbols[r.fills[0].equity as usize], "E2", "BBB as of day 4 is... E2 gave it up that day");
+    let r = run(
+        &p,
+        &ds,
+        ExecConfig {
+            initial_cash: 10_000.0,
+            as_of: Some(day(&ds, 2)),
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.symbols[r.fills[0].equity as usize], "E2", "BBB as of day 3 is still E2");
 }
 
 #[test]
@@ -121,7 +151,16 @@ fn a_ticker_nobody_carries_at_the_bundle_date_is_a_configuration_error() {
     }
     // BBX exists only from day 4: as of day 2 it is unknown.
     let p = program(&HOLD_NAMED.replace("\"BBB\"", "\"BBX\""), "hold_named");
-    let err = run(&p, &ds, ExecConfig { as_of: Some(day(&ds, 1)), ..ExecConfig::frictionless() }).err().unwrap();
+    let err = run(
+        &p,
+        &ds,
+        ExecConfig {
+            as_of: Some(day(&ds, 1)),
+            ..ExecConfig::frictionless()
+        },
+    )
+    .err()
+    .unwrap();
     assert!(err.to_string().contains("BBX"), "{}", err);
     // A dataset without a security table is the old world: the ticker is the id.
     let legacy = absolute_backtest::data::synthetic_daily(&["AAA", "BBB"], (2024, 1, 8), 6, 1);
@@ -164,7 +203,15 @@ fn the_security_table_loads_and_round_trips_through_csv() {
     assert!(notes.is_empty(), "{:?}", notes);
     assert_eq!(ds.securities.len(), 4);
     assert_eq!(ds.facts["ticker"].len(), 14);
-    let r = run(&p, &ds, ExecConfig { initial_cash: 10_000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &p,
+        &ds,
+        ExecConfig {
+            initial_cash: 10_000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     assert_eq!(r.symbols[r.fills[0].equity as usize], "E3");
     // An equity field that is not a security id is an error naming the line.
     fs::write(dir.join("close.csv"), "A,T,P\nE9,2024-01-08,1.0\n").unwrap();

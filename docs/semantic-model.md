@@ -410,6 +410,7 @@ interface.
 | `close` | `(+A: Equity, @T, -P: Price<USD>)` | no | market data |
 | `volume` | `(+A: Equity, @T, -V: Quantity<Shares>)` | no | market data |
 | `universe` | `(+A: Equity, @T)` | yes | market data (membership as of T) |
+| `ticker` | `(+A: Equity, @T, -S: Label)` | yes | the bundle's security table (data-bundle doc, section 3): the ticker `A` carried over bar T; derived, never a file |
 | `position` | `(+A: Equity, @T, -Q: Quantity<Shares>)` | yes | executor |
 | `cash` | `(@T, -C: Notional<USD>)` | yes | executor |
 | `fill` | `(+A: Equity, @T, -Q: Quantity<Shares>, -P: Price<USD>)` | yes | executor |

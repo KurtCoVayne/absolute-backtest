@@ -19,6 +19,32 @@ pub type Tuple = Vec<Value>;
 pub(crate) type MemoKey = (usize, Vec<Value>);
 pub(crate) type Derived = Rc<Vec<(Tuple, usize)>>;
 
+/// One row of the bundle's security table (data-bundle doc, section 3,
+/// "Identity"): the security `id` carried `ticker` from `from` (inclusive)
+/// to `to` (exclusive; `None` is still).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Security {
+    pub id: Sym,
+    pub ticker: String,
+    pub from: i64,
+    pub to: Option<i64>,
+}
+
+/// The security carrying `ticker` at `as_of`, in a table.
+pub fn resolve_ticker(securities: &[Security], ticker: &str, as_of: i64) -> Result<Sym, String> {
+    securities
+        .iter()
+        .find(|s| s.ticker == ticker && s.from <= as_of && s.to.map(|to| as_of < to).unwrap_or(true))
+        .map(|s| s.id)
+        .ok_or_else(|| {
+            format!(
+                "`{}` is not a ticker of the bundle as of {} (a ticker literal names the security carrying it at the bundle date)",
+                ticker,
+                time::format_timestamp(as_of)
+            )
+        })
+}
+
 /// Primitive facts: an environment instance E (section 7).
 #[derive(Clone, Debug, Default)]
 pub struct Dataset {
@@ -26,6 +52,11 @@ pub struct Dataset {
     /// Labels (`Ty::Label`), interned apart from the equities.
     pub labels: Symbols,
     pub facts: BTreeMap<String, Vec<Tuple>>,
+    /// The security table: stable ids and their ticker history. Empty for
+    /// a dataset without one, where the ticker is the id.
+    pub securities: Vec<Security>,
+    /// The bundle date a ticker literal resolves at; the last bar when unset.
+    pub as_of: Option<i64>,
 }
 
 impl Dataset {
@@ -34,6 +65,76 @@ impl Dataset {
     }
     pub fn intern(&mut self, name: &str) -> Sym {
         self.symbols.intern(name)
+    }
+    /// Record that security `id` carried `ticker` over `[from, to)`.
+    pub fn add_security(&mut self, id: &str, ticker: &str, from: i64, to: Option<i64>) -> Sym {
+        let sym = self.symbols.intern(id);
+        self.securities.push(Security {
+            id: sym,
+            ticker: ticker.to_string(),
+            from,
+            to,
+        });
+        sym
+    }
+    /// The last temporal key of any fact.
+    pub fn last_bar(&self) -> Option<i64> {
+        self.facts.values().flatten().filter_map(|tu| tu.iter().find_map(|v| v.as_time())).max()
+    }
+    /// The date a ticker literal resolves at: `as_of`, or the last bar.
+    pub fn bundle_date(&self) -> Option<i64> {
+        self.as_of.or_else(|| self.last_bar())
+    }
+    /// The security carrying `ticker` at the bundle date (or `as_of`).
+    pub fn resolve_ticker(&self, ticker: &str, as_of: Option<i64>) -> Result<Sym, String> {
+        let at = as_of.or_else(|| self.bundle_date()).unwrap_or(0);
+        resolve_ticker(&self.securities, ticker, at)
+    }
+    /// Materialise `ticker(A, @T, S)` from the security table over the bars
+    /// of `universe` (or of every fact), one row per security and bar in its
+    /// interval; without a table every symbol is its own ticker. Replaces
+    /// any `ticker` facts present.
+    pub fn derive_tickers(&mut self) {
+        let mut bars: BTreeSet<i64> = BTreeSet::new();
+        let source = if self.facts.contains_key("universe") {
+            vec!["universe".to_string()]
+        } else {
+            self.facts.keys().cloned().collect()
+        };
+        for rel in &source {
+            for tu in &self.facts[rel] {
+                bars.extend(tu.iter().find_map(|v| v.as_time()));
+            }
+        }
+        let rows: Vec<(Sym, i64, String)> = if self.securities.is_empty() {
+            let mut present: BTreeSet<(Sym, i64)> = BTreeSet::new();
+            for rel in &source {
+                for tu in &self.facts[rel] {
+                    if let (Some(sym), Some(t)) = (tu.iter().find_map(|v| v.as_equity()), tu.iter().find_map(|v| v.as_time())) {
+                        present.insert((sym, t));
+                    }
+                }
+            }
+            present.into_iter().map(|(sym, t)| (sym, t, self.symbols.name(sym).to_string())).collect()
+        } else {
+            let mut rows = Vec::new();
+            for s in &self.securities {
+                for &t in bars.range(s.from..) {
+                    if s.to.map(|to| t >= to).unwrap_or(false) {
+                        break;
+                    }
+                    rows.push((s.id, t, s.ticker.clone()));
+                }
+            }
+            rows.sort_by_key(|r| (r.0, r.1));
+            rows
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (sym, t, ticker) in rows {
+            let label = self.labels.intern(&ticker);
+            out.push(vec![Value::Equity(sym), Value::Time(t), Value::Label(label)]);
+        }
+        self.facts.insert("ticker".to_string(), out);
     }
     pub fn intern_label(&mut self, name: &str) -> Sym {
         self.labels.intern(name)
@@ -55,6 +156,8 @@ impl Dataset {
             symbols: self.symbols.clone(),
             labels: self.labels.clone(),
             facts: BTreeMap::new(),
+            securities: self.securities.clone(),
+            as_of: Some(self.bundle_date().unwrap_or(t).min(t)),
         };
         for (name, tuples) in &self.facts {
             let Some(sig) = prog.relations.get(name) else { continue };
@@ -284,6 +387,9 @@ pub struct ExecConfig {
     /// Borrow buckets by average daily volume, ascending `adv_below`, the
     /// last unbounded; an instrument whose ADV is unknown is in the last.
     pub borrow: Vec<BorrowBucket>,
+    /// The bundle date a ticker literal resolves at (data-bundle doc,
+    /// section 3); the dataset's own, or its last bar, when `None`.
+    pub as_of: Option<i64>,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -345,6 +451,7 @@ impl Default for ExecConfig {
                 },
             ],
             price_relation: None,
+            as_of: None,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
             on_oversize: OnOversize::Halt,
@@ -724,6 +831,12 @@ pub struct Kernel<'p> {
     pub(crate) last_price: HashMap<Sym, f64>,
     pub(crate) params: HashMap<(String, String), Value>,
     pub(crate) labels: Symbols,
+    /// The security table with ids in the kernel's symbol order, and the
+    /// bundle date ticker literals and command-line names resolve at.
+    pub(crate) securities: Vec<Security>,
+    pub(crate) as_of: Option<i64>,
+    /// What each equity literal of the program (a ticker) resolved to.
+    pub(crate) literal_equities: HashMap<String, Sym>,
 }
 
 impl<'p> Kernel<'p> {
@@ -739,13 +852,31 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
-        // Intern every equity and label literal of the program, then order
-        // ids by identifier.
+        // Resolve every equity literal of the program (a ticker, as of the
+        // bundle date, through the security table; the ticker is the id
+        // without one), intern every label literal, then order ids by
+        // identifier.
+        let as_of = cfg.as_of.or_else(|| dataset.bundle_date());
         let mut symbols = dataset.symbols.clone();
         let mut labels = dataset.labels.clone();
+        let mut literal_equities: HashMap<String, Sym> = HashMap::new();
+        let mut unresolved: Vec<String> = Vec::new();
         let mut intern = |l: &Lit| match l {
             Lit::Equity(s) => {
-                symbols.intern(s);
+                if literal_equities.contains_key(s) {
+                    return;
+                }
+                if dataset.securities.is_empty() {
+                    let sym = symbols.intern(s);
+                    literal_equities.insert(s.clone(), sym);
+                } else {
+                    match dataset.resolve_ticker(s, as_of) {
+                        Ok(sym) => {
+                            literal_equities.insert(s.clone(), sym);
+                        }
+                        Err(m) => unresolved.push(m),
+                    }
+                }
             }
             Lit::Label(s) => {
                 labels.intern(s);
@@ -763,8 +894,20 @@ impl<'p> Kernel<'p> {
         for rule in &prog.rules {
             for_each_lit(rule, &mut intern);
         }
+        if let Some(m) = unresolved.first() {
+            return Err(RunError::Config(m.clone()));
+        }
         let (symbols, remap) = symbols.sorted();
         let (labels, remap_labels) = labels.sorted();
+        let literal_equities: HashMap<String, Sym> = literal_equities.into_iter().map(|(k, s)| (k, remap[s as usize])).collect();
+        let securities: Vec<Security> = dataset
+            .securities
+            .iter()
+            .map(|s| Security {
+                id: remap[s.id as usize],
+                ..s.clone()
+            })
+            .collect();
         let remap_value = |v: &Value| -> Value {
             match v {
                 Value::Equity(s) => Value::Equity(remap[*s as usize]),
@@ -843,7 +986,7 @@ impl<'p> Kernel<'p> {
         let mut lab_tmp = labels.clone();
         for (unit, ps) in &prog.params {
             for (name, p) in ps {
-                params.insert((unit.clone(), name.clone()), lit_value(&p.value, &mut sym_tmp, &mut lab_tmp));
+                params.insert((unit.clone(), name.clone()), lit_value(&p.value, &mut sym_tmp, &mut lab_tmp, &literal_equities));
             }
         }
         for (name, value) in &cfg.param_overrides {
@@ -884,7 +1027,7 @@ impl<'p> Kernel<'p> {
                     )));
                 }
             }
-            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp, &mut lab_tmp));
+            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp, &mut lab_tmp, &literal_equities));
         }
         // Price relation for the executor.
         let price_rel = match &cfg.price_relation {
@@ -958,6 +1101,9 @@ impl<'p> Kernel<'p> {
             volume_rel,
             volume_col,
             labels,
+            securities,
+            as_of,
+            literal_equities,
             last_price: HashMap::new(),
             params,
         })
@@ -1702,8 +1848,8 @@ impl<'p> Kernel<'p> {
     /// integer is a Count; write a quantity with a decimal point or a unit).
     pub fn parse_binding(&self, raw: &str) -> Result<Value, String> {
         let raw = raw.trim();
-        if let Some(s) = self.symbols.get(raw) {
-            return Ok(Value::Equity(s));
+        if let Ok(v) = self.equity(raw) {
+            return Ok(v);
         }
         if let Some(t) = time::parse_timestamp(raw) {
             return Ok(Value::Time(t));
@@ -1718,8 +1864,15 @@ impl<'p> Kernel<'p> {
         }
     }
 
+    /// A security by id, or by the ticker it carries at the bundle date.
     fn equity(&self, name: &str) -> Result<Value, String> {
-        self.symbols.get(name).map(Value::Equity).ok_or_else(|| format!("`{}` is not an equity of the dataset", name))
+        if let Some(s) = self.symbols.get(name) {
+            return Ok(Value::Equity(s));
+        }
+        if self.securities.is_empty() {
+            return Err(format!("`{}` is not an equity of the dataset", name));
+        }
+        resolve_ticker(&self.securities, name, self.as_of.unwrap_or(0)).map(Value::Equity)
     }
 
     /// Why rule `rule_idx` did or did not fire at `t` (section 7): the first
@@ -1863,14 +2016,14 @@ fn price_column(sig: &Signature) -> Option<usize> {
         .position(|a| a.mode == Mode::Out && matches!(&a.ty, Ty::Quantity(d) if d.c2 == 2 && d.s2 == -2 && d.t2 == 0))
 }
 
-pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols) -> Value {
+pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols, equities: &HashMap<String, Sym>) -> Value {
     match l {
         Lit::Int(i) => Value::Count(*i),
         Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
         Lit::Duration(d) => Value::Dur(*d),
-        // The checker resolves every string literal; an unresolved one can
-        // only come from an unchecked program, and reads as an equity.
-        Lit::Str(s) | Lit::Equity(s) => Value::Equity(symbols.intern(s)),
+        // A ticker literal is what `Kernel::new` resolved it to; one it did
+        // not see (an unchecked program) reads as its own id.
+        Lit::Str(s) | Lit::Equity(s) => Value::Equity(equities.get(s).copied().unwrap_or_else(|| symbols.intern(s))),
         Lit::Label(s) => Value::Label(labels.intern(s)),
     }
 }

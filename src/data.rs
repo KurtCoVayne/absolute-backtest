@@ -1,13 +1,13 @@
 //! Environment instances from CSV files, and a deterministic synthetic
 //! market for tests and demos.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use crate::check::Program;
 use crate::ir::*;
 use crate::kernel::time::{bucket, days_from_civil, format_timestamp, parse_timestamp, weekday, DAY};
-use crate::kernel::{Dataset, Value};
+use crate::kernel::{Dataset, Security, Sym, Value};
 
 /// Load one CSV per primitive relation of the program's environment from
 /// `dir` (`<relation>.csv`, header row naming the signature's arguments).
@@ -33,12 +33,56 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
     }
     let mut ds = Dataset::new();
     let mut notes = Vec::new();
+    // The security table (data-bundle doc, section 3): `securities.csv` with
+    // `id,ticker,from,to` (`to` empty when the ticker is still carried). With
+    // it, every equity field is a security id; without it, the ticker is the id.
+    let table = dir.join("securities.csv");
+    if table.exists() {
+        let text = std::fs::read_to_string(&table).map_err(|e| format!("{}: {}", table.display(), e))?;
+        let mut lines = text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty());
+        let header: Vec<String> = lines
+            .next()
+            .ok_or_else(|| format!("{}: empty file", table.display()))?
+            .1
+            .split(',')
+            .map(|h| h.trim().to_lowercase())
+            .collect();
+        let col = |name: &str| header.iter().position(|h| h == name).ok_or_else(|| format!("{}: header lacks column `{}`", table.display(), name));
+        let (ci, ct, cf, cto) = (col("id")?, col("ticker")?, col("from")?, col("to")?);
+        for (ln, line) in lines {
+            let lineno = ln + 1;
+            let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
+            let get = |c: usize| fields.get(c).copied().ok_or_else(|| format!("{}:{}: short row", table.display(), lineno));
+            let (id, ticker) = (get(ci)?, get(ct)?);
+            if id.is_empty() || ticker.is_empty() {
+                return Err(format!("{}:{}: id and ticker must be non-empty", table.display(), lineno));
+            }
+            let from_raw = get(cf)?;
+            let from = parse_timestamp(from_raw).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), lineno, from_raw))?;
+            let to_raw = get(cto)?;
+            let to = if to_raw.is_empty() {
+                None
+            } else {
+                Some(parse_timestamp(to_raw).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), lineno, to_raw))?)
+            };
+            ds.add_security(id, ticker, from, to);
+        }
+        let problems = check_identities(&ds);
+        if !problems.is_empty() {
+            return Err(format!("{}: {}", table.display(), problems.join("; ")));
+        }
+    }
+    let ids: HashSet<Sym> = ds.securities.iter().map(|s| s.id).collect();
     for (name, sig) in &prog.relations {
         if !matches!(sig.kind, Kind::Primitive { .. }) {
             continue;
         }
         let path = dir.join(format!("{}.csv", name));
         if !path.exists() {
+            if name == "ticker" {
+                // Derived from the security table after the other relations load.
+                continue;
+            }
             notes.push(format!("no file {}; relation left empty", path.display()));
             continue;
         }
@@ -75,6 +119,11 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
             for (i, (arg, &c)) in sig.args.iter().zip(cols.iter()).enumerate() {
                 let raw = fields.get(c).ok_or_else(|| format!("{}:{}: missing column `{}`", path.display(), lineno, arg.name))?;
                 let mut v = parse_value(&mut ds, &arg.ty, raw).ok_or_else(|| format!("{}:{}: `{}` is not a {}", path.display(), lineno, raw, arg.ty))?;
+                if let (true, Value::Equity(s)) = (!ids.is_empty(), &v) {
+                    if !ids.contains(s) {
+                        return Err(format!("{}:{}: `{}` is not a security id of securities.csv", path.display(), lineno, raw));
+                    }
+                }
                 if let (Some(res), Value::Time(t)) = (sig.res.filter(|_| key_pos == Some(i)), &v) {
                     v = Value::Time(bucket(res, *t));
                 }
@@ -114,7 +163,50 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
             notes.push(format!("{} has no rows; relation left empty", path.display()));
         }
     }
+    if prog.relations.get("ticker").map(|s| matches!(s.kind, Kind::Primitive { .. })).unwrap_or(false) && !dir.join("ticker.csv").exists() {
+        ds.derive_tickers();
+    }
     Ok((ds, notes))
+}
+
+/// The identity bundle tests (data-bundle doc, section 3): every interval
+/// ends after it starts, one id carries one ticker at a time, and one ticker
+/// is carried by one id at a time.
+pub fn check_identities(ds: &Dataset) -> Vec<String> {
+    let mut out = Vec::new();
+    let show = |s: &Security| -> String {
+        format!(
+            "{} {} {}..{}",
+            ds.symbols.name(s.id),
+            s.ticker,
+            format_timestamp(s.from),
+            s.to.map(format_timestamp).unwrap_or_default()
+        )
+    };
+    for s in &ds.securities {
+        if s.to.map(|to| to <= s.from).unwrap_or(false) {
+            out.push(format!("{}: the interval ends before it starts", show(s)));
+        }
+    }
+    let overlap = |a: &Security, b: &Security| -> bool { a.from < b.to.unwrap_or(i64::MAX) && b.from < a.to.unwrap_or(i64::MAX) };
+    for (i, a) in ds.securities.iter().enumerate() {
+        for b in &ds.securities[i + 1..] {
+            if a.id == b.id && overlap(a, b) {
+                out.push(format!("id {}: ticker intervals overlap ({} and {})", ds.symbols.name(a.id), show(a), show(b)));
+            }
+            if a.id != b.id && a.ticker == b.ticker && overlap(a, b) {
+                out.push(format!(
+                    "ticker {} is carried by {} and {} at once ({} and {})",
+                    a.ticker,
+                    ds.symbols.name(a.id),
+                    ds.symbols.name(b.id),
+                    show(a),
+                    show(b)
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// One CSV field for a value.
@@ -146,8 +238,25 @@ fn parse_value(ds: &mut Dataset, ty: &Ty, raw: &str) -> Option<Value> {
 /// Write a dataset as one CSV per relation (the inverse of `load_csv_dir`).
 pub fn write_csv_dir(prog: &Program, ds: &Dataset, dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    if !ds.securities.is_empty() {
+        let mut out = String::from("id,ticker,from,to\n");
+        for s in &ds.securities {
+            out.push_str(&format!(
+                "{},{},{},{}\n",
+                ds.symbols.name(s.id),
+                s.ticker,
+                format_timestamp(s.from),
+                s.to.map(format_timestamp).unwrap_or_default()
+            ));
+        }
+        std::fs::write(dir.join("securities.csv"), out).map_err(|e| e.to_string())?;
+    }
     for (name, tuples) in &ds.facts {
         let Some(sig) = prog.relations.get(name) else { continue };
+        if name == "ticker" {
+            // Derived from the security table (or from the symbols) at load.
+            continue;
+        }
         let mut out = String::new();
         out.push_str(&sig.args.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(","));
         out.push('\n');
@@ -220,6 +329,7 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
             ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
         }
     }
+    ds.derive_tickers();
     ds
 }
 

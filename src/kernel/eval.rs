@@ -103,7 +103,7 @@ impl<'p> Kernel<'p> {
             Term::Var(v, _) => env[cr.slots[v]].clone().ok_or_else(|| RunError::Internal(format!("variable `{}` unbound in rule {}", v, cr.label))),
             Term::Wild(_) => Err(RunError::Internal(format!("wildcard where a value is needed in rule {}", cr.label))),
             Term::Param(p, _) => self.param_value(cr, p),
-            Term::Lit(l, _) => Ok(super::lit_value(l, &mut self.symbols, &mut self.labels)),
+            Term::Lit(l, _) => Ok(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
             Term::Ctor(c, subs, _) => {
                 let ctor = Ctor::parse(c).ok_or_else(|| RunError::Internal(format!("unknown constructor `{}`", c)))?;
                 let e = self.term_value(cr, &subs[0], env)?;
@@ -147,7 +147,7 @@ impl<'p> Kernel<'p> {
                 Term::Var(v, _) => env[cr.slots[v]].clone(),
                 Term::Wild(_) | Term::Ctor(..) => None,
                 Term::Param(p, _) => Some(self.param_value(cr, p)?),
-                Term::Lit(l, _) => Some(super::lit_value(l, &mut self.symbols, &mut self.labels)),
+                Term::Lit(l, _) => Some(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
             });
         }
         Ok(pat)
@@ -486,7 +486,7 @@ impl<'p> Kernel<'p> {
         match e {
             Expr::Var(v, _) => env[cr.slots[v]].clone().ok_or_else(|| RunError::Internal(format!("variable `{}` unbound in rule {}", v, cr.label))),
             Expr::Param(p, _) => self.param_value(cr, p),
-            Expr::Lit(l, _) => Ok(super::lit_value(l, &mut self.symbols, &mut self.labels)),
+            Expr::Lit(l, _) => Ok(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
             Expr::Neg(x, _) => match self.eval_expr(cr, x, env)? {
                 Value::Num(v) => Ok(Value::Num(-v)),
                 Value::Count(c) => Ok(Value::Count(-c)),

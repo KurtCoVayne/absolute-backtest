@@ -174,6 +174,13 @@ impl Value {
             _ => None,
         }
     }
+    pub fn as_equity(&self) -> Option<Sym> {
+        if let Value::Equity(s) = self {
+            Some(*s)
+        } else {
+            None
+        }
+    }
     pub fn as_time(&self) -> Option<i64> {
         if let Value::Time(t) = self {
             Some(*t)

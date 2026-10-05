@@ -369,6 +369,21 @@ a timestamp is `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
   line 2 already binds them`. A row identical to an earlier one is dropped.
 - A field that does not parse as its type, a header lacking a column and a
   short row are errors naming the file and line.
+- `securities.csv` (`id,ticker,from,to`, `to` empty while the ticker is
+  still carried) is the bundle's security table (`docs/data-bundle.md`,
+  section 3): with it, every equity field is a security id (an unknown id is
+  an error naming the line), the identity bundle tests run at load (one id
+  carries one ticker at a time, one ticker is carried by one id at a time,
+  every interval ends after it starts), and the `ticker(A, @T, S)` relation
+  is derived from the table over the bars of `universe` rather than read from
+  a file. Without a table the ticker is the id and `ticker` is derived from
+  the symbols, so the old CSV layout still loads.
+- A ticker literal in a program (`param bench : Equity = "SPY"`), a
+  `--param` value, a `--bind` or an `--inputs` name resolves through the
+  table to the security carrying that ticker at the bundle date: the data's
+  last bar, or `--as-of DATE` (`ExecConfig::as_of`). A ticker nobody carries
+  at that date is a configuration error naming the date, never a silent
+  empty symbol. A security id is accepted anywhere a ticker is.
 - A missing or header-only file leaves the relation empty and prints a
   `note:`; `--data DIR` must be an existing directory.
 
@@ -472,6 +487,12 @@ small and easy to flip.
   decision names the instrument or the instrument has no price. Re-issues
   are fills without decisions: `decided` still holds only what the strategy
   emitted.
+- **Without a security table the ticker is the id.** A dataset that has no
+  `securities.csv` (the synthetic markets, the old CSV layout) is the v1
+  world: equity fields are tickers, a ticker literal interns its own symbol,
+  and `ticker(A, T, S)` is derived with every symbol as its own ticker, so
+  `not ticker(...)` keeps its meaning. With a table, resolution is by bundle
+  date and strict.
 - **Ruin is not a margin call.** The maintenance check fires on positive
   equity below the margin of gross exposure; a non-positive equity is ruin
   and is judged by the ruin policy when an order comes to be filled, so a
