@@ -12,6 +12,7 @@ use absolute_backtest::check::{check_program, Program, Workspace};
 use absolute_backtest::data::{synthetic_daily, synthetic_minute};
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
 use absolute_backtest::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, RunError, Value};
+use absolute_backtest::{Duration, Lit};
 
 fn program(extra: &str, name: &str) -> (Program, Workspace) {
     let mut ws = corpus::base_workspace();
@@ -357,7 +358,14 @@ fn every_corpus_strategy_runs_and_is_deterministic() {
         assert_eq!(a.final_cash.to_bits(), b.final_cash.to_bits(), "{} is not deterministic", name);
         let modes: BTreeSet<_> = a.decisions.iter().map(|d| d.decision.ctor.mode()).collect();
         assert!(modes.iter().all(|m| *m == prog.mode), "{} emitted decisions outside its mode", name);
-        assert!(a.dropped.is_empty(), "{} dropped decisions: {:?}", name, a.dropped);
+        // Every bar has a price, so the only drops are last-bar decisions.
+        let last = *a.bars.last().unwrap();
+        assert!(
+            a.dropped.iter().all(|(t, _, reason)| *t == last && reason == "no next bar"),
+            "{} dropped decisions: {:?}",
+            name,
+            a.dropped
+        );
     }
 }
 
@@ -423,14 +431,93 @@ fn a_missing_fill_price_drops_the_decision() {
         },
     )
     .unwrap();
-    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
-    assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
     // Thursday's log return needs Wednesday's close too, so the next buy is
-    // Friday's, which has no bar left to fill it: no fills at all.
+    // Friday's, which has no bar left to fill it: no fills at all, and both
+    // decisions are dropped, each with its reason.
     let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
     assert_eq!(decisions, vec!["2024-01-09", "2024-01-12"]);
+    assert_eq!(r.dropped.len(), 2, "{:?}", r.dropped);
+    assert_eq!(format_timestamp(r.dropped[0].0), "2024-01-09");
+    assert_eq!(r.dropped[0].2, "no price for X at 2024-01-10");
+    assert_eq!(format_timestamp(r.dropped[1].0), "2024-01-12");
+    assert_eq!(r.dropped[1].2, "no next bar");
     assert!(r.fills.is_empty(), "{:?}", r.fills);
     assert_eq!(r.final_cash, 1000.0);
+}
+
+/// trend-14: a decision on the last bar has no next bar to fill at (section
+/// 6), so it is recorded as dropped with that reason and the run's
+/// arithmetic closes: decisions = fills + dropped.
+#[test]
+fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
+    let (prog, _) = program(UP_DOWN, "up_down");
+    let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // 01-09 buy, 01-10 sell, 01-11 buy, 01-12 sell: the last cannot fill.
+    assert_eq!(r.decisions.len(), 4);
+    assert_eq!(r.fills.len(), 3);
+    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
+    let (t, d, reason) = &r.dropped[0];
+    assert_eq!(format_timestamp(*t), "2024-01-12");
+    assert_eq!(r.describe_decision(d), "sell(X, 10)");
+    assert!(reason.contains("no next bar"), "{}", reason);
+    assert_eq!(r.decisions.len(), r.fills.len() + r.dropped.len());
+}
+
+/// trend-09: parameters are the only values the kernel may vary between
+/// runs of one program (section 3) and its sweep axis (section 1):
+/// `ExecConfig.param_overrides` replaces a default, checked against the
+/// parameter's type and range.
+#[test]
+fn parameter_overrides_change_the_run_within_type_and_range() {
+    let src = r#"
+strategy hold_n {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode delta
+  param hold : Duration = 1d in 1d..5d
+  param qty : Quantity<Shares> = 10 shares
+  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not bought_within(A, T, 30d).
+  decide(T, sell(A, Q)) :- held(A, T, Q), lag(T, hold, T0), decided(T0, buy(A, _)).
+}
+"#;
+    let (prog, _) = program(src, "hold_n");
+    let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let with = |overrides: Vec<(&str, Lit)>| {
+        run(
+            &prog,
+            &ds,
+            ExecConfig {
+                param_overrides: overrides.into_iter().map(|(n, l)| (n.to_string(), l)).collect(),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())
+    };
+    let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect() };
+    let days = |n: i64| Lit::Duration(Duration { months: 0, days: n });
+    assert_eq!(show(&with(vec![]).unwrap()), vec!["2024-01-08 buy(X, 10)", "2024-01-09 sell(X, 10)"]);
+    assert_eq!(show(&with(vec![("hold", days(3))]).unwrap()), vec!["2024-01-08 buy(X, 10)", "2024-01-11 sell(X, 10)"]);
+    assert_eq!(
+        show(&with(vec![("hold", days(3)), ("qty", Lit::Shares(25.0))]).unwrap()),
+        vec!["2024-01-08 buy(X, 25)", "2024-01-11 sell(X, 25)"]
+    );
+    // Outside the range, of another type, or not a parameter: a request error, not a run.
+    let err = with(vec![("hold", days(10))]).expect_err("10d is outside 1d..5d");
+    assert!(err.contains("hold") && err.contains("1d..5d") && !err.contains("internal"), "{}", err);
+    let err = with(vec![("hold", Lit::Int(3))]).expect_err("3 is not a Duration");
+    assert!(err.contains("hold") && err.contains("Duration") && !err.contains("internal"), "{}", err);
+    let err = with(vec![("nope", days(3))]).expect_err("no such parameter");
+    assert!(err.contains("`nope`") && err.contains("hold_n") && !err.contains("internal"), "{}", err);
 }
 
 /// The corpus strategies with a time-based exit, their `hold` in days and
@@ -728,4 +815,41 @@ fn synthetic_minute_bars_are_labelled_by_close_instant() {
     assert_eq!(format_timestamp(times[389]), "2024-01-08T16:00:00");
     assert_eq!(bucket(Resolution::M5, times[0]), times[4]);
     assert_eq!(bucket(Resolution::M5, times[4]), times[4]);
+}
+
+/// A parameter override may not change what the checker judged on the
+/// default: `lag` by a zero duration is causal rather than strict (section 5,
+/// WF-4), so flipping a lag duration between zero and non-zero would turn a
+/// well-formed recursion into a same-time cycle. The kernel refuses it with a
+/// user-facing error instead of halting with an internal one.
+#[test]
+fn a_parameter_override_may_not_flip_a_lag_duration_to_zero() {
+    let src = r#"
+strategy lagz {
+  env equities_1d
+  resolution @1d
+  mode delta
+  param d : Duration = 5d in 0d..30d
+  param qty : Quantity<Shares> = 1 shares
+  rel cnt(+A: Equity, @T: Timestamp, -N: Scalar)
+  cnt(A, T, N) :- universe(A, T), lag(T, d, T1), cnt(A, T1, M), N = M + 1.
+  cnt(A, T, N) :- universe(A, T), N = 0, lag(T, 400d, T1), not universe(A, T1).
+  decide(T, buy(A, qty)) :- universe(A, T), cnt(A, T, N), N > 100.
+}
+"#;
+    let (prog, _) = program(src, "lagz");
+    let ds = synthetic_daily(&["AAA"], (2023, 1, 2), 40, 3);
+    let fine = ExecConfig {
+        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 7 }))],
+        ..Default::default()
+    };
+    run(&prog, &ds, fine).unwrap();
+    let flipped = ExecConfig {
+        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 0 }))],
+        ..Default::default()
+    };
+    match run(&prog, &ds, flipped) {
+        Err(RunError::Request(m)) => assert!(m.contains("lag") && m.contains("zero") && !m.contains("internal"), "{}", m),
+        other => panic!("expected the override to be refused, got {:?}", other.map(|r| r.decisions.len())),
+    }
 }

@@ -71,6 +71,11 @@ pub struct ExecConfig {
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
+    /// Parameter values replacing the program's defaults (section 3: the
+    /// only values the kernel may vary between runs of one program). A name
+    /// is `param` in the strategy or `unit::param`; each value must be of
+    /// the parameter's type and within its declared range.
+    pub param_overrides: Vec<(String, Lit)>,
 }
 
 impl Default for ExecConfig {
@@ -80,6 +85,7 @@ impl Default for ExecConfig {
             slippage_bps: 0.0,
             commission_per_share: 0.0,
             price_relation: None,
+            param_overrides: Vec::new(),
         }
     }
 }
@@ -108,14 +114,18 @@ pub enum RunError {
         message: String,
     },
     NoBars,
-    /// `explain` asked about a timestamp that is not a bar of the rule's
-    /// resolution (section 6: the time domain is the set of @T values present).
+    /// An explain request at a timestamp outside the rule's time domain
+    /// (section 6): the nearest bars before and after it, if any.
     NotABar {
         t: i64,
         res: Resolution,
-        first: Option<i64>,
-        last: Option<i64>,
+        before: Option<i64>,
+        after: Option<i64>,
     },
+    /// A request the kernel cannot serve as asked: missing or ill-typed
+    /// explain inputs, a binding of a variable the rule does not have, a
+    /// parameter override outside its type or range.
+    Request(String),
     /// An executor configuration the program cannot honour.
     Config(String),
     Internal(String),
@@ -137,13 +147,15 @@ impl std::fmt::Display for RunError {
             ),
             RunError::BadDecision { t, rule, decision, message } => write!(f, "invalid decision {} from rule {} at {}: {}", decision, rule, time::format_timestamp(*t), message),
             RunError::NoBars => write!(f, "the environment instance has no bars at the decision resolution"),
-            RunError::NotABar { t, res, first, last } => {
-                write!(f, "{} is not a bar of the {} time domain", time::format_timestamp(*t), res)?;
-                match (first, last) {
-                    (Some(a), Some(b)) => write!(f, " ({} to {})", time::format_timestamp(*a), time::format_timestamp(*b)),
-                    _ => write!(f, " (which is empty)"),
+            RunError::NotABar { t, res, before, after } => {
+                write!(f, "{} is not a bar at {}; ", time::format_timestamp(*t), res)?;
+                match (before, after) {
+                    (Some(b), Some(a)) => write!(f, "nearest bars are {} and {}", time::format_timestamp(*b), time::format_timestamp(*a)),
+                    (Some(b), None) | (None, Some(b)) => write!(f, "the nearest bar is {}", time::format_timestamp(*b)),
+                    (None, None) => write!(f, "the time domain is empty"),
                 }
             }
+            RunError::Request(m) => write!(f, "{}", m),
             RunError::Config(m) => write!(f, "configuration error: {}", m),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
         }
@@ -226,6 +238,8 @@ pub type Env = Vec<Option<Value>>;
 pub struct Explanation {
     pub rule: String,
     pub t: i64,
+    /// Variables pre-bound for this explanation, with the shown values.
+    pub bindings: Vec<(String, String)>,
     pub solutions: usize,
     /// Index and text of the first body literal with no solution, if any.
     pub failed_at: Option<(usize, String)>,
@@ -233,9 +247,22 @@ pub struct Explanation {
 
 impl std::fmt::Display for Explanation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let with = if self.bindings.is_empty() {
+            String::new()
+        } else {
+            format!(" with {}", self.bindings.iter().map(|(v, x)| format!("{} = {}", v, x)).collect::<Vec<_>>().join(", "))
+        };
         match &self.failed_at {
-            Some((i, text)) => write!(f, "rule {} did not fire at {}: literal {} `{}` has no solution", self.rule, time::format_timestamp(self.t), i + 1, text),
-            None => write!(f, "rule {} fired at {} with {} solution(s)", self.rule, time::format_timestamp(self.t), self.solutions),
+            Some((i, text)) => write!(
+                f,
+                "rule {} did not fire at {}{}: literal {} `{}` has no solution",
+                self.rule,
+                time::format_timestamp(self.t),
+                with,
+                i + 1,
+                text
+            ),
+            None => write!(f, "rule {} fired at {}{} with {} solution(s)", self.rule, time::format_timestamp(self.t), with, self.solutions),
         }
     }
 }
@@ -266,6 +293,11 @@ impl<'p> Kernel<'p> {
                 if let Lit::Equity(s) = &p.value {
                     symbols.intern(s);
                 }
+            }
+        }
+        for (_, l) in &cfg.param_overrides {
+            if let Lit::Equity(s) = l {
+                symbols.intern(s);
             }
         }
         for rule in &prog.rules {
@@ -354,6 +386,46 @@ impl<'p> Kernel<'p> {
             for (name, p) in ps {
                 params.insert((unit.clone(), name.clone()), lit_value(&p.value, &mut sym_tmp));
             }
+        }
+        for (name, value) in &cfg.param_overrides {
+            let (unit, pname) = name.split_once("::").unwrap_or((prog.strategy.as_str(), name.as_str()));
+            let Some(p) = prog.param(unit, pname) else {
+                let known: Vec<String> = prog
+                    .params
+                    .iter()
+                    .flat_map(|(u, ps)| ps.keys().map(move |n| if *u == prog.strategy { n.clone() } else { format!("{}::{}", u, n) }))
+                    .collect();
+                return Err(RunError::Request(format!(
+                    "no parameter `{}` in `{}`; the parameters are {}",
+                    name,
+                    unit,
+                    if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                )));
+            };
+            if !crate::check::types::compat(&p.ty, &value.ty()) {
+                return Err(RunError::Request(format!("parameter `{}` of `{}` is {}, and `{}` is {}", pname, unit, p.ty, value, value.ty())));
+            }
+            if let Some((lo, hi)) = &p.range {
+                let within = match (lit_magnitude(value), lit_magnitude(lo), lit_magnitude(hi)) {
+                    (Some(v), Some(l), Some(h)) => l <= v && v <= h,
+                    _ => true,
+                };
+                if !within {
+                    return Err(RunError::Request(format!("parameter `{}` of `{}` = {} is outside its range {}..{}", pname, unit, value, lo, hi)));
+                }
+            }
+            // WF-4 was judged on the default: `lag` by a zero duration is
+            // causal, not strict (section 5), so an override may not change
+            // whether a lag duration is zero.
+            if let (Lit::Duration(d), Lit::Duration(v)) = (&p.value, value) {
+                if d.is_zero() != v.is_zero() && lag_uses_param(prog, unit, pname) {
+                    return Err(RunError::Request(format!(
+                        "parameter `{}` of `{}` is a lag duration and the checker judged WF-4 with its default {}; an override may not change whether it is zero (got {})",
+                        pname, unit, d, v
+                    )));
+                }
+            }
+            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp));
         }
         // Price relation for the executor.
         let price_rel = match &cfg.price_relation {
@@ -527,6 +599,15 @@ impl<'p> Kernel<'p> {
                     self.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
                 }
                 self.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(cash)]);
+            } else {
+                // A decision on the last bar has no bar to fill at: it is
+                // recorded in `decided` like any other, and dropped here so
+                // that decisions = fills + dropped.
+                for ds in by_equity.values() {
+                    for (d, _) in ds {
+                        result.dropped.push((t, d.clone(), "no next bar".to_string()));
+                    }
+                }
             }
         }
         result.final_cash = cash;
@@ -571,21 +652,86 @@ impl<'p> Kernel<'p> {
         found
     }
 
+    /// The `+` head arguments of rule `rule_idx`, in signature order: what
+    /// `explain` needs as `inputs`.
+    pub fn rule_inputs(&self, rule_idx: usize) -> Vec<(String, Ty)> {
+        let sig = &self.prog.relations[&self.prog.rules[rule_idx].head.name];
+        sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect()
+    }
+
+    /// Parse a command-line value as an input of type `ty`: an equity by
+    /// identifier, a timestamp, or a literal in the DSL's own grammar.
+    pub fn parse_input(&self, ty: &Ty, raw: &str) -> Result<Value, String> {
+        let raw = raw.trim();
+        match ty {
+            Ty::Equity => self.equity(raw.trim_matches('"')),
+            Ty::Timestamp => time::parse_timestamp(raw)
+                .map(Value::Time)
+                .ok_or_else(|| format!("`{}` is not a Timestamp (YYYY-MM-DD[THH:MM[:SS]])", raw)),
+            Ty::Count => raw.parse().map(Value::Count).map_err(|_| format!("`{}` is not a Count", raw)),
+            Ty::Duration => match crate::parser::parse_lit(raw) {
+                Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
+                _ => Err(format!("`{}` is not a Duration (such as 20d, 3mo or 1y)", raw)),
+            },
+            Ty::Quantity(_) => match crate::parser::parse_lit(raw) {
+                Ok(l @ (Lit::Int(_) | Lit::Float(_))) => Ok(Value::Num(l_num(&l))),
+                Ok(l @ (Lit::Shares(_) | Lit::Money(..))) if crate::check::types::compat(ty, &l.ty()) => Ok(Value::Num(l_num(&l))),
+                Ok(l) => Err(format!("`{}` is {}, not {}", raw, l.ty(), ty)),
+                Err(_) => Err(format!("`{}` is not a {}", raw, ty)),
+            },
+            Ty::Decision | Ty::IntLit => Err(format!("a {} cannot be given on the command line", ty)),
+        }
+    }
+
+    /// Parse a command-line value for a body variable, whose type is not
+    /// declared: an equity of the dataset, a timestamp, or a literal (a bare
+    /// integer is a Count; write a quantity with a decimal point or a unit).
+    pub fn parse_binding(&self, raw: &str) -> Result<Value, String> {
+        let raw = raw.trim();
+        if let Some(s) = self.symbols.get(raw) {
+            return Ok(Value::Equity(s));
+        }
+        if let Some(t) = time::parse_timestamp(raw) {
+            return Ok(Value::Time(t));
+        }
+        match crate::parser::parse_lit(raw) {
+            Ok(Lit::Equity(name)) => self.equity(&name),
+            Ok(Lit::Int(i)) => Ok(Value::Count(i)),
+            Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
+            Ok(l) => Ok(Value::Num(l_num(&l))),
+            Err(_) => Err(format!("`{}` is not an equity of the dataset, a timestamp or a literal", raw)),
+        }
+    }
+
+    fn equity(&self, name: &str) -> Result<Value, String> {
+        self.symbols.get(name).map(Value::Equity).ok_or_else(|| format!("`{}` is not an equity of the dataset", name))
+    }
+
     /// Why rule `rule_idx` did or did not fire at `t` (section 7): the first
     /// body literal with no solution. `inputs` supplies the rule's `+` head
     /// arguments, in signature order (empty for a decide rule).
     pub fn explain(&mut self, rule_idx: usize, t: i64, inputs: &[Value]) -> Result<Explanation, RunError> {
+        self.explain_with(rule_idx, t, inputs, &[])
+    }
+
+    /// `explain` with body variables pre-bound: the explanation is then about
+    /// the bindings that agree with them (one instrument, say) rather than
+    /// about the union of every binding.
+    pub fn explain_with(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<Explanation, RunError> {
         let rule = &self.prog.rules[rule_idx];
         let cr = self.compiled[rule_idx].clone();
         let rel = self.rel(&rule.head.name)?;
         let info = self.rels[rel].clone();
-        let domain = self.domains.get(&info.res);
-        if !domain.map(|d| d.contains(&t)).unwrap_or(false) {
+        // Only bars of the rule's time domain are ever evaluated (section 6);
+        // a label between two bars would read a phantom bucket.
+        let res = self.prog.infos[rule_idx].resolution;
+        let domain = self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))?;
+        if !domain.contains(&t) {
             return Err(RunError::NotABar {
                 t,
-                res: info.res,
-                first: domain.and_then(|d| d.first().copied()),
-                last: domain.and_then(|d| d.last().copied()),
+                res,
+                before: domain.range(..t).next_back().copied(),
+                after: domain.range(t..).next().copied(),
             });
         }
         let mut env: Env = vec![None; cr.nslots];
@@ -593,12 +739,45 @@ impl<'p> Kernel<'p> {
             env[cr.slots[v]] = Some(Value::Time(t));
         }
         if inputs.len() != info.inputs.len() {
-            return Err(RunError::Internal(format!("rule {} takes {} inputs, {} given", cr.label, info.inputs.len(), inputs.len())));
+            let need: Vec<String> = self.rule_inputs(rule_idx).iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
+            return Err(RunError::Request(format!(
+                "rule {} takes {} inputs ({}), {} given",
+                cr.label,
+                info.inputs.len(),
+                need.join(", "),
+                inputs.len()
+            )));
         }
         for (pos, val) in info.inputs.iter().zip(inputs) {
             if let Term::Var(v, _) = &rule.head.terms[*pos] {
                 env[cr.slots[v]] = Some(val.clone());
             }
+        }
+        let mut shown = Vec::with_capacity(bindings.len());
+        for (var, val) in bindings {
+            let Some(&slot) = cr.slots.get(var) else {
+                let mut vars: Vec<&String> = cr.slots.keys().collect();
+                vars.sort();
+                return Err(RunError::Request(format!(
+                    "rule {} has no variable `{}`; its variables are {}",
+                    cr.label,
+                    var,
+                    vars.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", ")
+                )));
+            };
+            if let Some(x) = &env[slot] {
+                if x != val {
+                    return Err(RunError::Request(format!(
+                        "`{}` is already {} in rule {} and cannot also be {}",
+                        var,
+                        self.show(x),
+                        cr.label,
+                        self.show(val)
+                    )));
+                }
+            }
+            env[slot] = Some(val.clone());
+            shown.push((var.clone(), self.show(val)));
         }
         let mut envs = vec![env];
         for (i, lit) in rule.body.iter().enumerate() {
@@ -610,6 +789,7 @@ impl<'p> Kernel<'p> {
                 return Ok(Explanation {
                     rule: cr.label.clone(),
                     t,
+                    bindings: shown,
                     solutions: 0,
                     failed_at: Some((i, lit.describe())),
                 });
@@ -619,9 +799,40 @@ impl<'p> Kernel<'p> {
         Ok(Explanation {
             rule: cr.label.clone(),
             t,
+            bindings: shown,
             solutions: envs.len(),
             failed_at: None,
         })
+    }
+}
+
+/// Whether any `lag` in `unit`'s rules takes parameter `name` as its length.
+fn lag_uses_param(prog: &Program, unit: &str, name: &str) -> bool {
+    fn lit(l: &Literal, name: &str) -> bool {
+        match l {
+            Literal::Builtin(Builtin::Lag { n: Expr::Param(p, _), .. }, _) => p == name,
+            Literal::Agg { conj, .. } => conj.iter().any(|c| lit(c, name)),
+            _ => false,
+        }
+    }
+    prog.rules.iter().filter(|r| r.unit == unit).any(|r| r.body.iter().any(|l| lit(l, name)))
+}
+
+fn l_num(l: &Lit) -> f64 {
+    match l {
+        Lit::Int(i) => *i as f64,
+        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => *x,
+        Lit::Duration(_) | Lit::Equity(_) => f64::NAN,
+    }
+}
+
+/// The magnitude a literal is ranged by: its number, or a duration's
+/// approximate length in days; an equity has none.
+fn lit_magnitude(l: &Lit) -> Option<f64> {
+    match l {
+        Lit::Duration(d) => Some(d.approx_days()),
+        Lit::Equity(_) => None,
+        _ => Some(l_num(l)),
     }
 }
 

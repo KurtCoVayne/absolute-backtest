@@ -10,7 +10,11 @@ loop with a simulated executor. One Rust crate, no dependencies.
 abt check corpus/                                   # every strategy and library in the corpus
 abt run --strategy momentum_top_n --synthetic corpus/   # backtest on a synthetic market
 abt run --strategy sma_crossover --data ./csv corpus/ --verify-causality
-abt explain --strategy breakout_52w --rule 'breakout#1' --at 2023-02-24 --synthetic corpus/
+abt run --strategy momentum_top_n --synthetic --all --fills corpus/  # every decision, and the fills
+abt run --strategy breakout_52w --synthetic --param hold=21d --param qty='50 shares' corpus/
+abt explain --strategy breakout_52w --rule 'decide#1' --at 2023-02-24 --synthetic corpus/
+abt explain --strategy breakout_52w --rule 'decide#2' --at 2023-02-24 --bind A=SPY --synthetic corpus/
+abt explain --strategy breakout_52w --rule 'features::sma#1' --at 2023-02-24 --inputs SPY,20d,10 --synthetic corpus/
 abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market as CSV
 ```
 
@@ -171,6 +175,27 @@ linearly between order statistics, so `quantile(e, 0.5)` is the median. `cash` i
 first bar with the initial cash so that cash-aware rules can fire from the
 start.
 
+A decision the executor cannot carry out is dropped with a reason in
+`RunResult.dropped`: a decision on the last bar has no bar to fill at (`no
+next bar`), and an instrument with no price at the fill bar cannot be filled
+(`no price for AAA at 2022-02-09`); both are still recorded in `decided`.
+`abt run` prints the counts and then each dropped decision with its reason,
+so that `decisions = fills + dropped`, except that in target mode a decision
+whose order is zero (the target is already held) makes neither a fill nor a
+drop. `--all` prints every decision instead of the first twenty, `--fills`
+prints the fills, and `--quiet` prints the summary only.
+
+Parameters are the kernel's sweep axis (section 1) and the only values it
+may vary between runs of one program (section 3): `ExecConfig.param_overrides`
+replaces defaults by name (`hold`, or `unit::name` for a library's), and
+`abt run` and `abt explain` take a repeatable `--param name=value` whose
+value is a literal in the DSL's grammar (`21d`, `50 shares`, `0.02`, `"SPY"`
+or a bare identifier for an equity). An override must be of the parameter's
+declared type and within its declared range, or the run is refused before it
+starts. An override also may not change what the checker judged on the
+default: a `lag` length may not be overridden between zero and non-zero,
+because WF-4 treats `lag` by a zero duration as causal rather than strict.
+
 A decision the executor cannot fill (no price for the instrument at the next
 bar) is reported as dropped, is still recorded in `decided`, and is not
 retried by the kernel; whether the strategy retries it depends on how the
@@ -189,9 +214,20 @@ This sells at the first bar strictly later than `hold` after the entry,
 closes every entry, and fires again if a fill was dropped.
 
 `Kernel::explain(rule, t, inputs)` reports the first body literal with no
-solution at `t`; `verify_causality` re-runs truncated instances for sampled
-bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus
-strategies.
+solution at `t`. `t` must be a bar of the rule's time domain (a weekend, a
+date before the data, or a label between two resample buckets is refused
+naming the nearest bars, since no run ever evaluates a rule there). A rule
+with `+` arguments needs their values: `abt explain --inputs SPY,20d,10`
+passes them in signature order, parsed by the signature's types, and asking
+without them names the inputs the rule takes. The literal reported is the
+first with no solution over *every* binding that survived the literals
+before it, so for a multi-instrument rule it can be the literal that fails
+for the last surviving instrument rather than for the one you are asking
+about; `Kernel::explain_with(rule, t, inputs, bindings)` and `--bind A=SPY`
+(repeatable; an equity, a timestamp, or a literal, a bare integer being a
+Count) pre-bind body variables so the explanation is about that instrument.
+`verify_causality` re-runs truncated instances for sampled bars and compares
+`decide(t)`, which `tests/kernel.rs` does for seven corpus strategies.
 
 ## The command line
 
@@ -280,6 +316,12 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **An unpriced position is marked at its last price.** When the price
+  relation has no tuple for a held instrument at a bar (a delisting that
+  removes its rows), the equity curve and `target_weight` sizing value it at
+  the last price seen for it, its last close or fill, rather than at zero.
+  The executor never trades at that stale price: a decision on the
+  instrument is dropped with `no price for ...` until a price reappears.
 - **A library is usable only on its own environment.** Section 4 says both
   libraries and strategies name the environment they are written against; a
   `uses` of a library written against another environment is one E error,
