@@ -73,7 +73,7 @@ A quantity type is a vector of integer or half-integer exponents (c, s, θ).
 - `log`, `exp`: require and return Scalar. `log(P)` for a price is rejected; `log(P1 / P0)` is accepted.
 - `sqrt`: halves every exponent; the result must have exponents in ½ℤ.
 - `abs`, `least`, `greatest`: preserve the dimension; all arguments must agree.
-- Literals carry units: `100 shares`, `5_000_000 USD`, `252d`, `0.02`. A bare number is Scalar.
+- Literals carry units: `100 shares`, `5_000_000 USD` (Notional), `60 USD/share` (Price: currency per share), `252d`, `0.02`. A bare number is Scalar.
 - Count converts to Scalar only through explicit division (`W = 1 / N` is accepted because 1 / Count is defined as Scalar); Count + Scalar is rejected.
 
 **Aggregate typing.** `sum`, `mean`, `max`, `min`, `std` preserve the dimension

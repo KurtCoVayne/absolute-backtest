@@ -594,7 +594,7 @@ fn price_column(sig: &Signature) -> Option<usize> {
 pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols) -> Value {
     match l {
         Lit::Int(i) => Value::Count(*i),
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) => Value::Num(*x),
+        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
         Lit::Duration(d) => Value::Dur(*d),
         Lit::Equity(s) => Value::Equity(symbols.intern(s)),
     }
