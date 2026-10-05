@@ -83,9 +83,12 @@ fn arrow_type(ty: &Ty) -> Result<DataType, String> {
     })
 }
 
-fn schema_of(sig: &Signature) -> Result<Schema, String> {
-    let fields: Result<Vec<Field>, String> = sig.args.iter().map(|a| Ok(Field::new(a.name.clone(), arrow_type(&a.ty)?, false))).collect();
-    Ok(Schema::new(fields?))
+fn schema_of(sig: &Signature, with_availability: bool) -> Result<Schema, String> {
+    let mut fields: Vec<Field> = sig.args.iter().map(|a| Ok(Field::new(a.name.clone(), arrow_type(&a.ty)?, false))).collect::<Result<_, String>>()?;
+    if with_availability {
+        fields.push(Field::new("available_at", DataType::Int64, false));
+    }
+    Ok(Schema::new(fields))
 }
 
 /// `name(+A: Equity, @T: Timestamp, -P: Price<USD>) @1d [complete]`.
@@ -142,11 +145,13 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         }
         let Some(tuples) = ds.facts.get(rel) else { continue };
         let key_pos = sig.key_pos().ok_or_else(|| format!("`{}` has no temporal key", rel))?;
-        let schema = Arc::new(schema_of(sig)?);
-        let mut by_month: BTreeMap<String, Vec<&Vec<Value>>> = BTreeMap::new();
-        for tu in tuples {
+        let res = sig.res.ok_or_else(|| format!("`{}` has no resolution", rel))?;
+        let records = ds.availability_of(rel).is_some();
+        let schema = Arc::new(schema_of(sig, records)?);
+        let mut by_month: BTreeMap<String, Vec<(usize, &Vec<Value>)>> = BTreeMap::new();
+        for (i, tu) in tuples.iter().enumerate() {
             let t = tu[key_pos].as_time().ok_or_else(|| format!("`{}`: a tuple without a timestamp key", rel))?;
-            by_month.entry(month_label(t)).or_default().push(tu);
+            by_month.entry(month_label(t)).or_default().push((i, tu));
         }
         let rel_dir = dir.join("log").join(rel);
         fs::create_dir_all(&rel_dir).map_err(|e| e.to_string())?;
@@ -155,17 +160,23 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
             let mut columns: Vec<ArrayRef> = Vec::new();
             for (i, arg) in sig.args.iter().enumerate() {
                 let col: ArrayRef = match &arg.ty {
-                    Ty::Equity => Arc::new(StringArray::from(rows.iter().map(|tu| tu[i].as_equity().map(|s| ds.symbols.name(s))).collect::<Vec<_>>())),
-                    Ty::Label => Arc::new(StringArray::from(rows.iter().map(|tu| ds.label_name(&tu[i])).collect::<Vec<_>>())),
-                    Ty::Timestamp => Arc::new(Int64Array::from(rows.iter().map(|tu| tu[i].as_time()).collect::<Vec<_>>())),
-                    Ty::Count => Arc::new(Int64Array::from(rows.iter().map(|tu| if let Value::Count(c) = &tu[i] { Some(*c) } else { None }).collect::<Vec<_>>())),
-                    Ty::Quantity(_) => Arc::new(Float64Array::from(rows.iter().map(|tu| tu[i].as_f64()).collect::<Vec<_>>())),
+                    Ty::Equity => Arc::new(StringArray::from(rows.iter().map(|(_, tu)| tu[i].as_equity().map(|s| ds.symbols.name(s))).collect::<Vec<_>>())),
+                    Ty::Label => Arc::new(StringArray::from(rows.iter().map(|(_, tu)| ds.label_name(&tu[i])).collect::<Vec<_>>())),
+                    Ty::Timestamp => Arc::new(Int64Array::from(rows.iter().map(|(_, tu)| tu[i].as_time()).collect::<Vec<_>>())),
+                    Ty::Count => Arc::new(Int64Array::from(
+                        rows.iter().map(|(_, tu)| if let Value::Count(c) = &tu[i] { Some(*c) } else { None }).collect::<Vec<_>>(),
+                    )),
+                    Ty::Quantity(_) => Arc::new(Float64Array::from(rows.iter().map(|(_, tu)| tu[i].as_f64()).collect::<Vec<_>>())),
                     t => return Err(format!("`{}`: a {} column cannot be stored", rel, t)),
                 };
                 if col.null_count() > 0 {
                     return Err(format!("`{}`: a value of column `{}` is not of its declared type", rel, arg.name));
                 }
                 columns.push(col);
+            }
+            if records {
+                let avail: Vec<i64> = rows.iter().map(|(i, tu)| ds.available(rel, *i, tu[key_pos].as_time().unwrap_or(0), res)).collect();
+                columns.push(Arc::new(Int64Array::from(avail)));
             }
             let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| e.to_string())?;
             let path = rel_dir.join(format!("{}.parquet", month));
@@ -179,7 +190,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
             name: rel.clone(),
             signature: signature_text(sig),
             resolution: sig.res.map(|r| r.to_string()).unwrap_or_default(),
-            availability: "bar_close".into(),
+            availability: if records { "recorded".into() } else { "bar_close".into() },
             rows: tuples.len(),
             partitions,
         });
@@ -244,14 +255,10 @@ fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, Strin
                 .map_err(|e| e.to_string())?;
             for batch in reader {
                 let batch = batch.map_err(|e| format!("{}: {}", path.display(), e))?;
-                if batch.num_columns() != sig.args.len() {
-                    return Err(format!(
-                        "{}: {} columns for the {}-argument relation `{}`",
-                        path.display(),
-                        batch.num_columns(),
-                        sig.args.len(),
-                        entry.name
-                    ));
+                let records = entry.availability == "recorded";
+                let expected = sig.args.len() + usize::from(records);
+                if batch.num_columns() != expected {
+                    return Err(format!("{}: {} columns for the {}-argument relation `{}`", path.display(), batch.num_columns(), expected, entry.name));
                 }
                 for row in 0..batch.num_rows() {
                     let mut tuple = Vec::with_capacity(sig.args.len());
@@ -275,7 +282,12 @@ fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, Strin
                         };
                         tuple.push(v);
                     }
-                    ds.add(&entry.name, tuple);
+                    if records {
+                        let avail = int_at(batch.column(sig.args.len()), row, &path)?;
+                        ds.add_available(&entry.name, tuple, avail);
+                    } else {
+                        ds.add(&entry.name, tuple);
+                    }
                 }
             }
         }

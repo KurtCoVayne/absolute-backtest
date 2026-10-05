@@ -56,6 +56,10 @@ pub struct Dataset {
     /// Labels (`Ty::Label`), interned apart from the equities.
     pub labels: Symbols,
     pub facts: BTreeMap<String, Vec<Tuple>>,
+    /// Availability time per tuple, parallel to `facts` (data-bundle doc,
+    /// section 2): absent for a relation whose tuples are available at their
+    /// own bar's close, the v1 convention.
+    pub available_at: BTreeMap<String, Vec<i64>>,
     /// The security table: stable ids and their ticker history. Empty for
     /// a dataset without one, where the ticker is the id.
     pub securities: Vec<Security>,
@@ -151,7 +155,44 @@ impl Dataset {
         }
     }
     pub fn add(&mut self, relation: &str, tuple: Tuple) {
+        let key = tuple.iter().find_map(|v| v.as_time());
+        let n = self.facts.get(relation).map(|v| v.len()).unwrap_or(0);
+        if let Some(avails) = self.available_at.get_mut(relation) {
+            // The relation records availability: this tuple's is its bar.
+            avails.push(key.unwrap_or(i64::MIN));
+        } else if n == 0 {
+            // Nothing to record yet.
+        }
         self.facts.entry(relation.to_string()).or_default().push(tuple);
+    }
+    /// Add a tuple available at `avail` (at or after its bar's close); the
+    /// relation then records availability for every tuple.
+    pub fn add_available(&mut self, relation: &str, tuple: Tuple, avail: i64) {
+        if !self.available_at.contains_key(relation) {
+            let existing: Vec<i64> = self
+                .facts
+                .get(relation)
+                .map(|tus| tus.iter().map(|tu| tu.iter().find_map(|v| v.as_time()).unwrap_or(i64::MIN)).collect())
+                .unwrap_or_default();
+            self.available_at.insert(relation.to_string(), existing);
+        }
+        self.available_at.get_mut(relation).unwrap().push(avail);
+        self.facts.entry(relation.to_string()).or_default().push(tuple);
+    }
+    /// Whether any relation records availability apart from its bars.
+    pub fn has_availability(&self) -> bool {
+        !self.available_at.is_empty()
+    }
+    pub fn availability_of(&self, relation: &str) -> Option<&[i64]> {
+        self.available_at.get(relation).map(|v| v.as_slice())
+    }
+    /// When tuple `i` of `relation` is available: its recorded time, or the
+    /// close of its bucket at `res` (its own bar).
+    pub fn available(&self, relation: &str, i: usize, key: i64, res: Resolution) -> i64 {
+        match self.available_at.get(relation).and_then(|v| v.get(i)) {
+            Some(&a) if a != i64::MIN => a,
+            _ => time::bucket_range(res, key).1.max(key),
+        }
     }
     /// The dataset restricted to tuples whose temporal key falls in a
     /// decision-resolution bucket at or before `t` (E|ₜ of section 7).
@@ -160,22 +201,34 @@ impl Dataset {
             symbols: self.symbols.clone(),
             labels: self.labels.clone(),
             facts: BTreeMap::new(),
+            available_at: BTreeMap::new(),
             securities: self.securities.clone(),
             as_of: Some(self.bundle_date().unwrap_or(t).min(t)),
         };
+        // The close of the decision bar t: what a decision at t can have seen.
+        let horizon = time::bucket_range(prog.resolution, t).1.max(t);
         for (name, tuples) in &self.facts {
             let Some(sig) = prog.relations.get(name) else { continue };
             let (Some(k), Some(res)) = (sig.key_pos(), sig.res) else { continue };
-            let kept: Vec<Tuple> = tuples
-                .iter()
-                .filter(|tu| {
-                    let key = tu[k].as_time().unwrap_or(i64::MAX);
+            let records = self.available_at.contains_key(name);
+            for (i, tu) in tuples.iter().enumerate() {
+                let key = tu[k].as_time().unwrap_or(i64::MAX);
+                let keep = if records {
+                    // Judged on availability (the v2 theorem).
+                    self.available(name, i, key, res) <= horizon
+                } else {
                     let label = if res == prog.resolution { key } else { time::bucket(prog.resolution, key) };
                     label <= t
-                })
-                .cloned()
-                .collect();
-            out.facts.insert(name.clone(), kept);
+                };
+                if keep {
+                    if records {
+                        out.add_available(name, tu.clone(), self.available(name, i, key, res));
+                    } else {
+                        out.add(name, tu.clone());
+                    }
+                }
+            }
+            out.facts.entry(name.clone()).or_default();
         }
         out
     }
@@ -355,6 +408,8 @@ pub struct KernelStats {
     pub window_groups: usize,
     /// Bars' rows the cache holds now.
     pub window_rows_cached: usize,
+    /// Tuples that arrived after their bar closed (the fold only).
+    pub late_tuples: usize,
 }
 
 /// Serde for an `f64` that may be infinite (JSON has no infinity): null
@@ -1270,6 +1325,19 @@ impl<'p> Kernel<'p> {
         self.domains.entry(res).or_default().insert(label);
     }
 
+    /// A tuple keyed at `key` arrived after its bar closed: everything
+    /// derived at or after `key` may have read its absence. Derived values
+    /// are recomputed on demand; the windowed groups forget the bars from
+    /// `key` on. Decisions already emitted stand (`decided` is a log).
+    pub fn invalidate_from(&mut self, key: i64) {
+        self.memo.clear();
+        for cache in self.windows.values_mut() {
+            let keep = std::mem::take(cache);
+            *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
+        }
+        self.stats.late_tuples += 1;
+    }
+
     pub fn relation_id(&self, name: &str) -> Option<usize> {
         self.rel_ids.get(name).copied()
     }
@@ -1820,7 +1888,10 @@ pub struct CausalityMismatch {
 /// The empirical check of the causality theorem (section 7): for each sampled
 /// t, decide(t) over E must equal decide(t) over E|ₜ.
 pub fn verify_causality(prog: &Program, dataset: &Dataset, cfg: ExecConfig, samples: &[i64]) -> Result<Vec<CausalityMismatch>, RunError> {
-    let full = run(prog, dataset, cfg.clone())?;
+    // Both runs are the fold, which honours availability (its executor's
+    // fills included); the truncated runs hold what was available at each
+    // sampled bar.
+    let full = run_fold(prog, dataset, cfg.clone())?;
     let describe = |r: &RunResult, t: i64| -> Vec<String> {
         let mut v: Vec<String> = r.decisions_at(t).into_iter().map(|d| r.describe_decision(d)).collect();
         v.sort();
@@ -1829,7 +1900,7 @@ pub fn verify_causality(prog: &Program, dataset: &Dataset, cfg: ExecConfig, samp
     let mut out = Vec::new();
     for &t in samples {
         let trunc = dataset.truncated(prog, t);
-        let partial = run(prog, &trunc, cfg.clone())?;
+        let partial = run_fold(prog, &trunc, cfg.clone())?;
         let a = describe(&full, t);
         let b = describe(&partial, t);
         if a != b {

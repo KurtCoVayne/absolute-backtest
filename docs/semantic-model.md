@@ -504,6 +504,11 @@ ships (data-bundle doc, sections 2 and 3; `src/bundle.rs`): a strategy names
 the version it was written against as `env equities_1d_v2@2026.10`, the bundle
 must match, and a bundle that has not passed its tests is not run.
 
+**Availability time (v2, implemented in the fold).** A tuple may carry its own
+availability time, at or after its bar's close; the fold kernel reads it from
+then on and the causality theorem below is judged on availability
+(data-bundle doc, section 2; `tests/fold_availability.rs`).
+
 **Availability convention (v1).** Every fact at resolution r is available at
 the close of its bar; a resampled bar is available at the close of its bucket.
 A strategy that reads a @1d open to decide at the open (the corpus case

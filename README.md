@@ -207,6 +207,21 @@ symbols, are checked) and replays the events from the cursor on.
 `tests/fold_checkpoint.rs` requires a run resumed from any monthly
 checkpoint to equal the unbroken fold and the batch kernel to the bit.
 
+A tuple may carry its own availability time (`Dataset::add_available`, an
+`available_at` column in CSV or in a bundle's partitions, whose manifest
+then says `recorded` rather than `bar_close`): the fold reads it from then
+on, so a tuple that arrived after its bar closed is late in the backtest
+too, exactly as section 2 of the data-bundle doc wants. The stream's
+buckets close when its availability passes their end, never because of a
+key; a late tuple is stored at its own key, everything derived from that
+key on is recomputed on demand (the memo is dropped and the windowed
+groups forget those bars), and decisions already emitted stand. The batch
+kernel is blind to availability, so with late tuples the two drivers
+differ and the fold is the one that is right; `Dataset::truncated` keeps
+what was available at `t`, and `verify_causality` compares the fold's
+decisions at sampled bars with the batch kernel's on that subset, which is
+the v2 theorem. Nothing is ever available before its own bar.
+
 Evaluation is top-down: `decide(t, D)` is requested for each bar `t` of the
 decision resolution's time domain, and every derived relation is requested
 with its temporal key and inputs bound and memoised by them. Because WF-4

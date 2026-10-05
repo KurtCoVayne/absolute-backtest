@@ -91,10 +91,15 @@ impl EventLog {
             if !k.is_primitive(rel) {
                 continue;
             }
+            let res = k.relation_resolution(rel);
+            let records = ds.availability_of(name).is_some();
             for (i, tu) in tuples.iter().enumerate() {
                 let tuple = k.remap_tuple(tu);
                 let key = tuple[k.rels[rel].key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", name)))?;
-                events.push((key, rel, i, Event::Tuple { rel, key, avail: key, tuple }));
+                // Available at its bar's close by convention, or when the
+                // bundle recorded it (never before its own bar).
+                let avail = if records { ds.available(name, i, key, res).max(key) } else { key };
+                events.push((avail, rel, i, Event::Tuple { rel, key, avail, tuple }));
             }
         }
         events.sort_by_key(|(avail, rel, i, _)| (*avail, *rel, *i));
@@ -120,32 +125,34 @@ impl Scheduler {
         Scheduler { needed, open: HashMap::new() }
     }
 
-    /// A tuple keyed `key` at native resolution `native` arrived: the
-    /// barriers it closes (finer first), after opening the buckets it falls
-    /// in at every resolution at or above its own.
-    fn advance(&mut self, k: &mut Kernel, key: i64, native: Resolution) -> Vec<(Resolution, i64)> {
+    /// A tuple keyed `key` at native resolution `native`, available at
+    /// `avail`, arrived: the barriers its availability closes (finer first),
+    /// after opening the bucket the availability reaches and the bucket the
+    /// tuple falls in at every resolution at or above its own. A bucket
+    /// closes when the stream's availability passes its end, never because
+    /// of a key: a late tuple falls into a closed bucket.
+    fn advance(&mut self, k: &mut Kernel, key: i64, avail: i64, native: Resolution) -> Vec<(Resolution, i64)> {
         let mut closed = Vec::new();
         for &r in &self.needed {
             if r < native {
                 continue;
             }
-            let label = time::bucket(r, key);
+            let front = time::bucket(r, avail);
             match self.open.get(&r).copied() {
-                Some(l) if l == label => {}
-                Some(l) if l < label => {
+                Some(l) if l == front => {}
+                Some(l) if l < front => {
                     closed.push((r, l));
-                    self.open.insert(r, label);
-                    k.open_bucket(r, label);
+                    self.open.insert(r, front);
+                    k.open_bucket(r, front);
                 }
-                Some(_) => {
-                    // Keyed before the open bucket: the domain gets it, no barrier moves.
-                    k.open_bucket(r, label);
-                }
+                Some(_) => {}
                 None => {
-                    self.open.insert(r, label);
-                    k.open_bucket(r, label);
+                    self.open.insert(r, front);
+                    k.open_bucket(r, front);
                 }
             }
+            // The tuple's own bucket exists whatever its availability.
+            k.open_bucket(r, time::bucket(r, key));
         }
         closed
     }
@@ -296,7 +303,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             Event::Tuple { rel, key, avail, tuple } => {
                 let native = self.kernel.relation_resolution(rel);
                 self.ran_decision = false;
-                for (res, label) in self.sched.advance(&mut self.kernel, key, native) {
+                for (res, label) in self.sched.advance(&mut self.kernel, key, avail, native) {
                     self.barrier(res, label)?;
                 }
                 // A checkpoint at the end of a decision bar, before the tuple
@@ -312,7 +319,14 @@ impl<'p, 'e> Fold<'p, 'e> {
                         self.bars_since_checkpoint = 0;
                     }
                 }
+                // A tuple keyed before the open bucket of its own resolution
+                // arrived after its bar closed: it is available from now on,
+                // and what was derived meanwhile is recomputed on demand.
+                let late = self.sched.open.get(&native).map(|&open| time::bucket(native, key) < open).unwrap_or(false);
                 self.kernel.insert_fact(rel, tuple)?;
+                if late {
+                    self.kernel.invalidate_from(key);
+                }
                 Ok(())
             }
             Event::Barrier { res, label } => {
