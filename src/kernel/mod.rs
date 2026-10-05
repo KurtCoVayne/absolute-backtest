@@ -108,6 +108,16 @@ pub enum RunError {
         message: String,
     },
     NoBars,
+    /// `explain` asked about a timestamp that is not a bar of the rule's
+    /// resolution (section 6: the time domain is the set of @T values present).
+    NotABar {
+        t: i64,
+        res: Resolution,
+        first: Option<i64>,
+        last: Option<i64>,
+    },
+    /// An executor configuration the program cannot honour.
+    Config(String),
     Internal(String),
 }
 
@@ -127,6 +137,14 @@ impl std::fmt::Display for RunError {
             ),
             RunError::BadDecision { t, rule, decision, message } => write!(f, "invalid decision {} from rule {} at {}: {}", decision, rule, time::format_timestamp(*t), message),
             RunError::NoBars => write!(f, "the environment instance has no bars at the decision resolution"),
+            RunError::NotABar { t, res, first, last } => {
+                write!(f, "{} is not a bar of the {} time domain", time::format_timestamp(*t), res)?;
+                match (first, last) {
+                    (Some(a), Some(b)) => write!(f, " ({} to {})", time::format_timestamp(*a), time::format_timestamp(*b)),
+                    _ => write!(f, " (which is empty)"),
+                }
+            }
+            RunError::Config(m) => write!(f, "configuration error: {}", m),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
         }
     }
@@ -339,7 +357,20 @@ impl<'p> Kernel<'p> {
         }
         // Price relation for the executor.
         let price_rel = match &cfg.price_relation {
-            Some(name) => Some(*rel_ids.get(name).ok_or_else(|| RunError::Internal(format!("price relation `{}` is not in the program", name)))?),
+            Some(name) => {
+                let id = *rel_ids.get(name).ok_or_else(|| RunError::Config(format!("price relation `{}` is not in the program", name)))?;
+                let sig = prog.relations.get(name).unwrap();
+                if !matches!(sig.kind, Kind::Primitive { .. }) || price_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
+                    return Err(RunError::Config(format!(
+                        "price relation `{}` must be a primitive with an equity argument and a Price<...> output; `{}` has none",
+                        name, name
+                    )));
+                }
+                if !sig.res.map(|r| r <= prog.resolution).unwrap_or(false) {
+                    return Err(RunError::Config(format!("price relation `{}` is coarser than the decision resolution {}", name, prog.resolution)));
+                }
+                Some(id)
+            }
             None => {
                 let mut cands: Vec<(&String, &Signature)> = prog
                     .relations
@@ -548,6 +579,15 @@ impl<'p> Kernel<'p> {
         let cr = self.compiled[rule_idx].clone();
         let rel = self.rel(&rule.head.name)?;
         let info = self.rels[rel].clone();
+        let domain = self.domains.get(&info.res);
+        if !domain.map(|d| d.contains(&t)).unwrap_or(false) {
+            return Err(RunError::NotABar {
+                t,
+                res: info.res,
+                first: domain.and_then(|d| d.first().copied()),
+                last: domain.and_then(|d| d.last().copied()),
+            });
+        }
         let mut env: Env = vec![None; cr.nslots];
         if let Term::Var(v, _) = &rule.head.terms[info.key_pos] {
             env[cr.slots[v]] = Some(Value::Time(t));

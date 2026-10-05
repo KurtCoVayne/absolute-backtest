@@ -38,6 +38,7 @@ resampled bucket.
 | `corpus/negative` | 18 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
+| `tests/data.rs`, `tests/cli.rs` | The CSV loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
 
 ## The surface syntax in one page
 
@@ -176,6 +177,58 @@ solution at `t`; `verify_causality` re-runs truncated instances for sampled
 bars and compares `decide(t)`, which `tests/kernel.rs` does for seven corpus
 strategies.
 
+## The command line
+
+```
+abt check <files...>
+abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+        [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL]
+        [--verify-causality] [--quiet] <files...>
+abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
+        [--price-relation REL] <files...>
+abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
+```
+
+`<files...>` are `.dsl` files or directories searched recursively. The
+synthetic market is seeded (`--seed`, default 7) and deterministic.
+`--price-relation REL` names the primitive the executor fills at; by default
+it is the `close`-like primitive at the decision resolution (or the finest
+one below it, whose last tuple in the bucket is used). `REL` must be a
+primitive with an equity argument and a `Price<...>` output no coarser than
+the decision resolution; anything else halts the run before it starts
+rather than dropping every order.
+
+Every option value is validated: `--days abc`, `--cash lots`, `--symbols ""`
+or `--at yesterday` are errors naming the option, never a silent default,
+and an unknown `--option` prints the usage. `explain` at a timestamp that is
+not a bar reports `2030-01-01 is not a bar of the @1d time domain (2022-01-03
+to 2023-12-01)` instead of a missing literal. Exit codes: 0 success; 1 the
+strategy does not check, the run halted, or the usage is wrong; 2 an input
+could not be read or parsed (a source file, a data directory, an option
+value).
+
+## Environment instances as CSV
+
+`abt run --data DIR` loads one `<relation>.csv` per primitive of the
+strategy's environment; `abt synth` writes the same layout. The header names
+the signature's arguments (case-insensitive), fields are comma-separated, and
+a timestamp is `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
+` HH:MM[:SS]`. The loader enforces what the signature promises:
+
+- The temporal key is stored as the label of the bar containing it at the
+  relation's resolution (spec section 3: at @1d the trading date), so
+  `2022-01-03T16:00:00` in `close.csv` and `2022-01-03` in `universe.csv`
+  are one bar and share one time domain.
+- A relation is a function of its identity columns (its inputs, its key and
+  its entity-typed outputs; spec section 3): two rows for one identity with
+  different value outputs are an error naming both lines, such as
+  `close.csv:3: duplicate tuple for (AAA, 2022-01-03) with different outputs;
+  line 2 already binds them`. A row identical to an earlier one is dropped.
+- A field that does not parse as its type, a header lacking a column and a
+  short row are errors naming the file and line.
+- A missing or header-only file leaves the relation empty and prints a
+  `note:`; `--data DIR` must be an existing directory.
+
 ## Decisions taken where the model left room
 
 These are the places where implementing the model required a choice; each is
@@ -227,7 +280,7 @@ small and easy to flip.
 ## Development
 
 ```
-cargo test            # type algebra, time, corpus, kernel, syntax
+cargo test            # type algebra, time, corpus, kernel, syntax, CSV loader, command line
 cargo build --release
 ```
 
