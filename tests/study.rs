@@ -14,8 +14,8 @@ use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::time::parse_timestamp;
 use absolute_backtest::kernel::{run, ExecConfig};
 use absolute_backtest::study::{
-    block_embargo, grid_points, parse_grid_axis, program_hash, reveal, run_study, subperiod_sharpes, surface, trailing_embargo, Attachment, Grid, Holdout, Lineages, Project, Provenance, Threshold,
-    TrialKind, WalkForward,
+    block_embargo, build_report, grid_points, parse_grid_axis, program_hash, reveal, run_study, subperiod_sharpes, surface, trailing_embargo, Attachment, Grid, Holdout, Lineages, Project, Provenance,
+    Threshold, TrialKind, WalkForward, BIASES,
 };
 
 fn program(src: &str, name: &str) -> Program {
@@ -511,5 +511,71 @@ fn a_walk_forward_picks_per_fold_and_logs_every_evaluation() {
     assert_eq!(log.iter().filter(|t| t.note.as_deref().map(|n| n.ends_with("test")).unwrap_or(false)).count(), 2);
     assert!(log.iter().skip(2).all(|t| t.scheme.as_deref() == Some("anchored:12mo:6mo")));
     assert_eq!(report.trials, 8);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- the report ----
+
+#[test]
+fn the_report_counts_trials_reveals_and_marks_the_biases_warned() {
+    let dir = temp_dir("report");
+    let project = Project::open(&dir);
+    let src = momentum("reported", "");
+    let mut ws = corpus::base_workspace();
+    ws.add_source(&src).unwrap();
+    let (prog, diags) = check_program(&ws, "reported");
+    let prog = prog.unwrap();
+    // Nothing to report before a lineage exists.
+    assert!(build_report(&project, &prog, &diags).is_err());
+    let (spec, _) = project
+        .declare(
+            &prog,
+            Holdout::Trailing { years: 1 },
+            "sharpe",
+            vec![Threshold::parse("max_drawdown<=0.9").unwrap()],
+            ExecConfig::default(),
+        )
+        .unwrap();
+    let ds = synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 600, 9);
+    let grid = Grid::new(vec![parse_grid_axis("n=1,2").unwrap()], &[]);
+    run_study(&project, &spec, &prog, &ds, &grid, &run, Provenance::default()).unwrap();
+    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    absolute_backtest::study::log_untracked(&project, &prog, &r, &ExecConfig::default(), None).unwrap();
+    reveal(&project, &spec, &prog, &ds, &run, Provenance::default()).unwrap();
+    let report = build_report(&project, &prog, &diags).unwrap();
+    assert_eq!(report.trials, 4);
+    assert_eq!(report.study_trials, 2);
+    assert_eq!(report.untracked, 1);
+    assert_eq!(report.reveals.len(), 1);
+    assert_eq!(report.runs, 2, "one study run and one reveal");
+    assert_eq!(report.members.len(), 1);
+    assert!(report.dsr.is_some());
+    assert_eq!(report.biases.len(), 40);
+    assert_eq!(BIASES.iter().filter(|b| b.audit == 'C').count(), 12);
+    // The executor's cash warning was raised on every run; its row is marked.
+    let cash = report.biases.iter().find(|b| b.name == "cash-management").unwrap();
+    assert_eq!(cash.raised.len(), 1, "{:?}", cash);
+    assert!(report.warnings.iter().any(|w| w.bias == "cash-management" && w.times >= 4), "{:?}", report.warnings);
+    assert!(report.warnings.iter().any(|w| w.bias == "short-sample"), "{:?}", report.warnings);
+    let look = report.biases.iter().find(|b| b.name == "look-ahead").unwrap();
+    assert!(look.raised.is_empty() && look.status.starts_with("guaranteed"));
+    assert_eq!(report.thresholds.len(), 1);
+    assert_eq!(report.thresholds[0].on_latest_reveal, Some(true));
+    assert!(report.degrees_of_freedom.starts_with("degrees of freedom: 3 params"));
+    let text = report.render();
+    assert!(text.contains("trials: 4 (2 in studies, 1 untracked, 1 reveal(s)); study runs: 2"), "{}", text);
+    assert!(text.contains("reveal #4") && text.contains("<- raised") && text.contains("B cash-management"), "{}", text);
+    assert!(text.contains("threshold max_drawdown <= 0.9: latest trial holds; latest reveal holds"), "{}", text);
+    // The command line prints the same report.
+    let d = dir.to_string_lossy().into_owned();
+    std::fs::write(dir.join("reported.dsl"), &src).unwrap();
+    let files = [
+        format!("{}/corpus/env", env!("CARGO_MANIFEST_DIR")),
+        format!("{}/corpus/lib", env!("CARGO_MANIFEST_DIR")),
+        dir.join("reported.dsl").to_string_lossy().into_owned(),
+    ];
+    let (code, out, err) = abt(&["study", "report", "--study", &d, "--strategy", "reported", &files[0], &files[1], &files[2]]);
+    assert_eq!(code, 0, "{}\n{}", out, err);
+    assert!(out.contains("study report: reported") && out.contains("bias audit"), "{}", out);
     std::fs::remove_dir_all(&dir).unwrap();
 }
