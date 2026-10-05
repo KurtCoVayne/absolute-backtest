@@ -738,6 +738,8 @@ pub struct Unit {
     pub name: String,
     pub span: Span,
     pub env: Option<(String, Span)>,
+    /// The bundle version the unit is written against (`env name@2026.10`).
+    pub env_version: Option<String>,
     pub uses: Vec<(String, Span)>,
     pub resolution: Option<(Resolution, Span)>,
     pub mode: Option<(DecisionMode, Span)>,

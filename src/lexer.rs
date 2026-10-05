@@ -9,6 +9,8 @@ pub enum Tok {
     Float(f64),
     Str(String),
     Res(Resolution),
+    /// `@2026.10`: a bundle version after an environment name.
+    Version(String),
     Duration(Duration),
     LParen,
     RParen,
@@ -41,6 +43,7 @@ impl std::fmt::Display for Tok {
             Tok::Float(x) => write!(f, "`{}`", x),
             Tok::Str(s) => write!(f, "\"{}\"", s),
             Tok::Res(r) => write!(f, "`{}`", r),
+            Tok::Version(v) => write!(f, "@{}", v),
             Tok::Duration(d) => write!(f, "`{}`", d),
             Tok::LParen => write!(f, "`(`"),
             Tok::RParen => write!(f, "`)`"),
@@ -218,9 +221,21 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
         if c == '@' {
             let mut j = i + 1;
             let mut text = String::new();
-            while j < n && chars[j].is_ascii_alphanumeric() {
+            while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '.') {
                 text.push(chars[j]);
                 j += 1;
+            }
+            // A trailing period ends a rule, not a version.
+            while text.ends_with('.') {
+                text.pop();
+                j -= 1;
+            }
+            // `@2026.10` after an environment name is a bundle version.
+            if text.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && text.contains('.') {
+                let k = j - i;
+                advance(&mut i, &mut line, &mut col, k);
+                toks.push(Token { tok: Tok::Version(text), span });
+                continue;
             }
             // `@1d` is a resolution; `@T` is the temporal-key mode marker.
             if !text.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {

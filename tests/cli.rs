@@ -333,3 +333,43 @@ fn nav_prints_the_book_per_bar_and_reg_t_is_a_preset() {
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out).1.contains("--margin"), "{}", text(&out).1);
 }
+
+/// Data-bundle doc, sections 2 and 3: build a bundle from a synthetic
+/// catalog market, run its tests, and run a strategy on it; an untested
+/// bundle is refused without --untested.
+#[test]
+fn bundle_build_test_and_run() {
+    let dir = std::env::temp_dir().join(format!("abt-cli-bundle-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = dir.to_string_lossy().to_string();
+    let files = strategy_files("total_return_momentum");
+    let mut args = vec!["bundle", "build", "--synthetic", "--days", "150", "--env", "equities_1d_v2", "--version", "2026.10", "--out", &out];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let built = abt(&args);
+    assert_eq!(built.status.code(), Some(0), "{}\n{}", text(&built).0, text(&built).1);
+    assert!(text(&built).0.contains("wrote bundle `equities_1d_v2@2026.10`"), "{}", text(&built).0);
+    assert!(dir.join("manifest.json").exists() && dir.join("log").join("close").exists());
+    // Untested: refused.
+    let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let refused = abt(&args);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(text(&refused).1.contains("--untested"), "{}", text(&refused).1);
+    let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--untested", "--quiet"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let ran = abt(&args);
+    assert_eq!(ran.status.code(), Some(0), "{}", text(&ran).1);
+    assert!(text(&ran).1.contains("not causality-certified"), "{}", text(&ran).1);
+    // Tested: recorded, then runs without the flag.
+    let mut args = vec!["bundle", "test", &out];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let tested = abt(&args);
+    assert_eq!(tested.status.code(), Some(0), "{}\n{}", text(&tested).0, text(&tested).1);
+    assert!(text(&tested).0.contains("recorded in the manifest"), "{}", text(&tested).0);
+    let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let ran = abt(&args);
+    assert_eq!(ran.status.code(), Some(0), "{}", text(&ran).1);
+    assert!(text(&ran).0.contains("decisions:"), "{}", text(&ran).0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
