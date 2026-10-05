@@ -425,9 +425,16 @@ environment without a complete entity domain cannot express "has no position".
 
 **Execution contract (v1).** Decisions at T are emitted after close T. The
 simulated executor fills them at close prev⁻¹(T), the next bar at the decision
-resolution, at that bar's close price, optionally adjusted by a configured
-slippage and commission model that is part of the kernel configuration and
-not of the program. Consequently `position(A, T)` is the position held at
+resolution, at that bar's close price, adjusted by a cost model that is part
+of the kernel configuration and not of the program (data-bundle doc, section
+5, with conservative non-zero defaults: a per-share commission with a
+per-order minimum, a regulatory fee on sells, and slippage against the order
+of a fixed part plus a multiple of the instrument's realized volatility over
+the bars before the fill; a configuration that turns a model off is reported
+on the run, never silent). A long that is bought is sized at the price it
+will fill at, so the cash it spends is the weight of equity; a bar's
+transaction costs are never leverage, so a fully invested book stays fully
+invested after paying them. Consequently `position(A, T)` is the position held at
 close T, after fills of decisions made at prev(T); `fill(A, T, Q, P)` records
 those fills; `cash(T, C)` is cash after them; `decided(T0, D)` holds every
 decision the strategy emitted at T0. A decision rule at T therefore sees the

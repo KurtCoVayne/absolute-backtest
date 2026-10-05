@@ -160,9 +160,22 @@ impl std::str::FromStr for Lot {
 #[derive(Clone, Debug)]
 pub struct ExecConfig {
     pub initial_cash: f64,
-    /// Slippage applied to the fill price, in basis points, against the order.
+    /// Fixed slippage applied to the fill price, in basis points, against
+    /// the order; added to the volatility-scaled part.
     pub slippage_bps: f64,
+    /// Volatility-scaled slippage (data-bundle doc, section 5): the fill
+    /// price moves against the order by `slippage_vol_mult` times the
+    /// instrument's realized volatility, the sample standard deviation of
+    /// its log returns over the last `vol_window` bars ending at the fill
+    /// bar; with fewer than `vol_min_obs` returns only the fixed part applies.
+    pub slippage_vol_mult: f64,
+    pub vol_window: usize,
+    pub vol_min_obs: usize,
+    /// Commission per share, subject to a per-order minimum.
     pub commission_per_share: f64,
+    pub commission_min_per_order: f64,
+    /// Regulatory fee on the notional of sells (and shorts), in basis points.
+    pub fee_bps_on_sells: f64,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -181,11 +194,20 @@ pub struct ExecConfig {
 }
 
 impl Default for ExecConfig {
+    /// Conservative, non-zero costs (data-bundle doc, section 5: "defaults
+    /// are conservative on purpose"): half a cent a share with a dollar
+    /// minimum, the SEC-style fee on sells, and slippage of a tenth of a
+    /// bar's realized volatility.
     fn default() -> ExecConfig {
         ExecConfig {
             initial_cash: 1_000_000.0,
             slippage_bps: 0.0,
-            commission_per_share: 0.0,
+            slippage_vol_mult: 0.1,
+            vol_window: 20,
+            vol_min_obs: 10,
+            commission_per_share: 0.005,
+            commission_min_per_order: 1.0,
+            fee_bps_on_sells: 0.278,
             price_relation: None,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
@@ -194,6 +216,61 @@ impl Default for ExecConfig {
             lot: Lot::Whole,
         }
     }
+}
+
+impl ExecConfig {
+    /// Every cost model off: the executor of the semantic model alone, for
+    /// hand-computed tests and for an author who wants a frictionless run
+    /// (which is then warned on, see `RunResult::warnings`).
+    pub fn frictionless() -> ExecConfig {
+        ExecConfig {
+            slippage_bps: 0.0,
+            slippage_vol_mult: 0.0,
+            commission_per_share: 0.0,
+            commission_min_per_order: 0.0,
+            fee_bps_on_sells: 0.0,
+            ..ExecConfig::default()
+        }
+    }
+
+    /// The models this configuration turns off, each named by the bias of
+    /// the data-bundle doc it leaves unmodeled.
+    pub fn warnings(&self) -> Vec<RunWarning> {
+        let mut w = Vec::new();
+        if self.commission_per_share == 0.0 && self.commission_min_per_order == 0.0 && self.fee_bps_on_sells == 0.0 {
+            w.push(RunWarning {
+                bias: "transaction-cost neglect".into(),
+                message: "commissions and fees are zero; fills cost nothing but their price".into(),
+            });
+        }
+        if self.slippage_bps == 0.0 && self.slippage_vol_mult == 0.0 {
+            w.push(RunWarning {
+                bias: "slippage".into(),
+                message: "slippage is zero; every order fills at the bar's close".into(),
+            });
+        }
+        w
+    }
+}
+
+/// A model the run's configuration turned off (data-bundle doc, section 5:
+/// a study run at zero cost is warned, never silent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunWarning {
+    /// The bias of the data-bundle doc's audit the warning relates to.
+    pub bias: String,
+    pub message: String,
+}
+
+/// Costs paid over a run, and the notional traded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CostSummary {
+    pub commissions: f64,
+    pub fees: f64,
+    /// The notional lost to slippage: Σ |quantity| · |fill price − bar price|.
+    pub slippage: f64,
+    /// Σ |quantity| · fill price.
+    pub turnover: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +370,12 @@ pub struct FillRecord {
     /// The bar had no price for the instrument and the order reduced the
     /// position, so it filled at the last known price (section 6).
     pub at_last_price: bool,
+    /// Commission charged (per share, at least the per-order minimum).
+    pub commission: f64,
+    /// Regulatory fee charged (on sells).
+    pub fee: f64,
+    /// Slippage paid: |quantity| · |fill price − bar price|.
+    pub slippage: f64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -307,6 +390,9 @@ pub struct RunResult {
     pub equity_curve: Vec<(i64, f64)>,
     pub final_cash: f64,
     pub final_positions: BTreeMap<Sym, f64>,
+    pub costs: CostSummary,
+    /// The cost models the configuration turned off.
+    pub warnings: Vec<RunWarning>,
 }
 
 impl RunResult {
@@ -620,6 +706,7 @@ impl<'p> Kernel<'p> {
         let mut result = RunResult {
             symbols: self.symbols.names().to_vec(),
             bars: bars.clone(),
+            warnings: self.cfg.warnings(),
             ..Default::default()
         };
         let delta = self.prog.mode == DecisionMode::Delta;
@@ -708,12 +795,20 @@ impl<'p> Kernel<'p> {
                     });
                 }
                 let sizing_equity = equity_next.max(0.0);
-                let slip = self.cfg.slippage_bps / 10_000.0;
+                // A bar's transaction costs (commission, fee, slippage) are never
+                // leverage: a fully invested book stays fully invested after
+                // paying them, carrying a debit of at most the bar's costs, which
+                // the next sizing sees (and margin interest prices).
+                let mut bar_costs = 0.0;
                 for (d, rule) in &pending {
                     let sym = d.equity;
                     let name = self.symbols.name(sym).to_string();
                     let pos = positions.get(&sym).copied().unwrap_or(0.0);
                     let bar_price = self.bar_price(sym, tn);
+                    // Slippage against the order: the fixed part plus a multiple
+                    // of the instrument's realized volatility at the fill bar.
+                    let slip = self.cfg.slippage_bps / 10_000.0 + self.cfg.slippage_vol_mult * self.realized_vol(sym, &bars, k + 1).unwrap_or(0.0);
+                    let slipped = |p: f64, buying: bool| if buying { p * (1.0 + slip) } else { p * (1.0 - slip) };
                     // Lot rounding applies to what the decision names: a delta
                     // order's quantity, or a target's quantity (so a kept name
                     // never ends a fraction of a share over its target).
@@ -727,7 +822,19 @@ impl<'p> Kernel<'p> {
                         (Ctor::Buy | Ctor::Cover, _) => round(d.amount),
                         (Ctor::Sell | Ctor::Short, _) => -round(d.amount),
                         (Ctor::TargetQuantity, _) => round(d.amount) - pos,
-                        (Ctor::TargetWeight, Some(p)) => round(d.amount * sizing_equity / p) - pos,
+                        // A long that is bought is sized at the price it will fill
+                        // at, so the cash it spends is the weight of equity; any
+                        // other target (a reduction, a short) is sized at the bar
+                        // price, which is what the position is marked at.
+                        (Ctor::TargetWeight, Some(p)) => {
+                            let target = round(d.amount * sizing_equity / p);
+                            let target = if target > pos && target > 0.0 {
+                                round(d.amount * sizing_equity / slipped(p, true))
+                            } else {
+                                target
+                            };
+                            target - pos
+                        }
                         // Without a price a weight cannot be sized, except the flat target.
                         (Ctor::TargetWeight, None) if d.amount == 0.0 => -pos,
                         (Ctor::TargetWeight, None) => {
@@ -781,8 +888,16 @@ impl<'p> Kernel<'p> {
                             }
                         },
                     };
-                    let fill_price = if qty > 0.0 { p * (1.0 + slip) } else { p * (1.0 - slip) };
-                    let cost = qty * fill_price + self.cfg.commission_per_share * qty.abs();
+                    let fill_price = slipped(p, qty > 0.0);
+                    let commission = if self.cfg.commission_per_share == 0.0 && self.cfg.commission_min_per_order == 0.0 {
+                        0.0
+                    } else {
+                        (self.cfg.commission_per_share * qty.abs()).max(self.cfg.commission_min_per_order)
+                    };
+                    let fee = if qty < 0.0 { qty.abs() * fill_price * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
+                    let cost = qty * fill_price + commission + fee;
+                    let slippage = qty.abs() * (fill_price - p).abs();
+                    let allowance = bar_costs + commission + fee + slippage;
                     // Leverage: only an order that adds exposure can borrow.
                     if !reduces {
                         let new_cash = cash - cost;
@@ -798,7 +913,7 @@ impl<'p> Kernel<'p> {
                             gross += qty.abs() * p;
                             net += qty * p;
                         }
-                        let tol = 1e-9 * (1.0 + net.abs());
+                        let tol = 1e-9 * (1.0 + net.abs()) + allowance;
                         if new_cash < -tol || gross > net + tol {
                             let message = format!("leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2}", new_cash, gross, net);
                             match self.cfg.on_leverage {
@@ -831,12 +946,20 @@ impl<'p> Kernel<'p> {
                     }
                     self.last_price.insert(sym, fill_price);
                     self.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
+                    bar_costs += commission + fee + slippage;
+                    result.costs.commissions += commission;
+                    result.costs.fees += fee;
+                    result.costs.slippage += slippage;
+                    result.costs.turnover += qty.abs() * fill_price;
                     result.fills.push(FillRecord {
                         t: tn,
                         equity: sym,
                         quantity: qty,
                         price: fill_price,
                         at_last_price,
+                        commission,
+                        fee,
+                        slippage,
                     });
                 }
                 for (&sym, &q) in &positions {
@@ -866,6 +989,34 @@ impl<'p> Kernel<'p> {
             Some(p) => Some(p),
             None => self.last_price.get(&sym).copied(),
         }
+    }
+
+    /// Realized volatility of `sym` at `bars[end]`: the sample standard
+    /// deviation of its log returns over the `vol_window` bars ending there
+    /// (inclusive), from the price relation; `None` with fewer than
+    /// `vol_min_obs` returns (a bar without a price yields no return).
+    pub fn realized_vol(&mut self, sym: Sym, bars: &[i64], end: usize) -> Option<f64> {
+        if self.cfg.slippage_vol_mult == 0.0 {
+            return None;
+        }
+        let lo = end.saturating_sub(self.cfg.vol_window);
+        let mut rets = Vec::new();
+        let mut prev: Option<f64> = None;
+        for &t in &bars[lo..=end.min(bars.len() - 1)] {
+            let p = self.bar_price(sym, t);
+            if let (Some(a), Some(b)) = (prev, p) {
+                rets.push((b / a).ln());
+            }
+            if p.is_some() {
+                prev = p;
+            }
+        }
+        if rets.len() < self.cfg.vol_min_obs.max(2) {
+            return None;
+        }
+        let n = rets.len() as f64;
+        let mean = rets.iter().sum::<f64>() / n;
+        Some((rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt())
     }
 
     /// Price of `sym` at decision bar `t` from the configured price relation:

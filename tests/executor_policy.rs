@@ -41,7 +41,7 @@ fn market(prices: &[Option<f64>]) -> Dataset {
 fn cfg(cash: f64) -> ExecConfig {
     ExecConfig {
         initial_cash: cash,
-        ..Default::default()
+        ..ExecConfig::frictionless()
     }
 }
 

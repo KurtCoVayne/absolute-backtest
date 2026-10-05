@@ -63,7 +63,7 @@ fn executor_contract_by_hand() {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -91,7 +91,7 @@ fn slippage_and_commission_apply_against_the_order() {
             initial_cash: 1000.0,
             slippage_bps: 100.0,
             commission_per_share: 0.5,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -122,7 +122,7 @@ strategy half {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -252,7 +252,7 @@ fn explain_names_the_first_failing_literal() {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -427,7 +427,7 @@ fn a_missing_fill_price_drops_the_decision() {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -457,7 +457,7 @@ fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -498,7 +498,7 @@ strategy hold_n {
             &ds,
             ExecConfig {
                 param_overrides: overrides.into_iter().map(|(n, l)| (n.to_string(), l)).collect(),
-                ..Default::default()
+                ..ExecConfig::frictionless()
             },
         )
         .map_err(|e| e.to_string())
@@ -733,7 +733,7 @@ strategy unguarded {
         &ds,
         ExecConfig {
             on_leverage: OnLeverage::Allow,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     )
     .unwrap();
@@ -749,7 +749,7 @@ strategy unguarded {
         &ds,
         ExecConfig {
             on_leverage: OnLeverage::Allow,
-            ..Default::default()
+            ..ExecConfig::frictionless()
         },
     ) {
         Err(RunError::Arithmetic { rule, message, .. }) => {
@@ -856,12 +856,12 @@ strategy lagz {
     let ds = synthetic_daily(&["AAA"], (2023, 1, 2), 40, 3);
     let fine = ExecConfig {
         param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 7 }))],
-        ..Default::default()
+        ..ExecConfig::frictionless()
     };
     run(&prog, &ds, fine).unwrap();
     let flipped = ExecConfig {
         param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 0 }))],
-        ..Default::default()
+        ..ExecConfig::frictionless()
     };
     match run(&prog, &ds, flipped) {
         Err(RunError::Request(m)) => assert!(m.contains("lag") && m.contains("zero") && !m.contains("internal"), "{}", m),
