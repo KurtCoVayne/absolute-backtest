@@ -303,7 +303,7 @@ fn main() {
                                 // A literal in the DSL's grammar; a bare identifier is an equity.
                                 let lit = absolute_backtest::parser::parse_lit(raw).unwrap_or_else(|e| {
                                     if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
-                                        absolute_backtest::Lit::Equity(raw.to_string())
+                                        absolute_backtest::Lit::Str(raw.to_string())
                                     } else {
                                         eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
                                         exit(1)

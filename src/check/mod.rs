@@ -218,6 +218,9 @@ pub struct RuleInfo {
     pub refs: Vec<AtomRef>,
     pub params_used: Vec<String>,
     pub resolution: Resolution,
+    /// The type each string literal of the rule resolved to (Equity or
+    /// Label), by its span; the checker rewrites the literals with it.
+    pub str_types: Vec<(Span, Ty)>,
 }
 
 /// A resolved, checked program: a strategy with its libraries and environment.
@@ -273,7 +276,8 @@ fn lit_order(a: &Lit, b: &Lit) -> Option<std::cmp::Ordering> {
         (Lit::Duration(x), Lit::Duration(y)) if x == y => Some(Ordering::Equal),
         (Lit::Duration(x), Lit::Duration(y)) if x.min_days() > y.max_days() => Some(Ordering::Greater),
         (Lit::Duration(x), Lit::Duration(y)) if x.max_days() < y.min_days() => Some(Ordering::Less),
-        (Lit::Money(..), _) | (_, Lit::Money(..)) | (Lit::Duration(_), _) | (_, Lit::Duration(_)) | (Lit::Equity(_), _) | (_, Lit::Equity(_)) => None,
+        (Lit::Money(..), _) | (_, Lit::Money(..)) | (Lit::Duration(_), _) | (_, Lit::Duration(_)) => None,
+        (Lit::Str(_) | Lit::Equity(_) | Lit::Label(_), _) | (_, Lit::Str(_) | Lit::Equity(_) | Lit::Label(_)) => None,
         _ => num(a)?.partial_cmp(&num(b)?),
     }
 }
@@ -567,14 +571,23 @@ impl<'a> Checker<'a> {
                 if pm.contains_key(&p.name) {
                     self.diag(Code::U, &u.name, None, p.span, format!("parameter `{}` is declared twice", p.name));
                 }
+                let mut p = p.clone();
                 if !types::compat(&p.ty, &p.value.ty()) {
+                    let what = if p.value.ty() == Ty::StrLit {
+                        "a string literal (an Equity or a Label)".to_string()
+                    } else {
+                        p.value.ty().to_string()
+                    };
                     self.diag(
                         Code::T,
                         &u.name,
                         None,
                         p.span,
-                        format!("parameter `{}` is declared {} but its default is {}", p.name, p.ty, p.value.ty()),
+                        format!("parameter `{}` is declared {} but its default `{}` is {}", p.name, p.ty, p.value, what),
                     );
+                } else if let Lit::Str(s) = &p.value {
+                    // Resolved by the declared type: the program carries no bare string.
+                    p.value = if p.ty == Ty::Label { Lit::Label(s.clone()) } else { Lit::Equity(s.clone()) };
                 }
                 if let Some((lo, hi)) = &p.range {
                     if !types::compat(&p.ty, &lo.ty()) || !types::compat(&p.ty, &hi.ty()) {
@@ -597,7 +610,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                pm.insert(p.name.clone(), p.clone());
+                pm.insert(p.name.clone(), p);
             }
             self.params.insert(u.name.clone(), pm);
             for r in &u.rules {
@@ -695,6 +708,25 @@ impl<'a> Checker<'a> {
         for (i, r) in rules.iter().enumerate() {
             let info = rule::analyze(self, i, r);
             self.infos.push(info);
+        }
+        // A string literal is an Equity or a Label from context: rewrite each
+        // one with the type the rule pass resolved, so the checked program
+        // (the IR the kernel reads) carries no bare string.
+        for (i, info) in self.infos.iter().enumerate() {
+            let Some(info) = info else { continue };
+            if info.str_types.is_empty() {
+                continue;
+            }
+            let types: HashMap<(u32, u32), Ty> = info.str_types.iter().map(|(sp, ty)| ((sp.line, sp.col), ty.clone())).collect();
+            dof::literals_in_rule_mut(&mut self.rules[i], &mut |lit, span| {
+                if let Lit::Str(s) = lit {
+                    match types.get(&(span.line, span.col)) {
+                        Some(Ty::Label) => *lit = Lit::Label(s.clone()),
+                        Some(_) => *lit = Lit::Equity(s.clone()),
+                        None => {}
+                    }
+                }
+            });
         }
     }
 
@@ -932,7 +964,8 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            for p in &self.root.params {
+            let root_params: Vec<Param> = self.params.get(&root_name).map(|m| m.values().cloned().collect()).unwrap_or_default();
+            for p in &root_params {
                 if let Lit::Equity(_) = &p.value {
                     self.diag(
                         Code::W6,

@@ -52,7 +52,10 @@ bundle, surviving ticker changes and the reuse of a ticker by a later company,
 totally ordered so that tie-breaks are deterministic; a ticker is a time-keyed
 relation `ticker(A, @T, S)`, not an identity, and a ticker literal such as
 `"SPY"` names the security carrying that ticker at the bundle date the program
-is written against, which the checker warns is a snapshot: W6), `Timestamp` (the finite, totally ordered
+is written against, which the checker warns is a snapshot: W6), `Label` (a
+name from a closed vocabulary the data bundle defines, such as a delisting
+reason, an index or a classification code; interned, compared with `=` only,
+never an identity column; data-bundle doc, section 3), `Timestamp` (the finite, totally ordered
 set of timestamps present in the data), `Duration` (calendar time in days,
 weeks, months, or years; `20d` means 20 calendar days, and a window of `20d`
 holds whichever timestamps are present inside it), `Count` (a non-negative

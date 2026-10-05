@@ -67,6 +67,9 @@ pub enum Value {
     Count(i64),
     Dur(Duration),
     Decision(Decision),
+    /// A name from the bundle's vocabulary (`Ty::Label`), interned in the
+    /// dataset's label table, distinct from an equity of the same spelling.
+    Label(Sym),
 }
 
 fn bits(x: f64) -> u64 {
@@ -87,6 +90,7 @@ impl PartialEq for Value {
             (Value::Count(a), Value::Count(b)) => a == b,
             (Value::Dur(a), Value::Dur(b)) => a == b,
             (Value::Decision(a), Value::Decision(b)) => a.ctor == b.ctor && a.equity == b.equity && bits(a.amount) == bits(b.amount),
+            (Value::Label(a), Value::Label(b)) => a == b,
             _ => false,
         }
     }
@@ -122,6 +126,10 @@ impl Hash for Value {
                 d.equity.hash(h);
                 bits(d.amount).hash(h)
             }
+            Value::Label(a) => {
+                6u8.hash(h);
+                a.hash(h)
+            }
         }
     }
 }
@@ -134,6 +142,7 @@ fn rank(v: &Value) -> u8 {
         Value::Count(_) => 3,
         Value::Dur(_) => 4,
         Value::Decision(_) => 5,
+        Value::Label(_) => 6,
     }
 }
 
@@ -146,6 +155,7 @@ impl Ord for Value {
             (Value::Count(a), Value::Count(b)) => a.cmp(b),
             (Value::Dur(a), Value::Dur(b)) => a.approx_days().total_cmp(&b.approx_days()).then(a.cmp(b)),
             (Value::Decision(a), Value::Decision(b)) => a.ctor.cmp(&b.ctor).then(a.equity.cmp(&b.equity)).then(a.amount.total_cmp(&b.amount)),
+            (Value::Label(a), Value::Label(b)) => a.cmp(b),
             _ => rank(self).cmp(&rank(o)),
         }
     }
