@@ -111,7 +111,8 @@ strategy sma_crossover {
   idiom is `mstart(T) :- bar(T), month_start(T).` and then `not mstart(T)`.
 - Decisions: `decide(T, buy(A, Q))`, `sell`, `short`, `cover` in delta mode;
   `target_weight(A, W)`, `target_quantity(A, Q)` in target mode. The kernel
-  supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)` and
+  supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)`,
+  `nav(T, N)` (the book marked at T, before T's decisions) and
   `fill(A, T, Q, P)` at the decision resolution.
 
 `abt check` also prints each strategy's degrees of freedom (`docs/data-bundle.md`,

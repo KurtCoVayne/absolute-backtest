@@ -343,6 +343,10 @@ impl Executor for SimExecutor {
             leverage: if equity > 0.0 { gross / equity } else { 0.0 },
         });
         result.equity_curve.push((t, equity));
+        // `nav(T, N)`: the book's value at T's mark, before T's decisions
+        // (data-bundle doc, section 7: what the metrics library reads).
+        let nav_rel = k.rel_id("nav");
+        k.stores[nav_rel].insert(t, vec![Value::Time(t), Value::Num(equity)]);
         Ok(())
     }
 
