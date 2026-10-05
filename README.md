@@ -37,9 +37,9 @@ resampled bucket.
 | `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation; `mod.rs` runs the executor loop of section 7, `explain`, and the empirical causality check; `time.rs` is calendar arithmetic and resolution buckets. |
 | `src/data.rs` | CSV environment instances and a deterministic synthetic market. |
 | `src/bin/abt.rs` | The command line. |
-| `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
-| `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
-| `corpus/strategies` | 17 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
+| `corpus/env` | Four environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`, and `equities_1d_v2`, the catalog of `docs/data-bundle.md` section 3 (prices as traded, `split`, `dividend`, `delisted`, `member`, `classification`, `ticker`). |
+| `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d), `catalog` (total return and a point-in-time adjusted close over `equities_1d_v2`). |
+| `corpus/strategies` | 18 strategies that must check clean, including `opening_gap` at @1m, `resampled_momentum` over @1m data at @1d and `total_return_momentum` over the catalog. |
 | `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/checker_messages.rs` | Diagnostics pinned exactly: one diagnostic per root cause, library diagnostics reported once, and the wording of the messages for builtins, wildcards and resolution mismatches. |
@@ -487,6 +487,18 @@ small and easy to flip.
   decision names the instrument or the instrument has no price. Re-issues
   are fills without decisions: `decided` still holds only what the strategy
   emitted.
+- **Corporate actions act on the book at the bar's open, before the mark.**
+  A `split(A, T, F)` multiplies the position by F at its ex-date T; under
+  whole lots the fraction is cashed at the bar's price. A `dividend(A, T0,
+  Ex, Pay, Amount)` creates a receivable of Amount times the shares held at
+  Ex (a short owes it), credited at Pay; the receivable is not marked, so
+  equity dips between the ex-date and the pay date, and a pay date beyond
+  the data is never credited. A `delisted(A, T, Reason)` force-closes the
+  position at the first bar it holds, at the last trade less the haircut for
+  the reason (`--haircut REASON=X`; bankruptcy and regulatory 1, acquisition
+  and voluntary 0, anything else 1), with commission and no slippage, as a
+  forced fill; a zero haircut on an involuntary reason is warned. Every
+  action is in `RunResult.actions`.
 - **Without a security table the ticker is the id.** A dataset that has no
   `securities.csv` (the synthetic markets, the old CSV layout) is the v1
   world: equity fields are tickers, a ticker literal interns its own symbol,

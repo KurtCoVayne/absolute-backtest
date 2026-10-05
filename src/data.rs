@@ -333,6 +333,93 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
     ds
 }
 
+/// Synthetic daily market for the `equities_1d_v2` catalog environment:
+/// stable ids `E1..` with the given tickers (the second name changes ticker
+/// halfway), prices as traded with a 2:1 split of the second name at two
+/// fifths of the sample, quarterly dividends on the first name (announced
+/// ten bars before the ex-date, paid fifteen after; the as-traded price drops
+/// by the dividend), the last name delisted for bankruptcy at four fifths
+/// (its rows stop; `delisted` holds from then on), open/high/low around the
+/// close, every listed name a member of `SPX`, and a `sector` classification
+/// cycling over three codes.
+pub fn synthetic_daily_v2(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Dataset {
+    let mut ds = Dataset::new();
+    let mut rng = Rng::new(seed);
+    let bars = business_days(start, days);
+    let spx = ds.intern_label("SPX");
+    let scheme = ds.intern_label("sector");
+    let sectors: Vec<Sym> = ["tech", "fin", "energy"].iter().map(|s| ds.intern_label(s)).collect();
+    let bankrupt = ds.intern_label("bankruptcy");
+    let n = symbols.len();
+    let split_bar = days * 2 / 5;
+    let rename_bar = days / 2;
+    let delist_bar = days * 4 / 5;
+    for (i, s) in symbols.iter().enumerate() {
+        let id = format!("E{}", i + 1);
+        let sym = if i == 1 && n > 1 {
+            let sym = ds.add_security(&id, s, bars[0], Some(bars[rename_bar.min(days - 1)]));
+            ds.add_security(&id, &format!("{}X", s), bars[rename_bar.min(days - 1)], None);
+            sym
+        } else if i + 1 == n && n > 2 {
+            ds.add_security(&id, s, bars[0], Some(bars[delist_bar.min(days - 1)]))
+        } else {
+            ds.add_security(&id, s, bars[0], None)
+        };
+        let mut price = 50.0 + 10.0 * i as f64;
+        let drift = 0.0002 * (i as f64 - n as f64 / 2.0);
+        let vol = 0.01 + 0.004 * i as f64;
+        for (k, &t) in bars.iter().enumerate() {
+            if i + 1 == n && n > 2 && k >= delist_bar {
+                ds.add("delisted", vec![Value::Equity(sym), Value::Time(t), Value::Label(bankrupt)]);
+                continue;
+            }
+            let spike = rng.uniform() < 0.03;
+            let shock = if spike { 0.03 * if rng.uniform() < 0.5 { 1.0 } else { -1.0 } } else { 0.0 };
+            price *= (drift + shock + vol * rng.normal()).exp();
+            if i == 1 && n > 1 && k == split_bar {
+                price /= 2.0;
+                ds.add("split", vec![Value::Equity(sym), Value::Time(t), Value::Num(2.0)]);
+            }
+            if i == 0 && k >= 10 && (k - 10) % 63 == 0 && k + 15 < days {
+                // Announced at k, ex at k + 10, paid at k + 25 (clamped to the data).
+                let amount = (price * 0.005 * 100.0).round() / 100.0;
+                ds.add(
+                    "dividend",
+                    vec![
+                        Value::Equity(sym),
+                        Value::Time(t),
+                        Value::Time(bars[k + 10]),
+                        Value::Time(bars[(k + 25).min(days - 1)]),
+                        Value::Num(amount),
+                    ],
+                );
+            }
+            // The as-traded price drops by a dividend going ex today.
+            let ex_today: f64 = ds
+                .facts
+                .get("dividend")
+                .map(|tus| tus.iter().filter(|tu| tu[0] == Value::Equity(sym) && tu[2] == Value::Time(t)).filter_map(|tu| tu[4].as_f64()).sum())
+                .unwrap_or(0.0);
+            price = (price - ex_today).max(0.01);
+            let c = (price * 100.0).round() / 100.0;
+            let o = (c * (1.0 + 0.003 * rng.normal()) * 100.0).round() / 100.0;
+            let h = c.max(o) * (1.0 + 0.004 * rng.uniform());
+            let l = c.min(o) * (1.0 - 0.004 * rng.uniform());
+            let volume = (1_000_000.0 * (0.3 * rng.normal()).exp() * if spike { 3.0 } else { 1.0 }).round();
+            ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+            ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+            ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+            ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+            ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
+            ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
+            ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
+            ds.add("classification", vec![Value::Equity(sym), Value::Time(t), Value::Label(scheme), Value::Label(sectors[i % 3])]);
+        }
+    }
+    ds.derive_tickers();
+    ds
+}
+
 /// Synthetic minute market for the `equities_1m` environment: `bars_per_day`
 /// one-minute bars from 09:31 on each business day.
 pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, bars_per_day: usize, seed: u64) -> Dataset {

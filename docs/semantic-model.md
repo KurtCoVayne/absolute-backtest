@@ -411,6 +411,7 @@ interface.
 | `volume` | `(+A: Equity, @T, -V: Quantity<Shares>)` | no | market data |
 | `universe` | `(+A: Equity, @T)` | yes | market data (membership as of T) |
 | `ticker` | `(+A: Equity, @T, -S: Label)` | yes | the bundle's security table (data-bundle doc, section 3): the ticker `A` carried over bar T; derived, never a file |
+| `split`, `dividend`, `delisted`, `member`, `classification` | catalog relations of `equities_1d_v2` (data-bundle doc, section 3) | yes | corporate actions as events at their ex-date or announcement, delisting as a status, point-in-time membership and classification; the executor applies splits, dividends and delistings to the book (section 4 of that doc), the `catalog` library derives `ret` and `close_adj` from them causally |
 | `position` | `(+A: Equity, @T, -Q: Quantity<Shares>)` | yes | executor |
 | `cash` | `(@T, -C: Notional<USD>)` | yes | executor |
 | `fill` | `(+A: Equity, @T, -Q: Quantity<Shares>, -P: Price<USD>)` | yes | executor |

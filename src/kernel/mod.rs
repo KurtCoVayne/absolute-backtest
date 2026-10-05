@@ -308,6 +308,36 @@ pub struct BorrowBucket {
     pub shortable: bool,
 }
 
+/// A corporate action or delisting the executor applied to the book
+/// (data-bundle doc, section 4: splits adjust positions on the ex-date,
+/// dividends are credited on the pay date, a delisted name is force-closed
+/// at its last trade with a haircut by reason).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    Split {
+        factor: f64,
+    },
+    /// `amount` a share on `shares` held at the ex-date, credited at the pay date.
+    Dividend {
+        amount: f64,
+        shares: f64,
+    },
+    Delisting {
+        reason: String,
+        haircut: f64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActionRecord {
+    pub t: i64,
+    pub equity: Sym,
+    pub action: Action,
+    /// The cash the action moved (a cashed fraction, a dividend, the
+    /// proceeds of a forced close).
+    pub cash: f64,
+}
+
 /// Interest and fees accrued over a run, between consecutive decision bars
 /// at the configured annual rates over calendar time.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -390,6 +420,11 @@ pub struct ExecConfig {
     /// The bundle date a ticker literal resolves at (data-bundle doc,
     /// section 3); the dataset's own, or its last bar, when `None`.
     pub as_of: Option<i64>,
+    /// Delisting haircuts by reason label on the last trade price, and the
+    /// haircut for a reason not listed (data-bundle doc, section 4 and
+    /// section 10 item 2: conservative by default, 1 is a total loss).
+    pub delisting_haircuts: Vec<(String, f64)>,
+    pub delisting_haircut_default: f64,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -452,6 +487,8 @@ impl Default for ExecConfig {
             ],
             price_relation: None,
             as_of: None,
+            delisting_haircuts: vec![("bankruptcy".into(), 1.0), ("regulatory".into(), 1.0), ("acquisition".into(), 0.0), ("voluntary".into(), 0.0)],
+            delisting_haircut_default: 1.0,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
             on_oversize: OnOversize::Halt,
@@ -514,6 +551,11 @@ impl ExecConfig {
             borrow: other.borrow.clone(),
             ..self
         }
+    }
+
+    /// The haircut on the last trade of a name delisted for `reason`.
+    pub fn delisting_haircut(&self, reason: &str) -> f64 {
+        self.delisting_haircuts.iter().find(|(r, _)| r == reason).map(|(_, h)| *h).unwrap_or(self.delisting_haircut_default)
     }
 
     /// The borrow bucket of an instrument with average daily volume `adv`
@@ -732,6 +774,8 @@ pub struct RunResult {
     pub funding: FundingSummary,
     /// The book at every bar's mark, parallel to `equity_curve`.
     pub exposure: Vec<ExposureRecord>,
+    /// Splits, dividends and delistings applied to the book.
+    pub actions: Vec<ActionRecord>,
     /// The models the configuration turned off, and what the run observed
     /// that the author should know (fills above the participation threshold).
     pub warnings: Vec<RunWarning>,
@@ -835,6 +879,10 @@ pub struct Kernel<'p> {
     /// bundle date ticker literals and command-line names resolve at.
     pub(crate) securities: Vec<Security>,
     pub(crate) as_of: Option<i64>,
+    /// The catalog's action relations, when the environment declares them.
+    pub(crate) split_rel: Option<usize>,
+    pub(crate) dividend_rel: Option<usize>,
+    pub(crate) delisted_rel: Option<usize>,
     /// What each equity literal of the program (a ticker) resolved to.
     pub(crate) literal_equities: HashMap<String, Sym>,
 }
@@ -1085,6 +1133,14 @@ impl<'p> Kernel<'p> {
             }
         };
         let volume_col = volume_rel.and_then(|id| shares_column(prog.relations.get(&rels[id].name).unwrap())).unwrap_or(0);
+        // The catalog's actions, by name (data-bundle doc, section 3).
+        let primitive = |name: &str| -> Option<usize> {
+            let id = *rel_ids.get(name)?;
+            matches!(prog.relations.get(name)?.kind, Kind::Primitive { .. }).then_some(id)
+        };
+        let split_rel = primitive("split");
+        let dividend_rel = primitive("dividend");
+        let delisted_rel = primitive("delisted");
         Ok(Kernel {
             prog,
             symbols,
@@ -1103,6 +1159,9 @@ impl<'p> Kernel<'p> {
             labels,
             securities,
             as_of,
+            split_rel,
+            dividend_rel,
+            delisted_rel,
             literal_equities,
             last_price: HashMap::new(),
             params,
@@ -1149,9 +1208,166 @@ impl<'p> Kernel<'p> {
         let mut filled_total = 0.0;
         let mut participations: Vec<f64> = Vec::new();
         let mut margin_calls = 0usize;
+        // Dividends by ex-date (sym, pay date, amount a share), and the
+        // receivables they create for the shares held at the ex-date.
+        let mut dividends_by_ex: BTreeMap<i64, Vec<(Sym, i64, f64)>> = BTreeMap::new();
+        if let Some(id) = self.dividend_rel {
+            let info = &self.rels[id];
+            let entity_pos = info.entity_positions.first().copied().unwrap_or(0);
+            let sig = &self.prog.relations[&info.name];
+            let times: Vec<usize> = sig.args.iter().enumerate().filter(|(i, a)| a.ty == Ty::Timestamp && *i != info.key_pos).map(|(i, _)| i).collect();
+            let amount_col = sig.args.iter().position(|a| a.mode == Mode::Out && matches!(&a.ty, Ty::Quantity(d) if d.c2 == 2 && d.s2 == -2));
+            if let (Some(&ex_col), Some(&pay_col), Some(amount_col)) = (times.first(), times.get(1), amount_col) {
+                for tus in self.stores[id].by_time.values() {
+                    for tu in tus {
+                        if let (Some(sym), Some(ex), Some(pay), Some(amount)) = (tu[entity_pos].as_equity(), tu[ex_col].as_time(), tu[pay_col].as_time(), tu[amount_col].as_f64()) {
+                            dividends_by_ex.entry(ex).or_default().push((sym, pay.max(ex), amount));
+                        }
+                    }
+                }
+            }
+        }
+        let mut receivables: Vec<(i64, Sym, f64, f64, f64)> = Vec::new(); // (pay, sym, cash, amount, shares)
+        let mut delisted_done: HashSet<Sym> = HashSet::new();
+        let mut zero_haircut_involuntary = 0usize;
         let mut not_shortable = 0usize;
         let mut shorts_held = false;
         for (k, &t) in bars.iter().enumerate() {
+            // Corporate actions and delistings at the bar (data-bundle doc,
+            // section 4), before the mark: a split multiplies the position at
+            // its ex-date, a dividend's receivable is recorded at the ex-date
+            // and paid at the pay date, a delisted name is force-closed at its
+            // last trade less the haircut for the reason.
+            let mut book_changed = false;
+            if let Some(id) = self.split_rel {
+                let entity_pos = self.rels[id].entity_positions.first().copied().unwrap_or(0);
+                let splits: Vec<(Sym, f64)> = self.stores[id]
+                    .by_time
+                    .get(&t)
+                    .map(|tus| tus.iter().filter_map(|tu| Some((tu[entity_pos].as_equity()?, tu.iter().rev().find_map(|v| v.as_f64())?))).collect())
+                    .unwrap_or_default();
+                for (sym, factor) in splits {
+                    let Some(pos) = positions.get(&sym).copied() else { continue };
+                    if factor <= 0.0 || factor == 1.0 {
+                        continue;
+                    }
+                    let exact = pos * factor;
+                    let kept = if self.cfg.lot == Lot::Whole { exact.trunc() } else { exact };
+                    let fraction_cash = self.price_at(sym, t).map(|p| (exact - kept) * p).unwrap_or(0.0);
+                    cash += fraction_cash;
+                    if kept.abs() < 1e-9 {
+                        positions.remove(&sym);
+                    } else {
+                        positions.insert(sym, kept);
+                    }
+                    if let Some(lp) = self.last_price.get_mut(&sym) {
+                        *lp /= factor;
+                    }
+                    result.actions.push(ActionRecord {
+                        t,
+                        equity: sym,
+                        action: Action::Split { factor },
+                        cash: fraction_cash,
+                    });
+                    book_changed = true;
+                }
+            }
+            if let Some(exs) = dividends_by_ex.get(&t) {
+                for &(sym, pay, amount) in exs {
+                    if let Some(&pos) = positions.get(&sym) {
+                        receivables.push((pay, sym, pos * amount, amount, pos));
+                    }
+                }
+            }
+            let (due, later): (Vec<_>, Vec<_>) = receivables.drain(..).partition(|(pay, ..)| *pay <= t);
+            receivables = later;
+            for (_, sym, amount_cash, amount, shares) in due {
+                cash += amount_cash;
+                result.actions.push(ActionRecord {
+                    t,
+                    equity: sym,
+                    action: Action::Dividend { amount, shares },
+                    cash: amount_cash,
+                });
+                book_changed = true;
+            }
+            if let Some(id) = self.delisted_rel {
+                let entity_pos = self.rels[id].entity_positions.first().copied().unwrap_or(0);
+                let gone: Vec<(Sym, String)> = self.stores[id]
+                    .by_time
+                    .get(&t)
+                    .map(|tus| {
+                        tus.iter()
+                            .filter_map(|tu| {
+                                let sym = tu[entity_pos].as_equity()?;
+                                let reason = tu
+                                    .iter()
+                                    .find_map(|v| if let Value::Label(l) = v { Some(self.labels.name(*l).to_string()) } else { None })
+                                    .unwrap_or_default();
+                                Some((sym, reason))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for (sym, reason) in gone {
+                    if !delisted_done.insert(sym) {
+                        continue;
+                    }
+                    let Some(pos) = positions.get(&sym).copied() else { continue };
+                    let haircut = self.cfg.delisting_haircut(&reason).clamp(0.0, 1.0);
+                    if haircut == 0.0 && matches!(reason.as_str(), "bankruptcy" | "regulatory") {
+                        zero_haircut_involuntary += 1;
+                    }
+                    let last = self.price_at(sym, t).unwrap_or(0.0);
+                    let price = last * (1.0 - haircut);
+                    let qty = -pos;
+                    let commission = if self.cfg.commission_per_share == 0.0 && self.cfg.commission_min_per_order == 0.0 {
+                        0.0
+                    } else {
+                        (self.cfg.commission_per_share * qty.abs()).max(self.cfg.commission_min_per_order)
+                    };
+                    let proceeds = -qty * price - commission;
+                    cash += proceeds;
+                    positions.remove(&sym);
+                    result.costs.commissions += commission;
+                    result.costs.turnover += qty.abs() * price;
+                    self.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
+                    result.fills.push(FillRecord {
+                        t,
+                        equity: sym,
+                        quantity: qty,
+                        price,
+                        at_last_price: true,
+                        commission,
+                        fee: 0.0,
+                        slippage: 0.0,
+                        impact: 0.0,
+                        participation: 0.0,
+                        partial: false,
+                        forced: true,
+                    });
+                    result.actions.push(ActionRecord {
+                        t,
+                        equity: sym,
+                        action: Action::Delisting { reason, haircut },
+                        cash: proceeds,
+                    });
+                    book_changed = true;
+                }
+            }
+            if book_changed {
+                // The executor relations at t describe the book after the actions.
+                if let Some(tus) = self.stores[position].by_time.get_mut(&t) {
+                    tus.clear();
+                }
+                for (&sym, &q) in &positions {
+                    self.stores[position].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
+                }
+                if let Some(tus) = self.stores[cash_rel].by_time.get_mut(&t) {
+                    tus.clear();
+                }
+                self.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(cash)]);
+            }
             // Mark to market before the bar's decisions.
             let mut equity = cash;
             let mut gross = 0.0;
@@ -1656,6 +1872,15 @@ impl<'p> Kernel<'p> {
                     above,
                     self.cfg.participation_warn * 100.0,
                     result.liquidity.max_participation * 100.0
+                ),
+            });
+        }
+        if zero_haircut_involuntary > 0 {
+            result.warnings.push(RunWarning {
+                bias: "delisting".into(),
+                message: format!(
+                    "{} involuntary delistings closed with no haircut; the default is a total loss (data-bundle doc, section 4)",
+                    zero_haircut_involuntary
                 ),
             });
         }

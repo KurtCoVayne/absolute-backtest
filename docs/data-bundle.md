@@ -17,7 +17,7 @@ Oct 4, 2026 · John Gonzalez
 > | --- | --- | --- |
 > | M0 | Section 9 (changes forced on the semantic model), W5, W6, this document | implemented |
 > | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | implemented (costs, slippage, impact, liquidity, partial fills, margin, funding, borrow proxy); delisting and actions in M2 |
-> | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | `Label` type, stable identifiers and the `ticker` relation implemented; actions, delistings, membership and the bundle format planned |
+> | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | `Label`, stable identifiers, `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library and the executor's handling implemented; the bundle format and bundle tests planned |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | planned |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | planned |
 > | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | planned |
@@ -117,8 +117,14 @@ component that differs between the two is the executor attached to the fold.
 > S)` derived from it, a ticker literal or command-line name resolving to
 > the security carrying it at the bundle date (the data's last bar or
 > `--as-of`), the identity bundle tests at load, and the old layout kept as
-> "the ticker is the id". The only action-like primitive is still
-> `dividend_announced` in `equities_1d_ext`.
+> "the ticker is the id"; the catalog environment `equities_1d_v2` (prices as
+> traded, `split`, `dividend`, `delisted`, `member`, `classification`,
+> `ticker`), the `catalog` library (`ret` applying the split factor and the
+> dividend at the ex-date, `close_adj` carrying the cumulative split factor
+> forward, `liquid`), and the executor's handling of splits, dividends and
+> delistings with the haircuts of section 10 item 2. The synthetic catalog
+> market carries every event. The bundle format, versions and the other
+> bundle tests are the last M2 pull request.
 
 The catalog stores what was observable, never what was derived with
 hindsight: unadjusted prices plus corporate-action events, stable security
