@@ -450,9 +450,10 @@ strategy degenerate_top {
   mode target
   rel cand(-A: Equity, @T: Timestamp, -P: Price<USD>)
   cand(A, T, P) :- universe(A, T), close(A, T, P).
+  param w : Scalar = 0.3
   rel chosen(+A: Equity, @T: Timestamp)
   chosen(A, T) :- bar(T), top(1, cand(A, T, P), by (P desc, A asc)).
-  decide(T, target_weight(A, 0.3)) :- universe(A, T), chosen(A, T).
+  decide(T, target_weight(A, w)) :- universe(A, T), chosen(A, T).
 }
 "#;
     let diags = check(src, "degenerate_top");
@@ -483,7 +484,7 @@ strategy dof_clean {
   rel n_chosen(@T: Timestamp, -N: Count)
   n_chosen(T, N) :- bar(T), N = count(A) over (chosen(A, T)), N > 0.
   decide(T, target_weight(A, W)) :- chosen(A, T), n_chosen(T, N), W = 1 / N.
-  decide(T, target_weight(A, 0)) :- held(A, T, Q), Q > 0 shares, not chosen(A, T).
+  decide(T, target_weight(A, 0)) :- held(A, T, Q), Q > 0 shares, zscore(A, T, lb, k, Z), Z < 0.
 }
 "#;
 
@@ -496,9 +497,10 @@ fn structural_zero_and_one_do_not_warn() {
 #[test]
 fn a_numeric_literal_in_a_strategy_rule_warns_w5() {
     // Four literals: a threshold, a window length, a min count and a weight.
-    let src = DOF_CLEAN
-        .replace("zscore(A, T, lb, k, Z), Z > 1.", "zscore(A, T, 60d, 30, Z), Z > 1.5.")
-        .replace("target_weight(A, W)) :- chosen(A, T), n_chosen(T, N), W = 1 / N.", "target_weight(A, 0.25)) :- chosen(A, T), n_chosen(T, N).");
+    let src = DOF_CLEAN.replace("zscore(A, T, lb, k, Z), Z > 1.", "zscore(A, T, 60d, 30, Z), Z > 1.5.").replace(
+        "target_weight(A, W)) :- chosen(A, T), n_chosen(T, N), W = 1 / N.",
+        "target_weight(A, 0.25)) :- chosen(A, T), n_chosen(T, N).",
+    );
     let diags = check(&src, "dof_clean");
     assert!(errors(&diags).is_empty(), "{}", text(&diags));
     let w5: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W5).collect();

@@ -10,9 +10,9 @@ use absolute_backtest::kernel::{run, ExecConfig};
 
 fn strategy(order_a: bool) -> String {
     let conj = if order_a {
-        "T1 in window(T, 30d, min 15), close(A, T1, P)"
+        "T1 in window(T, lb, min k), close(A, T1, P)"
     } else {
-        "close(A, T1, P), T1 in window(T, 30d, min 15)"
+        "close(A, T1, P), T1 in window(T, lb, min k)"
     };
     format!(
         r#"
@@ -22,6 +22,8 @@ strategy w {{
   resolution @1d
   mode delta
   param qty : Quantity<Shares> = 10 shares
+  param lb : Duration = 30d
+  param k : Count = 15
   rel above_mean(-A: Equity, @T: Timestamp)
   above_mean(A, T) :- universe(A, T), close(A, T, C), M = mean(P) over ({}), C > M.
   decide(T, buy(A, qty)) :- above_mean(A, T), flat(A, T).

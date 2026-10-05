@@ -1,8 +1,11 @@
 //! The well-formedness checker (spec section 5 and the rule map of section 8).
 //! Every diagnostic carries exactly one code, and every code is one judgment.
 
+pub mod dof;
 pub mod rule;
 pub mod types;
+
+pub use dof::DegreesOfFreedom;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -46,6 +49,12 @@ pub enum Code {
     /// Warning: a reduction whose identity columns are all bound by the
     /// outer rule, so it keeps every tuple.
     W4,
+    /// Warning: a numeric literal inside a strategy rule is a degree of
+    /// freedom the study must count (data-bundle doc, section 9 item 3).
+    W5,
+    /// Warning: a ticker literal names the security carrying that ticker at
+    /// the bundle date; it is a snapshot, not an identity (section 9 item 2).
+    W6,
 }
 
 impl Code {
@@ -68,6 +77,8 @@ impl Code {
             "W2" => Code::W2,
             "W3" => Code::W3,
             "W4" => Code::W4,
+            "W5" => Code::W5,
+            "W6" => Code::W6,
             _ => return None,
         })
     }
@@ -90,7 +101,13 @@ impl Code {
             Code::W2 => "unused parameter",
             Code::W3 => "undefined relation",
             Code::W4 => "degenerate reduction",
+            Code::W5 => "degrees of freedom",
+            Code::W6 => "ticker snapshot",
         }
+    }
+    /// Warnings never refuse a program (section 5, "Warnings, not errors").
+    pub fn is_warning(self) -> bool {
+        matches!(self, Code::W1 | Code::W2 | Code::W3 | Code::W4 | Code::W5 | Code::W6)
     }
 }
 
@@ -222,6 +239,8 @@ pub struct Program {
     pub strata: Vec<Vec<String>>,
     /// Relations judged complete (WF-5).
     pub complete: BTreeSet<String>,
+    /// Parameters, in-rule literals and rule count (data-bundle doc, section 6).
+    pub degrees_of_freedom: DegreesOfFreedom,
 }
 
 impl Program {
@@ -385,6 +404,7 @@ pub(crate) struct Checker<'a> {
     pub reserved_declared: HashSet<String>,
     scc_order: Option<Sccs>,
     complete_set: BTreeSet<String>,
+    dof: DegreesOfFreedom,
 }
 
 impl<'a> Checker<'a> {
@@ -407,15 +427,12 @@ impl<'a> Checker<'a> {
             reserved_declared: HashSet::new(),
             scc_order: None,
             complete_set: BTreeSet::new(),
+            dof: DegreesOfFreedom::default(),
         }
     }
 
     pub fn diag(&mut self, code: Code, unit: &str, rule: Option<String>, span: Span, message: impl Into<String>) {
-        let severity = if matches!(code, Code::W1 | Code::W2 | Code::W3 | Code::W4) {
-            Severity::Warning
-        } else {
-            Severity::Error
-        };
+        let severity = if code.is_warning() { Severity::Warning } else { Severity::Error };
         self.diags.push(Diagnostic {
             code,
             severity,
@@ -779,9 +796,10 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // W1: strategy-defined relations not reachable from decide.
+        // W1: strategy-defined relations not reachable from decide. `reach`
+        // is also what the degrees-of-freedom count below uses.
+        let mut reach: HashSet<String> = HashSet::new();
         if self.root.kind == UnitKind::Strategy {
-            let mut reach: HashSet<String> = HashSet::new();
             let mut stack = vec!["decide".to_string()];
             while let Some(x) = stack.pop() {
                 if !reach.insert(x.clone()) {
@@ -859,6 +877,76 @@ impl<'a> Checker<'a> {
                     self.diag(Code::W2, &u.name, None, p.span, format!("parameter `{}` is never referenced", p.name));
                 }
             }
+        }
+        // W5, W6 and the degrees-of-freedom count (data-bundle doc, section
+        // 6 and section 9 items 2 and 3): every numeric literal in one of the
+        // strategy's own rules is a tunable the author hid from the parameter
+        // list, so it warns once and is counted; a library's literals are part
+        // of a shared definition, counted for the rules the strategy reaches
+        // and never warned. A ticker literal, in a param default or a rule,
+        // names whichever security carried the ticker at the bundle date.
+        if self.root.kind == UnitKind::Strategy {
+            let rules = self.rules.clone();
+            let mut dof = DegreesOfFreedom {
+                params: self.root.params.len(),
+                ..Default::default()
+            };
+            for (i, r) in rules.iter().enumerate() {
+                let own = r.unit == root_name;
+                if own {
+                    dof.rules += 1;
+                } else if !reach.contains(&r.head.name) {
+                    continue;
+                }
+                let label = rule_label(&rules, i);
+                for (lit, span) in dof::literals_in_rule(r) {
+                    if let Lit::Equity(_) = lit {
+                        if own {
+                            self.diag(
+                                Code::W6,
+                                &r.unit,
+                                Some(label.clone()),
+                                span,
+                                format!("`{}` names the security carrying that ticker at the bundle date this strategy is written against; it is a snapshot, not an identity (a ticker is a time-keyed relation)", lit),
+                            );
+                        }
+                        continue;
+                    }
+                    if dof::is_structural(&lit) {
+                        continue;
+                    }
+                    if own {
+                        self.diag(
+                            Code::W5,
+                            &r.unit,
+                            Some(label.clone()),
+                            span,
+                            format!(
+                                "literal `{}` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable",
+                                lit
+                            ),
+                        );
+                        dof.literals.push((label.clone(), lit));
+                    } else {
+                        dof.library_literals.push((label.clone(), lit));
+                    }
+                }
+            }
+            for p in &self.root.params {
+                if let Lit::Equity(_) = &p.value {
+                    self.diag(
+                        Code::W6,
+                        &root_name,
+                        None,
+                        p.span,
+                        format!(
+                            "`{}` names the security carrying that ticker at the bundle date this strategy is written against; it is a snapshot, not an identity (a ticker is a time-keyed relation)",
+                            p.value
+                        ),
+                    );
+                }
+            }
+            self.dof = dof;
         }
         // Order diagnostics: errors before warnings; unit-level diagnostics
         // (a missing or mismatched environment or library, no decide) first,
@@ -989,6 +1077,7 @@ impl<'a> Checker<'a> {
             infos,
             strata,
             complete: self.complete_set,
+            degrees_of_freedom: self.dof,
         };
         (Some(program), self.diags)
     }
