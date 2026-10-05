@@ -342,6 +342,19 @@ pub struct ActionRecord {
     pub cash: f64,
 }
 
+/// What the evaluator did, for tests of its incremental state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KernelStats {
+    /// Windowed aggregations evaluated.
+    pub window_calls: usize,
+    /// Bars whose rows a windowed aggregation solved (once per group with the cache).
+    pub window_bars_solved: usize,
+    /// Windowed aggregation groups the cache holds.
+    pub window_groups: usize,
+    /// Bars' rows the cache holds now.
+    pub window_rows_cached: usize,
+}
+
 /// Interest and fees accrued over a run, between consecutive decision bars
 /// at the configured annual rates over calendar time.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -424,6 +437,10 @@ pub struct ExecConfig {
     /// The bundle date a ticker literal resolves at (data-bundle doc,
     /// section 3); the dataset's own, or its last bar, when `None`.
     pub as_of: Option<i64>,
+    /// Keep, per windowed aggregation group, the rows of every bar solved,
+    /// so that a rolling feature solves each bar once (data-bundle doc,
+    /// section 2, "State"); off only to prove the cache exact.
+    pub window_cache: bool,
     /// Delisting haircuts by reason label on the last trade price, and the
     /// haircut for a reason not listed (data-bundle doc, section 4 and
     /// section 10 item 2: conservative by default, 1 is a total loss).
@@ -491,6 +508,7 @@ impl Default for ExecConfig {
             ],
             price_relation: None,
             as_of: None,
+            window_cache: true,
             delisting_haircuts: vec![("bankruptcy".into(), 1.0), ("regulatory".into(), 1.0), ("acquisition".into(), 0.0), ("voluntary".into(), 0.0)],
             delisting_haircut_default: 1.0,
             param_overrides: Vec::new(),
@@ -780,6 +798,7 @@ pub struct RunResult {
     pub exposure: Vec<ExposureRecord>,
     /// Splits, dividends and delistings applied to the book.
     pub actions: Vec<ActionRecord>,
+    pub stats: KernelStats,
     /// The models the configuration turned off, and what the run observed
     /// that the author should know (fills above the participation threshold).
     pub warnings: Vec<RunWarning>,
@@ -881,6 +900,10 @@ pub struct Kernel<'p> {
     /// Dataset symbol and label ids to the kernel's (identifier order).
     pub(crate) remap_syms: Vec<Sym>,
     pub(crate) remap_labels: Vec<Sym>,
+    /// The rows of every bar a windowed aggregation group has solved, by
+    /// (rule, literal, the outer bindings the group reads), by bar.
+    pub(crate) windows: HashMap<eval::WindowKey, eval::WindowCache>,
+    pub stats: KernelStats,
     pub(crate) labels: Symbols,
     /// The security table with ids in the kernel's symbol order, and the
     /// bundle date ticker literals and command-line names resolve at.
@@ -1185,7 +1208,18 @@ impl<'p> Kernel<'p> {
             params,
             remap_syms: remap,
             remap_labels,
+            windows: HashMap::new(),
+            stats: KernelStats::default(),
         })
+    }
+
+    /// The evaluator's counters, with the cache's current size.
+    pub fn stats(&self) -> KernelStats {
+        KernelStats {
+            window_groups: self.windows.len(),
+            window_rows_cached: self.windows.values().map(|m| m.len()).sum(),
+            ..self.stats.clone()
+        }
     }
 
     /// A dataset tuple with its symbols and labels in the kernel's order.
@@ -1273,6 +1307,7 @@ impl<'p> Kernel<'p> {
             exec.on_decisions(self, t, &by_equity, &mut result)?;
         }
         exec.finish(self, &mut result);
+        result.stats = self.stats();
         Ok(result)
     }
 

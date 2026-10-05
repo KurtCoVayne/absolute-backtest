@@ -306,6 +306,7 @@ fn main() {
                 short_rebate: option(&args.opts, "short-rebate", "an annual rate", base.short_rebate),
                 borrow: base.borrow.clone(),
                 delisting_haircut_default: base.delisting_haircut_default,
+                window_cache: base.window_cache,
                 delisting_haircuts: {
                     let mut hs = base.delisting_haircuts.clone();
                     for h in args.multi.get("haircut").cloned().unwrap_or_default() {

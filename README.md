@@ -180,6 +180,19 @@ executor is a trait (`kernel::Executor`: `open_bar`, `on_decisions`,
 `fill`, `finish`), so a live run attaches another executor to the same
 fold.
 
+A windowed aggregation keeps, per group (the rule, the aggregation and the
+outer bindings its conjunction reads, including the window's length and
+minimum), the rows of every bar it has solved, so a rolling feature solves
+each bar once and evicts bars that leave the window; the rows are
+re-based on the current call's bindings and sorted as a whole solve would
+sort them, so the result is the uncached evaluation to the bit (`tests/fold_windows.rs`
+proves it on every corpus strategy, on both drivers; `ExecConfig::window_cache`
+turns the cache off only for that proof). A group whose conjunction reads
+the window's base time, or has more than one window, is solved whole.
+Resampled buckets and carried values (WF-4 recursion) are already evaluated
+once per bucket or bar through the memo. `RunResult.stats` counts the
+windowed aggregations, the bars solved and the cache's size.
+
 Evaluation is top-down: `decide(t, D)` is requested for each bar `t` of the
 decision resolution's time domain, and every derived relation is requested
 with its temporal key and inputs bound and memoised by them. Because WF-4

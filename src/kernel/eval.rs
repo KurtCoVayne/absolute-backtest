@@ -11,6 +11,21 @@ use super::value::{Ctor, Decision, Value};
 use super::{CompiledRule, Env, Kernel, RunError, Tuple};
 use crate::ir::*;
 
+/// The rows of one bar of a windowed group, each with the aggregate's
+/// arguments evaluated on it.
+pub type WindowRows = Vec<(Env, Vec<f64>)>;
+/// A group's cached bars.
+pub type WindowCache = BTreeMap<i64, WindowRows>;
+
+/// A windowed aggregation group: the rule, the aggregation literal, and the
+/// outer bindings its conjunction reads apart from the window's base time.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WindowKey {
+    pub rule: usize,
+    pub literal: usize,
+    pub outer: Vec<Option<Value>>,
+}
+
 impl<'p> Kernel<'p> {
     /// All tuples of `rel` matching `pattern` (`Some` at the key, at every
     /// input and at any output used as a filter), with the index of the rule
@@ -335,12 +350,47 @@ impl<'p> Kernel<'p> {
                         min_count = min_count.max(k);
                     }
                 }
-                let order = conj_order(conj);
-                let mut rows = self.solve(cr, &order, vec![env.clone()])?;
+                self.stats.window_calls += 1;
+                // The rows of the group with the aggregate's arguments evaluated
+                // on each: from the per-bar cache when the group has exactly one
+                // window (the common case), else solved whole.
+                let cached = if self.cfg.window_cache { self.window_rows(cr, lit, conj, agg, args, env)? } else { None };
+                let mut rows: Vec<(Env, Vec<f64>)> = match cached {
+                    Some(rows) => rows,
+                    None => {
+                        // Count the bars enumerated, as the cache does, for the stats.
+                        for l in conj {
+                            if let Literal::Window {
+                                kind,
+                                base: base @ Term::Var(..),
+                                dur,
+                                ..
+                            } = l
+                            {
+                                let t = self.time_of(cr, base, env)?;
+                                if let Value::Dur(d) = self.eval_expr(cr, dur, env)? {
+                                    let lo = time::sub_duration(t, d);
+                                    self.stats.window_bars_solved += match kind {
+                                        WindowKind::Window => self.domain(cr)?.range(lo..=t).count(),
+                                        WindowKind::Prior => self.domain(cr)?.range(lo..t).count(),
+                                    };
+                                }
+                            }
+                        }
+                        let order = conj_order(conj);
+                        let sols = self.solve(cr, &order, vec![env.clone()])?;
+                        let mut rows = Vec::with_capacity(sols.len());
+                        for row in sols {
+                            let vals = if agg == "count" { Vec::new() } else { self.agg_args(cr, args, &row)? };
+                            rows.push((row, vals));
+                        }
+                        rows
+                    }
+                };
                 if (rows.len() as i64) < min_count {
                     return Ok(());
                 }
-                rows.sort();
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
                 if agg == "count" {
                     let mut e = env.clone();
                     e[cr.slots[var]] = Some(Value::Count(rows.len() as i64));
@@ -348,10 +398,9 @@ impl<'p> Kernel<'p> {
                     return Ok(());
                 }
                 let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(rows.len()); args.len()];
-                for row in &rows {
-                    for (j, a) in args.iter().enumerate() {
-                        let v = self.eval_expr(cr, a, row)?;
-                        cols[j].push(v.as_f64().ok_or_else(|| self.arith(cr, row, a, "aggregate argument is not numeric"))?);
+                for (_, vals) in &rows {
+                    for (j, v) in vals.iter().enumerate() {
+                        cols[j].push(*v);
                     }
                 }
                 let value = match aggregate(agg, &cols) {
@@ -450,6 +499,144 @@ impl<'p> Kernel<'p> {
             }
         }
         Ok(())
+    }
+
+    /// The aggregate's arguments on one row of its group, as numbers.
+    fn agg_args(&mut self, cr: &CompiledRule, args: &[Expr], row: &Env) -> Result<Vec<f64>, RunError> {
+        let mut vals = Vec::with_capacity(args.len());
+        for a in args {
+            let v = self.eval_expr(cr, a, row)?;
+            vals.push(v.as_f64().ok_or_else(|| self.arith(cr, row, a, "aggregate argument is not numeric"))?);
+        }
+        Ok(vals)
+    }
+
+    /// The rows of a windowed group from the per-bar cache (data-bundle doc,
+    /// section 2, "State"): the group is the rule, the aggregation literal
+    /// and the outer bindings its conjunction reads apart from the window's
+    /// base time; each bar of the window is solved once, with the window
+    /// variable bound to it and the rest of the conjunction in evaluation
+    /// order, and kept until it leaves the window. `None` when the group is
+    /// not a single-window one (solved whole instead).
+    fn window_rows(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<WindowRows>, RunError> {
+        let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
+        if windows.len() != 1 {
+            return Ok(None);
+        }
+        let Literal::Window {
+            var: Term::Var(wvar, _),
+            kind,
+            base: base @ Term::Var(bvar, _),
+            dur,
+            min,
+            ..
+        } = &conj[windows[0]]
+        else {
+            return Ok(None);
+        };
+        let wslot = cr.slots[wvar];
+        if env[wslot].is_some() {
+            return Ok(None);
+        }
+        let t = self.time_of(cr, base, env)?;
+        let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
+            return Err(RunError::Internal("window length is not a Duration".into()));
+        };
+        let lo = time::sub_duration(t, d);
+        let times: Vec<i64> = match kind {
+            WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
+            WindowKind::Prior => self.domain(cr)?.range(lo..t).copied().collect(),
+        };
+        // The outer bindings the conjunction reads (not the window variable):
+        // the rows of a bar are a function of them and the bar.
+        let mut refs: Vec<String> = Vec::new();
+        for (i, l) in conj.iter().enumerate() {
+            if i != windows[0] {
+                literal_vars(l, &mut refs);
+            }
+        }
+        for a in args {
+            let mut vs = Vec::new();
+            a.vars(&mut vs);
+            refs.extend(vs.into_iter().map(|(v, _)| v));
+        }
+        // A conjunction that reads the base time itself has rows that change
+        // with every call: nothing to share, so solve it whole.
+        if refs.iter().any(|v| v == bvar) {
+            return Ok(None);
+        }
+        // The window's own length and minimum tell groups of different
+        // windows over one conjunction apart.
+        for e in [dur, min] {
+            let mut vs = Vec::new();
+            e.vars(&mut vs);
+            refs.extend(vs.into_iter().map(|(v, _)| v));
+        }
+        let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
+        outer.sort_unstable();
+        outer.dedup();
+        let key = WindowKey {
+            rule: cr.idx,
+            literal: lit as *const Literal as usize,
+            outer: outer.into_iter().map(|s| env[s].clone()).collect(),
+        };
+        let order: Vec<Literal> = conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect();
+        let mut cache = self.windows.remove(&key).unwrap_or_default();
+        for &t1 in &times {
+            if cache.contains_key(&t1) {
+                continue;
+            }
+            let mut e = env.clone();
+            e[wslot] = Some(Value::Time(t1));
+            let sols = match self.solve(cr, &order, vec![e]) {
+                Ok(s) => s,
+                Err(err) => {
+                    self.windows.insert(key, cache);
+                    return Err(err);
+                }
+            };
+            self.stats.window_bars_solved += 1;
+            let mut rows = Vec::with_capacity(sols.len());
+            for row in sols {
+                let vals = if agg == "count" {
+                    Vec::new()
+                } else {
+                    match self.agg_args(cr, args, &row) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            self.windows.insert(key, cache);
+                            return Err(err);
+                        }
+                    }
+                };
+                rows.push((row, vals));
+            }
+            cache.insert(t1, rows);
+        }
+        // A cached row carries the outer bindings of the call that solved it;
+        // what the aggregate sees is this call's outer bindings plus the
+        // conjunction's own (the slots unbound here), exactly as a whole
+        // solve would produce, so that the rows sort the same way.
+        let mut rows = Vec::new();
+        for t1 in &times {
+            if let Some(r) = cache.get(t1) {
+                for (row, vals) in r {
+                    let mut e = env.clone();
+                    for (i, v) in row.iter().enumerate() {
+                        if env[i].is_none() {
+                            e[i] = v.clone();
+                        }
+                    }
+                    rows.push((e, vals.clone()));
+                }
+            }
+        }
+        // Bars before the window's start will not be asked for again by a
+        // later bar of the same group; a request for an earlier base time
+        // simply solves them again.
+        cache = cache.split_off(&lo);
+        self.windows.insert(key, cache);
+        Ok(Some(rows))
     }
 
     fn arith(&self, cr: &CompiledRule, env: &Env, expr: &Expr, message: &str) -> RunError {
@@ -565,6 +752,72 @@ impl<'p> Kernel<'p> {
 /// binds its variable in a temporal-key position. The conjunction is
 /// commutative, so this changes nothing but the cost: the window enumerates
 /// the bars and the atom becomes a lookup instead of a scan.
+/// Every variable a literal mentions.
+pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {
+    fn term(t: &Term, out: &mut Vec<String>) {
+        match t {
+            Term::Var(v, _) => out.push(v.clone()),
+            Term::Ctor(_, subs, _) => subs.iter().for_each(|s| term(s, out)),
+            _ => {}
+        }
+    }
+    fn expr(e: &Expr, out: &mut Vec<String>) {
+        let mut vs = Vec::new();
+        e.vars(&mut vs);
+        out.extend(vs.into_iter().map(|(v, _)| v));
+    }
+    match l {
+        Literal::Atom(a) | Literal::Neg(a) => a.terms.iter().for_each(|t| term(t, out)),
+        Literal::Builtin(b, _) => match b {
+            Builtin::Prev { t, t1 } => {
+                term(t, out);
+                term(t1, out);
+            }
+            Builtin::Lag { t, n, t1 } => {
+                term(t, out);
+                expr(n, out);
+                term(t1, out);
+            }
+            Builtin::MonthStart { t } | Builtin::DayStart { t } => term(t, out),
+        },
+        Literal::Window { var, base, dur, min, .. } => {
+            term(var, out);
+            term(base, out);
+            expr(dur, out);
+            expr(min, out);
+        }
+        Literal::Cmp { lhs, rhs, .. } => {
+            expr(lhs, out);
+            expr(rhs, out);
+        }
+        Literal::Assign { var, expr: e, .. } => {
+            out.push(var.clone());
+            expr(e, out);
+        }
+        Literal::Agg { var, args, conj, .. } => {
+            out.push(var.clone());
+            args.iter().for_each(|a| expr(a, out));
+            conj.iter().for_each(|c| literal_vars(c, out));
+        }
+        Literal::Top { n, atom, by, .. } => {
+            expr(n, out);
+            atom.terms.iter().for_each(|t| term(t, out));
+            if let Some(keys) = by {
+                out.extend(keys.iter().map(|(k, _, _)| k.clone()));
+            }
+        }
+        Literal::Resample { inner, as_var, min, aggs, .. } => {
+            inner.terms.iter().for_each(|t| term(t, out));
+            out.push(as_var.clone());
+            expr(min, out);
+            for (x, _, e) in aggs {
+                out.push(x.clone());
+                expr(e, out);
+            }
+        }
+    }
+}
+
 pub(crate) fn conj_order(conj: &[Literal]) -> Vec<Literal> {
     let mut out: Vec<Literal> = Vec::with_capacity(conj.len());
     let mut placed = vec![false; conj.len()];

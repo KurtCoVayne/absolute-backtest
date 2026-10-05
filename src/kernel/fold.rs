@@ -194,6 +194,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             return Err(RunError::NoBars);
         }
         self.exec.finish(&self.kernel, &mut self.result);
+        self.result.stats = self.kernel.stats();
         Ok((self.result, self.kernel))
     }
 }
