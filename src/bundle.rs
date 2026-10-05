@@ -64,6 +64,10 @@ pub struct Manifest {
     /// Section 10 item 4: the offset between a bar's close and the moment
     /// its data could be acted on; zero records the bar-close convention.
     pub processing_delay_seconds: i64,
+    /// Where the data came from and the schema decisions taken on the way
+    /// (section 10: consolidated bars, the availability offset).
+    #[serde(default)]
+    pub source: Option<String>,
     pub created_at: String,
     pub relations: Vec<RelationEntry>,
     pub tests: Option<TestReport>,
@@ -200,12 +204,23 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         version: version.to_string(),
         as_of: ds.bundle_date().map(format_timestamp),
         processing_delay_seconds: 0,
+        source: None,
         created_at: today(),
         relations,
         tests: None,
     };
     write_manifest(dir, &manifest)?;
     Ok(manifest)
+}
+
+/// Record the data's source and processing delay in a written bundle's
+/// manifest (what the vendor adapters know and the builder does not).
+pub fn annotate_manifest(dir: &Path, source: Option<String>, processing_delay_seconds: i64) -> Result<Manifest, String> {
+    let mut m = read_manifest(dir)?;
+    m.source = source;
+    m.processing_delay_seconds = processing_delay_seconds;
+    write_manifest(dir, &m)?;
+    Ok(m)
 }
 
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<(), String> {
