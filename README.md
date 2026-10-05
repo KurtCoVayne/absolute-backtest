@@ -133,7 +133,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | S | WF-8 | no cycle through `not` or an aggregate |
 | Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode, in decide heads and in `decided` patterns; decide's T is a positive atom's key |
 | X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K`. The kernel's `position`, `cash`, `fill` and `decided` are at the strategy's decision resolution, so a library that reads them is usable only by strategies deciding at its resolution; the error names the strategy |
-| W1, W2, W3 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty) |
+| W1, W2, W3, W4 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty); `top` whose identity columns are all bound by the outer rule (keeps every tuple, `by` is dead) |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
 first error reported is the earliest offending relation; diagnostics about a
@@ -159,12 +159,30 @@ partial-arithmetic halt follows the same restriction: a degenerate tuple
 halts the run when a decision demands it, and a tuple no decision requests
 is never evaluated.
 
+The executor has four policies, all set in `ExecConfig` and on the command
+line, and every default halts the run with a diagnostic naming the bar, the
+decision and its rule (`RunError::Risk`): `on_ruin` (equity at the execution
+bar not positive while orders are pending: `halt` or `continue`, where a
+positive `target_weight` of a non-positive equity targets flat); `on_leverage`
+(a fill that would make cash negative or gross exposure exceed equity: `halt`,
+`reject` with a reason, or `allow`); `on_oversize` (a `sell` beyond the long
+or a `cover` beyond the short: `halt`, `clamp` at the position dropping the
+remainder, or `allow` the signed order); and `lot` (`whole`, truncating every
+order's quantity toward zero, or `fractional`). Within a bar, orders that
+reduce a position fill first, so a rebalance funds its buys with its sells,
+and a reducing order is never leverage. A liquidation whose fill bar has no
+price for the instrument fills at the last known price, flagged on the fill
+(`--fills` prints `(last price)`); an opening or adding order without a price
+is dropped. Most backtesters reject an order beyond buying power and continue;
+the halt default is stricter on purpose, so that a backtest cannot look
+plausible on a book the model never defined.
+
 The executor fills a bar's decisions at the next bar's close (slippage and
 commission from `ExecConfig`), then writes `fill`, `position` and `cash` at
 that bar and `decided` at the decision bar. In target mode the order is the
 difference between the target and the position at execution; `target_weight`
-sizes from cash plus marked positions at the execution bar, truncated to
-whole shares. Two distinct decisions for one instrument at one bar halt the
+sizes from cash plus marked positions at the execution bar, rounded by the
+configured lot. Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
 negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
 a constant series, a `quantile` level outside [0, 1], and a non-positive delta
@@ -235,6 +253,8 @@ Count) pre-bind body variables so the explanation is about that instrument.
 abt check <files...>
 abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL]
+        [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow]
+        [--on-ruin halt|continue] [--lot whole|fractional]
         [--verify-causality] [--quiet] <files...>
 abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
         [--price-relation REL] <files...>
@@ -352,6 +372,25 @@ small and easy to flip.
   filled at the last fine close inside the next decision bucket, whatever
   `min K` the strategy's bar rules declare; a bucket with no fine tuple for
   the instrument drops the decision.
+- **Ruin and leverage halt by default.** The model defines no margin; rather
+  than borrow silently, the executor halts when a fill would make cash
+  negative or gross exposure exceed equity, or when equity is not positive
+  with orders pending. `--on-leverage reject|allow` and `--on-ruin continue`
+  relax this per run.
+- **An oversize delta order halts by default.** A `sell` larger than the
+  long position or a `cover` larger than the short would cross zero; `clamp`
+  fills up to the position and drops the rest, `allow` keeps the signed-order
+  reading.
+- **Liquidations fill at the last price.** An order that shrinks a position
+  without crossing zero fills at the instrument's last known price when the
+  fill bar has none, flagged as such, so a delisted holding can always be
+  closed; opening or adding orders without a price still drop.
+- **Whole shares by default.** Every order's quantity (a delta amount or a
+  target's quantity) is truncated toward zero unless `--lot fractional`;
+  literals stay real-valued, and this rounding is where a contract size for
+  futures would later apply.
+- **A non-positive price is a data error**, rejected at load with the file
+  and line.
 
 ## Development
 
