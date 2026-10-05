@@ -101,6 +101,7 @@ pub fn literals_in_rule_mut(rule: &mut Rule, f: &mut dyn FnMut(&mut Lit, Span)) 
                 expr(min, f);
                 aggs.iter_mut().for_each(|(_, _, e)| expr(e, f));
             }
+            Literal::AsOf { atom, .. } => terms(&mut atom.terms, f),
         }
     }
     terms(&mut rule.head.terms, f);
@@ -153,6 +154,7 @@ fn literal(l: &Literal, out: &mut Vec<(Lit, Span)>) {
                 expr(e, out);
             }
         }
+        Literal::AsOf { atom, .. } => terms(&atom.terms, out),
     }
 }
 

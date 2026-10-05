@@ -539,7 +539,15 @@ impl Parser {
                 let expr = self.expr()?;
                 Ok(Literal::Assign { var, expr, span })
             }
-            Tok::Ident(s) if !is_var(&s) && *self.peek_at(1) == Tok::LParen && !SCALAR_FUNCTIONS.contains(&s.as_str()) => Ok(Literal::Atom(self.atom()?)),
+            Tok::Ident(s) if !is_var(&s) && *self.peek_at(1) == Tok::LParen && !SCALAR_FUNCTIONS.contains(&s.as_str()) => {
+                let atom = self.atom()?;
+                if self.at_kw("asof") {
+                    self.bump();
+                    let (v, vs) = self.var()?;
+                    return Ok(Literal::AsOf { atom, at: Term::Var(v, vs), span });
+                }
+                Ok(Literal::Atom(atom))
+            }
             _ => {
                 let lhs = self.expr()?;
                 let op = match self.bump().tok {

@@ -961,6 +961,9 @@ pub struct Kernel<'p> {
     pub(crate) rel_ids: HashMap<String, usize>,
     pub(crate) compiled: Vec<Rc<CompiledRule>>,
     pub(crate) memo: HashMap<MemoKey, Derived>,
+    /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
+    /// the latest bar at or before it with a tuple, a cache like `memo`.
+    pub(crate) asof_memo: HashMap<(usize, Vec<Value>, i64), Option<i64>>,
     pub(crate) in_progress: HashSet<MemoKey>,
     pub(crate) domains: HashMap<Resolution, BTreeSet<i64>>,
     pub(crate) cfg: ExecConfig,
@@ -1263,6 +1266,7 @@ impl<'p> Kernel<'p> {
             rel_ids,
             compiled,
             memo: HashMap::new(),
+            asof_memo: HashMap::new(),
             in_progress: HashSet::new(),
             domains,
             cfg,
@@ -1331,6 +1335,7 @@ impl<'p> Kernel<'p> {
     /// `key` on. Decisions already emitted stand (`decided` is a log).
     pub fn invalidate_from(&mut self, key: i64) {
         self.memo.clear();
+        self.asof_memo.clear();
         for cache in self.windows.values_mut() {
             let keep = std::mem::take(cache);
             *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
@@ -1783,6 +1788,10 @@ fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
                 expr(min, f);
                 aggs.iter().for_each(|(_, _, e)| expr(e, f));
             }
+            Literal::AsOf { atom, at, .. } => {
+                atom.terms.iter().for_each(|t| term(t, f));
+                term(at, f);
+            }
         }
     }
     rule.head.terms.iter().for_each(|t| term(t, f));
@@ -1853,6 +1862,10 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
                     f(x);
                     expr(e, f);
                 });
+            }
+            Literal::AsOf { atom, at, .. } => {
+                atom.terms.iter().for_each(|t| term(t, f));
+                term(at, f);
             }
         }
     }

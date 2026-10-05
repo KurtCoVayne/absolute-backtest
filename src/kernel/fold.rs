@@ -267,6 +267,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         kernel.windows = cp.windows.into_iter().map(|(key, rows)| (key, rows.into_iter().collect())).collect();
         kernel.stats = cp.stats;
         kernel.memo.clear();
+        kernel.asof_memo.clear();
         exec.restore(cp.executor).map_err(RunError::Config)?;
         let mut sched = Scheduler::new(&kernel);
         sched.open = cp.open_buckets.into_iter().collect();

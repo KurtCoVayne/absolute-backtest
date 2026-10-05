@@ -297,7 +297,7 @@ fn decided_patterns(body: &[Literal]) -> Vec<(&str, &Term, Span)> {
     }
     fn lit<'a>(l: &'a Literal, out: &mut Vec<(&'a str, &'a Term, Span)>) {
         match l {
-            Literal::Atom(a) | Literal::Neg(a) | Literal::Top { atom: a, .. } | Literal::Resample { inner: a, .. } => atom(a, out),
+            Literal::Atom(a) | Literal::Neg(a) | Literal::Top { atom: a, .. } | Literal::Resample { inner: a, .. } | Literal::AsOf { atom: a, .. } => atom(a, out),
             Literal::Agg { conj, .. } => conj.iter().for_each(|l| lit(l, out)),
             Literal::Builtin(..) | Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => {}
         }

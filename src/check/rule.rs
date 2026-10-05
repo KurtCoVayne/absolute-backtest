@@ -22,6 +22,8 @@ enum AtomCtx {
     InAgg,
     Top,
     ResampleInner,
+    /// The atom of `R(...) asof T`: its key is bound by the join.
+    AsOf,
 }
 
 struct AtomInfo {
@@ -45,6 +47,9 @@ struct Analyzer<'c, 'a> {
     /// a variable in its key position before the window literal is reached;
     /// the window then acts as the constraint (the conjunction is commutative).
     pending_windows: HashMap<String, TimeProv>,
+    /// The provenance an as-of join gives the key it binds, while its atom
+    /// is analysed.
+    asof_prov: TimeProv,
 }
 
 /// For a temporal builtin written where a relation is expected: how to get a
@@ -78,6 +83,7 @@ fn mentions_reserved(cx: &Checker, rule: &Rule) -> bool {
             Literal::Atom(a) | Literal::Neg(a) => cx.reserved_declared.contains(&a.name),
             Literal::Top { atom, .. } => cx.reserved_declared.contains(&atom.name),
             Literal::Resample { inner, .. } => cx.reserved_declared.contains(&inner.name),
+            Literal::AsOf { atom, .. } => cx.reserved_declared.contains(&atom.name),
             Literal::Agg { conj, .. } => conj.iter().any(|l| lit(cx, l)),
             Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => false,
         }
@@ -103,6 +109,7 @@ pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleI
         str_types: vec![],
         key_vars_positive: HashSet::new(),
         pending_windows: HashMap::new(),
+        asof_prov: TimeProv::Other,
     };
     let head_sig = an.cx.relations.get(&rule.head.name).cloned();
     if let Some(sig) = &head_sig {
@@ -339,6 +346,16 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 self.err(Code::T, *sp, format!("argument `{}` of `{}` is {} but `{}` is {}", arg.name, atom.name, arg.ty, v, t));
                             }
                         }
+                        if is_key && ctx == AtomCtx::AsOf {
+                            self.err(
+                                Code::X,
+                                *sp,
+                                format!(
+                                    "the temporal key `{}` of `{} asof ...` is bound by the join to the latest key at or before the as-of time; write a fresh variable or `_` there",
+                                    v, atom.name
+                                ),
+                            );
+                        }
                         if is_key {
                             key_prov = st.prov;
                         }
@@ -377,7 +394,9 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                             }
                         }
                         let prov = if is_key {
-                            if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
+                            if ctx == AtomCtx::AsOf {
+                                self.asof_prov
+                            } else if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
                                 TimeProv::Head
                             } else if let Some(p) = self.pending_windows.get(v) {
                                 *p
@@ -397,6 +416,8 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 Term::Wild(sp) => {
                     if arg.mode == Mode::In {
                         self.err(Code::M, *sp, format!("`_` is permitted only in `-` positions; `+{}` of `{}` is an input", arg.name, atom.name));
+                    } else if is_key && ctx == AtomCtx::AsOf {
+                        key_prov = self.asof_prov;
                     } else if is_key && ctx != AtomCtx::ResampleInner {
                         self.err(
                             Code::F,
@@ -481,12 +502,15 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         ),
                         _ => {}
                     }
-                    if matches!(ctx, AtomCtx::Positive | AtomCtx::InAgg) {
+                    if matches!(ctx, AtomCtx::Positive | AtomCtx::InAgg | AtomCtx::AsOf) {
                         self.key_vars_positive.insert(v.clone());
                     }
                 }
             }
-            if let Some(r) = sig.res {
+            // An as-of join is the one cross-resolution read (section 4):
+            // a tuple keyed at or before T is available by T whatever its
+            // resolution, so WF-10 is not applied to it.
+            if let Some(r) = sig.res.filter(|_| ctx != AtomCtx::AsOf) {
                 if r != self.res {
                     let head_name = self.rule.head.name.clone();
                     let kernel_supplied = matches!(sig.kind, Kind::Executor | Kind::KernelState | Kind::Output);
@@ -515,7 +539,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             }
         }
         let polarity = match ctx {
-            AtomCtx::Positive => Polarity::Positive,
+            AtomCtx::Positive | AtomCtx::AsOf => Polarity::Positive,
             AtomCtx::Negative => Polarity::Negative,
             AtomCtx::InAgg | AtomCtx::Top | AtomCtx::ResampleInner => Polarity::Aggregate,
         };
@@ -708,6 +732,33 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     );
                 }
                 self.atom(a, AtomCtx::Negative);
+            }
+            Literal::AsOf { atom, at, .. } => {
+                // WF-6: the key the join binds is at or before the as-of
+                // time, so it inherits that time's provenance (causal, or
+                // strict when the time is itself strictly before T).
+                let head_t = self.head_time.clone().unwrap_or_default();
+                let base = self.time_var_bound(at, "the time of an as-of join");
+                self.asof_prov = match base {
+                    None => TimeProv::Unknown,
+                    Some(b) => match self.prov_of(&b) {
+                        TimeProv::Other if b == head_t => TimeProv::Causal,
+                        TimeProv::Other => {
+                            self.err(
+                                Code::F,
+                                at.span(),
+                                format!(
+                                    "the as-of time `{}` of `{} asof {}` is not derived from the head time `{}`; bind it first with prev, lag, window or prior_window of `{}`",
+                                    b, atom.name, b, head_t, head_t
+                                ),
+                            );
+                            TimeProv::Unknown
+                        }
+                        p => Self::derived_prov(p, false),
+                    },
+                };
+                self.atom(atom, AtomCtx::AsOf);
+                self.asof_prov = TimeProv::Other;
             }
             Literal::Builtin(b, span) => match b {
                 // The last argument of prev and lag is an output (section 4,
