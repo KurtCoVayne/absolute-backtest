@@ -224,18 +224,24 @@ impl<'p> Kernel<'p> {
         }
     }
 
+    /// Bind a builtin's output position to `t`: a variable takes the value
+    /// (or must already equal it); `_` accepts it without binding anything.
     fn bind_time(&self, cr: &CompiledRule, term: &Term, env: &Env, t: i64, out: &mut Vec<Env>) {
-        if let Term::Var(v, _) = term {
-            let slot = cr.slots[v];
-            match &env[slot] {
-                Some(Value::Time(x)) if *x == t => out.push(env.clone()),
-                Some(_) => {}
-                None => {
-                    let mut e = env.clone();
-                    e[slot] = Some(Value::Time(t));
-                    out.push(e);
+        match term {
+            Term::Var(v, _) => {
+                let slot = cr.slots[v];
+                match &env[slot] {
+                    Some(Value::Time(x)) if *x == t => out.push(env.clone()),
+                    Some(_) => {}
+                    None => {
+                        let mut e = env.clone();
+                        e[slot] = Some(Value::Time(t));
+                        out.push(e);
+                    }
                 }
             }
+            Term::Wild(_) => out.push(env.clone()),
+            _ => {}
         }
     }
 

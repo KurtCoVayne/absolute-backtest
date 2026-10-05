@@ -240,7 +240,9 @@ them are causal.
 
 `prev` and `lag` fail (no tuple) when the data does not reach back far enough;
 a rule using them does not fire for the first bars, which is the intended
-behaviour rather than a warm-up special case.
+behaviour rather than a warm-up special case. The position they bind is an
+output, so it may be `_` (WF-2) when only the existence of the earlier bar
+matters: `prev(T, _)` holds exactly when T has a bar before it.
 
 `lag` is a function of T that is many-to-one and partial over the bar domain:
 when T − N falls in a gap (a weekend, a holiday), every T whose T − N falls in
@@ -272,9 +274,11 @@ whether, it is carried out. Decision constructors may be pattern-matched in
 
 **Libraries and strategies.** A library is a set of rules with no `decide`; a
 strategy is a set of rules with at least one `decide`, a declared mode, and
-parameters. Both name the environment they are written against. A strategy may
-use any number of libraries; name resolution is strategy, then libraries in
-`uses` order, then the environment's primitives, then builtins.
+parameters. Both name the environment they are written against, and a strategy
+may use only libraries written against its own environment (judgment E
+otherwise). A strategy may use any number of libraries; name resolution is
+strategy, then libraries in `uses` order, then the environment's primitives,
+then builtins.
 
 ## 5. Well-formedness judgments
 
@@ -550,8 +554,8 @@ produce), and `corpus/strategies/` must check clean.
 
 | Judgment | Code | Checks | Corpus case |
 | --- | --- | --- | --- |
-| Name resolution | U | relation declared in strategy, a used library, or the environment | `bad_undeclared` |
-| Environment | E | primitive provided by the declared environment | `bad_tier2_in_tier1` |
+| Name resolution | U | relation declared in strategy, a used library, or the environment; a builtin is not a relation | `bad_undeclared`, `bad_negated_builtin` |
+| Environment | E | primitive provided by the declared environment; used libraries written against it | `bad_tier2_in_tier1` |
 | WF-1 Range restriction | B | every head/negated/compared/assigned variable bound, in the order written | `bad_unbound_head` |
 | WF-2 Modes | M | `+` arguments bound at call site; `_` only in `-` positions | `bad_unbound_input` |
 | WF-3 Types | T | dimensions balance; signatures match; constructors typed | `bad_price_plus_scalar` |
@@ -561,7 +565,7 @@ produce), and `corpus/strategies/` must check clean.
 | WF-7 Determinism | D | `top` has `by`; keys cover identity columns; no `first`/`any` | `bad_nondeterministic_reduction`, `bad_unordered_top`, `bad_top_missing_identity` |
 | WF-8 Stratification | S | no cycle through `not` or an aggregate | `bad_negation_cycle` |
 | WF-9 Decisions | Z, C | at least one decide; one declared mode; constructors match mode | `bad_no_decision`, `bad_mixed_modes` |
-| WF-10 Resolution | X | body atoms share the head's resolution; resample strictly finer to coarser, aligned, with `min K` | `bad_resolution_mix` |
+| WF-10 Resolution | X | body atoms share the head's resolution; resample strictly finer to coarser, aligned, with `min K` | `bad_resolution_mix`, `bad_lib_executor_resolution` |
 | Dead rules | W1 | derived relation not reached from decide | (warning) |
 | Unused parameter | W2 | parameter not referenced | (warning) |
 | Undefined relation | W3 | declared relation with no defining rule | (warning) |

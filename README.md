@@ -37,6 +37,7 @@ resampled bucket.
 | `corpus/strategies` | 17 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
 | `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
+| `tests/checker_messages.rs` | Diagnostics pinned exactly: one diagnostic per root cause, library diagnostics reported once, and the wording of the messages for builtins, wildcards and resolution mismatches. |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
 | `tests/data.rs`, `tests/cli.rs` | The CSV loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
 
@@ -73,7 +74,9 @@ strategy sma_crossover {
 ```
 
 - Variables start with an uppercase letter; parameters, relations and
-  keywords are lowercase; `_` is a wildcard (output positions only).
+  keywords are lowercase; `_` is a wildcard (output positions only, which
+  include the bound position of `prev` and `lag`: `prev(T, _)` holds when T
+  has a bar before it).
 - A signature marks each argument `+` (input, bound by the caller), `-`
   (output, bound by the call) or `@` (the temporal key, exactly one). A
   relation's resolution follows the signature (`@1d`); in a library or
@@ -94,6 +97,8 @@ strategy sma_crossover {
   `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
   plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
+  A builtin is not a relation, so `not month_start(T)` does not resolve; the
+  idiom is `mstart(T) :- bar(T), month_start(T).` and then `not mstart(T)`.
 - Decisions: `decide(T, buy(A, Q))`, `sell`, `short`, `cover` in delta mode;
   `target_weight(A, W)`, `target_quantity(A, Q)` in target mode. The kernel
   supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)` and
@@ -123,11 +128,20 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | D | WF-7 | `top` has `by`; the keys cover every identity column; the key is bound; no `first`/`last` outside resample |
 | S | WF-8 | no cycle through `not` or an aggregate |
 | Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode, in decide heads and in `decided` patterns; decide's T is a positive atom's key |
-| X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
+| X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K`. The kernel's `position`, `cash`, `fill` and `decided` are at the strategy's decision resolution, so a library that reads them is usable only by strategies deciding at its resolution; the error names the strategy |
 | W1, W2, W3 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty) |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
-first error reported is the earliest offending relation.
+first error reported is the earliest offending relation; diagnostics about a
+whole unit (a missing or mismatched environment or library, no decide rule)
+come before any rule's. One root cause is one diagnostic: when the
+environment or a used library is missing from the workspace, the checker
+reports that once and does not report the names that may live there; a
+library written against another environment is one E error on the `uses`
+line; a relation that does not resolve binds its variables with unknown type
+and unknown time, so nothing after it is judged against them; and when a
+rule's head time is itself bound outside a temporal-key position, only the
+head is reported, not every atom keyed by it.
 
 ## Reading the kernel
 
@@ -266,6 +280,10 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **A library is usable only on its own environment.** Section 4 says both
+  libraries and strategies name the environment they are written against; a
+  `uses` of a library written against another environment is one E error,
+  even when the two environments share primitive names.
 - **A resample groups a stored inner relation by every fresh entity
   variable**, including one in a `+` position (`resample(close_m(A, T1, P)
   to @5m as T, ...)` with `A` fresh yields one bucket per symbol), because

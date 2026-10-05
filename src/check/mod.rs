@@ -171,6 +171,10 @@ pub enum TimeProv {
     Strict,
     /// Not derived from T.
     Other,
+    /// Bound by an atom the checker could not resolve (U or E already
+    /// reported): not judged, so one unresolved name does not cascade into
+    /// causality errors on every atom after it.
+    Unknown,
 }
 
 /// A body reference to a relation, recorded during rule analysis for the
@@ -280,20 +284,36 @@ pub fn rule_label(rules: &[Rule], i: usize) -> String {
 }
 
 /// Check every strategy and library in the workspace.
+///
+/// A library is checked in the scope of every strategy that uses it and once
+/// on its own, so a diagnostic on a library rule that does not depend on the
+/// using strategy would be reported once per check; identical diagnostics are
+/// kept once. Diagnostics that differ (an X error naming the using strategy's
+/// decision resolution, say) are all kept.
 pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
-    let mut out = Vec::new();
+    let mut out: Vec<Diagnostic> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |d: Diagnostic, out: &mut Vec<Diagnostic>| {
+        if seen.insert(d.to_string()) {
+            out.push(d);
+        }
+    };
     // A name declared twice is checked once; the clash itself is reported by
     // that check (adv-02).
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut seen_names: BTreeSet<&str> = BTreeSet::new();
     for s in ws.strategies() {
-        if seen.insert(&s.name) {
-            out.extend(check_program(ws, &s.name).1);
+        if seen_names.insert(&s.name) {
+            for d in check_program(ws, &s.name).1 {
+                push(d, &mut out);
+            }
         }
     }
-    seen.clear();
+    seen_names.clear();
     for l in ws.libraries() {
-        if seen.insert(&l.name) {
-            out.extend(check_library(ws, &l.name));
+        if seen_names.insert(&l.name) {
+            for d in check_library(ws, &l.name) {
+                push(d, &mut out);
+            }
         }
     }
     out
@@ -347,6 +367,14 @@ pub(crate) struct Checker<'a> {
     pub env_name: String,
     /// Unit resolutions by unit name.
     pub unit_res: HashMap<String, Resolution>,
+    /// The environment or a used library is missing from the workspace (U
+    /// reported once at unit level): names that fail to resolve are then not
+    /// reported per atom, since they may well live in the missing unit.
+    pub scope_incomplete: bool,
+    /// Environments of used libraries that differ from the root unit's (E
+    /// reported once at unit level): their primitives resolve to nothing,
+    /// silently.
+    pub foreign_envs: HashSet<String>,
     /// Relations declared with a reserved name (reported once at the
     /// declaration; rules mentioning them are not judged).
     pub reserved_declared: HashSet<String>,
@@ -369,6 +397,8 @@ impl<'a> Checker<'a> {
             mode: None,
             env_name: String::new(),
             unit_res: HashMap::new(),
+            scope_incomplete: false,
+            foreign_envs: HashSet::new(),
             reserved_declared: HashSet::new(),
             scc_order: None,
             complete_set: BTreeSet::new(),
@@ -420,9 +450,15 @@ impl<'a> Checker<'a> {
                         self.declare_named(sig.clone(), &root_name);
                     }
                 }
-                None => self.diag(Code::U, &root_name, None, *sp, format!("environment `{}` is not in the workspace", e)),
+                None => {
+                    self.scope_incomplete = true;
+                    self.diag(Code::U, &root_name, None, *sp, format!("environment `{}` is not in the workspace", e));
+                }
             },
-            None => self.diag(Code::U, &root_name, None, root.span, format!("{} `{}` names no environment; add `env <name>`", root.kind, root.name)),
+            None => {
+                self.scope_incomplete = true;
+                self.diag(Code::U, &root_name, None, root.span, format!("{} `{}` names no environment; add `env <name>`", root.kind, root.name));
+            }
         }
         // Kernel relations at the decision resolution.
         for sig in kernel_relations(self.resolution) {
@@ -440,7 +476,10 @@ impl<'a> Checker<'a> {
                     self.unique_in_workspace(UnitKind::Library, l, &root_name, Some(*sp));
                     units.push(lib);
                 }
-                None => self.diag(Code::U, &root_name, None, *sp, format!("library `{}` is not in the workspace", l)),
+                None => {
+                    self.scope_incomplete = true;
+                    self.diag(Code::U, &root_name, None, *sp, format!("library `{}` is not in the workspace", l));
+                }
             }
         }
         units.push(root);
@@ -458,9 +497,36 @@ impl<'a> Checker<'a> {
             if u.name != root.name {
                 self.redeclarations(u);
             }
-            if let Some((e, sp)) = &u.env {
-                if u.kind == UnitKind::Library && *e != self.env_name && self.ws.find(UnitKind::Environment, e).is_none() {
-                    self.diag(Code::U, &u.name, None, *sp, format!("environment `{}` is not in the workspace", e));
+            // A library is written against one environment (section 4) and
+            // is usable only by a unit on that environment: a mismatch is one
+            // E at unit level, and the library's primitives are then not
+            // reported again rule by rule.
+            if u.kind == UnitKind::Library {
+                match &u.env {
+                    Some((e, sp)) if *e != self.env_name => {
+                        if self.ws.find(UnitKind::Environment, e).is_none() {
+                            self.scope_incomplete = true;
+                            self.diag(Code::U, &u.name, None, *sp, format!("environment `{}` is not in the workspace", e));
+                        } else if !self.scope_incomplete {
+                            self.foreign_envs.insert(e.clone());
+                            let uses_span = root.uses.iter().find(|(l, _)| *l == u.name).map(|(_, sp)| *sp).unwrap_or(root.span);
+                            self.diag(
+                                Code::E,
+                                &root_name,
+                                None,
+                                uses_span,
+                                format!(
+                                    "library `{}` is written against environment `{}`, which is not the declared environment `{}` of {} `{}`; a library can only be used on its own environment",
+                                    u.name, e, self.env_name, root.kind, root.name
+                                ),
+                            );
+                        }
+                    }
+                    None => {
+                        self.scope_incomplete = true;
+                        self.diag(Code::U, &u.name, None, u.span, format!("library `{}` names no environment; add `env <name>`", u.name));
+                    }
+                    _ => {}
                 }
             }
             for sig in &u.rels {
@@ -675,7 +741,7 @@ impl<'a> Checker<'a> {
                 if scc_pos.id[hi] == scc_pos.id[bi] {
                     let info = &infos.iter().find(|(i, _)| i == ri).unwrap().1;
                     let r = info.refs.iter().find(|r| r.span == *span && r.name == *b).unwrap();
-                    if r.key_prov != TimeProv::Strict {
+                    if !matches!(r.key_prov, TimeProv::Strict | TimeProv::Unknown) {
                         let label = rule_label(&self.rules, *ri);
                         let unit = self.rules[*ri].unit.clone();
                         self.diag(
@@ -785,17 +851,23 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Order diagnostics by dependency rank of the rule's head (section 5,
-        // WF-6: "the first rule in dependency order that fails"), then by position.
+        // Order diagnostics: errors before warnings; unit-level diagnostics
+        // (a missing or mismatched environment or library, no decide) first,
+        // since everything else may follow from them; then by dependency rank
+        // of the rule's head (section 5, WF-6: "the first rule in dependency
+        // order that fails"), then by position.
         let rank: HashMap<String, usize> = nodes.iter().enumerate().map(|(i, nm)| (nm.clone(), scc_all.rank[i])).collect();
         let rules = self.rules.clone();
         self.diags.sort_by_key(|d| {
-            let r = d
-                .rule
-                .as_ref()
-                .and_then(|lbl| rules.iter().enumerate().find(|(i, _)| rule_label(&rules, *i) == *lbl))
-                .map(|(_, r)| rank.get(&r.head.name).copied().unwrap_or(usize::MAX));
-            (d.severity == Severity::Warning, r.unwrap_or(usize::MAX), d.unit.clone(), d.span.line, d.span.col)
+            let r = d.rule.as_ref().map(|lbl| {
+                rules
+                    .iter()
+                    .enumerate()
+                    .find(|(i, _)| rule_label(&rules, *i) == *lbl)
+                    .map(|(_, r)| rank.get(&r.head.name).copied().unwrap_or(usize::MAX))
+                    .unwrap_or(usize::MAX)
+            });
+            (d.severity == Severity::Warning, r.is_some(), r.unwrap_or(0), d.unit.clone(), d.span.line, d.span.col)
         });
         self.scc_order = Some(scc_all);
         self.complete_set = complete;
