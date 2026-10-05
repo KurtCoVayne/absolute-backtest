@@ -97,6 +97,7 @@ fn usage_documents_every_option() {
         "--margin-rate",
         "--short-rebate",
         "--nav",
+        "--as-of",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

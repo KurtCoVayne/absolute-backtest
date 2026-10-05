@@ -8,5 +8,6 @@ environment equities_1d_ext {
   low(+A: Equity, @T: Timestamp, -L: Price<USD>) @1d
   volume(+A: Equity, @T: Timestamp, -V: Quantity<Shares>) @1d
   universe(-A: Equity, @T: Timestamp) @1d complete
+  ticker(+A: Equity, @T: Timestamp, -S: Label) @1d complete
   dividend_announced(+A: Equity, @T: Timestamp, -Ex: Timestamp, -D: Price<USD>) @1d
 }

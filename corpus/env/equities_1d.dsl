@@ -5,4 +5,5 @@ environment equities_1d {
   close(+A: Equity, @T: Timestamp, -P: Price<USD>) @1d
   volume(+A: Equity, @T: Timestamp, -V: Quantity<Shares>) @1d
   universe(-A: Equity, @T: Timestamp) @1d complete
+  ticker(+A: Equity, @T: Timestamp, -S: Label) @1d complete
 }
