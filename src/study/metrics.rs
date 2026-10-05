@@ -235,6 +235,32 @@ fn drawdown(curve: &[f64]) -> (f64, usize) {
     (mdd, longest)
 }
 
+/// The curve of the kept bars only: the first kept bar's equity, then
+/// each later kept bar compounding its own one-bar return (a block embargo
+/// or a walk-forward window withholds the others). Every bar kept returns
+/// the curve itself.
+pub fn masked_curve(curve: &[(i64, f64)], keep: &dyn Fn(i64) -> bool) -> Vec<(i64, f64)> {
+    if curve.iter().all(|(t, _)| keep(*t)) {
+        return curve.to_vec();
+    }
+    let mut out: Vec<(i64, f64)> = Vec::new();
+    let mut e = 0.0;
+    for (i, &(t, v)) in curve.iter().enumerate() {
+        if !keep(t) {
+            continue;
+        }
+        if out.is_empty() {
+            e = v;
+        } else {
+            let prev = curve[i - 1].1;
+            let r = if prev > 0.0 { v / prev - 1.0 } else { 0.0 };
+            e *= 1.0 + r;
+        }
+        out.push((t, e));
+    }
+    out
+}
+
 /// Every return-based metric of an equity curve.
 pub fn return_metrics(curve: &[(i64, f64)], periods_per_year: f64) -> ReturnMetrics {
     let rets = Returns::from_curve(curve, periods_per_year);

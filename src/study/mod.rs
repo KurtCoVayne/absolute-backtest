@@ -12,21 +12,23 @@
 pub mod lineage;
 pub mod log;
 pub mod metrics;
+pub mod validate;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::check::Program;
-use crate::ir::{Duration, Lit};
-use crate::kernel::time::{self, format_timestamp};
+use crate::ir::Lit;
+use crate::kernel::time::format_timestamp;
 use crate::kernel::{Dataset, ExecConfig, RunError, RunResult};
 
 pub use lineage::{jaccard, normalized_rules, program_hash, Attachment, Lineage, Lineages, Opened, SIMILARITY_THRESHOLD};
 pub use log::{sharpe_variance, Trial, TrialKind, TrialLog};
 pub use metrics::{
-    block_bootstrap_sharpe, capacity, deflated_sharpe, min_track_record_length, newey_west_t, pbo_cscv, periods_per_year, probabilistic_sharpe, return_metrics, trading_metrics, DeflatedSharpe, Pbo,
-    ReturnMetrics, Returns, TradingMetrics,
+    block_bootstrap_sharpe, capacity, deflated_sharpe, masked_curve, min_track_record_length, newey_west_t, pbo_cscv, periods_per_year, probabilistic_sharpe, return_metrics, trading_metrics,
+    DeflatedSharpe, Pbo, ReturnMetrics, Returns, TradingMetrics,
 };
+pub use validate::{block_embargo, subperiod_sharpes, surface, trailing_embargo, Embargo, Surface, WalkForward};
 
 /// The hold-out policy a study declares (section 6, out-of-sample).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -36,10 +38,14 @@ pub enum Holdout {
     /// The last `years` of the sample are embargoed: a run is truncated
     /// before them until a committed version is revealed.
     Trailing { years: u32 },
+    /// `count` random blocks of `months` months are embargoed: a run
+    /// crosses them (the book's state must) but reports no metric over
+    /// them until revealed.
+    Blocks { count: u32, months: u32, seed: u64 },
 }
 
 impl Holdout {
-    /// `none` or `trailing:Ny`.
+    /// `none`, `trailing:Ny` or `blocks:K:Nmo[:SEED]`.
     pub fn parse(s: &str) -> Result<Holdout, String> {
         let s = s.trim();
         if s == "none" {
@@ -52,25 +58,46 @@ impl Holdout {
             }
             return Ok(Holdout::Trailing { years });
         }
-        Err(format!("`{}` is not a hold-out policy: none or trailing:Ny", s))
+        if let Some(rest) = s.strip_prefix("blocks:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() < 2 || parts.len() > 3 {
+                return Err(format!("`{}` is not a block hold-out (blocks:4:3mo or blocks:4:3mo:seed)", s));
+            }
+            let count: u32 = parts[0].parse().map_err(|_| format!("`{}` is not a number of blocks", parts[0]))?;
+            let months: u32 = parts[1].trim_end_matches("mo").parse().map_err(|_| format!("`{}` is not a number of months (3mo)", parts[1]))?;
+            let seed: u64 = parts.get(2).map(|x| x.parse().map_err(|_| format!("`{}` is not a seed", x))).transpose()?.unwrap_or(1);
+            if count == 0 || months == 0 {
+                return Err("a block hold-out needs at least one block of one month".into());
+            }
+            return Ok(Holdout::Blocks { count, months, seed });
+        }
+        Err(format!("`{}` is not a hold-out policy: none, trailing:Ny or blocks:K:Nmo[:SEED]", s))
     }
 
     pub fn describe(&self) -> String {
         match self {
             Holdout::None => "none".into(),
             Holdout::Trailing { years } => format!("trailing:{}y", years),
+            Holdout::Blocks { count, months, seed } => format!("blocks:{}:{}mo:{}", count, months, seed),
+        }
+    }
+
+    /// The bars of a dataset the policy embargoes.
+    pub fn embargo(&self, ds: &Dataset) -> Embargo {
+        let bars: Vec<i64> = ds.facts.values().flat_map(|tus| tus.iter()).filter_map(|tu| tu.iter().find_map(|v| v.as_time())).collect();
+        let (Some(first), Some(last)) = (bars.iter().min().copied(), bars.iter().max().copied()) else {
+            return Embargo::none();
+        };
+        match self {
+            Holdout::None => Embargo::none(),
+            Holdout::Trailing { years } => validate::trailing_embargo(last, *years),
+            Holdout::Blocks { count, months, seed } => validate::block_embargo(first, last, *count, *months, *seed),
         }
     }
 
     /// The first embargoed bar of a dataset, if any.
     pub fn embargo_start(&self, ds: &Dataset) -> Option<i64> {
-        match self {
-            Holdout::None => None,
-            Holdout::Trailing { years } => {
-                let last = ds.facts.values().flat_map(|tus| tus.iter()).filter_map(|tu| tu.iter().find_map(|v| v.as_time())).max()?;
-                Some(time::sub_duration(last, Duration { months: 12 * *years as i64, days: 0 }))
-            }
-        }
+        self.embargo(ds).start()
     }
 }
 
@@ -376,7 +403,34 @@ pub struct Provenance {
     /// `name@version` when the data came from a bundle.
     pub bundle: Option<String>,
     /// The walk-forward scheme, when one was declared.
-    pub scheme: Option<String>,
+    pub scheme: Option<WalkForward>,
+}
+
+/// A parameter grid: its axes and the points to run, each carrying the
+/// base overrides first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Grid {
+    pub axes: Vec<(String, Vec<Lit>)>,
+    pub points: Vec<Point>,
+}
+
+impl Grid {
+    pub fn new(axes: Vec<(String, Vec<Lit>)>, base: &[(String, Lit)]) -> Grid {
+        let points = grid_points(&axes)
+            .into_iter()
+            .map(|p| {
+                let mut all: Point = base.to_vec();
+                all.extend(p);
+                all
+            })
+            .collect();
+        Grid { axes, points }
+    }
+
+    /// One point: the base overrides alone.
+    pub fn single(base: &[(String, Lit)]) -> Grid {
+        Grid::new(vec![], base)
+    }
 }
 
 /// One trial's outcome: the run, its metrics and the logged record.
@@ -387,8 +441,33 @@ pub struct Outcome {
     pub trial: Trial,
 }
 
+/// One walk-forward fold: the point chosen in sample and how it did out.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FoldReport {
+    pub train: (i64, i64),
+    pub test: (i64, i64),
+    /// Index of the chosen grid point.
+    pub best: usize,
+    pub in_sample: f64,
+    pub out_of_sample: f64,
+    pub in_sample_cagr: f64,
+    pub out_of_sample_cagr: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WalkForwardReport {
+    pub scheme: WalkForward,
+    pub folds: Vec<FoldReport>,
+    /// Pardo's walk-forward efficiency: mean out-of-sample CAGR over mean
+    /// in-sample CAGR of the chosen points (`None` when the latter is not
+    /// positive).
+    pub efficiency: Option<f64>,
+    /// Metrics of the out-of-sample windows stitched into one curve.
+    pub out_of_sample: ReturnMetrics,
+}
+
 /// What a study run reports beyond the per-point metrics.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct RunReport {
     /// Trials in the lineage after this run.
     pub trials: usize,
@@ -397,14 +476,80 @@ pub struct RunReport {
     /// Index of the best point by the objective.
     pub best: usize,
     pub warnings: Vec<StudyWarning>,
-    /// The bars the hold-out embargo removed, if any.
-    pub embargoed_from: Option<i64>,
+    /// The bars the hold-out embargoes.
+    pub embargo: Embargo,
+    /// The parameter surface around the best point, on a grid.
+    pub surface: Option<Surface>,
+    /// The best point's annualised Sharpe ratio per calendar year.
+    pub subperiods: Vec<(i64, f64)>,
+    pub walk_forward: Option<WalkForwardReport>,
+}
+
+impl RunReport {
+    /// The bars a trailing embargo removed, if any.
+    pub fn embargoed_from(&self) -> Option<i64> {
+        if self.embargo.truncates {
+            self.embargo.start()
+        } else {
+            None
+        }
+    }
+}
+
+/// A run of one point with its metrics over the kept bars.
+struct Evaluated {
+    result: RunResult,
+    curve: Vec<(i64, f64)>,
+    metrics: ReturnMetrics,
+    trading: TradingMetrics,
+}
+
+fn evaluate(prog: &Program, data: &Dataset, cfg: ExecConfig, runner: &Runner, keep: &dyn Fn(i64) -> bool) -> Result<Evaluated, String> {
+    let ppy = periods_per_year(prog.resolution);
+    let result = runner(prog, data, cfg).map_err(|e| e.to_string())?;
+    let curve = masked_curve(&result.equity_curve, keep);
+    let metrics = return_metrics(&curve, ppy);
+    let trading = trading_metrics(&result, ppy);
+    Ok(Evaluated { result, curve, metrics, trading })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record(log: &TrialLog, study: &StudySpec, prog: &Program, hash: &str, cfg: &ExecConfig, ev: &Evaluated, kind: TrialKind, from: &Provenance, note: Option<String>) -> Result<Trial, String> {
+    log.append(Trial {
+        seq: 0,
+        at: now(),
+        kind,
+        study: Some(study.id.clone()),
+        lineage: study.lineage.clone(),
+        hash: hash.to_string(),
+        strategy: prog.strategy.clone(),
+        params: effective_params(prog, cfg),
+        period: ev.result.bars.first().zip(ev.result.bars.last()).map(|(a, b)| (format_timestamp(*a), format_timestamp(*b))),
+        bars: ev.result.bars.len(),
+        symbols: ev.result.symbols.len(),
+        bundle: from.bundle.clone(),
+        exec: cfg.clone(),
+        objective: study.objective.clone(),
+        scheme: from.scheme.as_ref().map(|s| s.describe()),
+        holdout: study.holdout.describe(),
+        metrics: ev.metrics.clone(),
+        trading: ev.trading.clone(),
+        note,
+    })
+}
+
+fn point_cfg(study: &StudySpec, point: &Point) -> ExecConfig {
+    let mut cfg = study.exec.clone();
+    cfg.param_overrides.extend(point.iter().cloned());
+    cfg
 }
 
 /// `study.run`: one logged trial per parameter point, on the sample the
-/// hold-out leaves, then the lineage's deflated Sharpe ratio for the best
-/// point and the grid's PBO.
-pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset, points: &[Point], runner: &Runner, from: Provenance) -> Result<(Vec<Outcome>, RunReport), String> {
+/// hold-out leaves (a trailing embargo truncates the data, a block embargo
+/// masks the metrics), then the lineage's deflated Sharpe ratio for the
+/// best point, the grid's PBO and parameter surface, the best point's
+/// sub-period stability, and the walk-forward folds when a scheme is given.
+pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset, grid: &Grid, runner: &Runner, from: Provenance) -> Result<(Vec<Outcome>, RunReport), String> {
     let hash = program_hash(prog);
     let opened = project.open_lineage(prog)?;
     if opened.lineage != study.lineage {
@@ -413,14 +558,19 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
             prog.strategy, hash, opened.lineage, study.id, study.lineage
         ));
     }
-    let embargoed_from = study.holdout.embargo_start(ds);
-    let sample = match embargoed_from {
-        Some(h) => ds.truncated(prog, h - 1),
-        None => ds.clone(),
+    if grid.points.is_empty() {
+        return Err("no parameter point to run".into());
+    }
+    let embargo = study.holdout.embargo(ds);
+    let sample = match (embargo.truncates, embargo.start()) {
+        (true, Some(h)) => ds.truncated(prog, h - 1),
+        _ => ds.clone(),
     };
+    let keep = |t: i64| !embargo.contains(t);
     let ppy = periods_per_year(prog.resolution);
     let log = project.log();
     let mut outcomes = Vec::new();
+    let mut curves = Vec::new();
     let mut warnings = Vec::new();
     if let Some(w) = opened.warning {
         warnings.push(StudyWarning {
@@ -428,52 +578,44 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
             message: w,
         });
     }
-    for point in points {
-        let mut cfg = study.exec.clone();
-        cfg.param_overrides.extend(point.iter().cloned());
-        let result = runner(prog, &sample, cfg.clone()).map_err(|e| e.to_string())?;
-        let metrics = return_metrics(&result.equity_curve, ppy);
-        let trading = trading_metrics(&result, ppy);
-        let trial = log.append(Trial {
-            seq: 0,
-            at: now(),
-            kind: TrialKind::Trial,
-            study: Some(study.id.clone()),
-            lineage: study.lineage.clone(),
-            hash: hash.clone(),
-            strategy: prog.strategy.clone(),
-            params: effective_params(prog, &cfg),
-            period: result.bars.first().zip(result.bars.last()).map(|(a, b)| (format_timestamp(*a), format_timestamp(*b))),
-            bars: result.bars.len(),
-            symbols: result.symbols.len(),
-            bundle: from.bundle.clone(),
-            exec: cfg,
-            objective: study.objective.clone(),
-            scheme: from.scheme.clone(),
-            holdout: study.holdout.describe(),
-            metrics: metrics.clone(),
-            trading: trading.clone(),
-            note: None,
-        })?;
-        outcomes.push(Outcome { result, metrics, trading, trial });
-    }
-    if outcomes.is_empty() {
-        return Err("no parameter point to run".into());
+    let masked_note = if embargo.truncates || embargo.is_empty() {
+        None
+    } else {
+        Some(format!("metrics exclude the embargoed blocks {}", embargo.describe()))
+    };
+    for point in &grid.points {
+        let cfg = point_cfg(study, point);
+        let ev = evaluate(prog, &sample, cfg.clone(), runner, &keep)?;
+        let trial = record(&log, study, prog, &hash, &cfg, &ev, TrialKind::Trial, &from, masked_note.clone())?;
+        curves.push(ev.curve);
+        outcomes.push(Outcome {
+            result: ev.result,
+            metrics: ev.metrics,
+            trading: ev.trading,
+            trial,
+        });
     }
     let best = best_point(&outcomes, &study.objective);
-    let lineage_trials = log.for_lineage(&study.lineage)?;
-    let var = sharpe_variance(&lineage_trials);
-    let m = &outcomes[best].metrics;
-    let dsr = deflated_sharpe(m.sharpe_period, m.n, m.skew, m.kurtosis, lineage_trials.len(), var);
+    let values: Vec<f64> = outcomes.iter().map(|o| objective_value(&study.objective, &o.metrics, &o.trading).unwrap_or(f64::NAN)).collect();
     let pbo = if outcomes.len() >= 2 {
-        let rets: Vec<Returns> = outcomes.iter().map(|o| Returns::from_curve(&o.result.equity_curve, ppy)).collect();
+        let rets: Vec<Returns> = curves.iter().map(|c| Returns::from_curve(c, ppy)).collect();
         let n = rets.iter().map(|r| r.len()).min().unwrap_or(0);
         let rows: Vec<Vec<f64>> = (0..n).map(|i| rets.iter().map(|r| r.r[i]).collect()).collect();
         pbo_cscv(&rows, 16).or_else(|| pbo_cscv(&rows, 8))
     } else {
         None
     };
-    let years = (outcomes[best].result.bars.len() as f64) / ppy;
+    let surface = validate::surface(&grid.axes, &values, best);
+    let subperiods = validate::subperiod_sharpes(&curves[best], ppy, 20);
+    let walk_forward = match &from.scheme {
+        Some(scheme) => Some(walk_forward(&log, study, prog, &hash, &sample, grid, runner, &from, scheme, &keep)?),
+        None => None,
+    };
+    let lineage_trials = log.for_lineage(&study.lineage)?;
+    let var = sharpe_variance(&lineage_trials);
+    let m = &outcomes[best].metrics;
+    let dsr = deflated_sharpe(m.sharpe_period, m.n, m.skew, m.kurtosis, lineage_trials.len(), var);
+    let years = (m.n as f64) / ppy;
     if years < 2.0 {
         warnings.push(StudyWarning {
             bias: "short-sample".into(),
@@ -507,6 +649,47 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
             });
         }
     }
+    if let Some(s) = &surface {
+        if s.stability < 0.5 {
+            warnings.push(StudyWarning {
+                bias: "parameter over-optimization".into(),
+                message: format!(
+                    "only {:.0}% of the best point's {} neighbours are within {:.3} of it: a peak, not a plateau",
+                    s.stability * 100.0,
+                    s.neighbours,
+                    s.tolerance
+                ),
+            });
+        }
+    }
+    if subperiods.len() >= 2 {
+        let sign = m.sharpe >= 0.0;
+        let agree = subperiods.iter().filter(|(_, s)| (*s >= 0.0) == sign).count();
+        if agree * 2 < subperiods.len() {
+            warnings.push(StudyWarning {
+                bias: "non-stationarity".into(),
+                message: format!(
+                    "the Sharpe ratio has the whole sample's sign in only {} of {} calendar years ({})",
+                    agree,
+                    subperiods.len(),
+                    subperiods.iter().map(|(y, s)| format!("{} {:.2}", y, s)).collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
+    }
+    if let Some(wf) = &walk_forward {
+        match wf.efficiency {
+            Some(e) if e < 0.5 => warnings.push(StudyWarning {
+                bias: "walk-forward".into(),
+                message: format!("walk-forward efficiency {:.2}: out of sample the chosen points earn less than half their in-sample rate", e),
+            }),
+            None => warnings.push(StudyWarning {
+                bias: "walk-forward".into(),
+                message: "walk-forward efficiency is undefined: the chosen points did not earn in sample".into(),
+            }),
+            _ => {}
+        }
+    }
     for w in &outcomes[best].result.warnings {
         warnings.push(StudyWarning {
             bias: w.bias.clone(),
@@ -521,8 +704,161 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
             pbo,
             best,
             warnings,
-            embargoed_from,
+            embargo,
+            surface,
+            subperiods,
+            walk_forward,
         },
+    ))
+}
+
+/// Walk forward over the sample: in each fold every grid point is run on
+/// the data up to the test window and judged on the train window (each a
+/// logged trial), the best is judged on the test window (a logged trial),
+/// and the test windows are stitched into one out-of-sample curve.
+#[allow(clippy::too_many_arguments)]
+fn walk_forward(
+    log: &TrialLog,
+    study: &StudySpec,
+    prog: &Program,
+    hash: &str,
+    sample: &Dataset,
+    grid: &Grid,
+    runner: &Runner,
+    from: &Provenance,
+    scheme: &WalkForward,
+    keep: &dyn Fn(i64) -> bool,
+) -> Result<WalkForwardReport, String> {
+    let bars: Vec<i64> = sample.facts.values().flat_map(|tus| tus.iter()).filter_map(|tu| tu.iter().find_map(|v| v.as_time())).collect();
+    let (Some(first), Some(last)) = (bars.iter().min().copied(), bars.iter().max().copied()) else {
+        return Err("the sample has no bars".into());
+    };
+    let folds = scheme.folds(first, last);
+    if folds.is_empty() {
+        return Err(format!(
+            "the sample ({} to {}) is shorter than one train and one test window of {}",
+            format_timestamp(first),
+            format_timestamp(last),
+            scheme.describe()
+        ));
+    }
+    let ppy = periods_per_year(prog.resolution);
+    let mut reports = Vec::new();
+    let mut stitched: Vec<(i64, f64)> = Vec::new();
+    let mut level = 1.0;
+    for (k, &(train_from, train_to, test_from, test_to)) in folds.iter().enumerate() {
+        let train_data = sample.truncated(prog, test_from - 1);
+        let mut best: Option<(usize, f64, f64)> = None;
+        for (i, point) in grid.points.iter().enumerate() {
+            let cfg = point_cfg(study, point);
+            let in_train = |t: i64| keep(t) && train_from <= t && t < train_to;
+            let ev = evaluate(prog, &train_data, cfg.clone(), runner, &in_train)?;
+            record(
+                log,
+                study,
+                prog,
+                hash,
+                &cfg,
+                &ev,
+                TrialKind::Trial,
+                from,
+                Some(format!("walk-forward fold {}/{} train", k + 1, folds.len())),
+            )?;
+            let v = objective_value(&study.objective, &ev.metrics, &ev.trading).unwrap_or(f64::NAN);
+            let better = higher_is_better(&study.objective);
+            if v.is_finite() && best.map(|(_, b, _)| if better { v > b } else { v < b }).unwrap_or(true) {
+                best = Some((i, v, ev.metrics.cagr));
+            }
+        }
+        let Some((bi, is_v, is_cagr)) = best else { continue };
+        let cfg = point_cfg(study, &grid.points[bi]);
+        let test_data = sample.truncated(prog, test_to - 1);
+        let in_test = |t: i64| keep(t) && test_from <= t && t < test_to;
+        let ev = evaluate(prog, &test_data, cfg.clone(), runner, &in_test)?;
+        record(
+            log,
+            study,
+            prog,
+            hash,
+            &cfg,
+            &ev,
+            TrialKind::Trial,
+            from,
+            Some(format!("walk-forward fold {}/{} test", k + 1, folds.len())),
+        )?;
+        let oos_v = objective_value(&study.objective, &ev.metrics, &ev.trading).unwrap_or(f64::NAN);
+        for w in ev.curve.windows(2) {
+            let r = if w[0].1 > 0.0 { w[1].1 / w[0].1 - 1.0 } else { 0.0 };
+            if stitched.is_empty() {
+                stitched.push((w[0].0, level));
+            }
+            level *= 1.0 + r;
+            stitched.push((w[1].0, level));
+        }
+        reports.push(FoldReport {
+            train: (train_from, train_to),
+            test: (test_from, test_to),
+            best: bi,
+            in_sample: is_v,
+            out_of_sample: oos_v,
+            in_sample_cagr: is_cagr,
+            out_of_sample_cagr: ev.metrics.cagr,
+        });
+    }
+    let n = reports.len().max(1) as f64;
+    let is_mean = reports.iter().map(|f| f.in_sample_cagr).sum::<f64>() / n;
+    let oos_mean = reports.iter().map(|f| f.out_of_sample_cagr).sum::<f64>() / n;
+    let efficiency = if is_mean > 0.0 { Some(oos_mean / is_mean) } else { None };
+    Ok(WalkForwardReport {
+        scheme: scheme.clone(),
+        folds: reports,
+        efficiency,
+        out_of_sample: return_metrics(&stitched, ppy),
+    })
+}
+
+/// `holdout.reveal`: the committed program (a member of the study's
+/// lineage) runs over the whole sample and reports the embargoed bars
+/// only; logged as an out-of-sample trial, counted like any other.
+pub fn reveal(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset, runner: &Runner, from: Provenance) -> Result<(Outcome, Embargo), String> {
+    let hash = program_hash(prog);
+    let ls = project.lineages()?;
+    match ls.lineage_of(&hash) {
+        Some(l) if l.id == study.lineage => {}
+        Some(l) => return Err(format!("strategy `{}` ({}) belongs to lineage {}, not the study's {}", prog.strategy, hash, l.id, study.lineage)),
+        None => {
+            return Err(format!(
+                "strategy `{}` ({}) is not a member of lineage {}: a reveal names a committed version, one the study has run",
+                prog.strategy, hash, study.lineage
+            ))
+        }
+    }
+    let embargo = study.holdout.embargo(ds);
+    if embargo.is_empty() {
+        return Err(format!("study {} declares no hold-out; there is nothing to reveal", study.id));
+    }
+    let cfg = study.exec.clone();
+    let ev = evaluate(prog, ds, cfg.clone(), runner, &|t| embargo.contains(t))?;
+    let log = project.log();
+    let trial = record(
+        &log,
+        study,
+        prog,
+        &hash,
+        &cfg,
+        &ev,
+        TrialKind::Reveal,
+        &from,
+        Some(format!("reveal of {} over {}", hash, embargo.describe())),
+    )?;
+    Ok((
+        Outcome {
+            result: ev.result,
+            metrics: ev.metrics,
+            trading: ev.trading,
+            trial,
+        },
+        embargo,
     ))
 }
 
