@@ -80,6 +80,15 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
                 }
                 tuple.push(v);
             }
+            // A price is positive (section 6, executor policy: a non-positive
+            // price is a data error, never a book state).
+            for (i, arg) in sig.args.iter().enumerate() {
+                if let (Ty::Quantity(d), Value::Num(x)) = (&arg.ty, &tuple[i]) {
+                    if d.c2 == 2 && d.s2 == -2 && d.t2 == 0 && *x <= 0.0 {
+                        return Err(format!("{}:{}: `{}` is not a positive price for `{}`", path.display(), lineno, x, arg.name));
+                    }
+                }
+            }
             rows += 1;
             let id: Vec<Value> = identity.iter().map(|&i| tuple[i].clone()).collect();
             match seen.get(&id) {

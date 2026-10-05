@@ -11,7 +11,7 @@ use std::path::Path;
 use absolute_backtest::check::{check_program, Program, Workspace};
 use absolute_backtest::data::{synthetic_daily, synthetic_minute};
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, RunError, Value};
+use absolute_backtest::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, OnLeverage, RunError, Value};
 use absolute_backtest::{Duration, Lit};
 
 fn program(extra: &str, name: &str) -> (Program, Workspace) {
@@ -600,25 +600,25 @@ fn spike_daily(spike_on: &str, closes_removed: &[&str]) -> Dataset {
     ds
 }
 
-/// A dropped fill of a time-based exit does not leave the position stuck:
-/// the exit is a state test, so it is decided again at the next bar
-/// (trend-02).
+/// A time-based exit whose fill bar has no close does not leave the position
+/// stuck: the exit is a liquidation, so it fills at the last known price
+/// (section 6, executor policy), flagged as such (trend-02, #16).
 #[test]
-fn corpus_time_exit_is_retried_after_a_dropped_fill() {
+fn corpus_time_exit_fills_at_the_last_price_when_the_fill_bar_has_no_close() {
     let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies/volume_spike.dsl")).unwrap();
     let (prog, _) = program(&src, "volume_spike");
     // A Wednesday entry with hold 5d: the exit is due on the Monday after
-    // next or the day after. Both bars that could fill it lack a close, so
-    // the first exit decision is dropped whichever bar it lands on.
+    // next or the day after. Both bars that could fill it lack a close.
     let ds = spike_daily("2024-01-31", &["2024-02-06", "2024-02-07"]);
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
     let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
     assert_eq!(decisions[0], "2024-01-31 buy(X, 100)", "{:?}", decisions);
-    assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
     let sells = decisions.iter().filter(|d| d.contains("sell")).count();
-    assert_eq!(sells, 2, "the exit must be decided again after the drop: {:?}", decisions);
+    assert_eq!(sells, 1, "one exit, filled at the last price: {:?}", decisions);
     assert_eq!(r.fills.len(), 2, "{:?}", r.fills);
-    assert!(r.final_positions.is_empty(), "position stuck after a dropped exit: {:?}", r.final_positions);
+    assert!(r.fills[1].at_last_price && r.fills[1].quantity == -100.0, "{:?}", r.fills);
+    assert!(r.dropped.iter().all(|(_, _, why)| why == "no next bar"), "{:?}", r.dropped);
+    assert!(r.final_positions.is_empty(), "position stuck after an unpriced exit: {:?}", r.final_positions);
 }
 
 /// Four symbols, five consecutive weekdays, one fixed close per symbol.
@@ -728,7 +728,15 @@ strategy unguarded {
 "#;
     let (prog, _) = program(src, "unguarded");
     let ds = synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), 200, 3);
-    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_leverage: OnLeverage::Allow,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(!r.decisions.is_empty());
     // Demanded at every bar, the same tuple halts on the first one.
     let demanded = src.replace(
@@ -736,7 +744,14 @@ strategy unguarded {
         "decide(T, target_weight(A, W)) :- bar(T), w(T, W), selected(A, T).",
     );
     let (prog, _) = program(&demanded, "unguarded");
-    match run(&prog, &ds, ExecConfig::default()) {
+    match run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_leverage: OnLeverage::Allow,
+            ..Default::default()
+        },
+    ) {
         Err(RunError::Arithmetic { rule, message, .. }) => {
             assert_eq!(rule, "unguarded::w#1");
             assert_eq!(message, "division by zero");

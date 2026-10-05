@@ -433,6 +433,27 @@ time of execution, using the bar's close for `target_weight`. Conflicting
 decisions for one instrument at one T halt the run with a diagnostic naming
 both rules.
 
+**Executor policy (v1).** The model defines no margin, so three degenerate
+book states are configuration of the kernel, not of the program, and every
+default halts the run with a diagnostic naming the bar, the decision and its
+rule: *ruin*, equity at the execution bar not positive while orders are
+pending (`halt`, or `continue`, where a positive `target_weight` of a
+non-positive equity targets flat); *leverage*, a fill that would make cash
+negative or gross exposure Σ|position|·price exceed equity (`halt`,
+`reject` the order with a reason, or `allow`); and an *oversize* delta
+order, a `sell` beyond the long or a `cover` beyond the short, which would
+cross zero (`halt`, `clamp` at the position and drop the remainder, or
+`allow` the signed order). Orders that reduce a position fill before the
+bar's other orders and are never leverage. A liquidation, an order that
+shrinks a position without crossing zero, whose fill bar has no price for
+the instrument fills at the instrument's last known price and is flagged;
+an opening or adding order without a price is dropped. Every order quantity
+is rounded by the configured lot, whole shares (truncation toward zero) by
+default or fractional, applied to the quantity the decision names: a delta
+order's amount or a target's quantity; `Quantity<Shares>` stays real-valued
+in the type system, and the lot is where a contract size would later apply.
+A non-positive price in the data is a load error, never a book state.
+
 When the decision resolution is coarser than the price data, the executor's
 "close of the next bar" is the last fine close inside the next decision
 bucket, for whichever fine tuples the data holds: the strategy's own bar
@@ -569,6 +590,7 @@ produce), and `corpus/strategies/` must check clean.
 | Dead rules | W1 | derived relation not reached from decide | (warning) |
 | Unused parameter | W2 | parameter not referenced | (warning) |
 | Undefined relation | W3 | declared relation with no defining rule | (warning) |
+| Degenerate reduction | W4 | `top` whose identity columns are all bound by the outer rule keeps every tuple | (warning) |
 
 The six negative cases the first draft asked for before the typed checker was
 built (an unbound head variable, an unbound `+` argument, a Price + Scalar

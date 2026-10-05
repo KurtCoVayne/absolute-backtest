@@ -10,7 +10,9 @@ strategy long_short_quantile {
   param lookback : Duration = 6mo
   param skip : Duration = 1mo
   param q : Scalar = 0.8
-  param gross : Scalar = 1.0
+  # Half of equity per leg: the book's gross exposure equals its equity, which
+  # is the most the executor allows by default (leverage halts the run).
+  param gross : Scalar = 0.5
 
   rel mom(-A: Equity, @T: Timestamp, -M: Scalar)
   mom(A, T, M) :- universe(A, T), momentum(A, T, lookback, skip, M).

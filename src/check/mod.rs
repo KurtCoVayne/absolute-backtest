@@ -43,6 +43,9 @@ pub enum Code {
     W2,
     /// Warning: declared relation with no defining rule.
     W3,
+    /// Warning: a reduction whose identity columns are all bound by the
+    /// outer rule, so it keeps every tuple.
+    W4,
 }
 
 impl Code {
@@ -64,6 +67,7 @@ impl Code {
             "W1" => Code::W1,
             "W2" => Code::W2,
             "W3" => Code::W3,
+            "W4" => Code::W4,
             _ => return None,
         })
     }
@@ -85,6 +89,7 @@ impl Code {
             Code::W1 => "dead rule",
             Code::W2 => "unused parameter",
             Code::W3 => "undefined relation",
+            Code::W4 => "degenerate reduction",
         }
     }
 }
@@ -406,7 +411,11 @@ impl<'a> Checker<'a> {
     }
 
     pub fn diag(&mut self, code: Code, unit: &str, rule: Option<String>, span: Span, message: impl Into<String>) {
-        let severity = if matches!(code, Code::W1 | Code::W2 | Code::W3) { Severity::Warning } else { Severity::Error };
+        let severity = if matches!(code, Code::W1 | Code::W2 | Code::W3 | Code::W4) {
+            Severity::Warning
+        } else {
+            Severity::Error
+        };
         self.diags.push(Diagnostic {
             code,
             severity,

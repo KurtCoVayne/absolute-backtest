@@ -76,6 +76,10 @@ fn usage_documents_every_option() {
         "--cash",
         "--slippage-bps",
         "--commission",
+        "--on-leverage",
+        "--on-oversize",
+        "--on-ruin",
+        "--lot",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

@@ -436,3 +436,31 @@ fn a_library_relation_named_after_a_builtin_is_a_u_error() {
     assert_only(&diags, Code::U);
     assert!(errors(&diags).iter().any(|d| d.message.contains("`lag`")), "{}", text(&diags));
 }
+
+// #20: a reduction whose identity columns are all bound by the outer rule
+// keeps every tuple, so `top(1, ...)` selects everything and `by` is dead.
+
+#[test]
+fn a_reduction_with_every_identity_column_bound_warns_w4() {
+    let src = r#"
+strategy degenerate_top {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  rel cand(-A: Equity, @T: Timestamp, -P: Price<USD>)
+  cand(A, T, P) :- universe(A, T), close(A, T, P).
+  rel chosen(+A: Equity, @T: Timestamp)
+  chosen(A, T) :- bar(T), top(1, cand(A, T, P), by (P desc, A asc)).
+  decide(T, target_weight(A, 0.3)) :- universe(A, T), chosen(A, T).
+}
+"#;
+    let diags = check(src, "degenerate_top");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let w4: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W4).collect();
+    assert_eq!(w4.len(), 1, "{}", text(&diags));
+    assert!(w4[0].message.contains("chosen") || w4[0].message.contains("cand"), "{}", w4[0].message);
+    // The enumerable form selects one name and warns about nothing.
+    let diags = check(&src.replace("rel chosen(+A", "rel chosen(-A"), "degenerate_top");
+    assert!(diags.is_empty(), "{}", text(&diags));
+}
