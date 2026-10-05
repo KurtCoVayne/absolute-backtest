@@ -373,3 +373,49 @@ fn bundle_build_test_and_run() {
     assert!(text(&ran).0.contains("decisions:"), "{}", text(&ran).0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Data-bundle doc, section 2: monthly checkpoints are written by the fold
+/// and a run resumed from one ends where the unbroken run ends.
+#[test]
+fn checkpoints_are_written_and_a_resumed_run_matches() {
+    let dir = std::env::temp_dir().join(format!("abt-cli-checkpoints-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = dir.to_string_lossy().to_string();
+    let files = strategy_files("momentum_top_n");
+    let base = ["run", "--strategy", "momentum_top_n", "--synthetic", "--days", "130", "--quiet", "--kernel", "fold"];
+    let mut args: Vec<&str> = base.to_vec();
+    args.extend(["--checkpoint-every", "month", "--checkpoint-dir", &out]);
+    args.extend(files.iter().map(|s| s.as_str()));
+    let full = abt(&args);
+    assert_eq!(full.status.code(), Some(0), "{}", text(&full).1);
+    let mut written: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    written.sort();
+    assert!(written.len() >= 4, "{:?}", written);
+    assert!(written[0].starts_with("2022-01-") && written[0].ends_with(".json"), "{:?}", written);
+    let last = dir.join(written.last().unwrap()).to_string_lossy().to_string();
+    let mut args: Vec<&str> = base.to_vec();
+    args.extend(["--resume", &last]);
+    args.extend(files.iter().map(|s| s.as_str()));
+    let resumed = abt(&args);
+    assert_eq!(resumed.status.code(), Some(0), "{}", text(&resumed).1);
+    assert!(text(&resumed).1.contains("resuming from"), "{}", text(&resumed).1);
+    let final_line = |o: &Output| text(o).0.lines().find(|l| l.starts_with("final cash")).unwrap_or_default().to_string();
+    assert_eq!(final_line(&full), final_line(&resumed));
+    // Checkpoints need the fold.
+    let mut args = vec![
+        "run",
+        "--strategy",
+        "momentum_top_n",
+        "--synthetic",
+        "--days",
+        "130",
+        "--quiet",
+        "--checkpoint-every",
+        "month",
+        "--checkpoint-dir",
+        &out,
+    ];
+    args.extend(files.iter().map(|s| s.as_str()));
+    assert_eq!(abt(&args).status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}

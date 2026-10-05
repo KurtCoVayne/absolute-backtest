@@ -19,7 +19,7 @@ pub type WindowCache = BTreeMap<i64, WindowRows>;
 
 /// A windowed aggregation group: the rule, the aggregation literal, and the
 /// outer bindings its conjunction reads apart from the window's base time.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct WindowKey {
     pub rule: usize,
     pub literal: usize,
@@ -575,9 +575,12 @@ impl<'p> Kernel<'p> {
         let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
         outer.sort_unstable();
         outer.dedup();
+        // The literal by its position in the rule's body (aggregations do not
+        // nest), so that the key survives a checkpoint.
+        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
         let key = WindowKey {
             rule: cr.idx,
-            literal: lit as *const Literal as usize,
+            literal,
             outer: outer.into_iter().map(|s| env[s].clone()).collect(),
         };
         let order: Vec<Literal> = conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect();

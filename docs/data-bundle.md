@@ -18,7 +18,7 @@ Oct 4, 2026 · John Gonzalez
 > | M0 | Section 9 (changes forced on the semantic model), W5, W6, this document | implemented |
 > | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | implemented (costs, slippage, impact, liquidity, partial fills, margin, funding, borrow proxy); delisting and actions in M2 |
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
-> | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) implemented; checkpoints, availability time and the as-of join planned |
+> | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) and checkpoints (serialisable state, monthly or every n bars, resumed by fingerprint) implemented; availability time and the as-of join planned |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | planned |
 > | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | planned |
 
@@ -58,7 +58,10 @@ warnings) has a single exception that is argued in section 9.
 > windows: a windowed group keeps the rows of every bar it solved (exact,
 > not the decomposable sums yet, which are an optimisation to come), and
 > resampled buckets and carried values go through the memo once per bucket
-> or bar. Still to come: checkpoints, per-tuple availability and late
+> or bar. Checkpoints are in (`kernel::Checkpoint`; `abt run --kernel fold
+> --checkpoint-every month --checkpoint-dir`, `--resume`): a run resumed
+> from one equals the unbroken fold to the bit, which is also the warm-up a
+> live run starts from. Still to come: per-tuple availability and late
 > tuples, and the as-of join. The storage paragraph is implemented in M2
 > (`src/bundle.rs`: `manifest.json`, `securities.csv`, append-only Parquet
 > partitions under `log/<relation>/<YYYY-MM>.parquet`, `snapshots/`

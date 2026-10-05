@@ -44,8 +44,11 @@ struct Args {
 const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested"];
 /// Options that may repeat.
 const MULTI: [&str; 3] = ["bind", "param", "haircut"];
-const OPTIONS: [&str; 41] = [
+const OPTIONS: [&str; 44] = [
     "strategy",
+    "checkpoint-every",
+    "checkpoint-dir",
+    "resume",
     "kernel",
     "bundle",
     "from",
@@ -125,9 +128,12 @@ fn parse_args() -> Args {
     Args { cmd, files, opts, multi, flags }
 }
 
+/// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
+type Runner = dyn FnOnce(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError>;
+
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
     );
     exit(code)
 }
@@ -437,9 +443,68 @@ fn main() {
             }
             let verify = args.flags.contains("verify-causality");
             let kernel_kind = args.opts.get("kernel").map(|s| s.as_str()).unwrap_or("batch");
-            let runner: fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError> = match kernel_kind {
-                "batch" => absolute_backtest::kernel::run,
-                "fold" => absolute_backtest::kernel::run_fold,
+            let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
+                "month" => absolute_backtest::kernel::CheckpointEvery::Month,
+                n => absolute_backtest::kernel::CheckpointEvery::Bars(n.parse().unwrap_or_else(|_| {
+                    eprintln!("--checkpoint-every: `{}` is not `month` or a number of bars", n);
+                    exit(2)
+                })),
+            });
+            let checkpoint_dir = args.opts.get("checkpoint-dir").map(PathBuf::from);
+            let resume = args.opts.get("resume").map(PathBuf::from);
+            if (checkpoint_every.is_some() || resume.is_some()) && kernel_kind != "fold" {
+                eprintln!("--checkpoint-every and --resume need --kernel fold");
+                exit(2)
+            }
+            let runner: Box<Runner> = match kernel_kind {
+                "batch" => Box::new(absolute_backtest::kernel::run),
+                "fold" if checkpoint_every.is_none() && resume.is_none() => Box::new(absolute_backtest::kernel::run_fold),
+                "fold" => Box::new(move |prog, dataset, cfg| {
+                    use absolute_backtest::kernel::{Checkpoint, Event, EventLog, Fold, Kernel, SimExecutor};
+                    std::thread::scope(|s| {
+                        std::thread::Builder::new()
+                            .stack_size(512 << 20)
+                            .spawn_scoped(s, || {
+                                let kernel = Kernel::new_streaming(prog, dataset, cfg.clone())?;
+                                let log = EventLog::from_dataset(&kernel, dataset)?;
+                                let mut exec = SimExecutor::new(cfg.clone());
+                                let (mut fold, cursor) = match &resume {
+                                    Some(path) => {
+                                        let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                        let cp: Checkpoint = serde_json::from_str(&text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                        let cursor = cp.cursor;
+                                        eprintln!("resuming from {} (checkpoint of {})", path.display(), format_timestamp(cp.last_bar));
+                                        (Fold::restore(kernel, &mut exec, cp)?, cursor)
+                                    }
+                                    None => (Fold::new(kernel, &mut exec), i64::MIN),
+                                };
+                                if let Some(every) = checkpoint_every {
+                                    fold = fold.with_checkpoints(every);
+                                }
+                                for ev in log.events {
+                                    if let Event::Tuple { avail, .. } = &ev {
+                                        if *avail < cursor {
+                                            continue;
+                                        }
+                                    }
+                                    fold.step(ev)?;
+                                    if let Some(cp) = fold.take_checkpoint() {
+                                        if let Some(dir) = &checkpoint_dir {
+                                            std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("{}: {}", dir.display(), e)))?;
+                                            let path = dir.join(format!("{}.json", format_timestamp(cp.last_bar)));
+                                            let text = serde_json::to_string(&cp).map_err(|e| RunError::Internal(e.to_string()))?;
+                                            std::fs::write(&path, text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                            eprintln!("checkpoint {} written", path.display());
+                                        }
+                                    }
+                                }
+                                fold.finish().map(|(r, _)| r)
+                            })
+                            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+                            .join()
+                            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+                    })
+                }),
                 other => {
                     eprintln!("--kernel: `{}` is not one of batch, fold", other);
                     exit(2)
