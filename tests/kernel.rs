@@ -341,6 +341,8 @@ fn dataset_for(prog: &Program, seed: u64) -> Dataset {
     let minute = prog.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1));
     if minute {
         synthetic_minute(&DAILY_SYMBOLS, (2024, 1, 2), 30, 320, seed)
+    } else if prog.relations.contains_key("split") {
+        absolute_backtest::data::synthetic_daily_v2(&DAILY_SYMBOLS, (2022, 1, 3), 320, seed)
     } else {
         synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), 320, seed)
     }
@@ -361,7 +363,9 @@ fn every_corpus_strategy_runs_and_is_deterministic() {
         // Every bar has a price, so the only drops are last-bar decisions.
         let last = *a.bars.last().unwrap();
         assert!(
-            a.dropped.iter().all(|(t, _, reason)| *t == last && reason == "no next bar"),
+            a.dropped
+                .iter()
+                .all(|(t, _, reason)| (*t == last && reason == "no next bar") || (prog.relations.contains_key("delisted") && reason.contains("no price"))),
             "{} dropped decisions: {:?}",
             name,
             a.dropped

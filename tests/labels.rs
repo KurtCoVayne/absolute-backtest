@@ -175,8 +175,11 @@ fn labels_flow_through_the_kernel() {
     )
     .unwrap();
     let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
-    // Day 1 buys both; day 3 sells BBB (delisted for bankruptcy) and does not re-enter it.
-    assert_eq!(decisions, vec!["2024-01-08 buy(AAA, 10)", "2024-01-08 buy(BBB, 10)", "2024-01-10 sell(BBB, 10)"]);
+    // Day 1 buys both; on day 3 the executor force-closes BBB (delisted for
+    // bankruptcy, a total loss) before the strategy can sell it, and the
+    // strategy never re-enters it.
+    assert_eq!(decisions, vec!["2024-01-08 buy(AAA, 10)", "2024-01-08 buy(BBB, 10)"]);
+    assert!(r.fills.iter().any(|f| f.forced && f.quantity == -10.0 && format_timestamp(f.t) == "2024-01-10"), "{:?}", r.fills);
     // A label is a value in its own right, distinct from an equity of the same spelling.
     assert_ne!(Value::Label(0), Value::Equity(0));
     assert!(Value::Equity(0) < Value::Label(0), "values of different kinds order by kind");
@@ -191,7 +194,8 @@ fn labels_flow_through_the_kernel() {
         },
     )
     .unwrap();
-    assert_eq!(r2.decisions.len(), 2, "an acquisition exit never fires on a bankruptcy: {:?}", r2.decisions.len());
+    assert_eq!(r2.decisions.len(), 2, "{:?}", r2.decisions.len());
+    assert!(r2.fills.iter().any(|f| f.forced), "the delisting closes the name whatever the strategy's exit says");
 }
 
 #[test]
@@ -218,7 +222,7 @@ fn a_label_column_loads_from_csv_and_round_trips() {
         },
     )
     .unwrap();
-    assert_eq!(r.decisions.len(), 3);
+    assert_eq!(r.decisions.len(), 2);
     let _ = fs::remove_dir_all(&dir);
 }
 

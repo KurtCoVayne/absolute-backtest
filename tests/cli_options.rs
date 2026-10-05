@@ -98,6 +98,7 @@ fn usage_documents_every_option() {
         "--short-rebate",
         "--nav",
         "--as-of",
+        "--haircut",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }
