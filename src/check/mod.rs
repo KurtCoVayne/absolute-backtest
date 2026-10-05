@@ -230,6 +230,8 @@ pub struct Program {
     pub environment: String,
     /// The bundle version the strategy names (`env name@version`), if any.
     pub environment_version: Option<String>,
+    /// The program hash the strategy declares itself a revision of.
+    pub revises: Option<String>,
     pub resolution: Resolution,
     pub mode: DecisionMode,
     /// All relations in scope, by name.
@@ -1121,6 +1123,7 @@ impl<'a> Checker<'a> {
             strategy: self.root.name.clone(),
             environment: self.env_name,
             environment_version: self.root.env_version.clone(),
+            revises: self.root.revises.clone(),
             resolution: self.resolution,
             mode: self.mode.expect("strategy mode"),
             relations: self.relations,

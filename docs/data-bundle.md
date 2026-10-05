@@ -19,7 +19,7 @@ Oct 4, 2026 · John Gonzalez
 > | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | implemented (costs, slippage, impact, liquidity, partial fills, margin, funding, borrow proxy); delisting and actions in M2 |
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) checkpoints (serialisable state, monthly or every n bars, resumed by fingerprint), per-tuple availability with late tuples and the as-of join (`R(...) asof T`, section 4 of the semantic model) implemented; the opt-in fast aggregation mode is deferred, the exact mode being the only one |
-> | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | in progress: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library implemented; lineage, trial log, hold-out and the report to come |
+> | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | in progress: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library; lineages (`revises`, similarity attachment, disputes), the append-only trial log, `abt study declare|run|metrics|dispute` with grids, DSR over the lineage, PBO over the grid and the trailing hold-out's embargo implemented; reveals, walk-forward, the stability surface and the report to come |
 > | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | planned |
 
 Data is closed and system-supplied, the kernel is built online so that
@@ -329,9 +329,12 @@ from it.
 
 ## 6. Bias audit C: research process
 
-> Status: M4, except the degrees-of-freedom count, which the checker computes
-> today (`Program.degrees_of_freedom`, printed by `abt check`; W5 on each
-> in-rule literal of a strategy).
+> Status: M4. Lineage (`revises`, similarity attachment at Jaccard 0.8,
+> disputes), the trial log and the deflated Sharpe ratio over the real trial
+> count are implemented (`src/study/`); the degrees-of-freedom count is the
+> checker's (`Program.degrees_of_freedom`, printed by `abt check`; W5 on each
+> in-rule literal of a strategy). The walk-forward, stability, hold-out
+> reveal and the report rows are the next PRs.
 
 Twelve biases are about how a strategy was found rather than how it runs;
 none can be forbidden, all can be counted, and the closed bundle is what makes
@@ -381,7 +384,11 @@ autocorrelation: Lo (2002).
 
 ## 7. Study API
 
-> Status: M4.
+> Status: M4. `study.declare`, `study.run` (one trial per grid point, DSR over
+> the lineage, PBO over the grid, the trailing hold-out embargo) and
+> `study.metrics` are `abt study declare|run|metrics` over a study directory;
+> `lineage.open` runs inside them. `holdout.reveal`, walk-forward schemes and
+> `study.report` follow.
 
 The study API is the only way to run a strategy, it lives inside the checker
 so that every run passes validation first, and it owns three things the author

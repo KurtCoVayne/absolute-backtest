@@ -156,6 +156,7 @@ impl Parser {
             resolution: None,
             mode: None,
             redeclared: vec![],
+            revises: None,
             params: vec![],
             rels: vec![],
             rules: vec![],
@@ -195,6 +196,19 @@ impl Parser {
                     } else {
                         unit.env = Some((e, sp));
                         unit.env_version = version;
+                    }
+                }
+                Tok::Ident(s) if s == "revises" => {
+                    self.bump();
+                    let sp = self.span();
+                    match self.bump().tok {
+                        Tok::Str(h) => unit.revises = Some(h),
+                        t => {
+                            return Err(ParseError {
+                                span: sp,
+                                message: format!("expected a quoted program hash after `revises`, found {}", t),
+                            })
+                        }
                     }
                 }
                 Tok::Ident(s) if s == "uses" => {
