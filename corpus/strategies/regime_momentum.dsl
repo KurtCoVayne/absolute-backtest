@@ -2,6 +2,7 @@
 # WF-5's teeth: `selected` includes the benchmark condition, so it is not
 # complete and `not selected(A, T)` is rejected; a missing benchmark close
 # cannot liquidate the book. Liquidation negates `in_top`, a reduction.
+# allow: W6  (the ticker literal is a snapshot of the bundle date)
 strategy regime_momentum {
   env equities_1d
   uses features

@@ -35,18 +35,51 @@ fn strategy_name(src: &str) -> String {
     units.iter().find(|u| u.kind == absolute_backtest::UnitKind::Strategy).map(|u| u.name.clone()).expect("a strategy unit")
 }
 
+/// The warning codes a strategy file allows itself, one `# allow: CODE` header
+/// line each (a ticker literal, for instance, is a snapshot by design and warns
+/// W6). Errors are never allowed.
+fn allowed_warnings(src: &str) -> Vec<Code> {
+    src.lines()
+        .filter(|l| l.starts_with("# allow:"))
+        .map(|l| {
+            let rest = l.trim_start_matches("# allow:").trim();
+            let code = rest.split_whitespace().next().unwrap_or("");
+            let parsed = Code::parse(code).unwrap_or_else(|| panic!("`{}` is not a diagnostic code", code));
+            assert!(parsed.is_warning(), "`# allow:` admits warnings only, not {:?}", parsed);
+            parsed
+        })
+        .collect()
+}
+
 #[test]
 fn every_strategy_checks_clean() {
     for f in dsl_files("strategies") {
         let src = fs::read_to_string(&f).unwrap();
+        let allowed = allowed_warnings(&src);
         let mut ws = base_workspace();
         ws.add_source(&src).unwrap_or_else(|e| panic!("{}: {}", f.display(), e));
         let name = strategy_name(&src);
         let (program, diags) = check_program(&ws, &name);
         let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-        assert!(diags.is_empty(), "{} should check clean (no errors, no warnings), got:\n{}", f.display(), text.join("\n"));
+        let unexpected: Vec<&String> = diags.iter().zip(&text).filter(|(d, _)| !allowed.contains(&d.code)).map(|(_, t)| t).collect();
+        assert!(
+            unexpected.is_empty(),
+            "{} should check clean (no errors, no warnings beyond its `# allow:` headers {:?}), got:\n{}",
+            f.display(),
+            allowed,
+            text.join("\n")
+        );
+        for code in &allowed {
+            assert!(diags.iter().any(|d| d.code == *code), "{} allows {:?} but does not raise it; drop the header", f.display(), code);
+        }
         assert!(program.is_some(), "{} should produce a program", f.display());
     }
+}
+
+#[test]
+fn allow_headers_name_warning_codes_only() {
+    assert_eq!(allowed_warnings("# allow: W6  (a snapshot)\nstrategy x {}"), vec![Code::W6]);
+    assert!(allowed_warnings("# expect: F\nstrategy x {}").is_empty());
 }
 
 #[test]

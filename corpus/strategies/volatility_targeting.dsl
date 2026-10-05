@@ -1,6 +1,7 @@
 # One asset, sized so that realized per-bar volatility hits a target, capped
 # at full weight. v1 does not scale volatility across resolutions, so the
 # target is quoted per bar.
+# allow: W6  (the ticker literal is a snapshot of the bundle date)
 strategy volatility_targeting {
   env equities_1d
   uses features
