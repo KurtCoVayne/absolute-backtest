@@ -44,9 +44,10 @@ struct Args {
 const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested"];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 50] = [
+const OPTIONS: [&str; 51] = [
     "strategy",
     "study",
+    "walk-forward",
     "holdout",
     "objective",
     "reason",
@@ -139,7 +140,7 @@ type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::ker
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned) or trailing:Ny: the last N years are embargoed until revealed\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
     );
     exit(code)
 }
@@ -746,27 +747,33 @@ fn main() {
                         exit(2)
                     });
                     let (dataset, bundle_label) = load_dataset(&args, &prog);
-                    let mut grid = Vec::new();
+                    let mut axes = Vec::new();
                     for g in args.multi.get("grid").cloned().unwrap_or_default() {
-                        grid.push(study::parse_grid_axis(&g).unwrap_or_else(|e| fail(e)));
+                        axes.push(study::parse_grid_axis(&g).unwrap_or_else(|e| fail(e)));
                     }
-                    let base_overrides = exec_config(&args).param_overrides;
-                    let mut points = study::grid_points(&grid);
-                    for p in points.iter_mut() {
-                        let mut all = base_overrides.clone();
-                        all.append(p);
-                        *p = all;
-                    }
+                    let grid = study::Grid::new(axes, &exec_config(&args).param_overrides);
+                    let points = grid.points.clone();
+                    let scheme = args.opts.get("walk-forward").map(|s| {
+                        study::WalkForward::parse(s).unwrap_or_else(|e| {
+                            eprintln!("--walk-forward: {}", e);
+                            exit(2)
+                        })
+                    });
                     let runner = make_runner(&args);
-                    let (outcomes, report) =
-                        study::run_study(&project, &spec, &prog, &dataset, &points, &*runner, study::Provenance { bundle: bundle_label, scheme: None }).unwrap_or_else(|e| fail(e));
+                    let (outcomes, report) = study::run_study(&project, &spec, &prog, &dataset, &grid, &*runner, study::Provenance { bundle: bundle_label, scheme }).unwrap_or_else(|e| fail(e));
                     println!(
                         "study {} (lineage {}, objective {}, hold-out {}){}",
                         spec.id,
                         spec.lineage,
                         spec.objective,
                         spec.holdout.describe(),
-                        report.embargoed_from.map(|t| format!("; bars from {} embargoed", format_timestamp(t))).unwrap_or_default()
+                        if report.embargo.is_empty() {
+                            String::new()
+                        } else if report.embargo.truncates {
+                            format!("; bars {} embargoed", report.embargo.describe())
+                        } else {
+                            format!("; metrics withhold the blocks {}", report.embargo.describe())
+                        }
                     );
                     for (i, o) in outcomes.iter().enumerate() {
                         let shown: Vec<String> = points[i].iter().map(|(n, l)| format!("{}={}", n, l)).collect();
@@ -796,9 +803,92 @@ fn main() {
                             p.pbo, p.combinations, p.partitions
                         );
                     }
+                    if let Some(sf) = &report.surface {
+                        println!(
+                            "parameter surface: smoothness {:.3}; {:.0}% of the best point's {} neighbours within {:.3} of it",
+                            sf.smoothness,
+                            sf.stability * 100.0,
+                            sf.neighbours,
+                            sf.tolerance
+                        );
+                    }
+                    if !report.subperiods.is_empty() {
+                        println!("sharpe by year: {}", report.subperiods.iter().map(|(y, s)| format!("{} {:.2}", y, s)).collect::<Vec<_>>().join("   "));
+                    }
+                    if let Some(wf) = &report.walk_forward {
+                        println!("walk-forward {}: {} folds", wf.scheme.describe(), wf.folds.len());
+                        for (k, f) in wf.folds.iter().enumerate() {
+                            let shown: Vec<String> = points[f.best].iter().map(|(n, l)| format!("{}={}", n, l)).collect();
+                            println!(
+                                "  fold {}: train {}..{} test {}..{}: point {} [{}] {} in {:.3} out {:.3}",
+                                k + 1,
+                                format_timestamp(f.train.0),
+                                format_timestamp(f.train.1),
+                                format_timestamp(f.test.0),
+                                format_timestamp(f.test.1),
+                                f.best + 1,
+                                shown.join(", "),
+                                spec.objective,
+                                f.in_sample,
+                                f.out_of_sample
+                            );
+                        }
+                        println!(
+                            "  efficiency {}; out-of-sample stitched: sharpe {:.3}   cagr {:.4}   max drawdown {:.4}",
+                            wf.efficiency.map(|e| format!("{:.3}", e)).unwrap_or_else(|| "undefined".into()),
+                            wf.out_of_sample.sharpe,
+                            wf.out_of_sample.cagr,
+                            wf.out_of_sample.max_drawdown
+                        );
+                    }
                     for w in &report.warnings {
                         println!("warning ({}): {}", w.bias, w.message);
                     }
+                }
+                "reveal" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let hash = study::program_hash(&prog);
+                    let ls = project.lineages().unwrap_or_else(|e| fail(e));
+                    let lineage = ls.lineage_of(&hash).map(|l| l.id.clone()).unwrap_or_else(|| {
+                        eprintln!(
+                            "strategy `{}` ({}) is not a member of any lineage in {}: a reveal names a committed version, one the study has run",
+                            name, hash, dir
+                        );
+                        exit(2)
+                    });
+                    let spec = project.study_for(&lineage).unwrap_or_else(|e| fail(e)).unwrap_or_else(|| {
+                        eprintln!("no study is declared for lineage {} in {}", lineage, dir);
+                        exit(2)
+                    });
+                    let (dataset, bundle_label) = load_dataset(&args, &prog);
+                    let runner = make_runner(&args);
+                    let (o, embargo) = study::reveal(&project, &spec, &prog, &dataset, &*runner, study::Provenance { bundle: bundle_label, scheme: None }).unwrap_or_else(|e| fail(e));
+                    println!("reveal of {} ({}) over the hold-out {} (study {}): trial #{}", name, hash, embargo.describe(), spec.id, o.trial.seq);
+                    println!(
+                        "out of sample: {} bars; sharpe {:.3} (se {:.3})   cagr {:.4}   max drawdown {:.4}   cvar5 {:.4}   worst month {:.4}",
+                        o.metrics.n + 1,
+                        o.metrics.sharpe,
+                        o.metrics.sharpe_se,
+                        o.metrics.cagr,
+                        o.metrics.max_drawdown,
+                        o.metrics.cvar_5,
+                        o.metrics.worst_month
+                    );
+                    for t in &spec.thresholds {
+                        if let Some(ok) = t.holds(&o.metrics, &o.trading) {
+                            println!("  {} {}", t.describe(), if ok { "holds" } else { "fails" });
+                        }
+                    }
+                    let reveals = project
+                        .log()
+                        .for_lineage(&lineage)
+                        .unwrap_or_else(|e| fail(e))
+                        .iter()
+                        .filter(|t| t.kind == study::TrialKind::Reveal)
+                        .count();
+                    println!("{} reveal(s) of this lineage so far; each is an out-of-sample trial", reveals);
                 }
                 "metrics" => {
                     let log = project.log();

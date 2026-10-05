@@ -623,6 +623,8 @@ in `studies/` and the append-only trial log `trials.jsonl`:
 ```
 abt study declare --study DIR --strategy NAME [--holdout trailing:2y] [--objective sharpe] [--require sharpe>=1] corpus/
 abt study run     --study DIR --strategy NAME --synthetic --grid lookback=3mo,6mo,1y --grid n=2,5 corpus/
+abt study run     --study DIR --strategy NAME --synthetic --grid n=2,5 --walk-forward anchored:2y:6mo corpus/
+abt study reveal  --study DIR --strategy NAME --synthetic corpus/
 abt study metrics --study DIR --strategy NAME corpus/
 abt study dispute --study DIR --strategy NAME --reason "a different idea" corpus/
 ```
@@ -635,13 +637,24 @@ with a warning; a dispute is logged and changes nothing). The program hash
 strategy's name and its variable names normalised away, so renaming resets
 nothing. `declare` fixes the study's inputs (hold-out policy, objective,
 thresholds, executor configuration) and warns about what is missing: no
-hold-out, zero costs or slippage. `run` logs one trial per grid point on
-the sample the hold-out leaves (a trailing hold-out embargoes the last N
-years until revealed), then reports the deflated Sharpe ratio of the best
-point over the lineage's whole trial count and the probability of backtest
-overfitting over the grid, with warnings for a short sample, a Sharpe ratio
-below its minimum track-record length, deflation below 0.95 and PBO at or
-above 0.5. The metrics library behind it is `src/study/metrics.rs` (its
+hold-out, zero costs or slippage. A hold-out is `trailing:Ny` (the last N
+years are truncated away from every run) or `blocks:K:Nmo[:seed]` (K random
+month-aligned blocks the runs cross, since the book's state must, but whose
+metrics are withheld); `reveal` runs a committed version (one the study has
+run) over the whole sample and reports the embargoed bars only, logged as
+an out-of-sample trial and counted. `run` logs one trial per grid point on
+the sample the hold-out leaves, then reports the deflated Sharpe ratio of
+the best point over the lineage's whole trial count, the probability of
+backtest overfitting over the grid, the parameter surface around the best
+point (smoothness, and the share of its grid neighbours within 10 % of it)
+and the best point's Sharpe ratio per calendar year, with warnings for a
+short sample, a Sharpe ratio below its minimum track-record length,
+deflation below 0.95, PBO at or above 0.5, a peak rather than a plateau,
+and a sign that flips across years. With `--walk-forward anchored:2y:6mo`
+(or `rolling`), each fold picks the grid's best point on its train window
+and judges it on the test window, every evaluation a logged trial, and the
+test windows are stitched into one out-of-sample curve with Pardo's
+walk-forward efficiency (mean out-of-sample over mean in-sample CAGR). The metrics library behind it is `src/study/metrics.rs` (its
 conventions are in the module notes); `corpus/lib/metrics.dsl` writes the
 book's return, running peak, drawdown and trailing volatility in the DSL
 over the executor's `nav`. A plain `abt run` is an untracked trial: logged
