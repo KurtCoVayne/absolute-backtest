@@ -173,6 +173,69 @@ impl<'p> Kernel<'p> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
         let pat = self.atom_pattern(cr, atom, env)?;
         let tuples = self.call(rel, &pat)?;
+        self.bind_tuples(cr, atom, env, &tuples)
+    }
+
+    /// `R(...) asof T`: R's tuples at the latest key at or before T that
+    /// has one matching the bound terms (data-bundle doc, section 2: the
+    /// as-of join). A stored relation is answered from its index; a derived
+    /// one by calling it at its own resolution's bars backwards from T,
+    /// with the answer memoised for every bar walked.
+    fn asof_matches(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, env: &Env) -> Result<Vec<Env>, RunError> {
+        let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
+        let t = self.time_of(cr, at, env)?;
+        let info = self.rels[rel].clone();
+        let mut pat = self.atom_pattern(cr, atom, env)?;
+        pat[info.key_pos] = None;
+        let tuples = if info.stored {
+            let matches = |tu: &Tuple| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
+            let mut found: Vec<(Tuple, usize)> = Vec::new();
+            for (_, tus) in self.stores[rel].by_time.range(..=t).rev() {
+                found.extend(tus.iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)));
+                if !found.is_empty() {
+                    break;
+                }
+            }
+            Rc::new(found)
+        } else {
+            let mut mkey: Vec<Value> = Vec::with_capacity(info.inputs.len());
+            for &i in &info.inputs {
+                match &pat[i] {
+                    Some(v) => mkey.push(v.clone()),
+                    None => return Err(RunError::Internal(format!("`{}` requested as of {} with its input #{} unbound", info.name, t, i + 1))),
+                }
+            }
+            let mut walked: Vec<i64> = Vec::new();
+            let mut found: Option<i64> = None;
+            let mut cur = t;
+            while let Some(k) = self.domains.get(&info.res).and_then(|d| d.range(..=cur).next_back().copied()) {
+                if let Some(hit) = self.asof_memo.get(&(rel, mkey.clone(), k)) {
+                    found = *hit;
+                    break;
+                }
+                walked.push(k);
+                pat[info.key_pos] = Some(Value::Time(k));
+                if !self.call(rel, &pat)?.is_empty() {
+                    found = Some(k);
+                    break;
+                }
+                cur = k - 1;
+            }
+            for k in walked {
+                self.asof_memo.insert((rel, mkey.clone(), k), found);
+            }
+            match found {
+                Some(k) => {
+                    pat[info.key_pos] = Some(Value::Time(k));
+                    self.call(rel, &pat)?
+                }
+                None => Rc::new(Vec::new()),
+            }
+        };
+        self.bind_tuples(cr, atom, env, &tuples)
+    }
+
+    fn bind_tuples(&mut self, cr: &CompiledRule, atom: &Atom, env: &Env, tuples: &super::Derived) -> Result<Vec<Env>, RunError> {
         let mut out = Vec::new();
         'tuples: for (tu, _) in tuples.iter() {
             let mut e = env.clone();
@@ -268,6 +331,7 @@ impl<'p> Kernel<'p> {
     pub(crate) fn step(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &Env, out: &mut Vec<Env>) -> Result<(), RunError> {
         match lit {
             Literal::Atom(a) => out.extend(self.atom_matches(cr, a, env)?),
+            Literal::AsOf { atom, at, .. } => out.extend(self.asof_matches(cr, atom, at, env)?),
             Literal::Neg(a) => {
                 if self.atom_matches(cr, a, env)?.is_empty() {
                     out.push(env.clone());
@@ -818,6 +882,10 @@ pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {
                 expr(e, out);
             }
         }
+        Literal::AsOf { atom, at, .. } => {
+            atom.terms.iter().for_each(|t| term(t, out));
+            term(at, out);
+        }
     }
 }
 
@@ -829,7 +897,7 @@ pub(crate) fn conj_order(conj: &[Literal]) -> Vec<Literal> {
             continue;
         }
         let key_vars: Vec<&String> = match lit {
-            Literal::Atom(a) | Literal::Neg(a) => a.terms.iter().filter_map(|t| if let Term::Var(v, _) = t { Some(v) } else { None }).collect(),
+            Literal::Atom(a) | Literal::Neg(a) | Literal::AsOf { atom: a, .. } => a.terms.iter().filter_map(|t| if let Term::Var(v, _) = t { Some(v) } else { None }).collect(),
             _ => vec![],
         };
         for (j, later) in conj.iter().enumerate().skip(i + 1) {

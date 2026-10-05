@@ -639,6 +639,13 @@ pub enum Literal {
         aggs: Vec<(String, String, Expr)>,
         span: Span,
     },
+    /// `R(..., T0, ...) asof T`: the tuples of R at the latest key at or
+    /// before T (any resolution); binds R's outputs and T0 <= T.
+    AsOf {
+        atom: Atom,
+        at: Term,
+        span: Span,
+    },
 }
 
 impl Literal {
@@ -646,7 +653,13 @@ impl Literal {
         match self {
             Literal::Atom(a) | Literal::Neg(a) => a.span,
             Literal::Builtin(_, s) => *s,
-            Literal::Window { span, .. } | Literal::Cmp { span, .. } | Literal::Assign { span, .. } | Literal::Agg { span, .. } | Literal::Top { span, .. } | Literal::Resample { span, .. } => *span,
+            Literal::Window { span, .. }
+            | Literal::Cmp { span, .. }
+            | Literal::Assign { span, .. }
+            | Literal::Agg { span, .. }
+            | Literal::Top { span, .. }
+            | Literal::Resample { span, .. }
+            | Literal::AsOf { span, .. } => *span,
         }
     }
     pub fn describe(&self) -> String {
@@ -668,6 +681,7 @@ impl Literal {
             }
             Literal::Top { n, atom, .. } => format!("top({}, {}, ...)", n, atom),
             Literal::Resample { inner, to, as_var, .. } => format!("resample({} to {} as {}, ...)", inner, to, as_var),
+            Literal::AsOf { atom, at, .. } => format!("{} asof {}", atom, at),
         }
     }
 }

@@ -28,7 +28,7 @@ same IR, and the LLM authors only the surface syntax, never host code.
 | Literal order | Body literals are written in bindable order; the front-end never reorders | The checker reports the first unbound variable at its position; the LLM learns one rule, bind before use |
 | Aggregates | `sum`, `mean`, `std`, `median`, `quantile`, `max`, `min`, `count`, `corr`, `cov`, `ols_beta`, `top`; a closed, kernel-defined set | No user-defined aggregates; extending the set is a kernel change |
 | Partial arithmetic | `x / 0`, `log(0)`, `std` of one value halt the run with a diagnostic naming the rule and tuple | A degenerate feature is surfaced, never silently skipped |
-| Cross-resolution | Fine-to-coarse resample only, with an explicit aggregate per value column and a minimum bucket count; no other cross-resolution join in v1 | A rule's body atoms all share the head's resolution (WF-10); the as-of join arrives in v2 with availability time |
+| Cross-resolution | Fine-to-coarse resample only, with an explicit aggregate per value column and a minimum bucket count; otherwise the as-of join, which reads one relation's latest tuple at or before T | A rule's body atoms all share the head's resolution (WF-10) except an `asof` atom, whose tuple is keyed at or before T and so available by T whatever its resolution |
 | Availability | Every fact at resolution r is available at the close of its bar, a resampled bar at the close of its bucket; decisions at T are emitted after close T | `open(T)` at @1d cannot drive a decision at the open; a strategy that must act at the open decides at a finer resolution, where the first bar of the day is available at its own close |
 | Position | `position` is a kernel primitive (executor feedback), distinct from any derived intended position | The strategy can observe when execution diverged from intent |
 | History | `decided(T0, D)` is kernel-supplied, complete, strictly causal (T0 < T), scoped to the strategy, pattern-matchable on D | Cooldowns and time-based exits are expressible; cross-strategy visibility is not |
@@ -192,6 +192,7 @@ judge these seven.
 | Aggregation | `X = agg(e) over (conj)` | X | conj is a conjunction of positive atoms, temporal constraints, and comparisons and assignments over variables bound inside it; e uses variables bound inside conj; variables shared with the outer rule are inputs to the group |
 | Reduction | `top(N, R(...), by (k1 dir, ..., km dir))` | R's variables | Keeps at most N tuples per group of bound outer variables; the order must be total (WF-7) |
 | Resample | `resample(R(...) to @r as T, min K, X1 = agg1(e1), ...)` | R's entity variables, the bucket label T, each Xi | R strictly finer than and aligned to @r; aggregates in `first`, `last`, `max`, `min`, `sum`, `mean`, `count`; a group below K yields no bucket (WF-10) |
+| As-of join | `R(..., T0, ...) asof T` | R's output positions and T0 | T bound and derived from the head time; T0 a fresh variable or `_`, bound to the latest key at or before T with a matching tuple; R at any resolution; fails when no such tuple exists |
 
 **Aggregation semantics.** `agg(e) over (conj)` evaluates conj with the outer
 bound variables fixed, collects the multiset of e over the resulting tuples,
@@ -232,6 +233,25 @@ close_d(A, T, C)  :- resample(close_m(A, T1, P) to @1d as T, min 300, C = last(P
 high_d(A, T, H)   :- resample(close_m(A, T1, P) to @1d as T, min 300, H = max(P)).
 volume_d(A, T, V) :- resample(volume_m(A, T1, Q) to @1d as T, min 300, V = sum(Q)).
 ```
+
+**As-of semantics.** `R(x1, ..., T0, ..., xn) asof T` evaluates R at the
+latest temporal key at or before T at which some tuple matches the bound
+terms, binds T0 to that key and the output positions to that tuple (every
+matching tuple at that key is a solution, as for a positive atom), and fails
+when no key at or before T has one. It is the point-in-time read of a sparse
+or irregular relation: the latest announced dividend, the current
+classification, the last known rating. The key it binds is provably <= T, so
+WF-6 treats T0 like a variable bound by `prev(T, ·)`: it may key further
+atoms and feed the builtins, but it may not key a head (the tuple's time
+would not be the time it became available). The join is the one read across
+resolutions (WF-10): a tuple keyed at or before T is available by T whatever
+its relation's resolution, so a minute rule may read a daily relation as of
+its own bar and a daily rule a sparse event relation. `decided` as of the
+head time would let a decision see itself, so it is read as of a time
+strictly before T, as with a plain atom. A stored relation is served from
+its index; a derived one is evaluated at its own resolution's bars backwards
+from T until one has a tuple, and the answer is memoised for every bar
+walked, so a sparse derived relation costs its history once.
 
 **Temporal builtins.** These are the only operations on Timestamp and all of
 them are causal.
@@ -335,7 +355,8 @@ benchmark close cannot liquidate the book.
 temporal key position. For a rule with head time T, every body atom's time
 term must be provably <= T, where provability is syntactic: T itself, or a
 variable bound by `prev(T, ·)`, `lag(T, ·, ·)`, `window(T, ·)`,
-`prior_window(T, ·)`, or transitively from such a variable. For `decided`, the
+`prior_window(T, ·)`, the key an as-of join binds (`R(..., T0, ...) asof T`
+gives T0 <= T), or transitively from such a variable. For `decided`, the
 bound must be strict (< T). No construct produces a later timestamp, so the
 only way to violate WF-6 is to bind a time variable in a body atom's key
 position to something not derived from T; that is rejected. Timestamp-typed
@@ -378,8 +399,10 @@ domain; a resample form's inner relation is strictly finer than, and aligned
 to, the head's resolution, and the form carries a `min K`. A strategy declares
 one decision resolution, and `decide`, `decided`, `position`, `cash`, and
 `fill` are at that resolution. Two relations at different resolutions can meet
-only through resample; there is no implicit alignment and no coarse-to-fine
-direction in v1.
+only through resample or the as-of join: a resample aggregates a strictly
+finer relation into the head's buckets, and `R(...) asof T` reads one tuple
+of R, at any resolution, keyed at or before T and so available by T. There
+is no implicit alignment and no other coarse-to-fine direction.
 
 **Warnings, not errors.** A derived relation that no decide rule reaches is
 reported as dead (W1). A parameter never used is reported (W2). A declared

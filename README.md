@@ -102,7 +102,9 @@ strategy sma_crossover {
   `X = expr` (including `TE = T`, which copies a bound time into a value
   column such as an entry date; the copy is a value, not a temporal key),
   `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
-  `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
+  `resample(R(...) to @1d as T, min K, X = last(P))`, the as-of join
+  `R(A, T0, X) asof T` (R's latest tuple keyed at or before T, at any
+  resolution; T0 is bound causally), and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
   plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
   A builtin is not a relation, so `not month_start(T)` does not resolve; the
