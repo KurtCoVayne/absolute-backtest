@@ -2,7 +2,8 @@
 //!
 //!   abt check <files...>
 //!   abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
-//!           [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--param NAME=VALUE]...
+//!           [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
+//!           [--price-relation REL] [--param NAME=VALUE]...
 //!           [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]
 //!           [--verify-causality] [--all] [--fills] [--quiet] <files...>
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]...
@@ -34,11 +35,15 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 5] = ["synthetic", "verify-causality", "quiet", "all", "fills"];
+const FLAGS: [&str; 6] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless"];
 /// Options that may repeat.
 const MULTI: [&str; 2] = ["bind", "param"];
-const OPTIONS: [&str; 20] = [
+const OPTIONS: [&str; 24] = [
     "strategy",
+    "commission-min",
+    "fee-bps",
+    "slippage-vol",
+    "vol-window",
     "on-leverage",
     "on-oversize",
     "on-ruin",
@@ -99,7 +104,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --frictionless        every cost model off (the run is warned)"
     );
     exit(code)
 }
@@ -230,10 +235,16 @@ fn main() {
             } else {
                 usage(1)
             };
+            let base = if args.flags.contains("frictionless") { ExecConfig::frictionless() } else { ExecConfig::default() };
             let cfg = ExecConfig {
-                initial_cash: option(&args.opts, "cash", "an amount", 1_000_000.0),
-                slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", 0.0),
-                commission_per_share: option(&args.opts, "commission", "an amount per share", 0.0),
+                initial_cash: option(&args.opts, "cash", "an amount", base.initial_cash),
+                slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", base.slippage_bps),
+                slippage_vol_mult: option(&args.opts, "slippage-vol", "a multiple of realized volatility", base.slippage_vol_mult),
+                vol_window: option(&args.opts, "vol-window", "a number of bars", base.vol_window),
+                vol_min_obs: base.vol_min_obs,
+                commission_per_share: option(&args.opts, "commission", "an amount per share", base.commission_per_share),
+                commission_min_per_order: option(&args.opts, "commission-min", "an amount per order", base.commission_min_per_order),
+                fee_bps_on_sells: option(&args.opts, "fee-bps", "a number of basis points", base.fee_bps_on_sells),
                 price_relation: args.opts.get("price-relation").cloned(),
                 on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", OnLeverage::Halt),
                 on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
@@ -359,6 +370,13 @@ fn main() {
             println!("decisions: {}   fills: {}   dropped: {}", result.decisions.len(), result.fills.len(), result.dropped.len());
             for (k, v) in data::summarize(&result.equity_curve) {
                 println!("{:>14}: {:.4}", k, v);
+            }
+            println!(
+                "costs: commissions {:.2}   fees {:.2}   slippage {:.2}   turnover {:.2}",
+                result.costs.commissions, result.costs.fees, result.costs.slippage, result.costs.turnover
+            );
+            for w in &result.warnings {
+                println!("warning ({}): {}", w.bias, w.message);
             }
             if !args.flags.contains("quiet") {
                 let shown = if args.flags.contains("all") { result.decisions.len() } else { 20 };

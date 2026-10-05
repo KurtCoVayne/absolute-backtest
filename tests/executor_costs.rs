@@ -58,9 +58,20 @@ fn frictionless_is_the_old_zero_cost_executor() {
     assert_eq!(cfg.slippage_vol_mult, 0.0);
     let prog = program(UP_DOWN, "up_down");
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     let fills: Vec<(String, f64, f64)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity, f.price)).collect();
-    assert_eq!(fills, vec![("2024-01-10".to_string(), 10.0, 10.0), ("2024-01-11".to_string(), -10.0, 12.0), ("2024-01-12".to_string(), 10.0, 13.0)]);
+    assert_eq!(
+        fills,
+        vec![("2024-01-10".to_string(), 10.0, 10.0), ("2024-01-11".to_string(), -10.0, 12.0), ("2024-01-12".to_string(), 10.0, 13.0)]
+    );
     assert_eq!(r.final_cash, 890.0);
     assert!(r.fills.iter().all(|f| f.commission == 0.0 && f.fee == 0.0 && f.slippage == 0.0));
     assert_eq!(r.costs.commissions, 0.0);
@@ -98,7 +109,17 @@ fn the_per_order_minimum_binds_on_a_small_order() {
     assert!(close(r.costs.commissions, 3.0));
     // 300 shares at 0.005 = 1.50 is above the minimum.
     let big = program(&UP_DOWN.replace("10 shares", "300 shares"), "up_down");
-    let r = run(&big, &ds, ExecConfig { initial_cash: 100_000.0, commission_per_share: 0.005, commission_min_per_order: 1.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &big,
+        &ds,
+        ExecConfig {
+            initial_cash: 100_000.0,
+            commission_per_share: 0.005,
+            commission_min_per_order: 1.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     assert!(close(r.fills[0].commission, 1.5), "{}", r.fills[0].commission);
 }
 
@@ -135,7 +156,13 @@ fn vol(prices: &[f64], end: usize, window: usize) -> f64 {
 fn slippage_scales_with_realized_volatility() {
     let ds = synthetic_daily(&["X"], (2024, 1, 1), 40, 5);
     let prices: Vec<f64> = ds.facts["close"].iter().map(|tu| tu[2].as_f64().unwrap()).collect();
-    let bars: Vec<i64> = ds.facts["close"].iter().map(|tu| match tu[1] { Value::Time(t) => t, _ => unreachable!() }).collect();
+    let bars: Vec<i64> = ds.facts["close"]
+        .iter()
+        .map(|tu| match tu[1] {
+            Value::Time(t) => t,
+            _ => unreachable!(),
+        })
+        .collect();
     let prog = program(UP_DOWN, "up_down");
     let cfg = ExecConfig {
         initial_cash: 100_000.0,
@@ -166,7 +193,12 @@ fn slippage_scales_with_realized_volatility() {
     assert!(checked_fixed > 0 && checked_scaled > 0, "{} fixed, {} scaled", checked_fixed, checked_scaled);
     assert!(close(r.costs.slippage, r.fills.iter().map(|f| f.slippage).sum::<f64>()));
     // The fixed part adds to the scaled part.
-    let cfg2 = ExecConfig { slippage_bps: 50.0, initial_cash: 100_000.0, slippage_vol_mult: 0.1, ..ExecConfig::frictionless() };
+    let cfg2 = ExecConfig {
+        slippage_bps: 50.0,
+        initial_cash: 100_000.0,
+        slippage_vol_mult: 0.1,
+        ..ExecConfig::frictionless()
+    };
     let r2 = run(&prog, &ds, cfg2).unwrap();
     let f = r2.fills.iter().find(|f| bars.iter().position(|&b| b == f.t).unwrap() >= 10).unwrap();
     let k = bars.iter().position(|&b| b == f.t).unwrap();
@@ -190,7 +222,11 @@ strategy full {
     let ds = market(&[10.0, 10.0, 10.0, 10.0, 10.0]);
     // 100 bps slippage: a fully invested book must fit after slippage, and
     // the commission it pays is never leverage.
-    let cfg = ExecConfig { initial_cash: 1000.0, slippage_bps: 100.0, ..ExecConfig::default() };
+    let cfg = ExecConfig {
+        initial_cash: 1000.0,
+        slippage_bps: 100.0,
+        ..ExecConfig::default()
+    };
     let r = run(&prog, &ds, cfg).unwrap();
     assert_eq!(r.fills.len(), 1, "{:?}", r.dropped);
     // 1000 / 10.1 = 99.0099 -> 99 shares at 10.10 = 999.90, plus the 1.00 minimum commission.
@@ -203,15 +239,41 @@ strategy full {
 fn a_frictionless_run_is_warned_and_a_default_run_is_not() {
     let prog = program(UP_DOWN, "up_down");
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     let biases: Vec<&str> = r.warnings.iter().map(|w| w.bias.as_str()).collect();
     assert!(biases.contains(&"transaction-cost neglect"), "{:?}", r.warnings);
     assert!(biases.contains(&"slippage"), "{:?}", r.warnings);
     assert!(r.warnings.iter().all(|w| !w.message.is_empty()));
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..ExecConfig::default() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::default()
+        },
+    )
+    .unwrap();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     // Commission off but the minimum on is still a cost model; slippage off entirely warns once.
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, commission_per_share: 0.0, slippage_vol_mult: 0.0, ..ExecConfig::default() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            commission_per_share: 0.0,
+            slippage_vol_mult: 0.0,
+            ..ExecConfig::default()
+        },
+    )
+    .unwrap();
     let biases: Vec<&str> = r.warnings.iter().map(|w| w.bias.as_str()).collect();
     assert_eq!(biases, vec!["slippage"], "{:?}", r.warnings);
 }

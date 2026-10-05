@@ -186,12 +186,29 @@ is dropped. Most backtesters reject an order beyond buying power and continue;
 the halt default is stricter on purpose, so that a backtest cannot look
 plausible on a book the model never defined.
 
-The executor fills a bar's decisions at the next bar's close (slippage and
-commission from `ExecConfig`), then writes `fill`, `position` and `cash` at
-that bar and `decided` at the decision bar. In target mode the order is the
-difference between the target and the position at execution; `target_weight`
-sizes from cash plus marked positions at the execution bar, rounded by the
-configured lot. Two distinct decisions for one instrument at one bar halt the
+The executor fills a bar's decisions at the next bar's close, at that bar's
+price adjusted by the cost model of `ExecConfig` (below), then writes `fill`,
+`position` and `cash` at that bar and `decided` at the decision bar. In
+target mode the order is the difference between the target and the position
+at execution; `target_weight` sizes from cash plus marked positions at the
+execution bar, rounded by the configured lot, and a long that is bought is
+sized at the price it will fill at, so the cash it spends is the weight of
+equity.
+
+The cost model (`docs/data-bundle.md`, section 5) has conservative non-zero
+defaults: a commission of 0.005 per share with a 1.00 per-order minimum, a
+regulatory fee of 0.278 basis points on the notional of sells, and slippage
+against the order of a fixed part (0 basis points) plus 0.1 times the
+instrument's realized volatility, the sample standard deviation of its log
+returns over the 20 bars ending at the fill bar (fewer than 10 returns: the
+fixed part only). Each fill records its commission, fee and slippage;
+`RunResult.costs` sums them with the turnover, and `abt run` prints the line.
+A bar's transaction costs are never leverage: a fully invested book stays
+fully invested after paying them, carrying a debit of at most the bar's
+costs, which the next sizing sees. `ExecConfig::frictionless()` (or
+`--frictionless`) turns every model off, and the run then carries a warning
+per model naming the bias it leaves unmodeled (`RunResult.warnings`, printed
+as `warning (slippage): ...`). Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
 negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
 a constant series, a `quantile` level outside [0, 1], and a non-positive delta
@@ -261,7 +278,9 @@ Count) pre-bind body variables so the explanation is about that instrument.
 ```
 abt check <files...>
 abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
-        [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL]
+        [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N]
+        [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
+        [--price-relation REL]
         [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow]
         [--on-ruin halt|continue] [--lot whole|fractional]
         [--verify-causality] [--quiet] <files...>
@@ -398,6 +417,12 @@ small and easy to flip.
   target's quantity) is truncated toward zero unless `--lot fractional`;
   literals stay real-valued, and this rounding is where a contract size for
   futures would later apply.
+- **Transaction costs are never leverage.** The leverage check exempts the
+  bar's commissions, fees and slippage, so a book targeting weights that sum
+  to one is not halted for paying its costs; the debit it carries is at most
+  the bar's costs and the next sizing sees it. A bought long is sized at its
+  expected fill price for the same reason; a reduction or a short is sized at
+  the bar price it is marked at.
 - **A non-positive price is a data error**, rejected at load with the file
   and line.
 

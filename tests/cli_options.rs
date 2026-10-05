@@ -80,6 +80,11 @@ fn usage_documents_every_option() {
         "--on-oversize",
         "--on-ruin",
         "--lot",
+        "--commission-min",
+        "--fee-bps",
+        "--slippage-vol",
+        "--vol-window",
+        "--frictionless",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }
