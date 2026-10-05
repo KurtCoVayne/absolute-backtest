@@ -19,7 +19,7 @@ Oct 4, 2026 · John Gonzalez
 > | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | implemented (costs, slippage, impact, liquidity, partial fills, margin, funding, borrow proxy); delisting and actions in M2 |
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) checkpoints (serialisable state, monthly or every n bars, resumed by fingerprint), per-tuple availability with late tuples and the as-of join (`R(...) asof T`, section 4 of the semantic model) implemented; the opt-in fast aggregation mode is deferred, the exact mode being the only one |
-> | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | in progress: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library; lineages (`revises`, similarity attachment, disputes), the append-only trial log, `abt study declare|run|reveal|metrics|dispute` with grids, DSR over the lineage, PBO over the grid, trailing and block hold-outs with reveals, walk-forward schemes with efficiency, the parameter surface and sub-period stability implemented; the report to come |
+> | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | implemented: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library; lineages (`revises`, similarity attachment, disputes), the append-only trial log, `abt study declare|run|reveal|metrics|dispute` with grids, DSR over the lineage, PBO over the grid, trailing and block hold-outs with reveals, walk-forward schemes with efficiency, the parameter surface and sub-period stability, and `abt study report` (every warning with its bias, trials, reveals, thresholds, degrees of freedom, the forty-bias audit with the rows warnings touched) |
 > | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | planned |
 
 Data is closed and system-supplied, the kernel is built online so that
@@ -335,8 +335,9 @@ from it.
 > checker's (`Program.degrees_of_freedom`, printed by `abt check`; W5 on each
 > in-rule literal of a strategy); so are the hold-out embargo and reveal,
 > walk-forward schemes with their efficiency, the parameter surface and
-> sub-period stability (`src/study/validate.rs`). The report row is the
-> next PR.
+> sub-period stability (`src/study/validate.rs`) and the report
+> (`src/study/report.rs`, `abt study report`), which encodes the three bias
+> tables as data and marks the rows the warnings touched.
 
 Twelve biases are about how a strategy was found rather than how it runs;
 none can be forbidden, all can be counted, and the closed bundle is what makes
@@ -390,7 +391,9 @@ autocorrelation: Lo (2002).
 > the lineage, PBO over the grid, the trailing hold-out embargo) and
 > `study.metrics` are `abt study declare|run|metrics` over a study directory;
 > `lineage.open` runs inside them; `holdout.reveal` is `abt study reveal`,
-> walk-forward schemes are `--walk-forward`. `study.report` follows.
+> walk-forward schemes are `--walk-forward`, `study.report` is `abt study
+> report`, and `study.explain` is `abt explain` (section 7 of the semantic
+> model) over the same program.
 
 The study API is the only way to run a strategy, it lives inside the checker
 so that every run passes validation first, and it owns three things the author

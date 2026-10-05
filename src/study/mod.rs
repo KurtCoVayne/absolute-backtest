@@ -12,6 +12,7 @@
 pub mod lineage;
 pub mod log;
 pub mod metrics;
+pub mod report;
 pub mod validate;
 
 use std::collections::BTreeMap;
@@ -23,11 +24,12 @@ use crate::kernel::time::format_timestamp;
 use crate::kernel::{Dataset, ExecConfig, RunError, RunResult};
 
 pub use lineage::{jaccard, normalized_rules, program_hash, Attachment, Lineage, Lineages, Opened, SIMILARITY_THRESHOLD};
-pub use log::{sharpe_variance, Trial, TrialKind, TrialLog};
+pub use log::{sharpe_variance, RunLog, RunRecord, Trial, TrialKind, TrialLog};
 pub use metrics::{
     block_bootstrap_sharpe, capacity, deflated_sharpe, masked_curve, min_track_record_length, newey_west_t, pbo_cscv, periods_per_year, probabilistic_sharpe, return_metrics, trading_metrics,
     DeflatedSharpe, Pbo, ReturnMetrics, Returns, TradingMetrics,
 };
+pub use report::{build_report, Report, BIASES};
 pub use validate::{block_embargo, subperiod_sharpes, surface, trailing_embargo, Embargo, Surface, WalkForward};
 
 /// The hold-out policy a study declares (section 6, out-of-sample).
@@ -226,6 +228,14 @@ impl Project {
 
     pub fn log(&self) -> TrialLog {
         TrialLog::in_dir(&self.dir)
+    }
+
+    pub fn run_log(&self) -> RunLog {
+        RunLog::in_dir(&self.dir)
+    }
+
+    pub fn runs(&self) -> Result<Vec<RunRecord>, String> {
+        self.run_log().read_all()
     }
 
     fn studies_dir(&self) -> PathBuf {
@@ -535,6 +545,15 @@ fn record(log: &TrialLog, study: &StudySpec, prog: &Program, hash: &str, cfg: &E
         metrics: ev.metrics.clone(),
         trading: ev.trading.clone(),
         note,
+        warnings: ev
+            .result
+            .warnings
+            .iter()
+            .map(|w| StudyWarning {
+                bias: w.bias.clone(),
+                message: w.message.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -696,6 +715,21 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
             message: w.message.clone(),
         });
     }
+    project.run_log().append(RunRecord {
+        seq: 0,
+        at: now(),
+        kind: "run".into(),
+        study: study.id.clone(),
+        lineage: study.lineage.clone(),
+        trials: outcomes.iter().map(|o| o.trial.seq).collect(),
+        best_trial: Some(outcomes[best].trial.seq),
+        dsr: Some(dsr.clone()),
+        pbo: pbo.clone(),
+        surface: surface.clone(),
+        scheme: from.scheme.as_ref().map(|s| s.describe()),
+        efficiency: walk_forward.as_ref().and_then(|w| w.efficiency),
+        warnings: warnings.clone(),
+    })?;
     Ok((
         outcomes,
         RunReport {
@@ -851,6 +885,29 @@ pub fn reveal(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset
         &from,
         Some(format!("reveal of {} over {}", hash, embargo.describe())),
     )?;
+    project.run_log().append(RunRecord {
+        seq: 0,
+        at: now(),
+        kind: "reveal".into(),
+        study: study.id.clone(),
+        lineage: study.lineage.clone(),
+        trials: vec![trial.seq],
+        best_trial: Some(trial.seq),
+        dsr: None,
+        pbo: None,
+        surface: None,
+        scheme: None,
+        efficiency: None,
+        warnings: ev
+            .result
+            .warnings
+            .iter()
+            .map(|w| StudyWarning {
+                bias: w.bias.clone(),
+                message: w.message.clone(),
+            })
+            .collect(),
+    })?;
     Ok((
         Outcome {
             result: ev.result,
@@ -904,5 +961,13 @@ pub fn log_untracked(project: &Project, prog: &Program, result: &RunResult, cfg:
         metrics: return_metrics(&result.equity_curve, ppy),
         trading: trading_metrics(result, ppy),
         note: Some("untracked: run outside a study".into()),
+        warnings: result
+            .warnings
+            .iter()
+            .map(|w| StudyWarning {
+                bias: w.bias.clone(),
+                message: w.message.clone(),
+            })
+            .collect(),
     })
 }

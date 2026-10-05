@@ -50,6 +50,9 @@ pub struct Trial {
     pub metrics: ReturnMetrics,
     pub trading: TradingMetrics,
     pub note: Option<String>,
+    /// The warnings the run raised (the executor's, with their biases).
+    #[serde(default)]
+    pub warnings: Vec<super::StudyWarning>,
 }
 
 /// The append-only trial log of a study directory.
@@ -105,4 +108,62 @@ pub fn sharpe_variance(trials: &[Trial]) -> f64 {
     }
     let m = x.iter().sum::<f64>() / x.len() as f64;
     x.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (x.len() as f64 - 1.0)
+}
+
+/// One `study run` or `reveal` invocation: the trials it logged and what
+/// it reported beyond them, appended to `runs.jsonl`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RunRecord {
+    pub seq: usize,
+    pub at: u64,
+    /// `run` or `reveal`.
+    pub kind: String,
+    pub study: String,
+    pub lineage: String,
+    pub trials: Vec<usize>,
+    pub best_trial: Option<usize>,
+    pub dsr: Option<super::DeflatedSharpe>,
+    pub pbo: Option<super::Pbo>,
+    pub surface: Option<super::Surface>,
+    pub scheme: Option<String>,
+    pub efficiency: Option<f64>,
+    pub warnings: Vec<super::StudyWarning>,
+}
+
+/// The append-only run log of a study directory.
+pub struct RunLog {
+    pub path: PathBuf,
+}
+
+impl RunLog {
+    pub fn in_dir(dir: &Path) -> RunLog {
+        RunLog { path: dir.join("runs.jsonl") }
+    }
+
+    pub fn read_all(&self) -> Result<Vec<RunRecord>, String> {
+        if !self.path.exists() {
+            return Ok(vec![]);
+        }
+        let text = std::fs::read_to_string(&self.path).map_err(|e| format!("{}: {}", self.path.display(), e))?;
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .enumerate()
+            .map(|(i, l)| serde_json::from_str(l).map_err(|e| format!("{} line {}: {}", self.path.display(), i + 1, e)))
+            .collect()
+    }
+
+    pub fn append(&self, mut record: RunRecord) -> Result<RunRecord, String> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+        }
+        record.seq = self.read_all()?.len() + 1;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| format!("{}: {}", self.path.display(), e))?;
+        let line = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+        writeln!(f, "{}", line).map_err(|e| format!("{}: {}", self.path.display(), e))?;
+        Ok(record)
+    }
 }

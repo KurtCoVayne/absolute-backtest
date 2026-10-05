@@ -626,6 +626,7 @@ abt study run     --study DIR --strategy NAME --synthetic --grid lookback=3mo,6m
 abt study run     --study DIR --strategy NAME --synthetic --grid n=2,5 --walk-forward anchored:2y:6mo corpus/
 abt study reveal  --study DIR --strategy NAME --synthetic corpus/
 abt study metrics --study DIR --strategy NAME corpus/
+abt study report  --study DIR --strategy NAME corpus/
 abt study dispute --study DIR --strategy NAME --reason "a different idea" corpus/
 ```
 
@@ -658,7 +659,15 @@ walk-forward efficiency (mean out-of-sample over mean in-sample CAGR). The metri
 conventions are in the module notes); `corpus/lib/metrics.dsl` writes the
 book's return, running peak, drawdown and trailing volatility in the DSL
 over the executor's `nav`. A plain `abt run` is an untracked trial: logged
-when it names `--study DIR`, warned either way.
+when it names `--study DIR`, warned either way. `report` reads the lineage
+back as a bias checklist: its members and disputes, the studies declared,
+the trial count by kind (in studies, untracked, reveals) and the study runs
+(`runs.jsonl` keeps each run's DSR, PBO, surface, efficiency and warnings),
+the degrees of freedom, the latest trial and every reveal, the author's
+thresholds judged on the latest trial and the latest reveal, every warning
+raised with its bias and how often (the checker's W5 and W6 included), and
+the forty biases of `docs/data-bundle.md` sections 4 to 6 with their status
+and the rows a warning touched marked.
 
 ## Development
 
@@ -683,4 +692,4 @@ bundles, the online fold kernel, the catalog, the bias audit and the study
 API), whose status table names the milestone each section lands in: M0
 section 9 and the warnings W5, W6; M1 execution realism; M2 catalog,
 identities and the bundle format; M3 the fold kernel and availability time
-(all done); M4 the study API (in progress); M5 the realism program.
+(all done); M4 the study API (done); M5 the realism program.
