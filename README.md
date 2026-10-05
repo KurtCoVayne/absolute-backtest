@@ -34,7 +34,7 @@ resampled bucket.
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
 | `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
-| `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation; `mod.rs` runs the executor loop of section 7, `explain`, and the empirical causality check; `time.rs` is calendar arithmetic and resolution buckets. |
+| `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver of section 7, `explain`, and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers (`docs/data-bundle.md`, section 2); `time.rs` is calendar arithmetic and resolution buckets. |
 | `src/data.rs` | CSV environment instances and a deterministic synthetic market. |
 | `src/bin/abt.rs` | The command line. |
 | `corpus/env` | Four environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`, and `equities_1d_v2`, the catalog of `docs/data-bundle.md` section 3 (prices as traded, `split`, `dividend`, `delisted`, `member`, `classification`, `ticker`). |
@@ -160,6 +160,25 @@ rule's head time is itself bound outside a temporal-key position, only the
 head is reported, not every atom keyed by it.
 
 ## Reading the kernel
+
+Two drivers share one evaluator and one executor. The batch driver
+(`Kernel::run`, `abt run`) walks the decision bars of a fully loaded
+dataset. The fold (`kernel::run_fold`, `abt run --kernel fold`;
+`docs/data-bundle.md`, section 2) is `state' = step(state, event)` over the
+dataset's event log: every primitive tuple available at its own bar's close
+(the v1 convention), ordered by availability, then relation; a tuple's
+arrival opens the buckets it falls in at every resolution the program needs
+and closes the ones before them, and the barrier of a decision bucket runs
+the executor's fill of the previous bar's orders, the bar's open (actions,
+mark, margin), the strategy's decisions and the executor's take, in the
+batch driver's order. Because every temporal builtin looks back only, a
+time domain that grows as buckets open is observationally the up-front one,
+and `tests/fold.rs` requires the two drivers to agree to the bit on every
+corpus strategy; a fold stopped at `t` equals the batch run on the dataset
+truncated at `t`, which is the causality theorem operationally. The
+executor is a trait (`kernel::Executor`: `open_bar`, `on_decisions`,
+`fill`, `finish`), so a live run attaches another executor to the same
+fold.
 
 Evaluation is top-down: `decide(t, D)` is requested for each bar `t` of the
 decision resolution's time domain, and every derived relation is requested
