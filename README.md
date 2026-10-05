@@ -614,6 +614,19 @@ is written against, `env equities_1d_v2@2026.10`: the bundle must match, and
 a library pinned to another version than its strategy is an E error. The
 crate depends on `serde`, `serde_json`, `arrow` and `parquet` for this.
 
+Vendor exports become bundles through adapters (`src/ingest.rs`): `abt
+bundle build --from-norgate DIR` reads a Norgate-style daily layout
+(`prices.csv` as traded, `symbols.csv` for the symbol history, `splits.csv`,
+`dividends.csv`, `delistings.csv`, `membership.csv` and
+`classification.csv`, the last two expanded over trading days) into
+`equities_1d_v2`; `--from-databento DIR [--processing-delay S]` reads a
+Databento-style minute layout (`ohlcv-1m.csv` keyed at the bar close with
+an optional `ts_recv`, `symbology.csv`) into `equities_1m` with every
+tuple's availability recorded as its receipt time plus the delay. The
+manifest records the source and the schema decisions of
+`docs/data-bundle.md` section 10 (consolidated bars, the availability
+offset as the processing delay).
+
 ## Studies
 
 `docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial. A
@@ -703,6 +716,20 @@ the known failure years (momentum's 2009, low volatility's 2020): gross
 execution or data errors, not strategy merit. Without a bundle the ranges
 are skipped with a note.
 
+## Briefs
+
+`briefs/` holds plain-language briefs for the LLM-authored corpus
+(`docs/data-bundle.md`, section 8) and the procedure: a model writes the
+strategy from a brief, its successive attempts are kept as
+`attempts/<brief>/<n>.dsl`, and `abt briefs report --briefs briefs
+--attempts attempts [--out report.json] corpus/` records, per brief, whether
+the first attempt checked clean, the diagnostics of every attempt, the
+attempts to a valid program and the first valid one's verdict on the
+synthetic market under the default cost model (trades, does not trade, does
+not survive costs, halted), and across briefs the first-attempt pass rate,
+the distribution of diagnostics and the mean attempts to a valid program.
+Measured and stored, never asserted.
+
 ## Development
 
 ```
@@ -726,4 +753,6 @@ bundles, the online fold kernel, the catalog, the bias audit and the study
 API), whose status table names the milestone each section lands in: M0
 section 9 and the warnings W5, W6; M1 execution realism; M2 catalog,
 identities and the bundle format; M3 the fold kernel and availability time
-(all done); M4 the study API (done); M5 the realism program (in progress).
+(all done); M4 the study API (done); M5 the realism program (done: the
+pandas reference, the stylized-fact tests, the briefs harness and the vendor
+adapters).

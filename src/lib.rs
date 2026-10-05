@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod check;
 pub mod data;
 pub mod dump;
+pub mod ingest;
 pub mod ir;
 pub mod kernel;
 pub mod lexer;

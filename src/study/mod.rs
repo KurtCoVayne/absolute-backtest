@@ -9,6 +9,7 @@
 //!
 //! Everything here is pure over `RunResult`; the kernel never reads it.
 
+pub mod briefs;
 pub mod lineage;
 pub mod log;
 pub mod metrics;

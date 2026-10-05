@@ -20,7 +20,7 @@ Oct 4, 2026 · John Gonzalez
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) checkpoints (serialisable state, monthly or every n bars, resumed by fingerprint), per-tuple availability with late tuples and the as-of join (`R(...) asof T`, section 4 of the semantic model) implemented; the opt-in fast aggregation mode is deferred, the exact mode being the only one |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | implemented: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library; lineages (`revises`, similarity attachment, disputes), the append-only trial log, `abt study declare|run|reveal|metrics|dispute` with grids, DSR over the lineage, PBO over the grid, trailing and block hold-outs with reveals, walk-forward schemes with efficiency, the parameter surface and sub-period stability, and `abt study report` (every warning with its bias, trials, reveals, thresholds, degrees of freedom, the forty-bias audit with the rows warnings touched) |
-> | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | in progress: the pandas reference executor (`reference/engine.py`, `diff.py`, `abt run --dump`, `tests/reference.rs` over the daily corpus, policy variants and the four action markets) and the stylized-fact tests (four canonical corpus strategies, published ranges checked on a bundle named by `ABT_BUNDLE_DIR`) implemented; the LLM-authored corpus to come |
+> | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | implemented: the pandas reference executor (`reference/engine.py`, `diff.py`, `abt run --dump`, `tests/reference.rs` over the daily corpus, policy variants and the four action markets), the stylized-fact tests (four canonical corpus strategies, published ranges checked on a bundle named by `ABT_BUNDLE_DIR`), the briefs harness (`briefs/`, `abt briefs report`) and the vendor adapters (`abt bundle build --from-norgate`, `--from-databento`, section 10's decisions in the manifest) |
 
 Data is closed and system-supplied, the kernel is built online so that
 backtesting is replay of the same fold that will run live, and every one of
@@ -444,7 +444,13 @@ honestly.
 > tests are `tests/stylized.rs` over the canonical corpus strategies
 > `momentum_12_1`, `low_volatility`, `short_term_reversal` and `size_proxy`
 > (dollar volume as the size proxy), run against the bundle `ABT_BUNDLE_DIR`
-> names and skipped without one. The LLM-authored corpus follows.
+> names and skipped without one. The LLM-authored corpus is the briefs in
+> `briefs/` with `abt briefs report` (`src/study/briefs.rs`), which records
+> the first-attempt pass rate, the diagnostics, the attempts to a valid
+> program and each first valid attempt's verdict on the synthetic market.
+> Bundle-level realism (resampled @1d against Norgate @1d, TBBO against the
+> spread proxy, broker executions) waits for the data; the adapters that
+> ingest the vendors' exports are `src/ingest.rs`.
 
 Realism is the provider's claim and is proven three ways: the kernel agrees
 with an independent slow implementation on the corpus, it reproduces the
