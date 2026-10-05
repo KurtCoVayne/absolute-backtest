@@ -99,6 +99,8 @@ fn usage_documents_every_option() {
         "--nav",
         "--as-of",
         "--haircut",
+        "--bundle",
+        "--untested",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

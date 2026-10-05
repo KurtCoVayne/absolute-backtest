@@ -12,6 +12,9 @@
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]...
 //!           (--data DIR | --synthetic ...) [--price-relation REL] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
+//!   abt bundle build (--from CSVDIR | --synthetic [--days N] [--symbols A,B,C] [--seed N]) --env NAME --version V --out DIR <files...>
+//!   abt bundle test DIR <files...>
+//!   abt run ... --bundle DIR [--untested]
 //!
 //! Exit codes: 0 success; 1 the strategy does not check, the run halted or
 //! the usage is wrong; 2 an input could not be read or parsed (a source
@@ -38,11 +41,14 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 7] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav"];
+const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested"];
 /// Options that may repeat.
 const MULTI: [&str; 3] = ["bind", "param", "haircut"];
-const OPTIONS: [&str; 37] = [
+const OPTIONS: [&str; 40] = [
     "strategy",
+    "bundle",
+    "from",
+    "version",
     "haircut",
     "as-of",
     "margin",
@@ -120,7 +126,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
     );
     exit(code)
 }
@@ -242,6 +248,15 @@ fn main() {
             };
             let dataset = if args.flags.contains("synthetic") {
                 synthetic_for(&prog, &args.opts)
+            } else if let Some(dir) = args.opts.get("bundle") {
+                let (ds, m) = absolute_backtest::bundle::load_bundle(&prog, Path::new(dir), args.flags.contains("untested")).unwrap_or_else(|e| {
+                    eprintln!("{}", e);
+                    exit(2)
+                });
+                if m.tests.is_none() {
+                    eprintln!("note: bundle `{}@{}` has not passed its tests; its decisions are not causality-certified", m.name, m.version);
+                }
+                ds
             } else if let Some(dir) = args.opts.get("data") {
                 let (ds, notes) = data::load_csv_dir(&prog, Path::new(dir)).unwrap_or_else(|e| {
                     eprintln!("{}", e);
@@ -527,6 +542,91 @@ fn main() {
                         exit(1)
                     }
                 }
+            }
+        }
+        "bundle" => {
+            // abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>
+            // abt bundle test DIR <files...>
+            let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
+            match sub.as_str() {
+                "build" => {
+                    let ws = workspace(&rest);
+                    let env = args.opts.get("env").cloned().unwrap_or_else(|| usage(1));
+                    let version = args.opts.get("version").cloned().unwrap_or_else(|| usage(1));
+                    let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
+                    let prog = ws
+                        .strategies()
+                        .filter(|s| s.env.as_ref().map(|e| e.0 == env).unwrap_or(false))
+                        .find_map(|s| check_program(&ws, &s.name).0)
+                        .unwrap_or_else(|| {
+                            eprintln!("bundle build needs a strategy in the workspace that uses environment `{}` and checks clean", env);
+                            exit(1)
+                        });
+                    let ds = if args.flags.contains("synthetic") {
+                        synthetic_for(&prog, &args.opts)
+                    } else if let Some(from) = args.opts.get("from") {
+                        let (ds, notes) = data::load_csv_dir(&prog, Path::new(from)).unwrap_or_else(|e| {
+                            eprintln!("{}", e);
+                            exit(2)
+                        });
+                        for n in notes {
+                            eprintln!("note: {}", n);
+                        }
+                        ds
+                    } else {
+                        usage(1)
+                    };
+                    let m = absolute_backtest::bundle::write_bundle(&prog, &ds, Path::new(&out), &env, &version).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    println!(
+                        "wrote bundle `{}@{}` to {}: {} relations, untested (run `abt bundle test {}`)",
+                        m.name,
+                        m.version,
+                        out,
+                        m.relations.len(),
+                        out
+                    );
+                }
+                "test" => {
+                    let dir = rest.first().cloned().unwrap_or_else(|| usage(1));
+                    let files: Vec<PathBuf> = rest.iter().skip(1).cloned().collect();
+                    let ws = workspace(&files);
+                    let m = absolute_backtest::bundle::read_manifest(&dir).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    let prog = ws
+                        .strategies()
+                        .filter(|s| s.env.as_ref().map(|e| e.0 == m.name).unwrap_or(false))
+                        .find_map(|s| check_program(&ws, &s.name).0)
+                        .unwrap_or_else(|| {
+                            eprintln!("bundle test needs a strategy in the workspace that uses environment `{}` and checks clean", m.name);
+                            exit(1)
+                        });
+                    let (m, results) = absolute_backtest::bundle::test_bundle(&prog, &dir).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    for r in &results {
+                        println!("{} {}: {}", if r.passed { "pass" } else { "FAIL" }, r.name, r.detail);
+                    }
+                    let failed = results.iter().filter(|r| !r.passed).count();
+                    println!(
+                        "bundle `{}@{}`: {} tests, {} failed{}",
+                        m.name,
+                        m.version,
+                        results.len(),
+                        failed,
+                        if failed == 0 { "; recorded in the manifest" } else { "; not marked tested" }
+                    );
+                    if failed > 0 {
+                        exit(1)
+                    }
+                }
+                _ => usage(1),
             }
         }
         "synth" => {

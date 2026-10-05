@@ -515,6 +515,38 @@ small and easy to flip.
 - **A non-positive price is a data error**, rejected at load with the file
   and line.
 
+## Bundles
+
+`docs/data-bundle.md` (sections 2 and 3) makes data a versioned bundle the
+system ships. A bundle is a directory: `manifest.json` (the environment name,
+the version, the bundle date, every relation with its signature, resolution,
+availability convention, row count and partitions, and the bundle tests'
+report once they pass), `securities.csv` (the security table), and
+`log/<relation>/<YYYY-MM>.parquet`, append-only Parquet partitions of each
+primitive relation by the month of its temporal key (`snapshots/` is
+reserved for the fold kernel's checkpoints). The derived `ticker` relation is
+rebuilt from the table, never stored.
+
+```
+abt bundle build --synthetic --env equities_1d_v2 --version 2026.10 --out ./bundle corpus/
+abt bundle build --from ./csv --env equities_1d --version 2026.10 --out ./bundle corpus/
+abt bundle test ./bundle corpus/
+abt run --strategy total_return_momentum --bundle ./bundle corpus/
+```
+
+`abt bundle test` runs the bundle tests of the doc's section 3 that the data
+can answer today (identity; every temporal key a bar label; positive prices;
+action reconciliation, where a close ratio outside [0.6, 1.67] between
+consecutive bars must be a split that day and every split must show one;
+delisting coverage, where a name that leaves the universe before the last bar
+has a `delisted` record; membership, where a member is in the universe that
+bar) and records a pass in the manifest; `abt run --bundle` refuses a bundle
+that has not passed unless `--untested`, and then notes that its decisions
+are not causality-certified. A strategy or library may name the version it
+is written against, `env equities_1d_v2@2026.10`: the bundle must match, and
+a library pinned to another version than its strategy is an E error. The
+crate depends on `serde`, `serde_json`, `arrow` and `parquet` for this.
+
 ## Development
 
 ```

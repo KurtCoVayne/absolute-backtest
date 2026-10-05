@@ -151,6 +151,7 @@ impl Parser {
             name,
             span,
             env: None,
+            env_version: None,
             uses: vec![],
             resolution: None,
             mode: None,
@@ -183,10 +184,17 @@ impl Parser {
                 Tok::Ident(s) if s == "env" => {
                     self.bump();
                     let (e, sp) = self.ident()?;
+                    let version = if let Tok::Version(v) = self.peek().clone() {
+                        self.bump();
+                        Some(v)
+                    } else {
+                        None
+                    };
                     if unit.env.is_some() {
                         unit.redeclared.push(("env".to_string(), sp));
                     } else {
                         unit.env = Some((e, sp));
+                        unit.env_version = version;
                     }
                 }
                 Tok::Ident(s) if s == "uses" => {

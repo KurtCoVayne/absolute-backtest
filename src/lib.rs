@@ -7,6 +7,7 @@
 // size on the error path does not matter.
 #![allow(clippy::result_large_err)]
 
+pub mod bundle;
 pub mod check;
 pub mod data;
 pub mod ir;

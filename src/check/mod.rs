@@ -228,6 +228,8 @@ pub struct RuleInfo {
 pub struct Program {
     pub strategy: String,
     pub environment: String,
+    /// The bundle version the strategy names (`env name@version`), if any.
+    pub environment_version: Option<String>,
     pub resolution: Resolution,
     pub mode: DecisionMode,
     /// All relations in scope, by name.
@@ -532,6 +534,22 @@ impl<'a> Checker<'a> {
             // E at unit level, and the library's primitives are then not
             // reported again rule by rule.
             if u.kind == UnitKind::Library {
+                // A library pinned to another bundle version than the strategy.
+                if let (Some((e, _)), Some(lv), Some(sv)) = (&u.env, &u.env_version, &root.env_version) {
+                    if *e == self.env_name && lv != sv {
+                        let uses_span = root.uses.iter().find(|(l, _)| *l == u.name).map(|(_, sp)| *sp).unwrap_or(root.span);
+                        self.diag(
+                            Code::E,
+                            &root_name,
+                            None,
+                            uses_span,
+                            format!(
+                                "library `{}` is written against `{}@{}`, but {} `{}` names `{}@{}`; a library and the strategies using it name one bundle version",
+                                u.name, e, lv, root.kind, root.name, e, sv
+                            ),
+                        );
+                    }
+                }
                 match &u.env {
                     Some((e, sp)) if *e != self.env_name => {
                         if self.ws.find(UnitKind::Environment, e).is_none() {
@@ -1102,6 +1120,7 @@ impl<'a> Checker<'a> {
         let program = Program {
             strategy: self.root.name.clone(),
             environment: self.env_name,
+            environment_version: self.root.env_version.clone(),
             resolution: self.resolution,
             mode: self.mode.expect("strategy mode"),
             relations: self.relations,
