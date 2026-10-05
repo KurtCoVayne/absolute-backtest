@@ -39,7 +39,7 @@ resampled bucket.
 | `src/bin/abt.rs` | The command line. |
 | `corpus/env` | Four environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`, and `equities_1d_v2`, the catalog of `docs/data-bundle.md` section 3 (prices as traded, `split`, `dividend`, `delisted`, `member`, `classification`, `ticker`). |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d), `catalog` (total return and a point-in-time adjusted close over `equities_1d_v2`). |
-| `corpus/strategies` | 18 strategies that must check clean, including `opening_gap` at @1m, `resampled_momentum` over @1m data at @1d and `total_return_momentum` over the catalog. |
+| `corpus/strategies` | 23 strategies that must check clean, including the four canonical stylized-fact strategies, `dividend_capture` with its as-of join, `opening_gap` at @1m, `resampled_momentum` over @1m data at @1d and `total_return_momentum` over the catalog. |
 | `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/checker_messages.rs` | Diagnostics pinned exactly: one diagnostic per root cause, library diagnostics reported once, and the wording of the messages for builtins, wildcards and resolution mismatches. |
@@ -685,6 +685,23 @@ policy and model variants and the four action markets through it, skipping
 with a note where python3 with pandas is absent. `ci/github-workflow.yml`
 is the GitHub Actions workflow (format, clippy, tests with pandas installed
 so the comparison runs); move it to `.github/workflows/ci.yml` to enable it.
+
+## Stylized facts
+
+`corpus/strategies/` carries the four canonical strategies of
+`docs/data-bundle.md` section 8, each long-short with four tenths of equity a
+leg (slack for the legs' drift under the default 1x gross policy) and a
+monthly rebalance over the catalog environment: `momentum_12_1`,
+`low_volatility`, `short_term_reversal` and `size_proxy` (market
+capitalisation is not a catalog relation, so average dollar volume stands
+in). `tests/stylized.rs` shows them trading both legs on the synthetic
+catalog market, and, when `ABT_BUNDLE_DIR` names a bundle of the
+point-in-time universe (`ABT_STYLIZED_N` sets the names a leg, 50 by
+default), runs them with the default cost model and checks wide published
+ranges for the long-short return, its volatility, the deepest drawdown and
+the known failure years (momentum's 2009, low volatility's 2020): gross
+execution or data errors, not strategy merit. Without a bundle the ranges
+are skipped with a note.
 
 ## Development
 
