@@ -15,7 +15,7 @@ use crate::ir::*;
 pub mod executor;
 pub mod fold;
 pub use executor::{Executor, SimExecutor};
-pub use fold::{run_fold, Event, EventLog, Fold};
+pub use fold::{fingerprint, run_fold, Checkpoint, CheckpointEvery, Event, EventLog, Fold};
 pub use value::{Ctor, Decision, Sym, Symbols, Value};
 
 pub type Tuple = Vec<Value>;
@@ -26,7 +26,7 @@ pub(crate) type Derived = Rc<Vec<(Tuple, usize)>>;
 /// One row of the bundle's security table (data-bundle doc, section 3,
 /// "Identity"): the security `id` carried `ticker` from `from` (inclusive)
 /// to `to` (exclusive; `None` is still).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Security {
     pub id: Sym,
     pub ticker: String,
@@ -184,7 +184,7 @@ impl Dataset {
 /// What the executor does when a fill would borrow: cash would go negative,
 /// or gross exposure (Σ |position| × price) would exceed equity (section 6,
 /// executor policy). Orders that reduce exposure are never leverage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OnLeverage {
     /// Halt the run naming the bar, the decision and its rule.
     #[default]
@@ -197,7 +197,7 @@ pub enum OnLeverage {
 
 /// What the executor does with a `sell` larger than the long position or a
 /// `cover` larger than the short (an order that would cross zero).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OnOversize {
     #[default]
     Halt,
@@ -209,7 +209,7 @@ pub enum OnOversize {
 
 /// What the executor does when equity at the execution bar is not positive
 /// while orders are pending.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OnRuin {
     #[default]
     Halt,
@@ -221,7 +221,7 @@ pub enum OnRuin {
 /// Rounding of every order quantity (section 6, executor policy). The
 /// type system keeps `Quantity<Shares>` real-valued; this is the one place
 /// a contract size could later apply.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Lot {
     /// Truncate toward zero to whole shares; an order that rounds to zero
     /// makes neither a fill nor a drop.
@@ -278,7 +278,7 @@ impl std::str::FromStr for Lot {
 
 /// What the executor does when, at a bar's mark, equity is positive but
 /// below the maintenance margin of gross exposure (a margin call).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum OnMarginCall {
     #[default]
     Halt,
@@ -305,8 +305,10 @@ impl std::str::FromStr for OnMarginCall {
 /// availability): instruments whose average daily volume is below
 /// `adv_below` (and not below the previous bucket's) pay `fee_bps` a year
 /// on their short notional, or cannot be shorted at all.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BorrowBucket {
+    /// Infinity for the last bucket (JSON has no infinity: it is stored as null).
+    #[serde(with = "infinite_as_null")]
     pub adv_below: f64,
     pub fee_bps: f64,
     pub shortable: bool,
@@ -316,7 +318,7 @@ pub struct BorrowBucket {
 /// (data-bundle doc, section 4: splits adjust positions on the ex-date,
 /// dividends are credited on the pay date, a delisted name is force-closed
 /// at its last trade with a haircut by reason).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Split {
         factor: f64,
@@ -332,7 +334,7 @@ pub enum Action {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ActionRecord {
     pub t: i64,
     pub equity: Sym,
@@ -343,7 +345,7 @@ pub struct ActionRecord {
 }
 
 /// What the evaluator did, for tests of its incremental state.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KernelStats {
     /// Windowed aggregations evaluated.
     pub window_calls: usize,
@@ -355,9 +357,25 @@ pub struct KernelStats {
     pub window_rows_cached: usize,
 }
 
+/// Serde for an `f64` that may be infinite (JSON has no infinity): null
+/// stands for +∞.
+mod infinite_as_null {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(x: &f64, s: S) -> Result<S::Ok, S::Error> {
+        if x.is_finite() {
+            s.serialize_some(x)
+        } else {
+            s.serialize_none()
+        }
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+        Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::INFINITY))
+    }
+}
+
 /// Interest and fees accrued over a run, between consecutive decision bars
 /// at the configured annual rates over calendar time.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FundingSummary {
     pub cash_interest: f64,
     pub margin_interest: f64,
@@ -366,7 +384,7 @@ pub struct FundingSummary {
 }
 
 /// The book at a bar's mark, before that bar's decisions.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExposureRecord {
     pub t: i64,
     pub cash: f64,
@@ -380,7 +398,7 @@ pub struct ExposureRecord {
 }
 
 /// Executor configuration: part of the kernel, not of the program (section 6).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecConfig {
     pub initial_cash: f64,
     /// Fixed slippage applied to the fill price, in basis points, against
@@ -634,7 +652,7 @@ impl ExecConfig {
 
 /// A model the run's configuration turned off (data-bundle doc, section 5:
 /// a study run at zero cost is warned, never silent).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunWarning {
     /// The bias of the data-bundle doc's audit the warning relates to.
     pub bias: String,
@@ -642,7 +660,7 @@ pub struct RunWarning {
 }
 
 /// Costs paid over a run, and the notional traded.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CostSummary {
     pub commissions: f64,
     pub fees: f64,
@@ -655,7 +673,7 @@ pub struct CostSummary {
 }
 
 /// How much of what was asked for was filled, and at what share of volume.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LiquiditySummary {
     /// Σ filled quantity over Σ quantity the decisions asked for (a target's
     /// re-issues count their fills, not a new request); 1 when nothing was asked.
@@ -746,14 +764,14 @@ impl std::fmt::Display for RunError {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DecisionRecord {
     pub t: i64,
     pub decision: Decision,
     pub rule: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FillRecord {
     pub t: i64,
     pub equity: Sym,
@@ -779,7 +797,7 @@ pub struct FillRecord {
     pub forced: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RunResult {
     pub symbols: Vec<String>,
     pub bars: Vec<i64>,
@@ -814,7 +832,7 @@ impl RunResult {
 }
 
 /// A stored relation (primitive, executor or kernel state), indexed by key.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Store {
     pub by_time: BTreeMap<i64, Vec<Tuple>>,
 }

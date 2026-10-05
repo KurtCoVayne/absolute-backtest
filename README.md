@@ -193,6 +193,20 @@ Resampled buckets and carried values (WF-4 recursion) are already evaluated
 once per bucket or bar through the memo. `RunResult.stats` counts the
 windowed aggregations, the bars solved and the cache's size.
 
+The fold's state is serialisable (`kernel::Checkpoint`: the facts, the time
+domains, the windowed groups' rows, the last prices, the executor's book
+through the `Executor` trait's `checkpoint` and `restore`, the run so far,
+and the cursor the replay resumes from; derived values are recomputed from
+the facts). `abt run --kernel fold --checkpoint-every month|N
+--checkpoint-dir DIR` writes one at the end of every calendar month (or
+every N bars) of the decision bars, taken after the bar's barrier and
+before the tuple that closed it is stored, as `DIR/<bar>.json`; `--resume
+FILE` restores it over the same data and configuration (a fingerprint of
+the program, its parameters and the configuration, and the dataset's
+symbols, are checked) and replays the events from the cursor on.
+`tests/fold_checkpoint.rs` requires a run resumed from any monthly
+checkpoint to equal the unbroken fold and the batch kernel to the bit.
+
 Evaluation is top-down: `decide(t, D)` is requested for each bar `t` of the
 decision resolution's time domain, and every derived relation is requested
 with its temporal key and inputs bound and memoised by them. Because WF-4

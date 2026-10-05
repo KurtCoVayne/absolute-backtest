@@ -23,10 +23,15 @@ pub trait Executor {
     fn on_decisions(&mut self, k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, result: &mut RunResult) -> Result<(), RunError>;
     fn fill(&mut self, k: &mut Kernel, tn: i64, result: &mut RunResult) -> Result<(), RunError>;
     fn finish(&mut self, k: &Kernel, result: &mut RunResult);
+    /// The executor's state for a checkpoint (data-bundle doc, section 2),
+    /// and the state back from one.
+    fn checkpoint(&self) -> Result<serde_json::Value, String>;
+    fn restore(&mut self, state: serde_json::Value) -> Result<(), String>;
 }
 
 /// The simulated executor: the book, the open targets, the receivables and
 /// the counters behind the run's summaries.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimExecutor {
     cfg: ExecConfig,
     cash: f64,
@@ -690,6 +695,15 @@ impl Executor for SimExecutor {
             k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
         }
         k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.cash)]);
+        Ok(())
+    }
+
+    fn checkpoint(&self) -> Result<serde_json::Value, String> {
+        serde_json::to_value(self).map_err(|e| e.to_string())
+    }
+
+    fn restore(&mut self, state: serde_json::Value) -> Result<(), String> {
+        *self = serde_json::from_value(state).map_err(|e| format!("executor state: {}", e))?;
         Ok(())
     }
 

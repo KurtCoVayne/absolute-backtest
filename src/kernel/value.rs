@@ -9,7 +9,7 @@ use crate::ir::{DecisionMode, Duration};
 
 pub type Sym = u32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Ctor {
     Buy,
     Sell,
@@ -52,14 +52,14 @@ impl Ctor {
 /// A decision value (section 4): a constructor, an equity and an amount
 /// (shares for delta constructors and `target_quantity`, a weight for
 /// `target_weight`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Decision {
     pub ctor: Ctor,
     pub equity: Sym,
     pub amount: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Equity(Sym),
     Time(i64),

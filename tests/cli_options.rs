@@ -102,6 +102,9 @@ fn usage_documents_every_option() {
         "--bundle",
         "--untested",
         "--kernel",
+        "--checkpoint-every",
+        "--checkpoint-dir",
+        "--resume",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

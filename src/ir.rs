@@ -17,7 +17,7 @@ impl fmt::Display for Span {
 }
 
 /// The fixed, totally ordered set of bar resolutions (section 3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Resolution {
     M1,
     M5,
@@ -314,7 +314,7 @@ impl Signature {
 }
 
 /// A calendar duration (section 2): days (weeks are 7 days) and months (years are 12 months).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Duration {
     pub months: i64,
     pub days: i64,
@@ -353,7 +353,7 @@ impl fmt::Display for Duration {
 }
 
 /// A literal value with its unit.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Lit {
     Int(i64),
     Float(f64),

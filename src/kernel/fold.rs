@@ -11,13 +11,61 @@
 //! backtest is this fold replayed over the bundle's log; live is the same
 //! fold on a feed with another executor attached.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
+use serde::{Deserialize, Serialize};
+
+use super::eval::{WindowKey, WindowRows};
 use super::executor::{Executor, SimExecutor};
 use super::time;
-use super::{Dataset, ExecConfig, Kernel, RunError, RunResult, Tuple};
+use super::{Dataset, ExecConfig, Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
 use crate::check::Program;
 use crate::ir::Resolution;
+
+/// When the fold takes a checkpoint (data-bundle doc, section 2): at the end
+/// of every calendar month of the decision bars, or every n decision bars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointEvery {
+    Month,
+    Bars(usize),
+}
+
+/// The fold's state at a decision barrier (data-bundle doc, section 2,
+/// "Checkpoints"): the facts, the time domains, the windowed groups' rows,
+/// the executor's book, the run so far, and the cursor the replay resumes
+/// from (every event with availability at or after it is still to come).
+/// Derived values are not kept: they are recomputed from the facts on
+/// demand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Checkpoint {
+    /// Of the program, its parameters and the configuration; a restore into
+    /// another is refused.
+    pub fingerprint: u64,
+    pub cursor: i64,
+    pub last_bar: i64,
+    pub symbols: Vec<String>,
+    pub labels: Vec<String>,
+    pub stores: Vec<Store>,
+    pub domains: Vec<(Resolution, Vec<i64>)>,
+    pub last_price: Vec<(Sym, f64)>,
+    pub windows: Vec<(WindowKey, Vec<(i64, WindowRows)>)>,
+    pub stats: KernelStats,
+    pub open_buckets: Vec<(Resolution, i64)>,
+    pub decided_once: bool,
+    pub result: RunResult,
+    pub executor: serde_json::Value,
+}
+
+/// FNV-1a of the program's rules and parameters and the configuration.
+pub fn fingerprint(prog: &Program, cfg: &ExecConfig) -> u64 {
+    let text = format!("{:?}|{:?}|{:?}|{:?}", prog.strategy, prog.rules, prog.params, cfg);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
 
 /// One event of the stream.
 #[derive(Clone, Debug)]
@@ -117,6 +165,12 @@ pub struct Fold<'p, 'e> {
     sched: Scheduler,
     decided_once: bool,
     halted: bool,
+    last_bar: Option<i64>,
+    checkpoint_every: Option<CheckpointEvery>,
+    bars_since_checkpoint: usize,
+    pending_checkpoint: Option<Checkpoint>,
+    /// Whether the current event's barriers ran a decision bar.
+    ran_decision: bool,
 }
 
 impl<'p, 'e> Fold<'p, 'e> {
@@ -134,7 +188,94 @@ impl<'p, 'e> Fold<'p, 'e> {
             sched,
             decided_once: false,
             halted: false,
+            last_bar: None,
+            checkpoint_every: None,
+            bars_since_checkpoint: 0,
+            pending_checkpoint: None,
+            ran_decision: false,
         }
+    }
+
+    /// Take checkpoints on this schedule; `take_checkpoint` hands them out.
+    pub fn with_checkpoints(mut self, every: CheckpointEvery) -> Self {
+        self.checkpoint_every = Some(every);
+        self
+    }
+
+    /// The checkpoint the last `step` produced, if any.
+    pub fn take_checkpoint(&mut self) -> Option<Checkpoint> {
+        self.pending_checkpoint.take()
+    }
+
+    /// The fold's state now, for a replay resuming at `cursor`.
+    pub fn checkpoint(&self, cursor: i64) -> Result<Checkpoint, RunError> {
+        let k = &self.kernel;
+        Ok(Checkpoint {
+            fingerprint: fingerprint(k.prog, &k.cfg),
+            cursor,
+            last_bar: self.last_bar.unwrap_or(i64::MIN),
+            symbols: k.symbols.names().to_vec(),
+            labels: k.labels.names().to_vec(),
+            stores: k.stores.clone(),
+            domains: {
+                let mut d: Vec<(Resolution, Vec<i64>)> = k.domains.iter().map(|(r, s)| (*r, s.iter().copied().collect())).collect();
+                d.sort_by_key(|(r, _)| *r);
+                d
+            },
+            last_price: {
+                let mut v: Vec<(Sym, f64)> = k.last_price.iter().map(|(s, p)| (*s, *p)).collect();
+                v.sort_by_key(|(s, _)| *s);
+                v
+            },
+            windows: k.windows.iter().map(|(key, cache)| (key.clone(), cache.iter().map(|(t, rows)| (*t, rows.clone())).collect())).collect(),
+            stats: k.stats(),
+            open_buckets: {
+                let mut v: Vec<(Resolution, i64)> = self.sched.open.iter().map(|(r, l)| (*r, *l)).collect();
+                v.sort();
+                v
+            },
+            decided_once: self.decided_once,
+            result: self.result.clone(),
+            executor: self.exec.checkpoint().map_err(RunError::Internal)?,
+        })
+    }
+
+    /// A fold continuing from `cp`: `kernel` is a streaming kernel over the
+    /// same program, dataset and configuration (checked by fingerprint and
+    /// symbols), `exec` the same kind of executor. Replay the events with
+    /// availability at or after `cp.cursor`.
+    pub fn restore(mut kernel: Kernel<'p>, exec: &'e mut dyn Executor, cp: Checkpoint) -> Result<Fold<'p, 'e>, RunError> {
+        if cp.fingerprint != fingerprint(kernel.prog, &kernel.cfg) {
+            return Err(RunError::Config("the checkpoint was taken by another program, parameters or configuration".into()));
+        }
+        if cp.symbols != kernel.symbols.names() || cp.labels != kernel.labels.names() {
+            return Err(RunError::Config("the checkpoint was taken over another dataset (its symbols differ)".into()));
+        }
+        if cp.stores.len() != kernel.stores.len() {
+            return Err(RunError::Config("the checkpoint's relations do not match the program's".into()));
+        }
+        kernel.stores = cp.stores;
+        kernel.domains = cp.domains.into_iter().map(|(r, v)| (r, v.into_iter().collect::<BTreeSet<i64>>())).collect();
+        kernel.last_price = cp.last_price.into_iter().collect();
+        kernel.windows = cp.windows.into_iter().map(|(key, rows)| (key, rows.into_iter().collect())).collect();
+        kernel.stats = cp.stats;
+        kernel.memo.clear();
+        exec.restore(cp.executor).map_err(RunError::Config)?;
+        let mut sched = Scheduler::new(&kernel);
+        sched.open = cp.open_buckets.into_iter().collect();
+        Ok(Fold {
+            kernel,
+            exec,
+            result: cp.result,
+            sched,
+            decided_once: cp.decided_once,
+            halted: false,
+            last_bar: if cp.last_bar == i64::MIN { None } else { Some(cp.last_bar) },
+            checkpoint_every: None,
+            bars_since_checkpoint: 0,
+            pending_checkpoint: None,
+            ran_decision: false,
+        })
     }
 
     /// Process one event: a tuple closes the buckets before it (their
@@ -152,10 +293,24 @@ impl<'p, 'e> Fold<'p, 'e> {
 
     fn step_inner(&mut self, ev: Event) -> Result<(), RunError> {
         match ev {
-            Event::Tuple { rel, key, tuple, .. } => {
+            Event::Tuple { rel, key, avail, tuple } => {
                 let native = self.kernel.relation_resolution(rel);
+                self.ran_decision = false;
                 for (res, label) in self.sched.advance(&mut self.kernel, key, native) {
                     self.barrier(res, label)?;
+                }
+                // A checkpoint at the end of a decision bar, before the tuple
+                // that closed it is stored: the replay resumes at this tuple.
+                if self.ran_decision {
+                    let due = match (self.checkpoint_every, self.last_bar) {
+                        (Some(CheckpointEvery::Month), Some(last)) => time::month_key(last) != time::month_key(key),
+                        (Some(CheckpointEvery::Bars(n)), _) => self.bars_since_checkpoint >= n,
+                        _ => false,
+                    };
+                    if due {
+                        self.pending_checkpoint = Some(self.checkpoint(avail)?);
+                        self.bars_since_checkpoint = 0;
+                    }
                 }
                 self.kernel.insert_fact(rel, tuple)?;
                 Ok(())
@@ -178,6 +333,9 @@ impl<'p, 'e> Fold<'p, 'e> {
         let by_equity = self.kernel.decide_at(label, &mut self.result)?;
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
         self.decided_once = true;
+        self.last_bar = Some(label);
+        self.ran_decision = true;
+        self.bars_since_checkpoint += 1;
         Ok(())
     }
 
