@@ -82,6 +82,9 @@ strategy sma_crossover {
   keywords are lowercase; `_` is a wildcard (output positions only, which
   include the bound position of `prev` and `lag`: `prev(T, _)` holds when T
   has a bar before it).
+- A strategy's header lines are `env`, `uses`, `resolution`, `mode` and,
+  optionally, `revises "<program hash>"`, which places it in the lineage of
+  the program with that hash (see Studies).
 - A signature marks each argument `+` (input, bound by the caller), `-`
   (output, bound by the call) or `@` (the temporal key, exactly one). A
   relation's resolution follows the signature (`@1d`); in a library or
@@ -611,6 +614,39 @@ is written against, `env equities_1d_v2@2026.10`: the bundle must match, and
 a library pinned to another version than its strategy is an E error. The
 crate depends on `serde`, `serde_json`, `arrow` and `parquet` for this.
 
+## Studies
+
+`docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial. A
+study directory (`--study DIR`) holds `lineages.json`, the declared studies
+in `studies/` and the append-only trial log `trials.jsonl`:
+
+```
+abt study declare --study DIR --strategy NAME [--holdout trailing:2y] [--objective sharpe] [--require sharpe>=1] corpus/
+abt study run     --study DIR --strategy NAME --synthetic --grid lookback=3mo,6mo,1y --grid n=2,5 corpus/
+abt study metrics --study DIR --strategy NAME corpus/
+abt study dispute --study DIR --strategy NAME --reason "a different idea" corpus/
+```
+
+A strategy belongs to a *lineage*: its own when nothing like it exists, the
+one it declares with a `revises "<hash>"` header line, or the nearest one
+when its normalised rules are within Jaccard 0.8 of a member's (attached
+with a warning; a dispute is logged and changes nothing). The program hash
+(`abt study declare` prints it) is over the checked program with the
+strategy's name and its variable names normalised away, so renaming resets
+nothing. `declare` fixes the study's inputs (hold-out policy, objective,
+thresholds, executor configuration) and warns about what is missing: no
+hold-out, zero costs or slippage. `run` logs one trial per grid point on
+the sample the hold-out leaves (a trailing hold-out embargoes the last N
+years until revealed), then reports the deflated Sharpe ratio of the best
+point over the lineage's whole trial count and the probability of backtest
+overfitting over the grid, with warnings for a short sample, a Sharpe ratio
+below its minimum track-record length, deflation below 0.95 and PBO at or
+above 0.5. The metrics library behind it is `src/study/metrics.rs` (its
+conventions are in the module notes); `corpus/lib/metrics.dsl` writes the
+book's return, running peak, drawdown and trailing volatility in the DSL
+over the executor's `nav`. A plain `abt run` is an untracked trial: logged
+when it names `--study DIR`, warned either way.
+
 ## Development
 
 ```
@@ -632,6 +668,6 @@ The crate follows two design documents: `docs/semantic-model.md` (the v1
 language and kernel, implemented) and `docs/data-bundle.md` (closed data
 bundles, the online fold kernel, the catalog, the bias audit and the study
 API), whose status table names the milestone each section lands in: M0
-section 9 and the warnings W5, W6 (done); M1 execution realism; M2 catalog,
-identities and the bundle format; M3 the fold kernel and availability time;
-M4 the study API; M5 the realism program.
+section 9 and the warnings W5, W6; M1 execution realism; M2 catalog,
+identities and the bundle format; M3 the fold kernel and availability time
+(all done); M4 the study API (in progress); M5 the realism program.

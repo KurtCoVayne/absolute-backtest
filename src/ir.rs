@@ -754,6 +754,9 @@ pub struct Unit {
     pub env: Option<(String, Span)>,
     /// The bundle version the unit is written against (`env name@2026.10`).
     pub env_version: Option<String>,
+    /// The program hash this strategy declares itself a revision of
+    /// (`revises "0123abcd..."`, data-bundle doc, section 6: lineage).
+    pub revises: Option<String>,
     pub uses: Vec<(String, Span)>,
     pub resolution: Option<(Resolution, Span)>,
     pub mode: Option<(DecisionMode, Span)>,

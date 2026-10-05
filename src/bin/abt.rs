@@ -43,9 +43,15 @@ struct Args {
 
 const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested"];
 /// Options that may repeat.
-const MULTI: [&str; 3] = ["bind", "param", "haircut"];
-const OPTIONS: [&str; 44] = [
+const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
+const OPTIONS: [&str; 50] = [
     "strategy",
+    "study",
+    "holdout",
+    "objective",
+    "reason",
+    "grid",
+    "require",
     "checkpoint-every",
     "checkpoint-dir",
     "resume",
@@ -129,11 +135,11 @@ fn parse_args() -> Args {
 }
 
 /// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
-type Runner = dyn FnOnce(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError>;
+type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError>;
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned) or trailing:Ny: the last N years are embargoed until revealed\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
     );
     exit(code)
 }
@@ -217,6 +223,204 @@ fn synthetic_for(prog: &absolute_backtest::check::Program, opts: &HashMap<String
     }
 }
 
+/// The dataset a run uses: synthetic, a bundle or loose CSV, as the options say.
+fn load_dataset(args: &Args, prog: &absolute_backtest::check::Program) -> (absolute_backtest::kernel::Dataset, Option<String>) {
+    let mut bundle_label: Option<String> = None;
+    let dataset = if args.flags.contains("synthetic") {
+        synthetic_for(prog, &args.opts)
+    } else if let Some(dir) = args.opts.get("bundle") {
+        let (ds, m) = absolute_backtest::bundle::load_bundle(prog, Path::new(dir), args.flags.contains("untested")).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            exit(2)
+        });
+        if m.tests.is_none() {
+            eprintln!("note: bundle `{}@{}` has not passed its tests; its decisions are not causality-certified", m.name, m.version);
+        }
+        bundle_label = Some(format!("{}@{}", m.name, m.version));
+        ds
+    } else if let Some(dir) = args.opts.get("data") {
+        let (ds, notes) = data::load_csv_dir(prog, Path::new(dir)).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            exit(2)
+        });
+        for n in notes {
+            eprintln!("note: {}", n);
+        }
+        ds
+    } else {
+        usage(1)
+    };
+    (dataset, bundle_label)
+}
+
+/// The executor configuration the options describe (a margin preset, then every option over it).
+fn exec_config(args: &Args) -> ExecConfig {
+    let preset = args.opts.get("margin").map(|s| s.as_str()).unwrap_or("none");
+    let base = match preset {
+        "none" => ExecConfig::default(),
+        "reg-t" => ExecConfig::reg_t(),
+        other => {
+            eprintln!("--margin: `{}` is not one of none, reg-t", other);
+            exit(2)
+        }
+    };
+    let base = if args.flags.contains("frictionless") {
+        ExecConfig { ..ExecConfig::frictionless() }.with_margin_of(&base)
+    } else {
+        base
+    };
+    let cfg = ExecConfig {
+        initial_cash: option(&args.opts, "cash", "an amount", base.initial_cash),
+        slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", base.slippage_bps),
+        slippage_vol_mult: option(&args.opts, "slippage-vol", "a multiple of realized volatility", base.slippage_vol_mult),
+        vol_window: option(&args.opts, "vol-window", "a number of bars", base.vol_window),
+        vol_min_obs: base.vol_min_obs,
+        commission_per_share: option(&args.opts, "commission", "an amount per share", base.commission_per_share),
+        commission_min_per_order: option(&args.opts, "commission-min", "an amount per order", base.commission_min_per_order),
+        fee_bps_on_sells: option(&args.opts, "fee-bps", "a number of basis points", base.fee_bps_on_sells),
+        participation_cap: option(&args.opts, "participation", "a fraction of bar volume", base.participation_cap),
+        impact_coef: option(&args.opts, "impact", "an impact coefficient", base.impact_coef),
+        adv_window: option(&args.opts, "adv-window", "a number of bars", base.adv_window),
+        participation_warn: base.participation_warn,
+        volume_relation: args.opts.get("volume-relation").cloned(),
+        max_gross: option(&args.opts, "max-gross", "a multiple of equity", base.max_gross),
+        maintenance_margin: option(&args.opts, "maintenance", "a fraction of gross exposure", base.maintenance_margin),
+        on_margin_call: option(&args.opts, "on-margin-call", "one of halt, liquidate, allow", base.on_margin_call),
+        cash_rate: option(&args.opts, "cash-rate", "an annual rate", base.cash_rate),
+        margin_rate: option(&args.opts, "margin-rate", "an annual rate", base.margin_rate),
+        short_rebate: option(&args.opts, "short-rebate", "an annual rate", base.short_rebate),
+        borrow: base.borrow.clone(),
+        delisting_haircut_default: base.delisting_haircut_default,
+        window_cache: base.window_cache,
+        delisting_haircuts: {
+            let mut hs = base.delisting_haircuts.clone();
+            for h in args.multi.get("haircut").cloned().unwrap_or_default() {
+                let (reason, x) = h.split_once('=').unwrap_or_else(|| {
+                    eprintln!("--haircut takes REASON=FRACTION, not `{}`", h);
+                    exit(2)
+                });
+                let x: f64 = x.trim().parse().unwrap_or_else(|_| {
+                    eprintln!("--haircut {}: `{}` is not a fraction", reason, x);
+                    exit(2)
+                });
+                hs.retain(|(r, _)| r != reason.trim());
+                hs.push((reason.trim().to_string(), x));
+            }
+            hs
+        },
+        as_of: args.opts.get("as-of").map(|s| {
+            parse_timestamp(s).unwrap_or_else(|| {
+                eprintln!("--as-of: `{}` is not a timestamp (YYYY-MM-DD)", s);
+                exit(2)
+            })
+        }),
+        price_relation: args.opts.get("price-relation").cloned(),
+        on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", base.on_leverage),
+        on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
+        on_ruin: option(&args.opts, "on-ruin", "one of halt, continue", OnRuin::Halt),
+        lot: option(&args.opts, "lot", "one of whole, fractional", Lot::Whole),
+        param_overrides: args
+            .multi
+            .get("param")
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| {
+                        let (name, raw) = p.split_once('=').unwrap_or_else(|| {
+                            eprintln!("--param takes NAME=VALUE, not `{}`", p);
+                            exit(1)
+                        });
+                        let (name, raw) = (name.trim(), raw.trim());
+                        // A literal in the DSL's grammar; a bare identifier is an equity.
+                        let lit = absolute_backtest::parser::parse_lit(raw).unwrap_or_else(|e| {
+                            if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
+                                absolute_backtest::Lit::Str(raw.to_string())
+                            } else {
+                                eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
+                                exit(1)
+                            }
+                        });
+                        (name.to_string(), lit)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    cfg
+}
+
+/// What runs the program: the batch kernel, the fold, or the fold with checkpoints.
+fn make_runner(args: &Args) -> Box<Runner> {
+    let kernel_kind = args.opts.get("kernel").map(|s| s.as_str()).unwrap_or("batch");
+    let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
+        "month" => absolute_backtest::kernel::CheckpointEvery::Month,
+        n => absolute_backtest::kernel::CheckpointEvery::Bars(n.parse().unwrap_or_else(|_| {
+            eprintln!("--checkpoint-every: `{}` is not `month` or a number of bars", n);
+            exit(2)
+        })),
+    });
+    let checkpoint_dir = args.opts.get("checkpoint-dir").map(PathBuf::from);
+    let resume = args.opts.get("resume").map(PathBuf::from);
+    if (checkpoint_every.is_some() || resume.is_some()) && kernel_kind != "fold" {
+        eprintln!("--checkpoint-every and --resume need --kernel fold");
+        exit(2)
+    }
+    let runner: Box<Runner> = match kernel_kind {
+        "batch" => Box::new(absolute_backtest::kernel::run),
+        "fold" if checkpoint_every.is_none() && resume.is_none() => Box::new(absolute_backtest::kernel::run_fold),
+        "fold" => Box::new(move |prog, dataset, cfg| {
+            use absolute_backtest::kernel::{Checkpoint, Event, EventLog, Fold, Kernel, SimExecutor};
+            std::thread::scope(|s| {
+                std::thread::Builder::new()
+                    .stack_size(512 << 20)
+                    .spawn_scoped(s, || {
+                        let kernel = Kernel::new_streaming(prog, dataset, cfg.clone())?;
+                        let log = EventLog::from_dataset(&kernel, dataset)?;
+                        let mut exec = SimExecutor::new(cfg.clone());
+                        let (mut fold, cursor) = match &resume {
+                            Some(path) => {
+                                let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                let cp: Checkpoint = serde_json::from_str(&text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                let cursor = cp.cursor;
+                                eprintln!("resuming from {} (checkpoint of {})", path.display(), format_timestamp(cp.last_bar));
+                                (Fold::restore(kernel, &mut exec, cp)?, cursor)
+                            }
+                            None => (Fold::new(kernel, &mut exec), i64::MIN),
+                        };
+                        if let Some(every) = checkpoint_every {
+                            fold = fold.with_checkpoints(every);
+                        }
+                        for ev in log.events {
+                            if let Event::Tuple { avail, .. } = &ev {
+                                if *avail < cursor {
+                                    continue;
+                                }
+                            }
+                            fold.step(ev)?;
+                            if let Some(cp) = fold.take_checkpoint() {
+                                if let Some(dir) = &checkpoint_dir {
+                                    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("{}: {}", dir.display(), e)))?;
+                                    let path = dir.join(format!("{}.json", format_timestamp(cp.last_bar)));
+                                    let text = serde_json::to_string(&cp).map_err(|e| RunError::Internal(e.to_string()))?;
+                                    std::fs::write(&path, text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                    eprintln!("checkpoint {} written", path.display());
+                                }
+                            }
+                        }
+                        fold.finish().map(|(r, _)| r)
+                    })
+                    .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+                    .join()
+                    .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+            })
+        }),
+        other => {
+            eprintln!("--kernel: `{}` is not one of batch, fold", other);
+            exit(2)
+        }
+    };
+    runner
+}
+
 fn main() {
     let args = parse_args();
     match args.cmd.as_str() {
@@ -253,119 +457,8 @@ fn main() {
                 eprintln!("strategy `{}` does not check; fix the errors above", name);
                 exit(1)
             };
-            let dataset = if args.flags.contains("synthetic") {
-                synthetic_for(&prog, &args.opts)
-            } else if let Some(dir) = args.opts.get("bundle") {
-                let (ds, m) = absolute_backtest::bundle::load_bundle(&prog, Path::new(dir), args.flags.contains("untested")).unwrap_or_else(|e| {
-                    eprintln!("{}", e);
-                    exit(2)
-                });
-                if m.tests.is_none() {
-                    eprintln!("note: bundle `{}@{}` has not passed its tests; its decisions are not causality-certified", m.name, m.version);
-                }
-                ds
-            } else if let Some(dir) = args.opts.get("data") {
-                let (ds, notes) = data::load_csv_dir(&prog, Path::new(dir)).unwrap_or_else(|e| {
-                    eprintln!("{}", e);
-                    exit(2)
-                });
-                for n in notes {
-                    eprintln!("note: {}", n);
-                }
-                ds
-            } else {
-                usage(1)
-            };
-            let preset = args.opts.get("margin").map(|s| s.as_str()).unwrap_or("none");
-            let base = match preset {
-                "none" => ExecConfig::default(),
-                "reg-t" => ExecConfig::reg_t(),
-                other => {
-                    eprintln!("--margin: `{}` is not one of none, reg-t", other);
-                    exit(2)
-                }
-            };
-            let base = if args.flags.contains("frictionless") {
-                ExecConfig { ..ExecConfig::frictionless() }.with_margin_of(&base)
-            } else {
-                base
-            };
-            let cfg = ExecConfig {
-                initial_cash: option(&args.opts, "cash", "an amount", base.initial_cash),
-                slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", base.slippage_bps),
-                slippage_vol_mult: option(&args.opts, "slippage-vol", "a multiple of realized volatility", base.slippage_vol_mult),
-                vol_window: option(&args.opts, "vol-window", "a number of bars", base.vol_window),
-                vol_min_obs: base.vol_min_obs,
-                commission_per_share: option(&args.opts, "commission", "an amount per share", base.commission_per_share),
-                commission_min_per_order: option(&args.opts, "commission-min", "an amount per order", base.commission_min_per_order),
-                fee_bps_on_sells: option(&args.opts, "fee-bps", "a number of basis points", base.fee_bps_on_sells),
-                participation_cap: option(&args.opts, "participation", "a fraction of bar volume", base.participation_cap),
-                impact_coef: option(&args.opts, "impact", "an impact coefficient", base.impact_coef),
-                adv_window: option(&args.opts, "adv-window", "a number of bars", base.adv_window),
-                participation_warn: base.participation_warn,
-                volume_relation: args.opts.get("volume-relation").cloned(),
-                max_gross: option(&args.opts, "max-gross", "a multiple of equity", base.max_gross),
-                maintenance_margin: option(&args.opts, "maintenance", "a fraction of gross exposure", base.maintenance_margin),
-                on_margin_call: option(&args.opts, "on-margin-call", "one of halt, liquidate, allow", base.on_margin_call),
-                cash_rate: option(&args.opts, "cash-rate", "an annual rate", base.cash_rate),
-                margin_rate: option(&args.opts, "margin-rate", "an annual rate", base.margin_rate),
-                short_rebate: option(&args.opts, "short-rebate", "an annual rate", base.short_rebate),
-                borrow: base.borrow.clone(),
-                delisting_haircut_default: base.delisting_haircut_default,
-                window_cache: base.window_cache,
-                delisting_haircuts: {
-                    let mut hs = base.delisting_haircuts.clone();
-                    for h in args.multi.get("haircut").cloned().unwrap_or_default() {
-                        let (reason, x) = h.split_once('=').unwrap_or_else(|| {
-                            eprintln!("--haircut takes REASON=FRACTION, not `{}`", h);
-                            exit(2)
-                        });
-                        let x: f64 = x.trim().parse().unwrap_or_else(|_| {
-                            eprintln!("--haircut {}: `{}` is not a fraction", reason, x);
-                            exit(2)
-                        });
-                        hs.retain(|(r, _)| r != reason.trim());
-                        hs.push((reason.trim().to_string(), x));
-                    }
-                    hs
-                },
-                as_of: args.opts.get("as-of").map(|s| {
-                    parse_timestamp(s).unwrap_or_else(|| {
-                        eprintln!("--as-of: `{}` is not a timestamp (YYYY-MM-DD)", s);
-                        exit(2)
-                    })
-                }),
-                price_relation: args.opts.get("price-relation").cloned(),
-                on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", base.on_leverage),
-                on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
-                on_ruin: option(&args.opts, "on-ruin", "one of halt, continue", OnRuin::Halt),
-                lot: option(&args.opts, "lot", "one of whole, fractional", Lot::Whole),
-                param_overrides: args
-                    .multi
-                    .get("param")
-                    .map(|ps| {
-                        ps.iter()
-                            .map(|p| {
-                                let (name, raw) = p.split_once('=').unwrap_or_else(|| {
-                                    eprintln!("--param takes NAME=VALUE, not `{}`", p);
-                                    exit(1)
-                                });
-                                let (name, raw) = (name.trim(), raw.trim());
-                                // A literal in the DSL's grammar; a bare identifier is an equity.
-                                let lit = absolute_backtest::parser::parse_lit(raw).unwrap_or_else(|e| {
-                                    if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
-                                        absolute_backtest::Lit::Str(raw.to_string())
-                                    } else {
-                                        eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
-                                        exit(1)
-                                    }
-                                });
-                                (name.to_string(), lit)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            };
+            let (dataset, bundle_label) = load_dataset(&args, &prog);
+            let cfg = exec_config(&args);
             if args.cmd == "explain" {
                 let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
                 let at_text = args.opts.get("at").cloned().unwrap_or_else(|| usage(1));
@@ -442,74 +535,7 @@ fn main() {
                 return;
             }
             let verify = args.flags.contains("verify-causality");
-            let kernel_kind = args.opts.get("kernel").map(|s| s.as_str()).unwrap_or("batch");
-            let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
-                "month" => absolute_backtest::kernel::CheckpointEvery::Month,
-                n => absolute_backtest::kernel::CheckpointEvery::Bars(n.parse().unwrap_or_else(|_| {
-                    eprintln!("--checkpoint-every: `{}` is not `month` or a number of bars", n);
-                    exit(2)
-                })),
-            });
-            let checkpoint_dir = args.opts.get("checkpoint-dir").map(PathBuf::from);
-            let resume = args.opts.get("resume").map(PathBuf::from);
-            if (checkpoint_every.is_some() || resume.is_some()) && kernel_kind != "fold" {
-                eprintln!("--checkpoint-every and --resume need --kernel fold");
-                exit(2)
-            }
-            let runner: Box<Runner> = match kernel_kind {
-                "batch" => Box::new(absolute_backtest::kernel::run),
-                "fold" if checkpoint_every.is_none() && resume.is_none() => Box::new(absolute_backtest::kernel::run_fold),
-                "fold" => Box::new(move |prog, dataset, cfg| {
-                    use absolute_backtest::kernel::{Checkpoint, Event, EventLog, Fold, Kernel, SimExecutor};
-                    std::thread::scope(|s| {
-                        std::thread::Builder::new()
-                            .stack_size(512 << 20)
-                            .spawn_scoped(s, || {
-                                let kernel = Kernel::new_streaming(prog, dataset, cfg.clone())?;
-                                let log = EventLog::from_dataset(&kernel, dataset)?;
-                                let mut exec = SimExecutor::new(cfg.clone());
-                                let (mut fold, cursor) = match &resume {
-                                    Some(path) => {
-                                        let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
-                                        let cp: Checkpoint = serde_json::from_str(&text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
-                                        let cursor = cp.cursor;
-                                        eprintln!("resuming from {} (checkpoint of {})", path.display(), format_timestamp(cp.last_bar));
-                                        (Fold::restore(kernel, &mut exec, cp)?, cursor)
-                                    }
-                                    None => (Fold::new(kernel, &mut exec), i64::MIN),
-                                };
-                                if let Some(every) = checkpoint_every {
-                                    fold = fold.with_checkpoints(every);
-                                }
-                                for ev in log.events {
-                                    if let Event::Tuple { avail, .. } = &ev {
-                                        if *avail < cursor {
-                                            continue;
-                                        }
-                                    }
-                                    fold.step(ev)?;
-                                    if let Some(cp) = fold.take_checkpoint() {
-                                        if let Some(dir) = &checkpoint_dir {
-                                            std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("{}: {}", dir.display(), e)))?;
-                                            let path = dir.join(format!("{}.json", format_timestamp(cp.last_bar)));
-                                            let text = serde_json::to_string(&cp).map_err(|e| RunError::Internal(e.to_string()))?;
-                                            std::fs::write(&path, text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
-                                            eprintln!("checkpoint {} written", path.display());
-                                        }
-                                    }
-                                }
-                                fold.finish().map(|(r, _)| r)
-                            })
-                            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-                            .join()
-                            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-                    })
-                }),
-                other => {
-                    eprintln!("--kernel: `{}` is not one of batch, fold", other);
-                    exit(2)
-                }
-            };
+            let runner = make_runner(&args);
             let result = runner(&prog, &dataset, cfg.clone()).unwrap_or_else(|e| {
                 match e {
                     RunError::Request(m) => eprintln!("{}", m),
@@ -602,6 +628,25 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            // A run outside a study is an untracked trial (data-bundle doc,
+            // section 7): logged when the study directory is named, warned
+            // either way.
+            match args.opts.get("study") {
+                Some(dir) => {
+                    let project = absolute_backtest::study::Project::open(Path::new(dir));
+                    match absolute_backtest::study::log_untracked(&project, &prog, &result, &cfg, bundle_label.clone()) {
+                        Ok(t) => println!(
+                            "warning (data-snooping): logged as untracked trial #{} of lineage {} in {}; run it with `abt study run` to count it against a study",
+                            t.seq, t.lineage, dir
+                        ),
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            exit(2)
+                        }
+                    }
+                }
+                None => println!("warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it"),
+            }
             if verify {
                 let n = result.bars.len();
                 let samples: Vec<i64> = (1..=5).map(|i| result.bars[(n * i / 6).min(n - 1)]).collect();
@@ -618,6 +663,210 @@ fn main() {
                         exit(1)
                     }
                 }
+            }
+        }
+        "study" => {
+            use absolute_backtest::study::{self, Holdout, Project, Threshold};
+            let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
+            let dir = args.opts.get("study").cloned().unwrap_or_else(|| usage(1));
+            let project = Project::open(Path::new(&dir));
+            let fail = |e: String| -> ! {
+                eprintln!("{}", e);
+                exit(2)
+            };
+            let checked = |ws: &Workspace, name: &str| -> absolute_backtest::check::Program {
+                let (prog, diags) = check_program(ws, name);
+                for d in &diags {
+                    eprintln!("{}", d);
+                }
+                prog.unwrap_or_else(|| {
+                    eprintln!("strategy `{}` does not check; fix the errors above", name);
+                    exit(1)
+                })
+            };
+            match sub.as_str() {
+                "declare" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let holdout = Holdout::parse(args.opts.get("holdout").map(|s| s.as_str()).unwrap_or("none")).unwrap_or_else(|e| {
+                        eprintln!("--holdout: {}", e);
+                        exit(2)
+                    });
+                    let objective = args.opts.get("objective").cloned().unwrap_or_else(|| "sharpe".into());
+                    let thresholds: Vec<Threshold> = args
+                        .multi
+                        .get("require")
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|r| {
+                            Threshold::parse(r).unwrap_or_else(|e| {
+                                eprintln!("--require: {}", e);
+                                exit(2)
+                            })
+                        })
+                        .collect();
+                    let exec = exec_config(&args);
+                    let (spec, opened) = project.declare(&prog, holdout, &objective, thresholds, exec).unwrap_or_else(|e| fail(e));
+                    println!("study {} declared in {}", spec.id, dir);
+                    println!(
+                        "  strategy {} ({}) in lineage {}{}",
+                        spec.strategy,
+                        spec.hash,
+                        spec.lineage,
+                        match &opened.attachment {
+                            study::Attachment::Root => String::new(),
+                            study::Attachment::Revises(h) => format!(", revising {}", h),
+                            study::Attachment::Similarity { to, score } => format!(", attached by similarity {:.2} with {}", score, to),
+                        }
+                    );
+                    println!(
+                        "  hold-out {}   objective {}   thresholds: {}",
+                        spec.holdout.describe(),
+                        spec.objective,
+                        if spec.thresholds.is_empty() {
+                            "none".to_string()
+                        } else {
+                            spec.thresholds.iter().map(|t| t.describe()).collect::<Vec<_>>().join(", ")
+                        }
+                    );
+                    for w in &spec.warnings {
+                        println!("warning ({}): {}", w.bias, w.message);
+                    }
+                }
+                "run" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let opened = project.open_lineage(&prog).unwrap_or_else(|e| fail(e));
+                    let spec = project.study_for(&opened.lineage).unwrap_or_else(|e| fail(e)).unwrap_or_else(|| {
+                        eprintln!("no study is declared for lineage {} in {}; run `abt study declare` first", opened.lineage, dir);
+                        exit(2)
+                    });
+                    let (dataset, bundle_label) = load_dataset(&args, &prog);
+                    let mut grid = Vec::new();
+                    for g in args.multi.get("grid").cloned().unwrap_or_default() {
+                        grid.push(study::parse_grid_axis(&g).unwrap_or_else(|e| fail(e)));
+                    }
+                    let base_overrides = exec_config(&args).param_overrides;
+                    let mut points = study::grid_points(&grid);
+                    for p in points.iter_mut() {
+                        let mut all = base_overrides.clone();
+                        all.append(p);
+                        *p = all;
+                    }
+                    let runner = make_runner(&args);
+                    let (outcomes, report) =
+                        study::run_study(&project, &spec, &prog, &dataset, &points, &*runner, study::Provenance { bundle: bundle_label, scheme: None }).unwrap_or_else(|e| fail(e));
+                    println!(
+                        "study {} (lineage {}, objective {}, hold-out {}){}",
+                        spec.id,
+                        spec.lineage,
+                        spec.objective,
+                        spec.holdout.describe(),
+                        report.embargoed_from.map(|t| format!("; bars from {} embargoed", format_timestamp(t))).unwrap_or_default()
+                    );
+                    for (i, o) in outcomes.iter().enumerate() {
+                        let shown: Vec<String> = points[i].iter().map(|(n, l)| format!("{}={}", n, l)).collect();
+                        println!(
+                            "point {}/{}{}: {} {:.3} (se {:.3})   cagr {:.4}   max drawdown {:.4}   turnover {:.2}   fills {}   trial #{}{}",
+                            i + 1,
+                            outcomes.len(),
+                            if shown.is_empty() { String::new() } else { format!(" [{}]", shown.join(", ")) },
+                            spec.objective,
+                            study::objective_value(&spec.objective, &o.metrics, &o.trading).unwrap_or(f64::NAN),
+                            o.metrics.sharpe_se,
+                            o.metrics.cagr,
+                            o.metrics.max_drawdown,
+                            o.trading.turnover,
+                            o.trading.fills,
+                            o.trial.seq,
+                            if i == report.best && outcomes.len() > 1 { " (best)" } else { "" }
+                        );
+                    }
+                    println!(
+                        "lineage {}: {} trials; deflated Sharpe ratio {:.3} for the best point (expected maximum per-period Sharpe {:.4})",
+                        spec.lineage, report.trials, report.dsr.dsr, report.dsr.expected_max_sr
+                    );
+                    if let Some(p) = &report.pbo {
+                        println!(
+                            "probability of backtest overfitting {:.3} over the grid ({} combinations of {} partitions)",
+                            p.pbo, p.combinations, p.partitions
+                        );
+                    }
+                    for w in &report.warnings {
+                        println!("warning ({}): {}", w.bias, w.message);
+                    }
+                }
+                "metrics" => {
+                    let log = project.log();
+                    let trials = match args.opts.get("strategy") {
+                        Some(name) => {
+                            let ws = workspace(&rest);
+                            let prog = checked(&ws, name);
+                            let ls = project.lineages().unwrap_or_else(|e| fail(e));
+                            let hash = study::program_hash(&prog);
+                            match ls.lineage_of(&hash) {
+                                Some(l) => log.for_lineage(&l.id).unwrap_or_else(|e| fail(e)),
+                                None => {
+                                    println!("strategy {} ({}) has no lineage in {}", name, hash, dir);
+                                    vec![]
+                                }
+                            }
+                        }
+                        None => log.read_all().unwrap_or_else(|e| fail(e)),
+                    };
+                    for t in &trials {
+                        let params: Vec<String> = t.params.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+                        println!(
+                            "#{} {:?} {} {} [{}] {}..{} bars {}: sharpe {:.3} (se {:.3}, lo {:.3})   cagr {:.4}   max drawdown {:.4}   cvar5 {:.4}   worst month {:.4}   turnover {:.2}",
+                            t.seq,
+                            t.kind,
+                            t.strategy,
+                            &t.hash[..8.min(t.hash.len())],
+                            params.join(", "),
+                            t.period.as_ref().map(|p| p.0.as_str()).unwrap_or("-"),
+                            t.period.as_ref().map(|p| p.1.as_str()).unwrap_or("-"),
+                            t.bars,
+                            t.metrics.sharpe,
+                            t.metrics.sharpe_se,
+                            t.metrics.sharpe_lo,
+                            t.metrics.cagr,
+                            t.metrics.max_drawdown,
+                            t.metrics.cvar_5,
+                            t.metrics.worst_month,
+                            t.trading.turnover
+                        );
+                    }
+                    if let Some(last) = trials.last() {
+                        let same: Vec<_> = trials.iter().filter(|t| t.lineage == last.lineage).cloned().collect();
+                        let d = study::deflated_sharpe(
+                            last.metrics.sharpe_period,
+                            last.metrics.n,
+                            last.metrics.skew,
+                            last.metrics.kurtosis,
+                            same.len(),
+                            study::sharpe_variance(&same),
+                        );
+                        println!("lineage {}: {} trials; deflated Sharpe ratio of the latest {:.3}", last.lineage, same.len(), d.dsr);
+                    }
+                    println!("{} trials", trials.len());
+                }
+                "dispute" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let reason = args.opts.get("reason").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let hash = study::program_hash(&prog);
+                    let mut ls = project.lineages().unwrap_or_else(|e| fail(e));
+                    ls.dispute(&hash, &reason, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+                        .unwrap_or_else(|e| fail(e));
+                    project.save_lineages(&ls).unwrap_or_else(|e| fail(e));
+                    println!("dispute of {}'s attachment logged; the attachment stands (section 6, lineage)", hash);
+                }
+                _ => usage(1),
             }
         }
         "bundle" => {
