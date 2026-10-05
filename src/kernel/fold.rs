@@ -186,6 +186,8 @@ impl<'p, 'e> Fold<'p, 'e> {
         let result = RunResult {
             symbols: kernel.symbols.names().to_vec(),
             warnings: kernel.cfg.warnings(),
+            price_relation: kernel.price_rel.map(|id| kernel.rels[id].name.clone()),
+            volume_relation: kernel.volume_rel.map(|id| kernel.rels[id].name.clone()),
             ..Default::default()
         };
         Fold {

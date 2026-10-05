@@ -875,6 +875,9 @@ pub struct RunResult {
     /// The models the configuration turned off, and what the run observed
     /// that the author should know (fills above the participation threshold).
     pub warnings: Vec<RunWarning>,
+    /// The primitives the executor filled at and read volume from.
+    pub price_relation: Option<String>,
+    pub volume_relation: Option<String>,
 }
 
 impl RunResult {
@@ -1387,6 +1390,8 @@ impl<'p> Kernel<'p> {
         let mut result = RunResult {
             symbols: self.symbols.names().to_vec(),
             warnings: self.cfg.warnings(),
+            price_relation: self.price_rel.map(|id| self.rels[id].name.clone()),
+            volume_relation: self.volume_rel.map(|id| self.rels[id].name.clone()),
             ..Default::default()
         };
         for (k, &t) in bars.iter().enumerate() {
