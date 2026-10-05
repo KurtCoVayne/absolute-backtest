@@ -85,6 +85,10 @@ fn usage_documents_every_option() {
         "--slippage-vol",
         "--vol-window",
         "--frictionless",
+        "--participation",
+        "--impact",
+        "--adv-window",
+        "--volume-relation",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

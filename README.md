@@ -208,7 +208,25 @@ fully invested after paying them, carrying a debit of at most the bar's
 costs, which the next sizing sees. `ExecConfig::frictionless()` (or
 `--frictionless`) turns every model off, and the run then carries a warning
 per model naming the bias it leaves unmodeled (`RunResult.warnings`, printed
-as `warning (slippage): ...`). Two distinct decisions for one instrument at one bar halt the
+as `warning (slippage): ...`).
+
+The liquidity model (same section) caps a fill at 0.1 of the bar's volume
+(from the `volume`-like primitive at the decision resolution, or
+`--volume-relation`; a coarser decision bar sums the fine volumes in its
+bucket). A delta order's remainder expires, reported as dropped with
+`partial fill: 4 of 10 shares (participation cap 10% of volume 40)`; a
+target's remainder re-issues itself at each following bar, sized afresh,
+until the target is reached or a new decision on the instrument supersedes
+it. Impact moves the fill price against the order by 0.1 times the square
+root of the filled quantity over average daily volume (the mean bar volume
+over the 20 bars ending at the fill bar). Each fill records its impact,
+participation and whether it was partial; `RunResult.liquidity` reports the
+fill ratio (filled over requested, a re-issue counting its fills and not a
+new request) and the mean and maximum participation, and a run with fills
+above 5% of bar volume carries a `market-impact` warning. A cap can leave a
+reduction partially filled while the bar's buys fill to their targets, which
+is leverage: the leverage policy decides (halt by default; `reject` drops the
+buy). Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
 negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
 a constant series, a `quantile` level outside [0, 1], and a non-positive delta
@@ -280,6 +298,7 @@ abt check <files...>
 abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N]
         [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
+        [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
         [--price-relation REL]
         [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow]
         [--on-ruin halt|continue] [--lot whole|fractional]
@@ -423,6 +442,12 @@ small and easy to flip.
   the bar's costs and the next sizing sees it. A bought long is sized at its
   expected fill price for the same reason; a reduction or a short is sized at
   the bar price it is marked at.
+- **A capped target re-issues itself; a capped delta order expires.** The
+  doc says so; the kernel keeps the open target per instrument, re-sizes it
+  at each bar from that bar's equity and price, and drops it when a new
+  decision names the instrument or the instrument has no price. Re-issues
+  are fills without decisions: `decided` still holds only what the strategy
+  emitted.
 - **A non-positive price is a data error**, rejected at load with the file
   and line.
 

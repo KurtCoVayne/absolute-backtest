@@ -431,10 +431,14 @@ of the kernel configuration and not of the program (data-bundle doc, section
 per-order minimum, a regulatory fee on sells, and slippage against the order
 of a fixed part plus a multiple of the instrument's realized volatility over
 the bars before the fill; a configuration that turns a model off is reported
-on the run, never silent). A long that is bought is sized at the price it
-will fill at, so the cash it spends is the weight of equity; a bar's
-transaction costs are never leverage, so a fully invested book stays fully
-invested after paying them. Consequently `position(A, T)` is the position held at
+on the run, never silent), and by a liquidity model: a fill is at most a
+participation cap times the bar's volume, a delta order's remainder expires
+while a target's re-issues itself at the following bars until reached or
+superseded, and impact moves the fill price against the order by a multiple
+of the square root of the filled quantity over average daily volume. A long
+that is bought is sized at the price it will fill at, so the cash it spends
+is the weight of equity; a bar's transaction costs are never leverage, so a
+fully invested book stays fully invested after paying them. Consequently `position(A, T)` is the position held at
 close T, after fills of decisions made at prev(T); `fill(A, T, Q, P)` records
 those fills; `cash(T, C)` is cash after them; `decided(T0, D)` holds every
 decision the strategy emitted at T0. A decision rule at T therefore sees the

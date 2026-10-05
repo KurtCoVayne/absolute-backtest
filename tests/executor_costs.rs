@@ -225,6 +225,7 @@ strategy full {
     let cfg = ExecConfig {
         initial_cash: 1000.0,
         slippage_bps: 100.0,
+        impact_coef: 0.0,
         ..ExecConfig::default()
     };
     let r = run(&prog, &ds, cfg).unwrap();

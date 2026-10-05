@@ -3,6 +3,7 @@
 //!   abt check <files...>
 //!   abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
 //!           [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
+//!           [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
 //!           [--price-relation REL] [--param NAME=VALUE]...
 //!           [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]
 //!           [--verify-causality] [--all] [--fills] [--quiet] <files...>
@@ -38,8 +39,12 @@ struct Args {
 const FLAGS: [&str; 6] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless"];
 /// Options that may repeat.
 const MULTI: [&str; 2] = ["bind", "param"];
-const OPTIONS: [&str; 24] = [
+const OPTIONS: [&str; 28] = [
     "strategy",
+    "participation",
+    "impact",
+    "adv-window",
+    "volume-relation",
     "commission-min",
     "fee-bps",
     "slippage-vol",
@@ -104,7 +109,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --frictionless        every cost model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --frictionless        every cost and liquidity model off (the run is warned)"
     );
     exit(code)
 }
@@ -245,6 +250,11 @@ fn main() {
                 commission_per_share: option(&args.opts, "commission", "an amount per share", base.commission_per_share),
                 commission_min_per_order: option(&args.opts, "commission-min", "an amount per order", base.commission_min_per_order),
                 fee_bps_on_sells: option(&args.opts, "fee-bps", "a number of basis points", base.fee_bps_on_sells),
+                participation_cap: option(&args.opts, "participation", "a fraction of bar volume", base.participation_cap),
+                impact_coef: option(&args.opts, "impact", "an impact coefficient", base.impact_coef),
+                adv_window: option(&args.opts, "adv-window", "a number of bars", base.adv_window),
+                participation_warn: base.participation_warn,
+                volume_relation: args.opts.get("volume-relation").cloned(),
                 price_relation: args.opts.get("price-relation").cloned(),
                 on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", OnLeverage::Halt),
                 on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
@@ -372,8 +382,14 @@ fn main() {
                 println!("{:>14}: {:.4}", k, v);
             }
             println!(
-                "costs: commissions {:.2}   fees {:.2}   slippage {:.2}   turnover {:.2}",
-                result.costs.commissions, result.costs.fees, result.costs.slippage, result.costs.turnover
+                "costs: commissions {:.2}   fees {:.2}   slippage {:.2}   impact {:.2}   turnover {:.2}",
+                result.costs.commissions, result.costs.fees, result.costs.slippage, result.costs.impact, result.costs.turnover
+            );
+            println!(
+                "liquidity: fill ratio {:.3}   participation avg {:.2}%   max {:.2}%",
+                result.liquidity.fill_ratio,
+                result.liquidity.avg_participation * 100.0,
+                result.liquidity.max_participation * 100.0
             );
             for w in &result.warnings {
                 println!("warning ({}): {}", w.bias, w.message);
@@ -394,7 +410,12 @@ fn main() {
                             result.symbols[f.equity as usize],
                             f.quantity,
                             f.price,
-                            if f.at_last_price { " (last price)" } else { "" }
+                            match (f.at_last_price, f.partial) {
+                                (true, true) => format!(" (last price, partial at {:.1}% of volume)", f.participation * 100.0),
+                                (true, false) => " (last price)".to_string(),
+                                (false, true) => format!(" (partial at {:.1}% of volume)", f.participation * 100.0),
+                                (false, false) => String::new(),
+                            }
                         );
                     }
                 }
