@@ -46,7 +46,32 @@ struct Analyzer<'c, 'a> {
     pending_windows: HashMap<String, TimeProv>,
 }
 
+/// A rule whose head or body names a relation declared with a reserved name
+/// is not judged: the declaration was already reported (U), and the parser
+/// has read every body occurrence as the builtin it names.
+fn mentions_reserved(cx: &Checker, rule: &Rule) -> bool {
+    fn lit(cx: &Checker, l: &Literal) -> bool {
+        match l {
+            Literal::Builtin(b, _) => cx.reserved_declared.contains(match b {
+                Builtin::Prev { .. } => "prev",
+                Builtin::Lag { .. } => "lag",
+                Builtin::MonthStart { .. } => "month_start",
+                Builtin::DayStart { .. } => "day_start",
+            }),
+            Literal::Atom(a) | Literal::Neg(a) => cx.reserved_declared.contains(&a.name),
+            Literal::Top { atom, .. } => cx.reserved_declared.contains(&atom.name),
+            Literal::Resample { inner, .. } => cx.reserved_declared.contains(&inner.name),
+            Literal::Agg { conj, .. } => conj.iter().any(|l| lit(cx, l)),
+            Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => false,
+        }
+    }
+    cx.reserved_declared.contains(&rule.head.name) || rule.body.iter().any(|l| lit(cx, l))
+}
+
 pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleInfo> {
+    if mentions_reserved(cx, rule) {
+        return None;
+    }
     let label = super::rule_label(&cx.rules, idx);
     let unit_res = cx.unit_res.get(&rule.unit).copied().unwrap_or(cx.resolution);
     let mut an = Analyzer {
@@ -234,11 +259,28 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 ),
                             );
                         } else if arg.mode == Mode::In {
-                            self.err(
-                                Code::M,
-                                *sp,
-                                format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
-                            );
+                            // A resample groups a stored relation by its entity
+                            // columns (section 4), so a fresh entity variable in
+                            // a `+` position is bound by the grouping; a derived
+                            // relation is a call and must have its inputs bound.
+                            let grouped = ctx == AtomCtx::ResampleInner && arg.ty.is_entity();
+                            let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
+                            if grouped && !stored {
+                                self.err(
+                                    Code::M,
+                                    *sp,
+                                    format!(
+                                        "`+{}` of `{}` is an input, and `{}` is a derived relation, so `{}` must be bound before the resample; a resample groups only a stored relation by a fresh entity variable (or declare `{}` with `-{}`)",
+                                        arg.name, atom.name, atom.name, v, atom.name, arg.name
+                                    ),
+                                );
+                            } else if !grouped {
+                                self.err(
+                                    Code::M,
+                                    *sp,
+                                    format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
+                                );
+                            }
                         }
                         let prov = if is_key {
                             if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
@@ -294,6 +336,25 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         continue;
                     }
                     self.ctor(c, subs, *sp, ctx == AtomCtx::Negative || arg.mode == Mode::In, arg.mode == Mode::In);
+                    // WF-9 (C): `decided` holds only this strategy's own
+                    // decisions, so a pattern with the other mode's
+                    // constructor can never match (adv-18). A library has no
+                    // mode: its patterns are judged by each strategy that
+                    // reaches them, in `Checker::program_checks`.
+                    if atom.name == "decided" && self.rule.unit == self.cx.root.name {
+                        if let (Some(mode), Some(m)) = (self.cx.mode, ctor_mode(c)) {
+                            if m != mode {
+                                self.err(
+                                    Code::C,
+                                    *sp,
+                                    format!(
+                                        "`{}` is a {} constructor but this strategy declares `mode {}`; `decided` holds only this strategy's own decisions, so `decided({}, {}(...))` can never match",
+                                        c, m, mode, atom.terms[0], c
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -610,8 +671,16 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     }
                 } else {
                     let t = self.expr_ty(expr);
-                    if t == Some(Ty::Timestamp) {
-                        self.err(Code::T, *span, "a Timestamp cannot be assigned; bind times with prev, lag, window or prior_window");
+                    // A bound time may be copied into a value column (`TE = T`,
+                    // section 2: non-key timestamps are ordinary values); it is
+                    // not computed, so anything else of type Timestamp is an
+                    // error. The copy has no provenance: using it as a key is F.
+                    if t == Some(Ty::Timestamp) && !matches!(expr, Expr::Var(..)) {
+                        self.err(
+                            Code::T,
+                            *span,
+                            "a Timestamp cannot be computed; copy a bound time with `X = T` or bind times with prev, lag, window or prior_window",
+                        );
                     }
                     self.bind(var, t, TimeProv::Other);
                 }

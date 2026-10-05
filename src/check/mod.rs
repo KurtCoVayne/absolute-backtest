@@ -41,6 +41,8 @@ pub enum Code {
     W1,
     /// Warning: unused parameter.
     W2,
+    /// Warning: declared relation with no defining rule.
+    W3,
 }
 
 impl Code {
@@ -61,6 +63,7 @@ impl Code {
             "X" => Code::X,
             "W1" => Code::W1,
             "W2" => Code::W2,
+            "W3" => Code::W3,
             _ => return None,
         })
     }
@@ -81,6 +84,7 @@ impl Code {
             Code::X => "WF-10 resolution",
             Code::W1 => "dead rule",
             Code::W2 => "unused parameter",
+            Code::W3 => "undefined relation",
         }
     }
 }
@@ -223,6 +227,52 @@ impl Program {
     }
 }
 
+/// Order two literals of one type, for a parameter's range (section 3):
+/// numbers by value, money of one currency by amount, durations by
+/// calendar length. A calendar duration has no single length, so two
+/// durations are ordered only when every length of one lies on the same
+/// side of every length of the other (`1mo` is neither above nor below
+/// `30d`). `None` when they are not comparable.
+fn lit_order(a: &Lit, b: &Lit) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    let num = |l: &Lit| match l {
+        Lit::Int(i) => Some(*i as f64),
+        Lit::Float(x) | Lit::Shares(x) => Some(*x),
+        _ => None,
+    };
+    match (a, b) {
+        (Lit::Money(x, cx), Lit::Money(y, cy)) if cx == cy => x.partial_cmp(y),
+        (Lit::Duration(x), Lit::Duration(y)) if x == y => Some(Ordering::Equal),
+        (Lit::Duration(x), Lit::Duration(y)) if x.min_days() > y.max_days() => Some(Ordering::Greater),
+        (Lit::Duration(x), Lit::Duration(y)) if x.max_days() < y.min_days() => Some(Ordering::Less),
+        (Lit::Money(..), _) | (_, Lit::Money(..)) | (Lit::Duration(_), _) | (_, Lit::Duration(_)) | (Lit::Equity(_), _) | (_, Lit::Equity(_)) => None,
+        _ => num(a)?.partial_cmp(&num(b)?),
+    }
+}
+
+/// The decision constructors written in `decided` patterns of a body, each
+/// with the pattern's time term and span, including those inside an
+/// aggregation's conjunction.
+fn decided_patterns(body: &[Literal]) -> Vec<(&str, &Term, Span)> {
+    fn atom<'a>(a: &'a Atom, out: &mut Vec<(&'a str, &'a Term, Span)>) {
+        if a.name == "decided" && a.terms.len() == 2 {
+            if let Term::Ctor(c, _, sp) = &a.terms[1] {
+                out.push((c, &a.terms[0], *sp));
+            }
+        }
+    }
+    fn lit<'a>(l: &'a Literal, out: &mut Vec<(&'a str, &'a Term, Span)>) {
+        match l {
+            Literal::Atom(a) | Literal::Neg(a) | Literal::Top { atom: a, .. } | Literal::Resample { inner: a, .. } => atom(a, out),
+            Literal::Agg { conj, .. } => conj.iter().for_each(|l| lit(l, out)),
+            Literal::Builtin(..) | Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => {}
+        }
+    }
+    let mut out = Vec::new();
+    body.iter().for_each(|l| lit(l, &mut out));
+    out
+}
+
 pub fn rule_label(rules: &[Rule], i: usize) -> String {
     let r = &rules[i];
     let k = rules[..i].iter().filter(|o| o.unit == r.unit && o.head.name == r.head.name).count() + 1;
@@ -232,11 +282,19 @@ pub fn rule_label(rules: &[Rule], i: usize) -> String {
 /// Check every strategy and library in the workspace.
 pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    // A name declared twice is checked once; the clash itself is reported by
+    // that check (adv-02).
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for s in ws.strategies() {
-        out.extend(check_program(ws, &s.name).1);
+        if seen.insert(&s.name) {
+            out.extend(check_program(ws, &s.name).1);
+        }
     }
+    seen.clear();
     for l in ws.libraries() {
-        out.extend(check_library(ws, &l.name));
+        if seen.insert(&l.name) {
+            out.extend(check_library(ws, &l.name));
+        }
     }
     out
 }
@@ -289,6 +347,9 @@ pub(crate) struct Checker<'a> {
     pub env_name: String,
     /// Unit resolutions by unit name.
     pub unit_res: HashMap<String, Resolution>,
+    /// Relations declared with a reserved name (reported once at the
+    /// declaration; rules mentioning them are not judged).
+    pub reserved_declared: HashSet<String>,
     scc_order: Option<Sccs>,
     complete_set: BTreeSet<String>,
 }
@@ -308,13 +369,14 @@ impl<'a> Checker<'a> {
             mode: None,
             env_name: String::new(),
             unit_res: HashMap::new(),
+            reserved_declared: HashSet::new(),
             scc_order: None,
             complete_set: BTreeSet::new(),
         }
     }
 
     pub fn diag(&mut self, code: Code, unit: &str, rule: Option<String>, span: Span, message: impl Into<String>) {
-        let severity = if matches!(code, Code::W1 | Code::W2) { Severity::Warning } else { Severity::Error };
+        let severity = if matches!(code, Code::W1 | Code::W2 | Code::W3) { Severity::Warning } else { Severity::Error };
         self.diags.push(Diagnostic {
             code,
             severity,
@@ -330,6 +392,8 @@ impl<'a> Checker<'a> {
     fn resolve(&mut self) {
         let root = self.root;
         let root_name = root.name.clone();
+        self.unique_in_workspace(root.kind, &root.name, &root_name, None);
+        self.redeclarations(root);
         match root.resolution {
             Some((r, _)) => self.resolution = r,
             None => self.diag(
@@ -350,9 +414,10 @@ impl<'a> Checker<'a> {
         match &root.env {
             Some((e, sp)) => match self.ws.find(UnitKind::Environment, e) {
                 Some(env) => {
+                    self.unique_in_workspace(UnitKind::Environment, e, &root_name, Some(*sp));
                     self.env_name = env.name.clone();
                     for sig in &env.rels {
-                        self.declare(sig.clone(), &root_name);
+                        self.declare_named(sig.clone(), &root_name);
                     }
                 }
                 None => self.diag(Code::U, &root_name, None, *sp, format!("environment `{}` is not in the workspace", e)),
@@ -372,6 +437,7 @@ impl<'a> Checker<'a> {
                         self.diag(Code::U, &root_name, None, *sp, format!("library `{}` is used twice", l));
                         continue;
                     }
+                    self.unique_in_workspace(UnitKind::Library, l, &root_name, Some(*sp));
                     units.push(lib);
                 }
                 None => self.diag(Code::U, &root_name, None, *sp, format!("library `{}` is not in the workspace", l)),
@@ -389,6 +455,9 @@ impl<'a> Checker<'a> {
                 }
             };
             self.unit_res.insert(u.name.clone(), ures);
+            if u.name != root.name {
+                self.redeclarations(u);
+            }
             if let Some((e, sp)) = &u.env {
                 if u.kind == UnitKind::Library && *e != self.env_name && self.ws.find(UnitKind::Environment, e).is_none() {
                     self.diag(Code::U, &u.name, None, *sp, format!("environment `{}` is not in the workspace", e));
@@ -399,7 +468,7 @@ impl<'a> Checker<'a> {
                 if sig.res.is_none() {
                     sig.res = Some(ures);
                 }
-                self.declare(sig, &u.name);
+                self.declare_named(sig, &u.name);
             }
             let mut pm = BTreeMap::new();
             for p in &u.params {
@@ -418,6 +487,22 @@ impl<'a> Checker<'a> {
                 if let Some((lo, hi)) = &p.range {
                     if !types::compat(&p.ty, &lo.ty()) || !types::compat(&p.ty, &hi.ty()) {
                         self.diag(Code::T, &u.name, None, p.span, format!("range of parameter `{}` must be {}", p.name, p.ty));
+                    } else if lit_order(lo, hi) == Some(std::cmp::Ordering::Greater) {
+                        self.diag(
+                            Code::T,
+                            &u.name,
+                            None,
+                            p.span,
+                            format!("range of parameter `{}` is inverted: `{}..{}` has its lower bound above its upper bound", p.name, lo, hi),
+                        );
+                    } else if lit_order(lo, &p.value) == Some(std::cmp::Ordering::Greater) || lit_order(&p.value, hi) == Some(std::cmp::Ordering::Greater) {
+                        self.diag(
+                            Code::T,
+                            &u.name,
+                            None,
+                            p.span,
+                            format!("default of parameter `{}` is `{}`, outside its declared range `{}..{}`", p.name, p.value, lo, hi),
+                        );
                     }
                 }
                 pm.insert(p.name.clone(), p.clone());
@@ -428,6 +513,72 @@ impl<'a> Checker<'a> {
             }
         }
         self.units = units;
+    }
+
+    /// A header line (`env`, `resolution`, `mode`) written twice in one unit
+    /// (adv-01): the first stays in effect, every later one is an error of
+    /// the judgment that owns the declaration (U, X, C).
+    fn redeclarations(&mut self, u: &Unit) {
+        for (what, sp) in &u.redeclared {
+            let (code, first) = match what.as_str() {
+                "mode" => (Code::C, u.mode.map(|(m, s)| format!("`mode {}` at {}", m, s))),
+                "resolution" => (Code::X, u.resolution.map(|(r, s)| format!("`resolution {}` at {}", r, s))),
+                _ => (Code::U, u.env.as_ref().map(|(e, s)| format!("`env {}` at {}", e, s))),
+            };
+            self.diag(
+                code,
+                &u.name,
+                None,
+                *sp,
+                format!(
+                    "`{}` is declared twice in {} `{}`; {} stays in effect, remove this line",
+                    what,
+                    u.kind,
+                    u.name,
+                    first.unwrap_or_default()
+                ),
+            );
+        }
+    }
+
+    /// Two units with one (kind, name) in the workspace (adv-02): a U error
+    /// naming every declaration, reported at `span` or, for the root unit
+    /// itself, at its last declaration.
+    fn unique_in_workspace(&mut self, kind: UnitKind, name: &str, reporting_unit: &str, span: Option<Span>) {
+        let spans: Vec<Span> = self.ws.units.iter().filter(|u| u.kind == kind && u.name == name).map(|u| u.span).collect();
+        if spans.len() < 2 {
+            return;
+        }
+        let at: Vec<String> = spans.iter().map(|s| s.to_string()).collect();
+        let span = span.unwrap_or(*spans.last().unwrap());
+        self.diag(
+            Code::U,
+            reporting_unit,
+            None,
+            span,
+            format!("{} `{}` is declared twice in the workspace (at {}); rename or remove one", kind, name, at.join(" and ")),
+        );
+    }
+
+    /// Declare a user-named relation (a primitive or a `rel`): a reserved
+    /// name is a U error (adv-16) and the relation is not declared.
+    fn declare_named(&mut self, sig: Signature, reporting_unit: &str) {
+        if is_reserved(&sig.name) {
+            let unit = match &sig.kind {
+                Kind::Derived { unit } => unit.clone(),
+                _ => reporting_unit.to_string(),
+            };
+            self.diag(
+                Code::U,
+                &unit,
+                None,
+                sig.span,
+                format!("`{}` is a builtin or keyword and cannot be declared as a relation; choose another name", sig.name),
+            );
+            self.reserved_declared.insert(sig.name);
+            return;
+        }
+        self.declare(sig, reporting_unit);
     }
 
     fn declare(&mut self, sig: Signature, reporting_unit: &str) {
@@ -569,10 +720,55 @@ impl<'a> Checker<'a> {
             }
             let decls: Vec<Signature> = self.root.rels.clone();
             for sig in decls {
-                if !reach.contains(&sig.name) {
+                if !reach.contains(&sig.name) && !self.reserved_declared.contains(&sig.name) {
                     self.diag(Code::W1, &root_name, None, sig.span, format!("derived relation `{}` is not reached by any decide rule", sig.name));
                 }
             }
+            // WF-9 (C): a library has no mode, so a `decided` pattern written
+            // in one is judged by each strategy that reaches the rule, against
+            // that strategy's mode; the strategy's own patterns are judged in
+            // `rule::analyze` (adv-18).
+            if let Some(mode) = self.mode {
+                let rules = self.rules.clone();
+                for (i, r) in rules.iter().enumerate() {
+                    if r.unit == root_name || !reach.contains(&r.head.name) {
+                        continue;
+                    }
+                    for (c, t, sp) in decided_patterns(&r.body) {
+                        if let Some(m) = ctor_mode(c).filter(|m| *m != mode) {
+                            let label = rule_label(&rules, i);
+                            self.diag(
+                                Code::C,
+                                &r.unit,
+                                Some(label),
+                                sp,
+                                format!(
+                                    "`{}` is a {} constructor but strategy `{}`, which reaches this rule, declares `mode {}`; `decided` holds only that strategy's own decisions, so `decided({}, {}(...))` can never match there",
+                                    c, m, root_name, mode, t, c
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // W3: a declared relation that no rule defines is empty for ever, so
+        // every rule reading it positively can never fire (adv-12).
+        let decls: Vec<Signature> = self.root.rels.clone();
+        for sig in decls {
+            if self.reserved_declared.contains(&sig.name) || self.rules.iter().any(|r| r.head.name == sig.name) {
+                continue;
+            }
+            self.diag(
+                Code::W3,
+                &root_name,
+                None,
+                sig.span,
+                format!(
+                    "derived relation `{}` is declared but no rule defines it; it is always empty, so every rule reading it positively can never fire",
+                    sig.name
+                ),
+            );
         }
         // W2: unused parameters.
         let mut used: HashSet<(String, String)> = HashSet::new();

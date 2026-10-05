@@ -99,7 +99,9 @@ a non-empty group.
 `prev`, `lag`, `window`, `prior_window`. Timestamp − Timestamp is not an
 expression in v1; a bar distance is obtained with `lag`. Timestamp-typed
 arguments of a relation other than its temporal key (section 3) are ordinary
-values and can be compared freely.
+values and can be compared freely; a bound time is carried into such a column
+by assignment (`TE = T`), which copies the value and none of its causal
+provenance.
 
 **What this buys.** The validity of an operation is decided by arithmetic on
 exponents, so the type checker has no table of allowed pairs to maintain, and
@@ -157,8 +159,10 @@ define it.
 
 **Parameters.** A `param` is a named constant with a type and an optional range
 (`param n : Duration = 20d in 5d..250d`). Within rules it behaves as a bound
-value of that type. Parameters are the only values the kernel may vary between
-runs of the same program.
+value of that type. The range is ordered and contains the default (a default
+outside it is a type error, WF-3; a calendar duration has no single length in
+days, so `1mo` lies within `31d..60d` and outside `32d..60d`). Parameters are
+the only values the kernel may vary between runs of the same program.
 
 **Identity columns.** For reductions (WF-7) the checker needs to know which
 arguments identify a tuple. v1 rule: the identity of a tuple is its
@@ -210,7 +214,10 @@ they are deterministic; the other aggregates are as in section 2. A group with
 fewer than K tuples yields no bucket. The result's temporal key is the bucket
 label, available at the bucket's close, so a resampled tuple depends only on
 fine tuples at or before it and WF-6 holds by construction. R may be a
-primitive or a derived relation. Standard bars are one rule each:
+primitive or a derived relation; a stored R is grouped by every entity
+variable left fresh in its atom, whatever that argument's mode, while a
+derived R is a call whose `+` inputs must be bound before the form (WF-2).
+Standard bars are one rule each:
 
 ```
 open_d(A, T, O)   :- resample(close_m(A, T1, P) to @1d as T, min 300, O = first(P)).
@@ -340,7 +347,12 @@ Temporal recursion through positive atoms is allowed by WF-4; recursion
 through `not` or through an aggregate is not.
 
 **WF-9 Decisions.** A strategy declares exactly one decision mode and every
-decide rule uses constructors of that mode; the head of a decide rule has the
+decide rule uses constructors of that mode, as does every `decided` pattern
+written in the strategy (`decided` holds only the strategy's own decisions,
+so a pattern with the other mode's constructor could never match; a library
+has no mode and its patterns are judged by the strategies whose decide rules
+reach them, each reporting at the library's rule);
+the head of a decide rule has the
 form `decide(T, D)` with T a variable that is the temporal key of at least one
 positive body atom; a strategy with no decide rule is rejected; and a decide
 rule may not refer to `decided(T, ·)` at its own T (this is WF-6's strictness,
@@ -359,7 +371,9 @@ only through resample; there is no implicit alignment and no coarse-to-fine
 direction in v1.
 
 **Warnings, not errors.** A derived relation that no decide rule reaches is
-reported as dead. A parameter never used is reported. Neither affects validity.
+reported as dead. A parameter never used is reported. A declared relation
+that no rule defines is reported: it is always empty, so every rule reading
+it positively can never fire. None of these affects validity.
 
 ## 6. Environment interface and kernel loop
 
@@ -550,6 +564,7 @@ produce), and `corpus/strategies/` must check clean.
 | WF-10 Resolution | X | body atoms share the head's resolution; resample strictly finer to coarser, aligned, with `min K` | `bad_resolution_mix` |
 | Dead rules | W1 | derived relation not reached from decide | (warning) |
 | Unused parameter | W2 | parameter not referenced | (warning) |
+| Undefined relation | W3 | declared relation with no defining rule | (warning) |
 
 The six negative cases the first draft asked for before the typed checker was
 built (an unbound head variable, an unbound `+` argument, a Price + Scalar

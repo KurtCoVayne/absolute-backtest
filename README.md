@@ -35,7 +35,7 @@ resampled bucket.
 | `corpus/env` | Three environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`. |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d). |
 | `corpus/strategies` | 17 strategies that must check clean, including `opening_gap` at @1m and `resampled_momentum` over @1m data at @1d. |
-| `corpus/negative` | 18 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
+| `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
 | `tests/data.rs`, `tests/cli.rs` | The CSV loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
@@ -88,7 +88,9 @@ strategy sma_crossover {
   `.5` and `+0.5` are not numbers. Durations are whole numbers of `d`, `w`,
   `mo` or `y`.
 - Body literals, in the order written: positive atom, `not` atom, comparison,
-  `X = expr`, `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
+  `X = expr` (including `TE = T`, which copies a bound time into a value
+  column such as an entry date; the copy is a value, not a temporal key),
+  `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
   `resample(R(...) to @1d as T, min K, X = last(P))`, and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
   plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
@@ -110,19 +112,19 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 
 | Code | Judgment | What the rule checks |
 | --- | --- | --- |
-| U | name resolution | relation or parameter declared in the strategy, a used library, or the environment; heads define relations declared in their own unit |
+| U | name resolution | relation or parameter declared in the strategy, a used library, or the environment; heads define relations declared in their own unit; one unit per (kind, name) in the workspace; `env` declared once; no builtin or keyword as a relation name |
 | E | environment | the primitive belongs to the declared environment, not another one |
 | B | WF-1 | every head, negated, compared or assigned variable is bound, left to right |
-| M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions |
-| T | WF-3 | dimensions balance; terms match signatures; constructors typed |
+| M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions; inside a resample, a fresh entity variable in a `+` position of a stored relation is bound by the grouping |
+| T | WF-3 | dimensions balance; terms match signatures; constructors typed; a parameter's default lies within its ordered range |
 | R | WF-4 | every positive cycle steps strictly back in time through `prev` or `lag` |
 | N | WF-5 | `not R` only when R is complete; completeness propagates; reductions close |
 | F | WF-6 | every temporal key is T or derived from T by a causal builtin; `decided` strictly earlier |
 | D | WF-7 | `top` has `by`; the keys cover every identity column; the key is bound; no `first`/`last` outside resample |
 | S | WF-8 | no cycle through `not` or an aggregate |
-| Z, C | WF-9 | at least one decide; one mode; constructors of that mode; decide's T is a positive atom's key |
-| X | WF-10 | body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
-| W1, W2 | warnings | dead derived relation; unused parameter |
+| Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode, in decide heads and in `decided` patterns; decide's T is a positive atom's key |
+| X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K` |
+| W1, W2, W3 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty) |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
 first error reported is the earliest offending relation.
@@ -264,6 +266,20 @@ small and easy to flip.
   (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
   there is no Duration-to-Count conversion.
 - **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
+- **A resample groups a stored inner relation by every fresh entity
+  variable**, including one in a `+` position (`resample(close_m(A, T1, P)
+  to @5m as T, ...)` with `A` fresh yields one bucket per symbol), because
+  section 4 says the form binds R's entity variables by grouping and a stored
+  relation can be enumerated. A derived inner relation is a call: its `+`
+  inputs must be bound before the resample (M), or it is declared with `-A`.
+- **A duration parameter's range is judged under every calendar length**:
+  a month is 28 to 31 days and a year 365 or 366, so `1mo in 31d..60d` is
+  accepted and `1mo in 32d..60d` is a T error; the kernel still orders
+  durations by their mean length.
+- **`X = T` copies a bound Timestamp** into a value column (the "held since"
+  idiom, `entry(A, T, E, TE) :- fill(A, T, Q, P), ..., TE = T`); the copy
+  carries no causal provenance, so it compares freely but cannot serve as a
+  body atom's temporal key.
 - **`min K` removes a bar from a relation, not from the time domain.** The
   @1d domain over minute data is every day with at least one minute bar
   (section 6), so a half-day with fewer than the bars library's 300 bars
@@ -280,7 +296,7 @@ small and easy to flip.
 ## Development
 
 ```
-cargo test            # type algebra, time, corpus, kernel, syntax, CSV loader, command line
+cargo test            # type algebra, time, corpus, checker, kernel, syntax, CSV loader, command line
 cargo build --release
 ```
 
