@@ -105,6 +105,9 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
                     .ok_or_else(|| format!("{}: header lacks column `{}`", path.display(), a.name))
             })
             .collect::<Result<_, _>>()?;
+        // An optional `available_at` column (data-bundle doc, section 2): when
+        // the tuple could be acted on, at or after its own bar's close.
+        let avail_col = header.iter().position(|h| h == "available_at");
         let key_pos = sig.key_pos();
         // Inputs, the key and entity-typed outputs identify a row (section 3:
         // `universe(-A, @T)` enumerates A); the value outputs are a function of them.
@@ -140,6 +143,17 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
             }
             rows += 1;
             let id: Vec<Value> = identity.iter().map(|&i| tuple[i].clone()).collect();
+            let avail = match avail_col {
+                Some(c) => {
+                    let raw = fields.get(c).copied().unwrap_or("");
+                    if raw.is_empty() {
+                        None
+                    } else {
+                        Some(parse_timestamp(raw).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp (available_at)", path.display(), lineno, raw))?)
+                    }
+                }
+                None => None,
+            };
             match seen.get(&id) {
                 Some((_, prev)) if *prev == tuple => continue,
                 Some((first, _)) => {
@@ -155,7 +169,10 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
                 }
                 None => {
                     seen.insert(id, (lineno, tuple.clone()));
-                    ds.add(name, tuple);
+                    match avail {
+                        Some(a) => ds.add_available(name, tuple, a),
+                        None => ds.add(name, tuple),
+                    }
                 }
             }
         }
@@ -258,10 +275,17 @@ pub fn write_csv_dir(prog: &Program, ds: &Dataset, dir: &Path) -> Result<(), Str
             continue;
         }
         let mut out = String::new();
+        let avails = ds.availability_of(name);
         out.push_str(&sig.args.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(","));
+        if avails.is_some() {
+            out.push_str(",available_at");
+        }
         out.push('\n');
-        for tu in tuples {
-            let fields: Vec<String> = tu.iter().map(|v| field(ds, v)).collect();
+        for (i, tu) in tuples.iter().enumerate() {
+            let mut fields: Vec<String> = tu.iter().map(|v| field(ds, v)).collect();
+            if let Some(a) = avails {
+                fields.push(a.get(i).filter(|x| **x != i64::MIN).map(|x| format_timestamp(*x)).unwrap_or_default());
+            }
             out.push_str(&fields.join(","));
             out.push('\n');
         }
