@@ -3,6 +3,7 @@
 //!   abt check <files...>
 //!   abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
 //!           [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--param NAME=VALUE]...
+//!           [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]
 //!           [--verify-causality] [--all] [--fills] [--quiet] <files...>
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]...
 //!           (--data DIR | --synthetic ...) [--price-relation REL] <files...>
@@ -22,7 +23,7 @@ use std::str::FromStr;
 use absolute_backtest::check::{check_program, check_workspace, Severity, Workspace};
 use absolute_backtest::data;
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{ExecConfig, Kernel, RunError, Value};
+use absolute_backtest::kernel::{ExecConfig, Kernel, Lot, OnLeverage, OnOversize, OnRuin, RunError, Value};
 
 struct Args {
     cmd: String,
@@ -36,8 +37,12 @@ struct Args {
 const FLAGS: [&str; 5] = ["synthetic", "verify-causality", "quiet", "all", "fills"];
 /// Options that may repeat.
 const MULTI: [&str; 2] = ["bind", "param"];
-const OPTIONS: [&str; 16] = [
+const OPTIONS: [&str; 20] = [
     "strategy",
+    "on-leverage",
+    "on-oversize",
+    "on-ruin",
+    "lot",
     "inputs",
     "bind",
     "param",
@@ -94,7 +99,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--param NAME=VALUE]... [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--commission X] [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional"
     );
     exit(code)
 }
@@ -220,6 +225,10 @@ fn main() {
                 slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", 0.0),
                 commission_per_share: option(&args.opts, "commission", "an amount per share", 0.0),
                 price_relation: args.opts.get("price-relation").cloned(),
+                on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", OnLeverage::Halt),
+                on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
+                on_ruin: option(&args.opts, "on-ruin", "one of halt, continue", OnRuin::Halt),
+                lot: option(&args.opts, "lot", "one of whole, fractional", Lot::Whole),
                 param_overrides: args
                     .multi
                     .get("param")
@@ -351,7 +360,14 @@ fn main() {
                 }
                 if args.flags.contains("fills") {
                     for f in &result.fills {
-                        println!("  fill {} {} {:+} @ {:.4}", format_timestamp(f.t), result.symbols[f.equity as usize], f.quantity, f.price);
+                        println!(
+                            "  fill {} {} {:+} @ {:.4}{}",
+                            format_timestamp(f.t),
+                            result.symbols[f.equity as usize],
+                            f.quantity,
+                            f.price,
+                            if f.at_last_price { " (last price)" } else { "" }
+                        );
                     }
                 }
                 for (t, d, reason) in &result.dropped {

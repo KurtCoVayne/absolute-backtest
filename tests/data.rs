@@ -151,8 +151,11 @@ fn a_header_only_file_is_noted() {
 #[test]
 fn a_non_positive_price_is_rejected_at_load() {
     let prog = program();
-    let dir = csv_dir("negprice", &[("close", "A,T,P\nAAA,2022-01-03,10.0\nAAA,2022-01-04,-5.0\n"), ("universe", "A,T\nAAA,2022-01-03\nAAA,2022-01-04\n")]);
-    let err = load_csv_dir(&prog, &dir).err().expect("a non-positive price must not load");
+    let dir = csv_dir(
+        "negprice",
+        &[("close", "A,T,P\nAAA,2022-01-03,10.0\nAAA,2022-01-04,-5.0\n"), ("universe", "A,T\nAAA,2022-01-03\nAAA,2022-01-04\n")],
+    );
+    let err = load_csv_dir(&prog, &dir).expect_err("a non-positive price must not load");
     assert!(err.contains("close.csv:3") && err.contains("-5"), "{}", err);
     let dir = csv_dir("zeroprice", &[("close", "A,T,P\nAAA,2022-01-03,0\n"), ("universe", "A,T\nAAA,2022-01-03\n")]);
     assert!(load_csv_dir(&prog, &dir).is_err());

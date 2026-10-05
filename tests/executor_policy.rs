@@ -39,7 +39,10 @@ fn market(prices: &[Option<f64>]) -> Dataset {
 }
 
 fn cfg(cash: f64) -> ExecConfig {
-    ExecConfig { initial_cash: cash, ..Default::default() }
+    ExecConfig {
+        initial_cash: cash,
+        ..Default::default()
+    }
 }
 
 fn risk_message(r: Result<absolute_backtest::kernel::RunResult, RunError>) -> String {
@@ -121,11 +124,27 @@ fn a_sell_beyond_the_position_halts_by_default() {
 fn a_sell_beyond_the_position_is_clamped_or_allowed_on_request() {
     let prog = program(OVERSELL, "oversell");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
-    let r = run(&prog, &ds, ExecConfig { on_oversize: OnOversize::Clamp, ..cfg(10_000.0) }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_oversize: OnOversize::Clamp,
+            ..cfg(10_000.0)
+        },
+    )
+    .unwrap();
     let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
     assert_eq!(qty[..2], [100.0, -100.0], "{:?}", qty);
     assert!(r.dropped.iter().any(|(_, _, why)| why.contains("clamped") && why.contains("50")), "{:?}", r.dropped);
-    let r = run(&prog, &ds, ExecConfig { on_oversize: OnOversize::Allow, ..cfg(10_000.0) }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_oversize: OnOversize::Allow,
+            ..cfg(10_000.0)
+        },
+    )
+    .unwrap();
     assert_eq!(r.fills.iter().map(|f| f.quantity).collect::<Vec<_>>()[..2], [100.0, -150.0]);
     assert_eq!(r.final_positions.values().copied().next(), Some(-50.0));
 }
@@ -155,11 +174,27 @@ fn borrowing_to_buy_halts_by_default() {
 fn borrowing_is_rejected_or_allowed_on_request() {
     let prog = program(LEVERED, "levered");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
-    let r = run(&prog, &ds, ExecConfig { on_leverage: OnLeverage::Reject, ..cfg(1000.0) }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_leverage: OnLeverage::Reject,
+            ..cfg(1000.0)
+        },
+    )
+    .unwrap();
     assert!(r.fills.is_empty(), "{:?}", r.fills);
-    assert!(r.dropped.iter().all(|(_, _, why)| why.contains("equity")), "{:?}", r.dropped);
+    assert!(r.dropped.iter().filter(|(_, _, why)| why != "no next bar").all(|(_, _, why)| why.contains("equity")), "{:?}", r.dropped);
     assert_eq!(r.final_cash, 1000.0);
-    let r = run(&prog, &ds, ExecConfig { on_leverage: OnLeverage::Allow, ..cfg(1000.0) }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_leverage: OnLeverage::Allow,
+            ..cfg(1000.0)
+        },
+    )
+    .unwrap();
     assert_eq!(r.fills[0].quantity, 240.0);
     assert_eq!(r.final_cash, 1000.0 - 2400.0);
 }
@@ -197,7 +232,9 @@ strategy ruined {
   param q : Quantity<Shares> = -100 shares
   param w : Scalar = 0.5
   param trigger : Price<USD> = 20 USD/share
-  decide(T, target_quantity(A, q)) :- universe(A, T), flat(A, T).
+  rel has_prev(@T: Timestamp)
+  has_prev(T) :- bar(T), prev(T, _).
+  decide(T, target_quantity(A, q)) :- universe(A, T), not has_prev(T).
   decide(T, target_weight(A, w)) :- position(A, T, Q), Q < 0 shares, close(A, T, P), P > trigger.
 }
 "#;
@@ -210,7 +247,15 @@ fn a_ruined_book_halts_by_default_and_targets_flat_on_request() {
     let ds = market(&[Some(10.0), Some(10.0), Some(30.0), Some(30.0), Some(30.0)]);
     let m = risk_message(run(&prog, &ds, cfg(1000.0)));
     assert!(m.contains("ruin") || m.contains("equity"), "{}", m);
-    let r = run(&prog, &ds, ExecConfig { on_ruin: OnRuin::Continue, ..cfg(1000.0) }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            on_ruin: OnRuin::Continue,
+            ..cfg(1000.0)
+        },
+    )
+    .unwrap();
     // A positive weight of a non-positive equity targets flat: the short is covered.
     let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
     assert_eq!(qty, vec![-100.0, 100.0], "{:?}", r.fills);
@@ -244,5 +289,9 @@ fn a_liquidation_without_a_bar_price_fills_at_the_last_price() {
     let fills: Vec<(String, f64, f64, bool)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity, f.price, f.at_last_price)).collect();
     assert_eq!(fills, vec![("2024-01-09".to_string(), 10.0, 12.0, false), ("2024-01-10".to_string(), -10.0, 12.0, true)]);
     assert!(r.final_positions.is_empty());
-    assert!(r.dropped.iter().any(|(t, d, why)| format_timestamp(*t) == "2024-01-10" && d.amount == 10.0 && why.contains("no price")), "{:?}", r.dropped);
+    assert!(
+        r.dropped.iter().any(|(t, d, why)| format_timestamp(*t) == "2024-01-10" && d.amount == 10.0 && why.contains("no price")),
+        "{:?}",
+        r.dropped
+    );
 }

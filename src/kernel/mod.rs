@@ -61,6 +61,101 @@ impl Dataset {
     }
 }
 
+/// What the executor does when a fill would borrow: cash would go negative,
+/// or gross exposure (Σ |position| × price) would exceed equity (section 6,
+/// executor policy). Orders that reduce exposure are never leverage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OnLeverage {
+    /// Halt the run naming the bar, the decision and its rule.
+    #[default]
+    Halt,
+    /// Drop the order with a reason and continue.
+    Reject,
+    /// Fill it; cash may go negative.
+    Allow,
+}
+
+/// What the executor does with a `sell` larger than the long position or a
+/// `cover` larger than the short (an order that would cross zero).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OnOversize {
+    #[default]
+    Halt,
+    /// Fill up to the position and drop the remainder with a reason.
+    Clamp,
+    /// Fill the signed order; the position crosses zero.
+    Allow,
+}
+
+/// What the executor does when equity at the execution bar is not positive
+/// while orders are pending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OnRuin {
+    #[default]
+    Halt,
+    /// Continue: `target_weight` sizes from an equity of zero (a positive
+    /// weight targets flat) and the other policies still apply.
+    Continue,
+}
+
+/// Rounding of every order quantity (section 6, executor policy). The
+/// type system keeps `Quantity<Shares>` real-valued; this is the one place
+/// a contract size could later apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Lot {
+    /// Truncate toward zero to whole shares; an order that rounds to zero
+    /// makes neither a fill nor a drop.
+    #[default]
+    Whole,
+    Fractional,
+}
+
+impl std::str::FromStr for OnLeverage {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "halt" => Ok(OnLeverage::Halt),
+            "reject" => Ok(OnLeverage::Reject),
+            "allow" => Ok(OnLeverage::Allow),
+            _ => Err(format!("`{}` is not one of halt, reject, allow", s)),
+        }
+    }
+}
+
+impl std::str::FromStr for OnOversize {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "halt" => Ok(OnOversize::Halt),
+            "clamp" => Ok(OnOversize::Clamp),
+            "allow" => Ok(OnOversize::Allow),
+            _ => Err(format!("`{}` is not one of halt, clamp, allow", s)),
+        }
+    }
+}
+
+impl std::str::FromStr for OnRuin {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "halt" => Ok(OnRuin::Halt),
+            "continue" => Ok(OnRuin::Continue),
+            _ => Err(format!("`{}` is not one of halt, continue", s)),
+        }
+    }
+}
+
+impl std::str::FromStr for Lot {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "whole" => Ok(Lot::Whole),
+            "fractional" => Ok(Lot::Fractional),
+            _ => Err(format!("`{}` is not one of whole, fractional", s)),
+        }
+    }
+}
+
 /// Executor configuration: part of the kernel, not of the program (section 6).
 #[derive(Clone, Debug)]
 pub struct ExecConfig {
@@ -76,6 +171,13 @@ pub struct ExecConfig {
     /// is `param` in the strategy or `unit::param`; each value must be of
     /// the parameter's type and within its declared range.
     pub param_overrides: Vec<(String, Lit)>,
+    /// Policies for degenerate book states (section 6, executor policy);
+    /// every default halts.
+    pub on_leverage: OnLeverage,
+    pub on_oversize: OnOversize,
+    pub on_ruin: OnRuin,
+    /// Rounding of order quantities; whole shares by default.
+    pub lot: Lot,
 }
 
 impl Default for ExecConfig {
@@ -86,6 +188,10 @@ impl Default for ExecConfig {
             commission_per_share: 0.0,
             price_relation: None,
             param_overrides: Vec::new(),
+            on_leverage: OnLeverage::Halt,
+            on_oversize: OnOversize::Halt,
+            on_ruin: OnRuin::Halt,
+            lot: Lot::Whole,
         }
     }
 }
@@ -128,6 +234,14 @@ pub enum RunError {
     Request(String),
     /// An executor configuration the program cannot honour.
     Config(String),
+    /// A degenerate book state that the configured policy halts on
+    /// (section 6, executor policy): ruin, leverage, or an oversize order.
+    Risk {
+        t: i64,
+        rule: String,
+        decision: String,
+        message: String,
+    },
     Internal(String),
 }
 
@@ -157,6 +271,7 @@ impl std::fmt::Display for RunError {
             }
             RunError::Request(m) => write!(f, "{}", m),
             RunError::Config(m) => write!(f, "configuration error: {}", m),
+            RunError::Risk { t, rule, decision, message } => write!(f, "risk policy halted the run at {}: {} (rule {}): {}", time::format_timestamp(*t), decision, rule, message),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
         }
     }
@@ -175,6 +290,9 @@ pub struct FillRecord {
     pub equity: Sym,
     pub quantity: f64,
     pub price: f64,
+    /// The bar had no price for the instrument and the order reduced the
+    /// position, so it filled at the last known price (section 6).
+    pub at_last_price: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -551,49 +669,175 @@ impl<'p> Kernel<'p> {
             }
             // Executor: fills at the next bar (section 6, execution contract).
             if let Some(&tn) = bars.get(k + 1) {
+                // Mark the book at the execution bar.
                 let mut equity_next = cash;
                 for (&sym, &q) in &positions {
                     if let Some(p) = self.price_at(sym, tn) {
                         equity_next += q * p;
                     }
                 }
-                for ds in by_equity.values() {
-                    for (d, _) in ds {
-                        let sym = d.equity;
-                        let Some(p) = self.bar_price(sym, tn) else {
-                            result
-                                .dropped
-                                .push((t, d.clone(), format!("no price for {} at {}", self.symbols.name(sym), time::format_timestamp(tn))));
-                            continue;
-                        };
-                        let pos = positions.get(&sym).copied().unwrap_or(0.0);
-                        let qty = match d.ctor {
-                            Ctor::Buy | Ctor::Cover => d.amount,
-                            Ctor::Sell | Ctor::Short => -d.amount,
-                            Ctor::TargetQuantity => d.amount - pos,
-                            Ctor::TargetWeight => (d.amount * equity_next / p).trunc() - pos,
-                        };
-                        if qty == 0.0 {
-                            continue;
-                        }
-                        let slip = self.cfg.slippage_bps / 10_000.0;
-                        let fill_price = if qty > 0.0 { p * (1.0 + slip) } else { p * (1.0 - slip) };
-                        cash -= qty * fill_price + self.cfg.commission_per_share * qty.abs();
-                        let new_pos = pos + qty;
-                        if new_pos.abs() < 1e-9 {
-                            positions.remove(&sym);
-                        } else {
-                            positions.insert(sym, new_pos);
-                        }
-                        self.last_price.insert(sym, fill_price);
-                        self.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
-                        result.fills.push(FillRecord {
-                            t: tn,
-                            equity: sym,
-                            quantity: qty,
-                            price: fill_price,
-                        });
+                // Orders that reduce a position fund the ones that open or add,
+                // so within a bar they fill first (symbol order within each group).
+                let mut pending: Vec<(Decision, usize)> = by_equity.values().flatten().cloned().collect();
+                let mut marks: HashMap<Sym, f64> = HashMap::new();
+                for (d, _) in &pending {
+                    if let Some(p) = self.price_at(d.equity, tn) {
+                        marks.insert(d.equity, p);
                     }
+                }
+                let reducing = |d: &Decision| -> bool {
+                    let pos = positions.get(&d.equity).copied().unwrap_or(0.0);
+                    match d.ctor {
+                        Ctor::Sell | Ctor::Cover => pos != 0.0,
+                        Ctor::Buy | Ctor::Short => false,
+                        Ctor::TargetQuantity => pos != 0.0 && d.amount.abs() < pos.abs() && d.amount * pos >= 0.0,
+                        Ctor::TargetWeight => {
+                            pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * equity_next.max(0.0) < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0))
+                        }
+                    }
+                };
+                pending.sort_by_key(|(d, _)| !reducing(d));
+                // Ruin: a book without positive equity cannot size or fund an order.
+                if !pending.is_empty() && equity_next <= 0.0 && self.cfg.on_ruin == OnRuin::Halt {
+                    let (d, rule) = &pending[0];
+                    return Err(RunError::Risk {
+                        t,
+                        rule: self.prog.rule_label(*rule),
+                        decision: result.describe_decision(d),
+                        message: format!("ruin: equity at {} is {:.2}, not positive, with orders pending", time::format_timestamp(tn), equity_next),
+                    });
+                }
+                let sizing_equity = equity_next.max(0.0);
+                let slip = self.cfg.slippage_bps / 10_000.0;
+                for (d, rule) in &pending {
+                    let sym = d.equity;
+                    let name = self.symbols.name(sym).to_string();
+                    let pos = positions.get(&sym).copied().unwrap_or(0.0);
+                    let bar_price = self.bar_price(sym, tn);
+                    // Lot rounding applies to what the decision names: a delta
+                    // order's quantity, or a target's quantity (so a kept name
+                    // never ends a fraction of a share over its target).
+                    let round = |x: f64| -> f64 {
+                        match self.cfg.lot {
+                            Lot::Whole => x.trunc(),
+                            Lot::Fractional => x,
+                        }
+                    };
+                    let mut qty = match (d.ctor, bar_price) {
+                        (Ctor::Buy | Ctor::Cover, _) => round(d.amount),
+                        (Ctor::Sell | Ctor::Short, _) => -round(d.amount),
+                        (Ctor::TargetQuantity, _) => round(d.amount) - pos,
+                        (Ctor::TargetWeight, Some(p)) => round(d.amount * sizing_equity / p) - pos,
+                        // Without a price a weight cannot be sized, except the flat target.
+                        (Ctor::TargetWeight, None) if d.amount == 0.0 => -pos,
+                        (Ctor::TargetWeight, None) => {
+                            result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
+                            continue;
+                        }
+                    };
+                    if qty == 0.0 {
+                        continue;
+                    }
+                    // Oversize: a delta order that would carry the position across zero.
+                    let crosses = matches!(d.ctor, Ctor::Sell | Ctor::Cover) && pos != 0.0 && (pos + qty) * pos < 0.0;
+                    if crosses {
+                        let message = format!(
+                            "{} {} of {} shares {}: the order would cross zero",
+                            d.ctor.name(),
+                            qty.abs(),
+                            pos.abs(),
+                            if pos > 0.0 { "held" } else { "short" }
+                        );
+                        match self.cfg.on_oversize {
+                            OnOversize::Halt => {
+                                return Err(RunError::Risk {
+                                    t,
+                                    rule: self.prog.rule_label(*rule),
+                                    decision: result.describe_decision(d),
+                                    message,
+                                });
+                            }
+                            OnOversize::Clamp => {
+                                let excess = qty.abs() - pos.abs();
+                                result
+                                    .dropped
+                                    .push((t, d.clone(), format!("clamped at position: {} of {} shares filled, {} dropped", pos.abs(), qty.abs(), excess)));
+                                qty = -pos;
+                            }
+                            OnOversize::Allow => {}
+                        }
+                    }
+                    // The order shrinks the position without crossing zero: it is a
+                    // liquidation (fillable at the last price) and never leverage.
+                    let reduces = pos != 0.0 && (pos + qty) * pos >= 0.0 && (pos + qty).abs() < pos.abs();
+                    // Price: the bar's, or the last known one for a liquidation.
+                    let (p, at_last_price) = match bar_price {
+                        Some(p) => (p, false),
+                        None => match self.last_price.get(&sym).copied() {
+                            Some(p) if reduces => (p, true),
+                            _ => {
+                                result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
+                                continue;
+                            }
+                        },
+                    };
+                    let fill_price = if qty > 0.0 { p * (1.0 + slip) } else { p * (1.0 - slip) };
+                    let cost = qty * fill_price + self.cfg.commission_per_share * qty.abs();
+                    // Leverage: only an order that adds exposure can borrow.
+                    if !reduces {
+                        let new_cash = cash - cost;
+                        let mut gross = 0.0;
+                        let mut net = new_cash;
+                        for (&s2, &q2) in &positions {
+                            let q2 = if s2 == sym { q2 + qty } else { q2 };
+                            let p2 = if s2 == sym { p } else { self.price_at(s2, tn).unwrap_or(0.0) };
+                            gross += q2.abs() * p2;
+                            net += q2 * p2;
+                        }
+                        if !positions.contains_key(&sym) {
+                            gross += qty.abs() * p;
+                            net += qty * p;
+                        }
+                        let tol = 1e-9 * (1.0 + net.abs());
+                        if new_cash < -tol || gross > net + tol {
+                            let message = format!("leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2}", new_cash, gross, net);
+                            match self.cfg.on_leverage {
+                                OnLeverage::Halt => {
+                                    return Err(RunError::Risk {
+                                        t,
+                                        rule: self.prog.rule_label(*rule),
+                                        decision: result.describe_decision(d),
+                                        message,
+                                    });
+                                }
+                                OnLeverage::Reject => {
+                                    result.dropped.push((
+                                        t,
+                                        d.clone(),
+                                        format!("rejected, would exceed equity: cash {:.2}, gross {:.2} against equity {:.2}", new_cash, gross, net),
+                                    ));
+                                    continue;
+                                }
+                                OnLeverage::Allow => {}
+                            }
+                        }
+                    }
+                    cash -= cost;
+                    let new_pos = pos + qty;
+                    if new_pos.abs() < 1e-9 {
+                        positions.remove(&sym);
+                    } else {
+                        positions.insert(sym, new_pos);
+                    }
+                    self.last_price.insert(sym, fill_price);
+                    self.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
+                    result.fills.push(FillRecord {
+                        t: tn,
+                        equity: sym,
+                        quantity: qty,
+                        price: fill_price,
+                        at_last_price,
+                    });
                 }
                 for (&sym, &q) in &positions {
                     self.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);

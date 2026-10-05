@@ -858,7 +858,22 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         );
                     }
                 }
-                for pos in info.sig.identity_positions() {
+                // W4: when no identity column is fresh, the group is one tuple
+                // per identity and the reduction keeps everything (section 4).
+                let identity = info.sig.identity_positions();
+                let none_fresh = identity.iter().all(|&pos| !matches!(&atom.terms[pos], Term::Var(v, _) if info.fresh.contains(v)));
+                if none_fresh {
+                    let head = self.rule.head.name.clone();
+                    self.err(
+                        Code::W4,
+                        *span,
+                        format!(
+                            "`top` over `{}` keeps every tuple: all of its identity columns are bound by the outer rule (the head `{}` declares its entity `+`, or an earlier literal binds it), so N and `by` have no effect; declare the entity `-` in the head or bind fewer columns before the reduction",
+                            atom.name, head
+                        ),
+                    );
+                }
+                for pos in identity {
                     let arg = &info.sig.args[pos];
                     match &atom.terms[pos] {
                         Term::Var(v, _) if info.fresh.contains(v) && !key_names.contains(v) => {
