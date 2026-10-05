@@ -450,9 +450,10 @@ strategy degenerate_top {
   mode target
   rel cand(-A: Equity, @T: Timestamp, -P: Price<USD>)
   cand(A, T, P) :- universe(A, T), close(A, T, P).
+  param w : Scalar = 0.3
   rel chosen(+A: Equity, @T: Timestamp)
   chosen(A, T) :- bar(T), top(1, cand(A, T, P), by (P desc, A asc)).
-  decide(T, target_weight(A, 0.3)) :- universe(A, T), chosen(A, T).
+  decide(T, target_weight(A, w)) :- universe(A, T), chosen(A, T).
 }
 "#;
     let diags = check(src, "degenerate_top");
@@ -463,4 +464,125 @@ strategy degenerate_top {
     // The enumerable form selects one name and warns about nothing.
     let diags = check(&src.replace("rel chosen(+A", "rel chosen(-A"), "degenerate_top");
     assert!(diags.is_empty(), "{}", text(&diags));
+}
+
+// Data-bundle doc, section 9 item 3 (W5 in this repo's numbering): numeric
+// literals inside a strategy's rules are degrees of freedom the study must
+// count, so each one warns; the structural constants 0 and 1 (a flat target,
+// `W = 1 / N`, a sign test) do not.
+
+const DOF_CLEAN: &str = r#"
+strategy dof_clean {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  param lb : Duration = 20d
+  param k : Count = 10
+  rel chosen(-A: Equity, @T: Timestamp)
+  chosen(A, T) :- universe(A, T), zscore(A, T, lb, k, Z), Z > 1.
+  rel n_chosen(@T: Timestamp, -N: Count)
+  n_chosen(T, N) :- bar(T), N = count(A) over (chosen(A, T)), N > 0.
+  decide(T, target_weight(A, W)) :- chosen(A, T), n_chosen(T, N), W = 1 / N.
+  decide(T, target_weight(A, 0)) :- held(A, T, Q), Q > 0 shares, zscore(A, T, lb, k, Z), Z < 0.
+}
+"#;
+
+#[test]
+fn structural_zero_and_one_do_not_warn() {
+    let diags = check(DOF_CLEAN, "dof_clean");
+    assert!(diags.is_empty(), "{}", text(&diags));
+}
+
+#[test]
+fn a_numeric_literal_in_a_strategy_rule_warns_w5() {
+    // Four literals: a threshold, a window length, a min count and a weight.
+    let src = DOF_CLEAN.replace("zscore(A, T, lb, k, Z), Z > 1.", "zscore(A, T, 60d, 30, Z), Z > 1.5.").replace(
+        "target_weight(A, W)) :- chosen(A, T), n_chosen(T, N), W = 1 / N.",
+        "target_weight(A, 0.25)) :- chosen(A, T), n_chosen(T, N).",
+    );
+    let diags = check(&src, "dof_clean");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let w5: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W5).collect();
+    assert_eq!(w5.len(), 4, "one W5 per literal:\n{}", text(&diags));
+    let msgs: Vec<&str> = w5.iter().map(|d| d.message.as_str()).collect();
+    for lit in ["60d", "30", "1.5", "0.25"] {
+        assert!(msgs.iter().any(|m| m.contains(&format!("`{}`", lit))), "no W5 names `{}`:\n{}", lit, text(&diags));
+    }
+    assert!(w5.iter().all(|d| d.message.contains("param")), "the fix is to lift the literal into a param:\n{}", text(&diags));
+    assert!(w5.iter().all(|d| d.rule.is_some()), "W5 is reported in its rule:\n{}", text(&diags));
+    // The unused params `lb` and `k` warn W2; nothing else does.
+    assert!(diags.iter().all(|d| matches!(d.code, Code::W5 | Code::W2)), "{}", text(&diags));
+}
+
+#[test]
+fn a_library_literal_is_counted_not_warned() {
+    // `mom_candidate` in `features` hard-codes `adv(A, T, 20d, 10, D)`.
+    let src = r#"
+strategy dof_lib {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  param lookback : Duration = 1y
+  param skip : Duration = 1mo
+  param min_adv : Notional<USD> = 1_000_000 USD
+  rel cand(-A: Equity, @T: Timestamp, -M: Scalar)
+  cand(A, T, M) :- universe(A, T), mom_candidate(A, T, lookback, skip, min_adv, M).
+  decide(T, target_weight(A, 0)) :- cand(A, T, M), M < 0.
+}
+"#;
+    let diags = check(src, "dof_lib");
+    assert!(diags.is_empty(), "library literals never warn:\n{}", text(&diags));
+    let p = program(src, "dof_lib");
+    let dof = &p.degrees_of_freedom;
+    assert_eq!(dof.params, 3);
+    assert_eq!(dof.rules, 2);
+    assert!(dof.literals.is_empty(), "{:?}", dof.literals);
+    let lib: Vec<String> = dof.library_literals.iter().map(|(rule, l)| format!("{} {}", rule, l)).collect();
+    assert!(lib.iter().any(|s| s.starts_with("features::mom_candidate") && s.ends_with(" 20d")), "{:?}", lib);
+    assert!(lib.iter().any(|s| s.starts_with("features::mom_candidate") && s.ends_with(" 10")), "{:?}", lib);
+    // Only reachable library rules count: `bought_within` and `highest` are not used here.
+    assert!(lib.iter().all(|s| s.starts_with("features::mom_candidate") || s.starts_with("features::adv")), "{:?}", lib);
+}
+
+#[test]
+fn degrees_of_freedom_counts_params_literals_and_rules() {
+    let src = DOF_CLEAN.replace("Z > 1.", "Z > 1.5.");
+    let p = program(&src, "dof_clean");
+    let dof = &p.degrees_of_freedom;
+    assert_eq!(dof.params, 2);
+    assert_eq!(dof.rules, 4, "two derived rules and two decide rules");
+    assert_eq!(dof.literals.len(), 1);
+    assert_eq!(dof.literals[0].0, "dof_clean::chosen#1");
+    assert_eq!(dof.literals[0].1.to_string(), "1.5");
+    assert_eq!(dof.summary(), "degrees of freedom: 2 params, 1 literal, 4 rules (+ 0 library literals)");
+}
+
+// Data-bundle doc, section 9 item 2 (W6): a ticker literal names the security
+// that carried the ticker at the bundle date; it is a snapshot, not an identity.
+
+#[test]
+fn an_equity_literal_warns_w6_as_a_snapshot() {
+    let src = r#"
+strategy snapshot {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  param bench : Equity = "SPY"
+  rel up(@T: Timestamp)
+  up(T) :- bar(T), logret(bench, T, R), R > 0.
+  decide(T, target_weight(A, 0)) :- up(T), held(A, T, _), A = "AAA".
+}
+"#;
+    let diags = check(src, "snapshot");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let w6: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W6).collect();
+    assert_eq!(w6.len(), 2, "one for the param default, one for the in-rule literal:\n{}", text(&diags));
+    assert!(w6.iter().any(|d| d.message.contains("\"SPY\"") && d.rule.is_none() && d.span.line == 7), "{}", text(&diags));
+    assert!(w6.iter().any(|d| d.message.contains("\"AAA\"") && d.rule.as_deref() == Some("snapshot::decide#1")), "{}", text(&diags));
+    assert!(w6.iter().all(|d| d.message.contains("snapshot") && d.message.contains("ticker")), "{}", text(&diags));
+    assert!(diags.iter().all(|d| d.code == Code::W6), "nothing else warns:\n{}", text(&diags));
+    assert!(Code::W5.is_warning() && Code::W6.is_warning() && !Code::F.is_warning());
 }

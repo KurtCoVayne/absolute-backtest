@@ -237,10 +237,11 @@ strategy has_history {{
   resolution @1d
   mode delta
   param qty : Quantity<Shares> = 10 shares
+  param depth : Duration = 5d
   rel bar_before(@T: Timestamp)
   bar_before(T) :- bar(T), prev(T, {p}).
   rel deep(@T: Timestamp)
-  deep(T) :- bar(T), lag(T, 5d, {l}).
+  deep(T) :- bar(T), lag(T, depth, {l}).
   decide(T, buy(A, qty)) :- universe(A, T), bar_before(T), not deep(T), flat(A, T).
   decide(T, sell(A, Q)) :- held(A, T, Q), deep(T).
 }}

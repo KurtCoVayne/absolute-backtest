@@ -191,6 +191,16 @@ fn main() {
             }
             let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
             let warnings = diags.len() - errors;
+            // Degrees of freedom per strategy (data-bundle doc, section 6):
+            // what the study report counts, printed for every strategy that
+            // checks.
+            let mut names: Vec<&str> = ws.strategies().map(|s| s.name.as_str()).collect();
+            names.sort_unstable();
+            for name in names {
+                if let (Some(p), _) = check_program(&ws, name) {
+                    println!("{}: {}", name, p.degrees_of_freedom.summary());
+                }
+            }
             let strategies = ws.strategies().count();
             println!("{} strategies, {} libraries checked: {} error(s), {} warning(s)", strategies, ws.libraries().count(), errors, warnings);
             exit(if errors > 0 { 1 } else { 0 })

@@ -47,8 +47,12 @@ Every value is either an entity, a time, or a dimensioned quantity; a
 quantity's type is its dimension vector over three base dimensions, and the
 financial names are aliases for specific vectors.
 
-**Entity domains.** `Equity` (opaque identifiers, totally ordered by identifier
-so that tie-breaks are deterministic), `Timestamp` (the finite, totally ordered
+**Entity domains.** `Equity` (stable security identifiers assigned by the data
+bundle, surviving ticker changes and the reuse of a ticker by a later company,
+totally ordered so that tie-breaks are deterministic; a ticker is a time-keyed
+relation `ticker(A, @T, S)`, not an identity, and a ticker literal such as
+`"SPY"` names the security carrying that ticker at the bundle date the program
+is written against, which the checker warns is a snapshot: W6), `Timestamp` (the finite, totally ordered
 set of timestamps present in the data), `Duration` (calendar time in days,
 weeks, months, or years; `20d` means 20 calendar days, and a window of `20d`
 holds whichever timestamps are present inside it), `Count` (a non-negative
@@ -375,9 +379,21 @@ only through resample; there is no implicit alignment and no coarse-to-fine
 direction in v1.
 
 **Warnings, not errors.** A derived relation that no decide rule reaches is
-reported as dead. A parameter never used is reported. A declared relation
-that no rule defines is reported: it is always empty, so every rule reading
-it positively can never fire. None of these affects validity.
+reported as dead (W1). A parameter never used is reported (W2). A declared
+relation that no rule defines is reported: it is always empty, so every rule
+reading it positively can never fire (W3). A `top` whose identity columns are
+all bound by the outer rule keeps every tuple (W4). A numeric literal inside a
+strategy's own rule is a degree of freedom the study counts (data-bundle doc,
+section 6), so each one is reported with the advice to lift it into a `param`
+(W5); the structural constants 0 and 1 in any unit are exempt, and a library's
+literals are counted for the rules a strategy reaches but never warned, a
+library being a shared definition. A ticker literal is a snapshot of the
+bundle date (W6). The checker also reports the strategy's degrees of freedom:
+parameters, in-rule literals, rule count and reachable library literals. None
+of these affects validity. The study report of the data-bundle doc warns,
+never refuses, on hindsight constants and asset lists; this grammar has no
+timestamp literal and no list literal, so those two warnings have nothing to
+fire on and are not codes here.
 
 ## 6. Environment interface and kernel loop
 
@@ -582,7 +598,7 @@ produce), and `corpus/strategies/` must check clean.
 | WF-3 Types | T | dimensions balance; signatures match; constructors typed | `bad_price_plus_scalar` |
 | WF-4 Temporal recursion | R | every cycle steps strictly back in time via `prev`/`lag` | `bad_recursion_no_step` |
 | WF-5 Completeness | N | `not R` only when complete(R); completeness propagated; reductions close | `bad_negation_incomplete_primitive`, `bad_negation_incomplete_derived` |
-| WF-6 Causality | F | temporal keys bound from T through causal builtins only; `decided` strictly earlier | `bad_lookahead`, `bad_same_time_history` |
+| WF-6 Causality | F | temporal keys bound from T through causal builtins only; `decided` strictly earlier | `bad_lookahead`, `bad_same_time_history`, `bad_full_sample_aggregate` (a group's temporal key left free is a full-sample aggregate) |
 | WF-7 Determinism | D | `top` has `by`; keys cover identity columns; no `first`/`any` | `bad_nondeterministic_reduction`, `bad_unordered_top`, `bad_top_missing_identity` |
 | WF-8 Stratification | S | no cycle through `not` or an aggregate | `bad_negation_cycle` |
 | WF-9 Decisions | Z, C | at least one decide; one declared mode; constructors match mode | `bad_no_decision`, `bad_mixed_modes` |
@@ -591,6 +607,9 @@ produce), and `corpus/strategies/` must check clean.
 | Unused parameter | W2 | parameter not referenced | (warning) |
 | Undefined relation | W3 | declared relation with no defining rule | (warning) |
 | Degenerate reduction | W4 | `top` whose identity columns are all bound by the outer rule keeps every tuple | (warning) |
+| Degrees of freedom | W5 | numeric literal (not 0 or 1) inside a strategy rule; the count of params, literals and rules is reported | (warning; `# allow:` in the corpus) |
+| Ticker snapshot | W6 | an `Equity` literal names the security carrying the ticker at the bundle date | (warning; four corpus strategies allow it) |
+| Hindsight literal, asset list | (none) | the grammar has no timestamp literal and no list literal, so the data-bundle doc's two warnings on them are not applicable | (not applicable) |
 
 The six negative cases the first draft asked for before the typed checker was
 built (an unbound head variable, an unbound `+` argument, a Price + Scalar
@@ -607,6 +626,16 @@ arithmetic), and resampling was pulled into v1 (sections 3 to 6); nothing in
 this section is open. The two items below are v2 work, each with its direction
 already agreed, kept here so the v1 model says what it deliberately leaves
 out.
+
+The second design document, [`data-bundle.md`](data-bundle.md) (2026-10-04),
+fixes the data supply, the online construction of the kernel, the catalog, the
+bias audit and the study API, and its section 9 records the four changes it
+forces on this model: the aggregation-group clause of WF-6 (already enforced,
+code F), `Equity` as a stable identifier with `ticker` a relation (section 2
+above), the warnings W5 and W6 in place of constraints (section 5 above), and
+relation-valued parameters kept out of the language, since a table of
+(Timestamp, value) pairs is a data upload under another name and would reopen
+every bias the closed bundle closes.
 
 1. **Availability time (v2).** Each tuple carries an event time and an availability time; causality is judged on availability; the cross-resolution join becomes "latest available at or before T", which adds the coarse-to-fine direction that v1's resample deliberately lacks. This unlocks fundamentals and corporate actions.
 2. **Instruments (v2+).** Options and futures as entity domains with instrument relations (underlying, strike, expiry) and their own decision constructors under a Decision sum type.

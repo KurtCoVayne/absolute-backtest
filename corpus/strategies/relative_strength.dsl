@@ -1,4 +1,5 @@
 # Buy names whose momentum beats the benchmark's by a margin.
+# allow: W6  (the ticker literal is a snapshot of the bundle date)
 strategy relative_strength {
   env equities_1d
   uses features

@@ -30,9 +30,10 @@ resampled bucket.
 | Path | What it is |
 | --- | --- |
 | `docs/semantic-model.md` | The v1 semantic model: domains, types, signatures, the seven literal forms, WF-1 to WF-10, the kernel contract, the causality theorem. The code cites it by section. |
+| `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API, with the status of each section in this crate and the milestone that implements it. |
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
-| `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1, W2). |
+| `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
 | `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation; `mod.rs` runs the executor loop of section 7, `explain`, and the empirical causality check; `time.rs` is calendar arithmetic and resolution buckets. |
 | `src/data.rs` | CSV environment instances and a deterministic synthetic market. |
 | `src/bin/abt.rs` | The command line. |
@@ -108,6 +109,13 @@ strategy sma_crossover {
   supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)` and
   `fill(A, T, Q, P)` at the decision resolution.
 
+`abt check` also prints each strategy's degrees of freedom (`docs/data-bundle.md`,
+section 6), the counts the study report will use:
+
+```
+momentum_top_n: degrees of freedom: 4 params, 0 literals, 5 rules (+ 2 library literals)
+```
+
 Every diagnostic names its code and judgment, for example:
 
 ```
@@ -134,6 +142,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode, in decide heads and in `decided` patterns; decide's T is a positive atom's key |
 | X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K`. The kernel's `position`, `cash`, `fill` and `decided` are at the strategy's decision resolution, so a library that reads them is usable only by strategies deciding at its resolution; the error names the strategy |
 | W1, W2, W3, W4 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty); `top` whose identity columns are all bound by the outer rule (keeps every tuple, `by` is dead) |
+| W5, W6 | warnings | a numeric literal inside a strategy's own rule is a degree of freedom the study counts (0 and 1 in any unit are structural and exempt; a library's literals are counted, never warned); an `Equity` literal names the security carrying that ticker at the bundle date, a snapshot rather than an identity |
 
 Diagnostics are ordered by the dependency rank of the rule's head, so the
 first error reported is the earliest offending relation; diagnostics about a
@@ -400,6 +409,19 @@ cargo build --release
 ```
 
 Adding a corpus case: a strategy goes in `corpus/strategies/` and must check
-clean (no errors and no warnings); a negative case goes in `corpus/negative/`
-with a `# expect: <code>` header and must produce errors of that code only.
-`tests/corpus.rs` asserts both and that every judgment code has a case.
+clean: no errors, and no warnings beyond those it allows itself with a
+`# allow: <code>` header line (one per code, warnings only; the four
+strategies with an `Equity` param allow W6, and a header whose code is not
+raised fails the test). A negative case goes in `corpus/negative/` with a
+`# expect: <code>` header and must produce errors of that code only.
+`tests/corpus.rs` asserts all of this and that every judgment code has a case.
+
+## Program
+
+The crate follows two design documents: `docs/semantic-model.md` (the v1
+language and kernel, implemented) and `docs/data-bundle.md` (closed data
+bundles, the online fold kernel, the catalog, the bias audit and the study
+API), whose status table names the milestone each section lands in: M0
+section 9 and the warnings W5, W6 (done); M1 execution realism; M2 catalog,
+identities and the bundle format; M3 the fold kernel and availability time;
+M4 the study API; M5 the realism program.

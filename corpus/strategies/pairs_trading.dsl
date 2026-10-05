@@ -1,6 +1,7 @@
 # Classic pair: hedge ratio by OLS over log returns, z-score of the residual
 # spread. `corr`-style bivariate aggregates align the two series on T1 by
 # construction (section 4, bivariate aggregates).
+# allow: W6  (the ticker literal is a snapshot of the bundle date)
 strategy pairs_trading {
   env equities_1d
   uses features

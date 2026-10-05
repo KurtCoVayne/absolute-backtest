@@ -286,3 +286,29 @@ fn run_takes_parameter_overrides() {
     let (stdout, stderr) = text(&out);
     assert!(out.status.success() && stdout.contains("rule sma_crossover::decide#1"), "stdout: {}\nstderr: {}", stdout, stderr);
 }
+
+/// Data-bundle doc, section 6: `abt check` prints each strategy's degrees of
+/// freedom (params, in-rule literals, rules, reachable library literals), and
+/// a ticker literal warns W6 without failing the check.
+#[test]
+fn check_prints_degrees_of_freedom_per_strategy() {
+    let files = strategy_files("momentum_top_n");
+    let mut args = vec!["check"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, _) = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout);
+    assert!(
+        stdout.contains("momentum_top_n: degrees of freedom: 4 params, 0 literals, 5 rules (+ 2 library literals)"),
+        "{}",
+        stdout
+    );
+    let files = strategy_files("relative_strength");
+    let mut args = vec!["check"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, _) = text(&out);
+    assert_eq!(out.status.code(), Some(0), "a warning does not fail the check:\n{}", stdout);
+    assert!(stdout.contains("warning [W6]") && stdout.contains("\"SPY\""), "{}", stdout);
+    assert!(stdout.contains("relative_strength: degrees of freedom:"), "{}", stdout);
+}
