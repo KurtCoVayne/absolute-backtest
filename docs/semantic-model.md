@@ -499,6 +499,11 @@ rules and their `min K` do not apply to execution, so a decision can be
 filled on a day the bars library yields no bar for. A bucket with no fine
 tuple for the instrument has no price, and the decision is dropped.
 
+**Bundles.** Environments are instantiated by versioned bundles the system
+ships (data-bundle doc, sections 2 and 3; `src/bundle.rs`): a strategy names
+the version it was written against as `env equities_1d_v2@2026.10`, the bundle
+must match, and a bundle that has not passed its tests is not run.
+
 **Availability convention (v1).** Every fact at resolution r is available at
 the close of its bar; a resampled bar is available at the close of its bucket.
 A strategy that reads a @1d open to decide at the open (the corpus case

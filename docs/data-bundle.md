@@ -17,7 +17,7 @@ Oct 4, 2026 · John Gonzalez
 > | --- | --- | --- |
 > | M0 | Section 9 (changes forced on the semantic model), W5, W6, this document | implemented |
 > | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | implemented (costs, slippage, impact, liquidity, partial fills, margin, funding, borrow proxy); delisting and actions in M2 |
-> | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | `Label`, stable identifiers, `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library and the executor's handling implemented; the bundle format and bundle tests planned |
+> | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | planned |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | planned |
 > | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | planned |
@@ -48,9 +48,13 @@ warnings) has a single exception that is argued in section 9.
 
 ## 2. Online construction
 
-> Status: M3. Today's kernel (`src/kernel/`) evaluates top-down with
-> memoisation and already runs the executor as a fold over bars; the plan
-> keeps it as the batch reference and adds the fold beside it.
+> Status: M3 for the fold; the storage paragraph is implemented in M2
+> (`src/bundle.rs`: `manifest.json`, `securities.csv`, append-only Parquet
+> partitions under `log/<relation>/<YYYY-MM>.parquet`, `snapshots/`
+> reserved; `abt bundle build|test`, `abt run --bundle`). Today's kernel
+> (`src/kernel/`) evaluates top-down with memoisation and already runs the
+> executor as a fold over bars; the plan keeps it as the batch reference and
+> adds the fold beside it.
 
 The kernel is a single fold `state' = step(state, event)` over a stream of
 events ordered by availability time, and a backtest is that fold replayed over
@@ -123,8 +127,11 @@ component that differs between the two is the executor attached to the fold.
 > dividend at the ex-date, `close_adj` carrying the cumulative split factor
 > forward, `liquid`), and the executor's handling of splits, dividends and
 > delistings with the haircuts of section 10 item 2. The synthetic catalog
-> market carries every event. The bundle format, versions and the other
-> bundle tests are the last M2 pull request.
+> market carries every event. The bundle format (`src/bundle.rs`), the
+> version a strategy names (`env name@version`) and the bundle tests the data
+> can answer are in; a bundle that has not passed them is refused by `abt run
+> --bundle` unless `--untested`, which notes that its decisions are not
+> causality-certified.
 
 The catalog stores what was observable, never what was derived with
 hindsight: unadjusted prices plus corporate-action events, stable security
