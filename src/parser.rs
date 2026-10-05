@@ -375,7 +375,7 @@ impl Parser {
                 }
                 Lit::Duration(d)
             }
-            Tok::Str(s) => Lit::Equity(s),
+            Tok::Str(s) => Lit::Str(s),
             t => {
                 return Err(ParseError {
                     span: sp,

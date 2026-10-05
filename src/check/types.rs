@@ -12,6 +12,8 @@ pub fn compat(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (Ty::Count, Ty::IntLit) | (Ty::IntLit, Ty::Count) => true,
         (Ty::Quantity(d), Ty::IntLit) | (Ty::IntLit, Ty::Quantity(d)) => d.is_scalar(),
+        // A string literal is an Equity or a Label from context.
+        (Ty::Equity, Ty::StrLit) | (Ty::StrLit, Ty::Equity) | (Ty::Label, Ty::StrLit) | (Ty::StrLit, Ty::Label) => true,
         _ => false,
     }
 }
@@ -146,11 +148,14 @@ pub fn call_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
 
 /// Whether two operand types may be compared with `op`.
 pub fn cmp_ok(op: CmpOp, l: &Ty, r: &Ty) -> Result<(), String> {
+    if *l == Ty::StrLit && *r == Ty::StrLit {
+        return Err("a string literal is an Equity or a Label from context; compare it with a typed variable or declare a param".into());
+    }
     if !compat(l, r) {
         return Err(format!("cannot compare {} with {}: both sides must share one dimension and currency", l, r));
     }
     match l {
-        Ty::Equity | Ty::Decision => {
+        Ty::Equity | Ty::Decision | Ty::Label | Ty::StrLit => {
             if op != CmpOp::Eq {
                 return Err(format!("{} admits only `=`", l));
             }

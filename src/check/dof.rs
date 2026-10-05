@@ -46,8 +46,65 @@ pub fn is_structural(lit: &Lit) -> bool {
         Lit::Int(i) => *i == 0 || *i == 1,
         Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => *x == 0.0 || *x == 1.0,
         Lit::Duration(d) => d.is_zero(),
-        Lit::Equity(_) => true,
+        Lit::Str(_) | Lit::Equity(_) | Lit::Label(_) => true,
     }
+}
+
+/// Every literal of a rule, mutably, with its span: the checker's rewrite
+/// of string literals into the type their context resolved.
+pub fn literals_in_rule_mut(rule: &mut Rule, f: &mut dyn FnMut(&mut Lit, Span)) {
+    fn terms(ts: &mut [Term], f: &mut dyn FnMut(&mut Lit, Span)) {
+        for t in ts {
+            match t {
+                Term::Lit(l, sp) => f(l, *sp),
+                Term::Ctor(_, subs, _) => terms(subs, f),
+                Term::Var(..) | Term::Wild(_) | Term::Param(..) => {}
+            }
+        }
+    }
+    fn expr(e: &mut Expr, f: &mut dyn FnMut(&mut Lit, Span)) {
+        match e {
+            Expr::Lit(l, sp) => f(l, *sp),
+            Expr::Var(..) | Expr::Param(..) => {}
+            Expr::Neg(a, _) => expr(a, f),
+            Expr::Bin(_, a, b, _) => {
+                expr(a, f);
+                expr(b, f);
+            }
+            Expr::Call(_, args, _) => args.iter_mut().for_each(|a| expr(a, f)),
+        }
+    }
+    fn literal(l: &mut Literal, f: &mut dyn FnMut(&mut Lit, Span)) {
+        match l {
+            Literal::Atom(a) | Literal::Neg(a) => terms(&mut a.terms, f),
+            Literal::Builtin(Builtin::Lag { n, .. }, _) => expr(n, f),
+            Literal::Builtin(..) => {}
+            Literal::Window { dur, min, .. } => {
+                expr(dur, f);
+                expr(min, f);
+            }
+            Literal::Cmp { lhs, rhs, .. } => {
+                expr(lhs, f);
+                expr(rhs, f);
+            }
+            Literal::Assign { expr: e, .. } => expr(e, f),
+            Literal::Agg { args, conj, .. } => {
+                args.iter_mut().for_each(|a| expr(a, f));
+                conj.iter_mut().for_each(|c| literal(c, f));
+            }
+            Literal::Top { n, atom, .. } => {
+                expr(n, f);
+                terms(&mut atom.terms, f);
+            }
+            Literal::Resample { inner, min, aggs, .. } => {
+                terms(&mut inner.terms, f);
+                expr(min, f);
+                aggs.iter_mut().for_each(|(_, _, e)| expr(e, f));
+            }
+        }
+    }
+    terms(&mut rule.head.terms, f);
+    rule.body.iter_mut().for_each(|l| literal(l, f));
 }
 
 /// Every literal written in a rule, head and body, in source order.

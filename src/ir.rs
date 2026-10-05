@@ -207,6 +207,13 @@ pub enum Ty {
     Quantity(Dim),
     Decision,
     IntLit,
+    /// A name from a closed vocabulary the bundle defines (a delisting
+    /// reason, an index, a classification code; data-bundle doc, section
+    /// 3): interned, compared with `=` only, never an identity column.
+    Label,
+    /// A string literal before the checker resolves it: an `Equity` or a
+    /// `Label` from context, the way a bare integer is a Count or a Scalar.
+    StrLit,
 }
 
 impl Ty {
@@ -225,6 +232,7 @@ impl Ty {
             ("Count", None) => Ty::Count,
             ("Scalar", None) => Ty::scalar(),
             ("Decision", None) => Ty::Decision,
+            ("Label", None) => Ty::Label,
             ("Price", Some(code)) => Ty::Quantity(Dim::price(code)),
             ("Notional", Some(code)) => Ty::Quantity(Dim::notional(code)),
             ("Quantity", Some("Shares")) => Ty::Quantity(Dim::shares()),
@@ -243,6 +251,8 @@ impl fmt::Display for Ty {
             Ty::Quantity(d) => write!(f, "{}", d),
             Ty::Decision => write!(f, "Decision"),
             Ty::IntLit => write!(f, "integer literal"),
+            Ty::Label => write!(f, "Label"),
+            Ty::StrLit => write!(f, "string literal"),
         }
     }
 }
@@ -352,7 +362,11 @@ pub enum Lit {
     /// `60 USD/share`: currency per share, Price<code>.
     Price(f64, String),
     Duration(Duration),
+    /// A string literal as parsed, `"SPY"` or `"bankruptcy"`; the checker
+    /// resolves it to `Equity` or `Label` by the type its context expects.
+    Str(String),
     Equity(String),
+    Label(String),
 }
 
 impl Lit {
@@ -364,7 +378,9 @@ impl Lit {
             Lit::Money(_, c) => Ty::Quantity(Dim::notional(c)),
             Lit::Price(_, c) => Ty::Quantity(Dim::price(c)),
             Lit::Duration(_) => Ty::Duration,
+            Lit::Str(_) => Ty::StrLit,
             Lit::Equity(_) => Ty::Equity,
+            Lit::Label(_) => Ty::Label,
         }
     }
 }
@@ -378,7 +394,7 @@ impl fmt::Display for Lit {
             Lit::Money(x, c) => write!(f, "{} {}", x, c),
             Lit::Price(x, c) => write!(f, "{} {}/share", x, c),
             Lit::Duration(d) => write!(f, "{}", d),
-            Lit::Equity(s) => write!(f, "\"{}\"", s),
+            Lit::Str(s) | Lit::Equity(s) | Lit::Label(s) => write!(f, "\"{}\"", s),
         }
     }
 }

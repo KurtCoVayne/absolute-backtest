@@ -19,7 +19,7 @@ environment labelled_1d {
   close(+A: Equity, @T: Timestamp, -P: Price<USD>) @1d
   volume(+A: Equity, @T: Timestamp, -V: Quantity<Shares>) @1d
   universe(-A: Equity, @T: Timestamp) @1d complete
-  delisted(+A: Equity, @T: Timestamp, -Reason: Label) @1d complete
+  delisted(-A: Equity, @T: Timestamp, -Reason: Label) @1d complete
   member(+A: Equity, @T: Timestamp, +Idx: Label) @1d complete
 }
 "#;
@@ -85,9 +85,9 @@ fn label_is_a_type_and_a_string_literal_resolves_by_context() {
     let mut seen = Vec::new();
     for r in &p.rules {
         for (l, _) in absolute_backtest::check::dof::literals_in_rule(r) {
-            match l {
+            match &l {
                 Lit::Str(s) => panic!("unresolved string literal `{}` in {}", s, r.head.name),
-                Lit::Label(s) | Lit::Equity(s) => seen.push((r.head.name.clone(), l.ty(), s)),
+                Lit::Label(s) | Lit::Equity(s) => seen.push((r.head.name.clone(), l.ty(), s.clone())),
                 _ => {}
             }
         }
@@ -97,13 +97,16 @@ fn label_is_a_type_and_a_string_literal_resolves_by_context() {
 
 #[test]
 fn a_ticker_literal_is_still_an_equity_and_warned() {
-    let src = EXIT_ON_BANKRUPTCY.replace("decide(T, sell(A, Q)) :- held(A, T, Q), gone(A, T).", "decide(T, sell(A, Q)) :- held(A, T, Q), gone(A, T), A = \"AAA\".");
+    let src = EXIT_ON_BANKRUPTCY.replace(
+        "decide(T, sell(A, Q)) :- held(A, T, Q), gone(A, T).",
+        "decide(T, sell(A, Q)) :- held(A, T, Q), gone(A, T), A = \"AAA\".",
+    );
     let diags = check(&src, "exit_on_bankruptcy");
     assert!(errors(&diags).is_empty(), "{}", text(&diags));
     assert_eq!(diags.len(), 1, "{}", text(&diags));
     assert_eq!(diags[0].code, Code::W6);
     let p = program(&src, "exit_on_bankruptcy");
-    let lits: Vec<Lit> = p.rules.iter().flat_map(|r| absolute_backtest::check::dof::literals_in_rule(r)).map(|(l, _)| l).collect();
+    let lits: Vec<Lit> = p.rules.iter().flat_map(absolute_backtest::check::dof::literals_in_rule).map(|(l, _)| l).collect();
     assert!(lits.contains(&Lit::Equity("AAA".into())) && lits.contains(&Lit::Label("SPX".into())), "{:?}", lits);
 }
 
@@ -151,7 +154,8 @@ fn market() -> Dataset {
             ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
             ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
         }
-        if i == 2 {
+        // Delisted from day 3 on: a point-in-time status, present at every later bar.
+        if i >= 2 {
             ds.add("delisted", vec![Value::Equity(b), Value::Time(t), Value::Label(bankrupt)]);
         }
     }
@@ -161,7 +165,15 @@ fn market() -> Dataset {
 #[test]
 fn labels_flow_through_the_kernel() {
     let p = program(EXIT_ON_BANKRUPTCY, "exit_on_bankruptcy");
-    let r = run(&p, &market(), ExecConfig { initial_cash: 10_000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &p,
+        &market(),
+        ExecConfig {
+            initial_cash: 10_000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
     // Day 1 buys both; day 3 sells BBB (delisted for bankruptcy) and does not re-enter it.
     assert_eq!(decisions, vec!["2024-01-08 buy(AAA, 10)", "2024-01-08 buy(BBB, 10)", "2024-01-10 sell(BBB, 10)"]);
@@ -170,7 +182,15 @@ fn labels_flow_through_the_kernel() {
     assert!(Value::Equity(0) < Value::Label(0), "values of different kinds order by kind");
     // Explain shows the label by name.
     let p2 = program(&EXIT_ON_BANKRUPTCY.replace("\"bankruptcy\"", "\"acquisition\""), "exit_on_bankruptcy");
-    let r2 = run(&p2, &market(), ExecConfig { initial_cash: 10_000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r2 = run(
+        &p2,
+        &market(),
+        ExecConfig {
+            initial_cash: 10_000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     assert_eq!(r2.decisions.len(), 2, "an acquisition exit never fires on a bankruptcy: {:?}", r2.decisions.len());
 }
 
@@ -186,10 +206,18 @@ fn a_label_column_loads_from_csv_and_round_trips() {
     let (ds, notes) = load_csv_dir(&p, &dir).unwrap();
     assert!(notes.is_empty(), "{:?}", notes);
     let reasons: Vec<&Value> = ds.facts["delisted"].iter().map(|tu| &tu[2]).collect();
-    assert_eq!(reasons.len(), 1);
+    assert_eq!(reasons.len(), 2);
     assert!(matches!(reasons[0], Value::Label(_)), "{:?}", reasons[0]);
     assert_eq!(ds.label_name(reasons[0]), Some("bankruptcy"));
-    let r = run(&p, &ds, ExecConfig { initial_cash: 10_000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &p,
+        &ds,
+        ExecConfig {
+            initial_cash: 10_000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     assert_eq!(r.decisions.len(), 3);
     let _ = fs::remove_dir_all(&dir);
 }

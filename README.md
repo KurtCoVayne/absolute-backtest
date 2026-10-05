@@ -88,7 +88,10 @@ strategy sma_crossover {
   strategy it defaults to the unit's `resolution`.
 - Literals carry units: `100 shares`, `5_000_000 USD`, `60 USD/share` (a
   `Price<USD>`, so `param floor : Price<USD> = 60 USD/share` compares with
-  `close` and `sma`), `20d`, `3mo`, `1y`, `0.02`, `"SPY"` (an equity). A
+  `close` and `sma`), `20d`, `3mo`, `1y`, `0.02`, `"SPY"` (a string: an
+  `Equity` or a `Label` from the type its context expects, the way a bare
+  integer is a Count or a Scalar; the checker resolves it, and a string with
+  no typed context is a T error). A
   bare `60 USD` is a `Notional<USD>`. A bare integer is a Count or a Scalar
   from context; a bare decimal is a Scalar. A number is digits with optional
   `_` separators, an optional fraction with digits on both sides of the
@@ -133,7 +136,7 @@ error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
 | E | environment | the primitive belongs to the declared environment, not another one |
 | B | WF-1 | every head, negated, compared or assigned variable is bound, left to right |
 | M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions; inside a resample, a fresh entity variable in a `+` position of a stored relation is bound by the grouping |
-| T | WF-3 | dimensions balance; terms match signatures; constructors typed; a parameter's default lies within its ordered range |
+| T | WF-3 | dimensions balance; terms match signatures; constructors typed; a parameter's default lies within its ordered range; a string literal resolves to `Equity` or `Label` from its context (`=` only on both) |
 | R | WF-4 | every positive cycle steps strictly back in time through `prev` or `lag` |
 | N | WF-5 | `not R` only when R is complete; completeness propagates; reductions close |
 | F | WF-6 | every temporal key is T or derived from T by a causal builtin; `decided` strictly earlier |

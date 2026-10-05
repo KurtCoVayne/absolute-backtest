@@ -121,6 +121,7 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
 fn field(ds: &Dataset, v: &Value) -> String {
     match v {
         Value::Equity(s) => ds.symbols.name(*s).to_string(),
+        Value::Label(s) => ds.labels.name(*s).to_string(),
         Value::Time(t) => format_timestamp(*t),
         Value::Num(x) => format!("{}", x),
         Value::Count(c) => format!("{}", c),
@@ -132,12 +133,13 @@ fn field(ds: &Dataset, v: &Value) -> String {
 fn parse_value(ds: &mut Dataset, ty: &Ty, raw: &str) -> Option<Value> {
     Some(match ty {
         Ty::Equity => Value::Equity(ds.intern(raw)),
+        Ty::Label => Value::Label(ds.intern_label(raw)),
         Ty::Timestamp => Value::Time(parse_timestamp(raw)?),
         Ty::Count => Value::Count(raw.parse().ok()?),
         Ty::Quantity(_) => Value::Num(raw.parse().ok()?),
         Ty::Duration => return None,
         Ty::Decision => return None,
-        Ty::IntLit => return None,
+        Ty::IntLit | Ty::StrLit => return None,
     })
 }
 

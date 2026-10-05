@@ -38,6 +38,7 @@ struct Analyzer<'c, 'a> {
     vars: HashMap<String, VarState>,
     refs: Vec<AtomRef>,
     params_used: Vec<String>,
+    str_types: Vec<(Span, Ty)>,
     key_vars_positive: HashSet<String>,
     /// Inside an aggregation: window variables declared later in the same
     /// conjunction, with the provenance they will have. An atom may bind such
@@ -99,6 +100,7 @@ pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleI
         vars: HashMap::new(),
         refs: vec![],
         params_used: vec![],
+        str_types: vec![],
         key_vars_positive: HashSet::new(),
         pending_windows: HashMap::new(),
     };
@@ -131,6 +133,7 @@ pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleI
         refs: an.refs,
         params_used: an.params_used,
         resolution: an.res,
+        str_types: an.str_types,
     })
 }
 
@@ -248,7 +251,57 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     fn check_lit_type(&mut self, expected: &Ty, lit: &Lit, span: Span, what: &str) {
         let actual = lit.ty();
         if !compat(expected, &actual) {
+            let actual = if actual == Ty::StrLit {
+                "a string literal (an Equity or a Label)".to_string()
+            } else {
+                actual.to_string()
+            };
             self.err(Code::T, span, format!("{} expects {} but literal `{}` is {}", what, expected, lit, actual));
+        } else if let Lit::Str(_) = lit {
+            self.resolve_str(span, expected);
+        }
+    }
+
+    /// Record what a string literal at `span` resolved to (Equity or Label).
+    fn resolve_str(&mut self, span: Span, ty: &Ty) {
+        if matches!(ty, Ty::Equity | Ty::Label) {
+            self.str_types.push((span, ty.clone()));
+        }
+    }
+
+    /// In a comparison, a string literal on one side takes the other side's
+    /// type (Equity or Label); with no typed side it is an error.
+    fn resolve_cmp_strs(&mut self, lhs: &Expr, tl: &Ty, rhs: &Expr, tr: &Ty) {
+        if let Expr::Lit(Lit::Str(_), sp) = lhs {
+            self.resolve_str(*sp, tr);
+        }
+        if let Expr::Lit(Lit::Str(_), sp) = rhs {
+            self.resolve_str(*sp, tl);
+        }
+    }
+
+    /// A string literal where only its own type is available (an assignment
+    /// to a fresh variable, an aggregate argument, arithmetic): nothing says
+    /// Equity or Label.
+    fn str_without_context(&mut self, e: &Expr) -> bool {
+        fn find(e: &Expr) -> Option<Span> {
+            match e {
+                Expr::Lit(Lit::Str(_), sp) => Some(*sp),
+                Expr::Neg(a, _) => find(a),
+                Expr::Bin(_, a, b, _) => find(a).or_else(|| find(b)),
+                Expr::Call(_, args, _) => args.iter().find_map(find),
+                _ => None,
+            }
+        }
+        if let Some(sp) = find(e) {
+            self.err(
+                Code::T,
+                sp,
+                "a string literal is an Equity or a Label from context: compare it with a typed variable, pass it to a typed argument, or declare a param",
+            );
+            true
+        } else {
+            false
         }
     }
 
@@ -570,6 +623,10 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 let mut tys = Vec::new();
                 let mut ok = true;
                 for a in args {
+                    if self.str_without_context(a) {
+                        ok = false;
+                        continue;
+                    }
                     match self.expr_ty(a) {
                         Some(t) => tys.push(t),
                         None => ok = false,
@@ -727,6 +784,8 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 if let (Some(tl), Some(tr)) = (tl, tr) {
                     if let Err(m) = cmp_ok(*op, &tl, &tr) {
                         self.err(Code::T, *span, format!("in `{} {} {}`: {}", lhs, op, rhs, m));
+                    } else {
+                        self.resolve_cmp_strs(lhs, &tl, rhs, &tr);
                     }
                 }
             }
@@ -736,8 +795,12 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     if let (Some(tv), Some(te)) = (st.ty, self.expr_ty(expr)) {
                         if let Err(m) = cmp_ok(CmpOp::Eq, &tv, &te) {
                             self.err(Code::T, *span, format!("in `{} = {}`: {}", var, expr, m));
+                        } else if let Expr::Lit(Lit::Str(_), sp) = expr {
+                            self.resolve_str(*sp, &tv);
                         }
                     }
+                } else if self.str_without_context(expr) {
+                    self.bind(var, None, TimeProv::Other);
                 } else {
                     let t = self.expr_ty(expr);
                     // A bound time may be copied into a value column (`TE = T`,

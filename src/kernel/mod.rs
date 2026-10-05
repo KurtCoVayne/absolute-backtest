@@ -23,6 +23,8 @@ pub(crate) type Derived = Rc<Vec<(Tuple, usize)>>;
 #[derive(Clone, Debug, Default)]
 pub struct Dataset {
     pub symbols: Symbols,
+    /// Labels (`Ty::Label`), interned apart from the equities.
+    pub labels: Symbols,
     pub facts: BTreeMap<String, Vec<Tuple>>,
 }
 
@@ -33,6 +35,16 @@ impl Dataset {
     pub fn intern(&mut self, name: &str) -> Sym {
         self.symbols.intern(name)
     }
+    pub fn intern_label(&mut self, name: &str) -> Sym {
+        self.labels.intern(name)
+    }
+    /// The spelling of a label value.
+    pub fn label_name(&self, v: &Value) -> Option<&str> {
+        match v {
+            Value::Label(s) => Some(self.labels.name(*s)),
+            _ => None,
+        }
+    }
     pub fn add(&mut self, relation: &str, tuple: Tuple) {
         self.facts.entry(relation.to_string()).or_default().push(tuple);
     }
@@ -41,6 +53,7 @@ impl Dataset {
     pub fn truncated(&self, prog: &Program, t: i64) -> Dataset {
         let mut out = Dataset {
             symbols: self.symbols.clone(),
+            labels: self.labels.clone(),
             facts: BTreeMap::new(),
         };
         for (name, tuples) in &self.facts {
@@ -710,35 +723,52 @@ pub struct Kernel<'p> {
     pub(crate) volume_col: usize,
     pub(crate) last_price: HashMap<Sym, f64>,
     pub(crate) params: HashMap<(String, String), Value>,
+    pub(crate) labels: Symbols,
 }
 
 impl<'p> Kernel<'p> {
     pub fn new(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        // Intern every equity literal of the program, then order ids by identifier.
+        // Resolve string overrides by their parameter's type, as the checker
+        // did for the program's own literals.
+        let mut cfg = cfg;
+        for (name, value) in cfg.param_overrides.iter_mut() {
+            if let Lit::Str(s) = value {
+                let (unit, pname) = name.split_once("::").unwrap_or((prog.strategy.as_str(), name.as_str()));
+                if let Some(p) = prog.param(unit, pname) {
+                    *value = if p.ty == Ty::Label { Lit::Label(s.clone()) } else { Lit::Equity(s.clone()) };
+                }
+            }
+        }
+        // Intern every equity and label literal of the program, then order
+        // ids by identifier.
         let mut symbols = dataset.symbols.clone();
+        let mut labels = dataset.labels.clone();
+        let mut intern = |l: &Lit| match l {
+            Lit::Equity(s) => {
+                symbols.intern(s);
+            }
+            Lit::Label(s) => {
+                labels.intern(s);
+            }
+            _ => {}
+        };
         for unit in prog.params.values() {
             for p in unit.values() {
-                if let Lit::Equity(s) = &p.value {
-                    symbols.intern(s);
-                }
+                intern(&p.value);
             }
         }
         for (_, l) in &cfg.param_overrides {
-            if let Lit::Equity(s) = l {
-                symbols.intern(s);
-            }
+            intern(l);
         }
         for rule in &prog.rules {
-            for_each_lit(rule, &mut |l| {
-                if let Lit::Equity(s) = l {
-                    symbols.intern(s);
-                }
-            });
+            for_each_lit(rule, &mut intern);
         }
         let (symbols, remap) = symbols.sorted();
+        let (labels, remap_labels) = labels.sorted();
         let remap_value = |v: &Value| -> Value {
             match v {
                 Value::Equity(s) => Value::Equity(remap[*s as usize]),
+                Value::Label(s) => Value::Label(remap_labels[*s as usize]),
                 Value::Decision(d) => Value::Decision(Decision {
                     ctor: d.ctor,
                     equity: remap[d.equity as usize],
@@ -810,9 +840,10 @@ impl<'p> Kernel<'p> {
         // Parameters.
         let mut params = HashMap::new();
         let mut sym_tmp = symbols.clone();
+        let mut lab_tmp = labels.clone();
         for (unit, ps) in &prog.params {
             for (name, p) in ps {
-                params.insert((unit.clone(), name.clone()), lit_value(&p.value, &mut sym_tmp));
+                params.insert((unit.clone(), name.clone()), lit_value(&p.value, &mut sym_tmp, &mut lab_tmp));
             }
         }
         for (name, value) in &cfg.param_overrides {
@@ -853,7 +884,7 @@ impl<'p> Kernel<'p> {
                     )));
                 }
             }
-            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp));
+            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp, &mut lab_tmp));
         }
         // Price relation for the executor.
         let price_rel = match &cfg.price_relation {
@@ -926,6 +957,7 @@ impl<'p> Kernel<'p> {
             price_col,
             volume_rel,
             volume_col,
+            labels,
             last_price: HashMap::new(),
             params,
         })
@@ -1643,6 +1675,10 @@ impl<'p> Kernel<'p> {
         let raw = raw.trim();
         match ty {
             Ty::Equity => self.equity(raw.trim_matches('"')),
+            Ty::Label => {
+                let name = raw.trim_matches('"');
+                self.labels.get(name).map(Value::Label).ok_or_else(|| format!("`{}` is not a label of the dataset", name))
+            }
             Ty::Timestamp => time::parse_timestamp(raw)
                 .map(Value::Time)
                 .ok_or_else(|| format!("`{}` is not a Timestamp (YYYY-MM-DD[THH:MM[:SS]])", raw)),
@@ -1657,7 +1693,7 @@ impl<'p> Kernel<'p> {
                 Ok(l) => Err(format!("`{}` is {}, not {}", raw, l.ty(), ty)),
                 Err(_) => Err(format!("`{}` is not a {}", raw, ty)),
             },
-            Ty::Decision | Ty::IntLit => Err(format!("a {} cannot be given on the command line", ty)),
+            Ty::Decision | Ty::IntLit | Ty::StrLit => Err(format!("a {} cannot be given on the command line", ty)),
         }
     }
 
@@ -1673,7 +1709,8 @@ impl<'p> Kernel<'p> {
             return Ok(Value::Time(t));
         }
         match crate::parser::parse_lit(raw) {
-            Ok(Lit::Equity(name)) => self.equity(&name),
+            Ok(Lit::Str(name) | Lit::Equity(name)) => self.equity(&name),
+            Ok(Lit::Label(name)) => self.labels.get(&name).map(Value::Label).ok_or_else(|| format!("`{}` is not a label of the dataset", name)),
             Ok(Lit::Int(i)) => Ok(Value::Count(i)),
             Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
             Ok(l) => Ok(Value::Num(l_num(&l))),
@@ -1800,7 +1837,7 @@ fn l_num(l: &Lit) -> f64 {
     match l {
         Lit::Int(i) => *i as f64,
         Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => *x,
-        Lit::Duration(_) | Lit::Equity(_) => f64::NAN,
+        Lit::Duration(_) | Lit::Str(_) | Lit::Equity(_) | Lit::Label(_) => f64::NAN,
     }
 }
 
@@ -1809,7 +1846,7 @@ fn l_num(l: &Lit) -> f64 {
 fn lit_magnitude(l: &Lit) -> Option<f64> {
     match l {
         Lit::Duration(d) => Some(d.approx_days()),
-        Lit::Equity(_) => None,
+        Lit::Str(_) | Lit::Equity(_) | Lit::Label(_) => None,
         _ => Some(l_num(l)),
     }
 }
@@ -1826,12 +1863,15 @@ fn price_column(sig: &Signature) -> Option<usize> {
         .position(|a| a.mode == Mode::Out && matches!(&a.ty, Ty::Quantity(d) if d.c2 == 2 && d.s2 == -2 && d.t2 == 0))
 }
 
-pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols) -> Value {
+pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols) -> Value {
     match l {
         Lit::Int(i) => Value::Count(*i),
         Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
         Lit::Duration(d) => Value::Dur(*d),
-        Lit::Equity(s) => Value::Equity(symbols.intern(s)),
+        // The checker resolves every string literal; an unresolved one can
+        // only come from an unchecked program, and reads as an equity.
+        Lit::Str(s) | Lit::Equity(s) => Value::Equity(symbols.intern(s)),
+        Lit::Label(s) => Value::Label(labels.intern(s)),
     }
 }
 
