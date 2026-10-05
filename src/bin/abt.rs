@@ -4,9 +4,11 @@
 //!   abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
 //!           [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
 //!           [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
+//!           [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow]
+//!           [--cash-rate X] [--margin-rate X] [--short-rebate X]
 //!           [--price-relation REL] [--param NAME=VALUE]...
 //!           [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]
-//!           [--verify-causality] [--all] [--fills] [--quiet] <files...>
+//!           [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]...
 //!           (--data DIR | --synthetic ...) [--price-relation REL] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
@@ -25,7 +27,7 @@ use std::str::FromStr;
 use absolute_backtest::check::{check_program, check_workspace, Severity, Workspace};
 use absolute_backtest::data;
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{ExecConfig, Kernel, Lot, OnLeverage, OnOversize, OnRuin, RunError, Value};
+use absolute_backtest::kernel::{ExecConfig, Kernel, Lot, OnOversize, OnRuin, RunError, Value};
 
 struct Args {
     cmd: String,
@@ -36,11 +38,18 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 6] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless"];
+const FLAGS: [&str; 7] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav"];
 /// Options that may repeat.
 const MULTI: [&str; 2] = ["bind", "param"];
-const OPTIONS: [&str; 28] = [
+const OPTIONS: [&str; 35] = [
     "strategy",
+    "margin",
+    "max-gross",
+    "maintenance",
+    "on-margin-call",
+    "cash-rate",
+    "margin-rate",
+    "short-rebate",
     "participation",
     "impact",
     "adv-window",
@@ -109,7 +118,7 @@ fn parse_args() -> Args {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --frictionless        every cost and liquidity model off (the run is warned)"
     );
     exit(code)
 }
@@ -240,7 +249,20 @@ fn main() {
             } else {
                 usage(1)
             };
-            let base = if args.flags.contains("frictionless") { ExecConfig::frictionless() } else { ExecConfig::default() };
+            let preset = args.opts.get("margin").map(|s| s.as_str()).unwrap_or("none");
+            let base = match preset {
+                "none" => ExecConfig::default(),
+                "reg-t" => ExecConfig::reg_t(),
+                other => {
+                    eprintln!("--margin: `{}` is not one of none, reg-t", other);
+                    exit(2)
+                }
+            };
+            let base = if args.flags.contains("frictionless") {
+                ExecConfig { ..ExecConfig::frictionless() }.with_margin_of(&base)
+            } else {
+                base
+            };
             let cfg = ExecConfig {
                 initial_cash: option(&args.opts, "cash", "an amount", base.initial_cash),
                 slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", base.slippage_bps),
@@ -255,8 +277,15 @@ fn main() {
                 adv_window: option(&args.opts, "adv-window", "a number of bars", base.adv_window),
                 participation_warn: base.participation_warn,
                 volume_relation: args.opts.get("volume-relation").cloned(),
+                max_gross: option(&args.opts, "max-gross", "a multiple of equity", base.max_gross),
+                maintenance_margin: option(&args.opts, "maintenance", "a fraction of gross exposure", base.maintenance_margin),
+                on_margin_call: option(&args.opts, "on-margin-call", "one of halt, liquidate, allow", base.on_margin_call),
+                cash_rate: option(&args.opts, "cash-rate", "an annual rate", base.cash_rate),
+                margin_rate: option(&args.opts, "margin-rate", "an annual rate", base.margin_rate),
+                short_rebate: option(&args.opts, "short-rebate", "an annual rate", base.short_rebate),
+                borrow: base.borrow.clone(),
                 price_relation: args.opts.get("price-relation").cloned(),
-                on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", OnLeverage::Halt),
+                on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", base.on_leverage),
                 on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
                 on_ruin: option(&args.opts, "on-ruin", "one of halt, continue", OnRuin::Halt),
                 lot: option(&args.opts, "lot", "one of whole, fractional", Lot::Whole),
@@ -391,6 +420,19 @@ fn main() {
                 result.liquidity.avg_participation * 100.0,
                 result.liquidity.max_participation * 100.0
             );
+            println!(
+                "funding: cash interest {:.2}   margin interest {:.2}   borrow fees {:.2}   short rebate {:.2}",
+                result.funding.cash_interest, result.funding.margin_interest, result.funding.borrow_fees, result.funding.short_rebate
+            );
+            let max_lev = result.exposure.iter().map(|e| e.leverage).fold(0.0, f64::max);
+            let max_gross = result.exposure.iter().map(|e| e.gross).fold(0.0, f64::max);
+            println!("exposure: max gross {:.2}   max leverage {:.3}", max_gross, max_lev);
+            if args.flags.contains("nav") {
+                println!("t,equity,cash,gross,net,leverage");
+                for e in &result.exposure {
+                    println!("{},{:.4},{:.4},{:.4},{:.4},{:.6}", format_timestamp(e.t), e.equity, e.cash, e.gross, e.net, e.leverage);
+                }
+            }
             for w in &result.warnings {
                 println!("warning ({}): {}", w.bias, w.message);
             }
@@ -410,11 +452,12 @@ fn main() {
                             result.symbols[f.equity as usize],
                             f.quantity,
                             f.price,
-                            match (f.at_last_price, f.partial) {
-                                (true, true) => format!(" (last price, partial at {:.1}% of volume)", f.participation * 100.0),
-                                (true, false) => " (last price)".to_string(),
-                                (false, true) => format!(" (partial at {:.1}% of volume)", f.participation * 100.0),
-                                (false, false) => String::new(),
+                            match (f.forced, f.at_last_price, f.partial) {
+                                (true, _, _) => " (forced by a margin call)".to_string(),
+                                (_, true, true) => format!(" (last price, partial at {:.1}% of volume)", f.participation * 100.0),
+                                (_, true, false) => " (last price)".to_string(),
+                                (_, false, true) => format!(" (partial at {:.1}% of volume)", f.participation * 100.0),
+                                (_, false, false) => String::new(),
                             }
                         );
                     }

@@ -156,6 +156,66 @@ impl std::str::FromStr for Lot {
     }
 }
 
+/// What the executor does when, at a bar's mark, equity is positive but
+/// below the maintenance margin of gross exposure (a margin call).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OnMarginCall {
+    #[default]
+    Halt,
+    /// Sell the fraction of every position that restores maintenance, at
+    /// the bar's close plus commission and fee; the fills are flagged forced.
+    Liquidate,
+    /// Carry on; the run reports how many calls it ignored.
+    Allow,
+}
+
+impl std::str::FromStr for OnMarginCall {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "halt" => Ok(OnMarginCall::Halt),
+            "liquidate" => Ok(OnMarginCall::Liquidate),
+            "allow" => Ok(OnMarginCall::Allow),
+            _ => Err(format!("`{}` is not one of halt, liquidate, allow", s)),
+        }
+    }
+}
+
+/// A borrow bucket (data-bundle doc, section 5, shorting and borrow
+/// availability): instruments whose average daily volume is below
+/// `adv_below` (and not below the previous bucket's) pay `fee_bps` a year
+/// on their short notional, or cannot be shorted at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorrowBucket {
+    pub adv_below: f64,
+    pub fee_bps: f64,
+    pub shortable: bool,
+}
+
+/// Interest and fees accrued over a run, between consecutive decision bars
+/// at the configured annual rates over calendar time.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FundingSummary {
+    pub cash_interest: f64,
+    pub margin_interest: f64,
+    pub borrow_fees: f64,
+    pub short_rebate: f64,
+}
+
+/// The book at a bar's mark, before that bar's decisions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExposureRecord {
+    pub t: i64,
+    pub cash: f64,
+    /// Σ |position| · price.
+    pub gross: f64,
+    /// Σ position · price.
+    pub net: f64,
+    pub equity: f64,
+    /// gross / equity (0 when equity is not positive).
+    pub leverage: f64,
+}
+
 /// Executor configuration: part of the kernel, not of the program (section 6).
 #[derive(Clone, Debug)]
 pub struct ExecConfig {
@@ -191,6 +251,26 @@ pub struct ExecConfig {
     /// Primitive relation that supplies bar volumes; `None` picks a
     /// `Quantity<Shares>`-valued primitive, preferring one named `volume`.
     pub volume_relation: Option<String>,
+    /// Margin (data-bundle doc, section 5, leverage): gross exposure may not
+    /// exceed `max_gross` times equity after a fill, and cash may not go
+    /// below −(max_gross − 1) times equity (1 is no borrowing, the default;
+    /// 2 is Reg T's 50% initial margin, see `ExecConfig::reg_t`); what the
+    /// `on_leverage` policy judges. At every bar's mark, positive equity
+    /// below `maintenance_margin` times gross is a margin call, judged by
+    /// `on_margin_call`.
+    pub max_gross: f64,
+    pub maintenance_margin: f64,
+    pub on_margin_call: OnMarginCall,
+    /// Funding, as annual rates accrued over the calendar time between
+    /// consecutive decision bars: positive cash earns `cash_rate` (0 in v1,
+    /// warned), a debit pays `margin_rate`, short notional pays its borrow
+    /// bucket's fee and earns `short_rebate`.
+    pub cash_rate: f64,
+    pub margin_rate: f64,
+    pub short_rebate: f64,
+    /// Borrow buckets by average daily volume, ascending `adv_below`, the
+    /// last unbounded; an instrument whose ADV is unknown is in the last.
+    pub borrow: Vec<BorrowBucket>,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -228,6 +308,29 @@ impl Default for ExecConfig {
             adv_window: 20,
             participation_warn: 0.05,
             volume_relation: None,
+            max_gross: 1.0,
+            maintenance_margin: 0.25,
+            on_margin_call: OnMarginCall::Halt,
+            cash_rate: 0.0,
+            margin_rate: 0.05,
+            short_rebate: 0.0,
+            borrow: vec![
+                BorrowBucket {
+                    adv_below: 100_000.0,
+                    fee_bps: 0.0,
+                    shortable: false,
+                },
+                BorrowBucket {
+                    adv_below: 1_000_000.0,
+                    fee_bps: 300.0,
+                    shortable: true,
+                },
+                BorrowBucket {
+                    adv_below: f64::INFINITY,
+                    fee_bps: 25.0,
+                    shortable: true,
+                },
+            ],
             price_relation: None,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
@@ -239,9 +342,11 @@ impl Default for ExecConfig {
 }
 
 impl ExecConfig {
-    /// Every cost model off: the executor of the semantic model alone, for
-    /// hand-computed tests and for an author who wants a frictionless run
-    /// (which is then warned on, see `RunResult::warnings`).
+    /// Every cost, liquidity and funding model off and every name shortable
+    /// for free: the executor of the semantic model alone, for hand-computed
+    /// tests and for an author who wants a frictionless run (which is then
+    /// warned on, see `RunResult::warnings`). The margin limits keep their
+    /// defaults.
     pub fn frictionless() -> ExecConfig {
         ExecConfig {
             slippage_bps: 0.0,
@@ -251,7 +356,57 @@ impl ExecConfig {
             fee_bps_on_sells: 0.0,
             participation_cap: 0.0,
             impact_coef: 0.0,
+            margin_rate: 0.0,
+            short_rebate: 0.0,
+            borrow: vec![BorrowBucket {
+                adv_below: f64::INFINITY,
+                fee_bps: 0.0,
+                shortable: true,
+            }],
             ..ExecConfig::default()
+        }
+    }
+
+    /// Reg T buying power (data-bundle doc, section 5): 50% initial margin,
+    /// so gross exposure up to twice equity, 25% maintenance, and orders
+    /// beyond it rejected and logged rather than halting. The cost and
+    /// liquidity models keep their defaults.
+    pub fn reg_t() -> ExecConfig {
+        ExecConfig {
+            max_gross: 2.0,
+            maintenance_margin: 0.25,
+            on_leverage: OnLeverage::Reject,
+            ..ExecConfig::default()
+        }
+    }
+
+    /// This configuration with the margin and funding settings of `other`
+    /// (what `--frictionless --margin reg-t` means).
+    pub fn with_margin_of(self, other: &ExecConfig) -> ExecConfig {
+        ExecConfig {
+            max_gross: other.max_gross,
+            maintenance_margin: other.maintenance_margin,
+            on_margin_call: other.on_margin_call,
+            on_leverage: other.on_leverage,
+            cash_rate: other.cash_rate,
+            margin_rate: other.margin_rate,
+            short_rebate: other.short_rebate,
+            borrow: other.borrow.clone(),
+            ..self
+        }
+    }
+
+    /// The borrow bucket of an instrument with average daily volume `adv`
+    /// (the last bucket when unknown).
+    pub fn borrow_bucket(&self, adv: Option<f64>) -> BorrowBucket {
+        let last = self.borrow.last().copied().unwrap_or(BorrowBucket {
+            adv_below: f64::INFINITY,
+            fee_bps: 0.0,
+            shortable: true,
+        });
+        match adv {
+            None => last,
+            Some(a) => self.borrow.iter().find(|b| a < b.adv_below).copied().unwrap_or(last),
         }
     }
 
@@ -259,6 +414,12 @@ impl ExecConfig {
     /// the data-bundle doc it leaves unmodeled.
     pub fn warnings(&self) -> Vec<RunWarning> {
         let mut w = Vec::new();
+        if self.cash_rate == 0.0 {
+            w.push(RunWarning {
+                bias: "cash-management".into(),
+                message: "cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)".into(),
+            });
+        }
         if self.commission_per_share == 0.0 && self.commission_min_per_order == 0.0 && self.fee_bps_on_sells == 0.0 {
             w.push(RunWarning {
                 bias: "transaction-cost neglect".into(),
@@ -430,6 +591,8 @@ pub struct FillRecord {
     /// The fill was capped by participation; the remainder expired (delta)
     /// or was re-issued (target).
     pub partial: bool,
+    /// A forced liquidation by a margin call, not a decision of the strategy.
+    pub forced: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -446,6 +609,9 @@ pub struct RunResult {
     pub final_positions: BTreeMap<Sym, f64>,
     pub costs: CostSummary,
     pub liquidity: LiquiditySummary,
+    pub funding: FundingSummary,
+    /// The book at every bar's mark, parallel to `equity_curve`.
+    pub exposure: Vec<ExposureRecord>,
     /// The models the configuration turned off, and what the run observed
     /// that the author should know (fills above the participation threshold).
     pub warnings: Vec<RunWarning>,
@@ -804,14 +970,115 @@ impl<'p> Kernel<'p> {
         let mut requested_total = 0.0;
         let mut filled_total = 0.0;
         let mut participations: Vec<f64> = Vec::new();
+        let mut margin_calls = 0usize;
+        let mut not_shortable = 0usize;
+        let mut shorts_held = false;
         for (k, &t) in bars.iter().enumerate() {
             // Mark to market before the bar's decisions.
             let mut equity = cash;
+            let mut gross = 0.0;
+            let mut net = 0.0;
             for (&sym, &q) in &positions {
                 if let Some(p) = self.price_at(sym, t) {
                     equity += q * p;
+                    gross += q.abs() * p;
+                    net += q * p;
                 }
             }
+            // Maintenance: positive equity below the margin of gross exposure
+            // is a margin call (a non-positive equity is ruin, judged when an
+            // order comes to be filled).
+            if gross > 0.0 && equity > 0.0 && equity < self.cfg.maintenance_margin * gross - 1e-9 * gross {
+                let message = format!(
+                    "margin call: equity {:.2} is below {}% of gross exposure {:.2} at {}",
+                    equity,
+                    self.cfg.maintenance_margin * 100.0,
+                    gross,
+                    time::format_timestamp(t)
+                );
+                match self.cfg.on_margin_call {
+                    OnMarginCall::Halt => {
+                        return Err(RunError::Risk {
+                            t,
+                            rule: "(executor)".into(),
+                            decision: "(mark to market)".into(),
+                            message,
+                        });
+                    }
+                    OnMarginCall::Allow => margin_calls += 1,
+                    OnMarginCall::Liquidate => {
+                        margin_calls += 1;
+                        // Sell the fraction f of every position with
+                        // equity >= maintenance * (1 - f) * gross.
+                        let f = 1.0 - equity / (self.cfg.maintenance_margin * gross);
+                        let syms: Vec<Sym> = positions.keys().copied().collect();
+                        for sym in syms {
+                            let pos = positions[&sym];
+                            let Some(p) = self.price_at(sym, t) else { continue };
+                            let mut qty = -(pos * f);
+                            if self.cfg.lot == Lot::Whole {
+                                qty = if qty < 0.0 { qty.floor() } else { qty.ceil() };
+                            }
+                            if qty == 0.0 || qty.abs() > pos.abs() {
+                                qty = -pos;
+                            }
+                            let commission = if self.cfg.commission_per_share == 0.0 && self.cfg.commission_min_per_order == 0.0 {
+                                0.0
+                            } else {
+                                (self.cfg.commission_per_share * qty.abs()).max(self.cfg.commission_min_per_order)
+                            };
+                            let fee = if qty < 0.0 { qty.abs() * p * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
+                            cash -= qty * p + commission + fee;
+                            equity -= commission + fee;
+                            gross -= qty.abs() * p;
+                            net -= -qty * p;
+                            let new_pos = pos + qty;
+                            if new_pos.abs() < 1e-9 {
+                                positions.remove(&sym);
+                            } else {
+                                positions.insert(sym, new_pos);
+                            }
+                            result.costs.commissions += commission;
+                            result.costs.fees += fee;
+                            result.costs.turnover += qty.abs() * p;
+                            self.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
+                            result.fills.push(FillRecord {
+                                t,
+                                equity: sym,
+                                quantity: qty,
+                                price: p,
+                                at_last_price: false,
+                                commission,
+                                fee,
+                                slippage: 0.0,
+                                impact: 0.0,
+                                participation: self.bar_volume(sym, t).filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0),
+                                partial: false,
+                                forced: true,
+                            });
+                        }
+                        // The executor relations at t describe the book after the call.
+                        if let Some(tus) = self.stores[position].by_time.get_mut(&t) {
+                            tus.clear();
+                        }
+                        for (&sym, &q) in &positions {
+                            self.stores[position].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
+                        }
+                        if let Some(tus) = self.stores[cash_rel].by_time.get_mut(&t) {
+                            tus.clear();
+                        }
+                        self.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(cash)]);
+                    }
+                }
+            }
+            result.exposure.push(ExposureRecord {
+                t,
+                cash,
+                gross,
+                net,
+                equity,
+                leverage: if equity > 0.0 { gross / equity } else { 0.0 },
+            });
             result.equity_curve.push((t, equity));
             // Decisions at t.
             let tuples = self.call(decide, &[Some(Value::Time(t)), None])?;
@@ -850,6 +1117,31 @@ impl<'p> Kernel<'p> {
             }
             // Executor: fills at the next bar (section 6, execution contract).
             if let Some(&tn) = bars.get(k + 1) {
+                // Funding over the calendar time to the execution bar: interest
+                // on cash or on the debit, borrow fee and rebate on short notional.
+                let dt = (tn - t) as f64 / (365.0 * 86_400.0);
+                if cash > 0.0 {
+                    let i = cash * self.cfg.cash_rate * dt;
+                    cash += i;
+                    result.funding.cash_interest += i;
+                } else if cash < 0.0 {
+                    let i = -cash * self.cfg.margin_rate * dt;
+                    cash -= i;
+                    result.funding.margin_interest += i;
+                }
+                let shorts: Vec<(Sym, f64)> = positions.iter().filter(|(_, q)| **q < 0.0).map(|(s, q)| (*s, *q)).collect();
+                for (sym, q) in shorts {
+                    shorts_held = true;
+                    let Some(p) = self.price_at(sym, tn) else { continue };
+                    let notional = q.abs() * p;
+                    let bucket = self.cfg.borrow_bucket(self.adv(sym, &bars, k + 1));
+                    let fee = notional * bucket.fee_bps / 10_000.0 * dt;
+                    let rebate = notional * self.cfg.short_rebate * dt;
+                    cash -= fee;
+                    cash += rebate;
+                    result.funding.borrow_fees += fee;
+                    result.funding.short_rebate += rebate;
+                }
                 // Mark the book at the execution bar.
                 let mut equity_next = cash;
                 for (&sym, &q) in &positions {
@@ -1042,7 +1334,29 @@ impl<'p> Kernel<'p> {
                     let slippage = qty.abs() * p * slip;
                     let impact = qty.abs() * p * imp;
                     let allowance = bar_costs + commission + fee + slippage + impact;
-                    // Leverage: only an order that adds exposure can borrow.
+                    // Borrow availability: an order that opens or adds to a short
+                    // needs its instrument's ADV bucket to be shortable.
+                    if pos + qty < 0.0 && pos + qty < pos {
+                        let adv = self.adv(sym, &bars, k + 1);
+                        let bucket = self.cfg.borrow_bucket(adv);
+                        if !bucket.shortable {
+                            not_shortable += 1;
+                            open_targets.remove(&sym);
+                            result.dropped.push((
+                                t,
+                                d.clone(),
+                                format!(
+                                    "not shortable: ADV {} of {} is below {} (the smallest borrow bucket)",
+                                    adv.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "unknown".into()),
+                                    name,
+                                    bucket.adv_below
+                                ),
+                            ));
+                            continue;
+                        }
+                    }
+                    // Leverage: only an order that adds exposure can borrow, and
+                    // only up to the configured gross multiple of equity.
                     if !reduces {
                         let new_cash = cash - cost;
                         let mut gross = 0.0;
@@ -1058,8 +1372,12 @@ impl<'p> Kernel<'p> {
                             net += qty * p;
                         }
                         let tol = 1e-9 * (1.0 + net.abs()) + allowance;
-                        if new_cash < -tol || gross > net + tol {
-                            let message = format!("leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2}", new_cash, gross, net);
+                        let max_gross = self.cfg.max_gross.max(1.0);
+                        if new_cash < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol {
+                            let message = format!(
+                                "leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2} (limit {}x gross)",
+                                new_cash, gross, net, max_gross
+                            );
                             match self.cfg.on_leverage {
                                 OnLeverage::Halt => {
                                     return Err(RunError::Risk {
@@ -1073,7 +1391,7 @@ impl<'p> Kernel<'p> {
                                     result.dropped.push((
                                         t,
                                         d.clone(),
-                                        format!("rejected, would exceed equity: cash {:.2}, gross {:.2} against equity {:.2}", new_cash, gross, net),
+                                        format!("rejected, would exceed {}x equity: cash {:.2}, gross {:.2} against equity {:.2}", max_gross, new_cash, gross, net),
                                     ));
                                     continue;
                                 }
@@ -1113,6 +1431,7 @@ impl<'p> Kernel<'p> {
                         impact,
                         participation,
                         partial,
+                        forced: false,
                     });
                     // The remainder of a capped order: a delta order expires, a
                     // target re-issues itself at the next bar.
@@ -1159,6 +1478,46 @@ impl<'p> Kernel<'p> {
                     above,
                     self.cfg.participation_warn * 100.0,
                     result.liquidity.max_participation * 100.0
+                ),
+            });
+        }
+        if margin_calls > 0 {
+            result.warnings.push(RunWarning {
+                bias: "leverage".into(),
+                message: format!(
+                    "{} margin calls (equity below {}% of gross) {}",
+                    margin_calls,
+                    self.cfg.maintenance_margin * 100.0,
+                    if self.cfg.on_margin_call == OnMarginCall::Liquidate {
+                        "liquidated pro rata at the bar's close"
+                    } else {
+                        "ignored"
+                    }
+                ),
+            });
+        }
+        if result.funding.margin_interest > 0.0 {
+            result.warnings.push(RunWarning {
+                bias: "funding-cost neglect".into(),
+                message: format!(
+                    "margin interest of {:.2} charged at a constant {}% a year, not a rate series",
+                    result.funding.margin_interest,
+                    self.cfg.margin_rate * 100.0
+                ),
+            });
+        }
+        if shorts_held {
+            result.warnings.push(RunWarning {
+                bias: "shorting".into(),
+                message: format!("borrow fees of {:.2} by ADV bucket are a proxy, modeled, not observed", result.funding.borrow_fees),
+            });
+        }
+        if not_shortable > 0 {
+            result.warnings.push(RunWarning {
+                bias: "borrow-availability".into(),
+                message: format!(
+                    "{} short orders dropped: the instrument's ADV is in the smallest bucket, which is not shortable (a proxy for locate)",
+                    not_shortable
                 ),
             });
         }

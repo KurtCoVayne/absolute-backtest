@@ -312,3 +312,24 @@ fn check_prints_degrees_of_freedom_per_strategy() {
     assert!(stdout.contains("warning [W6]") && stdout.contains("\"SPY\""), "{}", stdout);
     assert!(stdout.contains("relative_strength: degrees of freedom:"), "{}", stdout);
 }
+
+/// Data-bundle doc, section 5: `--nav` prints the book at every bar for the
+/// study and the reference engine to consume; `--margin reg-t` is a preset.
+#[test]
+fn nav_prints_the_book_per_bar_and_reg_t_is_a_preset() {
+    let files = strategy_files("momentum_top_n");
+    let mut args = vec!["run", "--strategy", "momentum_top_n", "--synthetic", "--days", "120", "--quiet", "--nav", "--margin", "reg-t"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{}\n{}", stdout, stderr);
+    assert!(stdout.contains("t,equity,cash,gross,net,leverage\n2022-01-03,"), "{}", stdout);
+    assert!(stdout.contains("funding: cash interest") && stdout.contains("exposure: max gross"), "{}", stdout);
+    let rows = stdout.lines().filter(|l| l.starts_with("2022-") || l.starts_with("2023-")).count();
+    assert!(rows > 100, "{} rows", rows);
+    let mut args = vec!["run", "--strategy", "momentum_top_n", "--synthetic", "--days", "120", "--quiet", "--margin", "portfolio"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out).1.contains("--margin"), "{}", text(&out).1);
+}
