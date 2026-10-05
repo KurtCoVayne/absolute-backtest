@@ -176,6 +176,21 @@ pub struct ExecConfig {
     pub commission_min_per_order: f64,
     /// Regulatory fee on the notional of sells (and shorts), in basis points.
     pub fee_bps_on_sells: f64,
+    /// Liquidity (data-bundle doc, section 5): a fill is at most
+    /// `participation_cap` times the bar's volume (0 is no cap); a delta
+    /// order's remainder expires, a target's re-issues itself at the next
+    /// bars until reached or superseded. Impact moves the fill price against
+    /// the order by `impact_coef` times the square root of the filled
+    /// quantity over average daily volume (the mean bar volume over the
+    /// `adv_window` bars ending at the fill bar); 0 is no impact. A fill
+    /// above `participation_warn` of bar volume is reported on the run.
+    pub participation_cap: f64,
+    pub impact_coef: f64,
+    pub adv_window: usize,
+    pub participation_warn: f64,
+    /// Primitive relation that supplies bar volumes; `None` picks a
+    /// `Quantity<Shares>`-valued primitive, preferring one named `volume`.
+    pub volume_relation: Option<String>,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -208,6 +223,11 @@ impl Default for ExecConfig {
             commission_per_share: 0.005,
             commission_min_per_order: 1.0,
             fee_bps_on_sells: 0.278,
+            participation_cap: 0.1,
+            impact_coef: 0.1,
+            adv_window: 20,
+            participation_warn: 0.05,
+            volume_relation: None,
             price_relation: None,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
@@ -229,6 +249,8 @@ impl ExecConfig {
             commission_per_share: 0.0,
             commission_min_per_order: 0.0,
             fee_bps_on_sells: 0.0,
+            participation_cap: 0.0,
+            impact_coef: 0.0,
             ..ExecConfig::default()
         }
     }
@@ -247,6 +269,18 @@ impl ExecConfig {
             w.push(RunWarning {
                 bias: "slippage".into(),
                 message: "slippage is zero; every order fills at the bar's close".into(),
+            });
+        }
+        if self.participation_cap == 0.0 {
+            w.push(RunWarning {
+                bias: "liquidity".into(),
+                message: "no participation cap; an order fills whole whatever the bar's volume".into(),
+            });
+        }
+        if self.impact_coef == 0.0 {
+            w.push(RunWarning {
+                bias: "market-impact".into(),
+                message: "impact is zero; a large order fills at the quoted price".into(),
             });
         }
         w
@@ -269,8 +303,21 @@ pub struct CostSummary {
     pub fees: f64,
     /// The notional lost to slippage: Σ |quantity| · |fill price − bar price|.
     pub slippage: f64,
+    /// The notional lost to impact: Σ |quantity| · bar price · impact fraction.
+    pub impact: f64,
     /// Σ |quantity| · fill price.
     pub turnover: f64,
+}
+
+/// How much of what was asked for was filled, and at what share of volume.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiquiditySummary {
+    /// Σ filled quantity over Σ quantity the decisions asked for (a target's
+    /// re-issues count their fills, not a new request); 1 when nothing was asked.
+    pub fill_ratio: f64,
+    /// Mean and maximum of |filled| / bar volume over fills with a volume.
+    pub avg_participation: f64,
+    pub max_participation: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -374,8 +421,15 @@ pub struct FillRecord {
     pub commission: f64,
     /// Regulatory fee charged (on sells).
     pub fee: f64,
-    /// Slippage paid: |quantity| · |fill price − bar price|.
+    /// Slippage paid: |quantity| · bar price · slippage fraction.
     pub slippage: f64,
+    /// Impact paid: |quantity| · bar price · impact fraction.
+    pub impact: f64,
+    /// |quantity| / bar volume (0 when the bar has no volume).
+    pub participation: f64,
+    /// The fill was capped by participation; the remainder expired (delta)
+    /// or was re-issued (target).
+    pub partial: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -391,7 +445,9 @@ pub struct RunResult {
     pub final_cash: f64,
     pub final_positions: BTreeMap<Sym, f64>,
     pub costs: CostSummary,
-    /// The cost models the configuration turned off.
+    pub liquidity: LiquiditySummary,
+    /// The models the configuration turned off, and what the run observed
+    /// that the author should know (fills above the participation threshold).
     pub warnings: Vec<RunWarning>,
 }
 
@@ -484,6 +540,8 @@ pub struct Kernel<'p> {
     pub(crate) cfg: ExecConfig,
     pub(crate) price_rel: Option<usize>,
     pub(crate) price_col: usize,
+    pub(crate) volume_rel: Option<usize>,
+    pub(crate) volume_col: usize,
     pub(crate) last_price: HashMap<Sym, f64>,
     pub(crate) params: HashMap<(String, String), Value>,
 }
@@ -659,6 +717,34 @@ impl<'p> Kernel<'p> {
             }
         };
         let price_col = price_rel.and_then(|id| price_column(prog.relations.get(&rels[id].name).unwrap())).unwrap_or(0);
+        // Volume relation for the participation cap and impact.
+        let volume_rel = match &cfg.volume_relation {
+            Some(name) => {
+                let id = *rel_ids.get(name).ok_or_else(|| RunError::Config(format!("volume relation `{}` is not in the program", name)))?;
+                let sig = prog.relations.get(name).unwrap();
+                if !matches!(sig.kind, Kind::Primitive { .. }) || shares_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
+                    return Err(RunError::Config(format!(
+                        "volume relation `{}` must be a primitive with an equity argument and a Quantity<Shares> output; `{}` has none",
+                        name, name
+                    )));
+                }
+                if !sig.res.map(|r| r <= prog.resolution).unwrap_or(false) {
+                    return Err(RunError::Config(format!("volume relation `{}` is coarser than the decision resolution {}", name, prog.resolution)));
+                }
+                Some(id)
+            }
+            None => {
+                let mut cands: Vec<(&String, &Signature)> = prog
+                    .relations
+                    .iter()
+                    .filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. }) && s.res.map(|r| r <= prog.resolution).unwrap_or(false))
+                    .filter(|(_, s)| s.args.iter().any(|a| a.ty.is_entity()) && shares_column(s).is_some())
+                    .collect();
+                cands.sort_by_key(|(n, s)| (s.res != Some(prog.resolution), !n.starts_with("volume"), (*n).clone()));
+                cands.first().map(|(n, _)| rel_ids[*n])
+            }
+        };
+        let volume_col = volume_rel.and_then(|id| shares_column(prog.relations.get(&rels[id].name).unwrap())).unwrap_or(0);
         Ok(Kernel {
             prog,
             symbols,
@@ -672,6 +758,8 @@ impl<'p> Kernel<'p> {
             cfg,
             price_rel,
             price_col,
+            volume_rel,
+            volume_col,
             last_price: HashMap::new(),
             params,
         })
@@ -710,6 +798,12 @@ impl<'p> Kernel<'p> {
             ..Default::default()
         };
         let delta = self.prog.mode == DecisionMode::Delta;
+        // Targets a participation cap left unreached, re-issued at each next
+        // bar until reached or superseded by a decision on the instrument.
+        let mut open_targets: BTreeMap<Sym, (Decision, usize)> = BTreeMap::new();
+        let mut requested_total = 0.0;
+        let mut filled_total = 0.0;
+        let mut participations: Vec<f64> = Vec::new();
         for (k, &t) in bars.iter().enumerate() {
             // Mark to market before the bar's decisions.
             let mut equity = cash;
@@ -765,9 +859,16 @@ impl<'p> Kernel<'p> {
                 }
                 // Orders that reduce a position fund the ones that open or add,
                 // so within a bar they fill first (symbol order within each group).
-                let mut pending: Vec<(Decision, usize)> = by_equity.values().flatten().cloned().collect();
+                // A decision on an instrument supersedes its open target; the
+                // other open targets are re-issued (flagged, so they are not
+                // counted as new requests).
+                for sym in by_equity.keys() {
+                    open_targets.remove(sym);
+                }
+                let mut pending: Vec<(Decision, usize, bool)> = by_equity.values().flatten().map(|(d, r)| (d.clone(), *r, false)).collect();
+                pending.extend(open_targets.values().map(|(d, r)| (d.clone(), *r, true)));
                 let mut marks: HashMap<Sym, f64> = HashMap::new();
-                for (d, _) in &pending {
+                for (d, _, _) in &pending {
                     if let Some(p) = self.price_at(d.equity, tn) {
                         marks.insert(d.equity, p);
                     }
@@ -783,10 +884,10 @@ impl<'p> Kernel<'p> {
                         }
                     }
                 };
-                pending.sort_by_key(|(d, _)| !reducing(d));
+                pending.sort_by_key(|(d, _, _)| !reducing(d));
                 // Ruin: a book without positive equity cannot size or fund an order.
                 if !pending.is_empty() && equity_next <= 0.0 && self.cfg.on_ruin == OnRuin::Halt {
-                    let (d, rule) = &pending[0];
+                    let (d, rule, _) = &pending[0];
                     return Err(RunError::Risk {
                         t,
                         rule: self.prog.rule_label(*rule),
@@ -800,8 +901,9 @@ impl<'p> Kernel<'p> {
                 // paying them, carrying a debit of at most the bar's costs, which
                 // the next sizing sees (and margin interest prices).
                 let mut bar_costs = 0.0;
-                for (d, rule) in &pending {
+                for (d, rule, reissued) in &pending {
                     let sym = d.equity;
+                    let is_target = matches!(d.ctor, Ctor::TargetWeight | Ctor::TargetQuantity);
                     let name = self.symbols.name(sym).to_string();
                     let pos = positions.get(&sym).copied().unwrap_or(0.0);
                     let bar_price = self.bar_price(sym, tn);
@@ -838,11 +940,14 @@ impl<'p> Kernel<'p> {
                         // Without a price a weight cannot be sized, except the flat target.
                         (Ctor::TargetWeight, None) if d.amount == 0.0 => -pos,
                         (Ctor::TargetWeight, None) => {
+                            open_targets.remove(&sym);
                             result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
                             continue;
                         }
                     };
                     if qty == 0.0 {
+                        // A target that is held: nothing to do, and an open one is reached.
+                        open_targets.remove(&sym);
                         continue;
                     }
                     // Oversize: a delta order that would carry the position across zero.
@@ -874,6 +979,38 @@ impl<'p> Kernel<'p> {
                             OnOversize::Allow => {}
                         }
                     }
+                    // Participation: a fill is at most the cap times the bar's volume.
+                    let requested = qty.abs();
+                    if !*reissued {
+                        requested_total += requested;
+                    }
+                    let bar_volume = self.bar_volume(sym, tn);
+                    let mut partial = false;
+                    if let (true, Some(v)) = (self.cfg.participation_cap > 0.0, bar_volume) {
+                        let cap = round(self.cfg.participation_cap * v);
+                        if requested > cap {
+                            partial = true;
+                            qty = qty.signum() * cap;
+                        }
+                    }
+                    let cap_pct = self.cfg.participation_cap * 100.0;
+                    let partial_note = move |filled: f64| {
+                        format!(
+                            "partial fill: {} of {} shares (participation cap {}% of volume {})",
+                            filled,
+                            requested,
+                            cap_pct,
+                            bar_volume.unwrap_or(0.0)
+                        )
+                    };
+                    if qty == 0.0 {
+                        if is_target {
+                            open_targets.insert(sym, (d.clone(), *rule));
+                        } else {
+                            result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(0.0))));
+                        }
+                        continue;
+                    }
                     // The order shrinks the position without crossing zero: it is a
                     // liquidation (fillable at the last price) and never leverage.
                     let reduces = pos != 0.0 && (pos + qty) * pos >= 0.0 && (pos + qty).abs() < pos.abs();
@@ -883,12 +1020,18 @@ impl<'p> Kernel<'p> {
                         None => match self.last_price.get(&sym).copied() {
                             Some(p) if reduces => (p, true),
                             _ => {
+                                open_targets.remove(&sym);
                                 result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
                                 continue;
                             }
                         },
                     };
-                    let fill_price = slipped(p, qty > 0.0);
+                    // Impact: square root in participation of average daily volume.
+                    let imp = match (self.cfg.impact_coef > 0.0, self.adv(sym, &bars, k + 1)) {
+                        (true, Some(adv)) if adv > 0.0 => self.cfg.impact_coef * (qty.abs() / adv).sqrt(),
+                        _ => 0.0,
+                    };
+                    let fill_price = if qty > 0.0 { p * (1.0 + slip + imp) } else { p * (1.0 - slip - imp) };
                     let commission = if self.cfg.commission_per_share == 0.0 && self.cfg.commission_min_per_order == 0.0 {
                         0.0
                     } else {
@@ -896,8 +1039,9 @@ impl<'p> Kernel<'p> {
                     };
                     let fee = if qty < 0.0 { qty.abs() * fill_price * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
                     let cost = qty * fill_price + commission + fee;
-                    let slippage = qty.abs() * (fill_price - p).abs();
-                    let allowance = bar_costs + commission + fee + slippage;
+                    let slippage = qty.abs() * p * slip;
+                    let impact = qty.abs() * p * imp;
+                    let allowance = bar_costs + commission + fee + slippage + impact;
                     // Leverage: only an order that adds exposure can borrow.
                     if !reduces {
                         let new_cash = cash - cost;
@@ -946,11 +1090,17 @@ impl<'p> Kernel<'p> {
                     }
                     self.last_price.insert(sym, fill_price);
                     self.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
-                    bar_costs += commission + fee + slippage;
+                    bar_costs += commission + fee + slippage + impact;
                     result.costs.commissions += commission;
                     result.costs.fees += fee;
                     result.costs.slippage += slippage;
+                    result.costs.impact += impact;
                     result.costs.turnover += qty.abs() * fill_price;
+                    filled_total += qty.abs();
+                    let participation = bar_volume.filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0);
+                    if bar_volume.is_some() {
+                        participations.push(participation);
+                    }
                     result.fills.push(FillRecord {
                         t: tn,
                         equity: sym,
@@ -960,7 +1110,21 @@ impl<'p> Kernel<'p> {
                         commission,
                         fee,
                         slippage,
+                        impact,
+                        participation,
+                        partial,
                     });
+                    // The remainder of a capped order: a delta order expires, a
+                    // target re-issues itself at the next bar.
+                    if partial {
+                        if is_target {
+                            open_targets.insert(sym, (d.clone(), *rule));
+                        } else {
+                            result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(qty.abs()))));
+                        }
+                    } else if is_target {
+                        open_targets.remove(&sym);
+                    }
                 }
                 for (&sym, &q) in &positions {
                     self.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
@@ -977,6 +1141,27 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        result.liquidity = LiquiditySummary {
+            fill_ratio: if requested_total > 0.0 { filled_total / requested_total } else { 1.0 },
+            avg_participation: if participations.is_empty() {
+                0.0
+            } else {
+                participations.iter().sum::<f64>() / participations.len() as f64
+            },
+            max_participation: participations.iter().cloned().fold(0.0, f64::max),
+        };
+        let above = participations.iter().filter(|p| **p > self.cfg.participation_warn).count();
+        if above > 0 {
+            result.warnings.push(RunWarning {
+                bias: "market-impact".into(),
+                message: format!(
+                    "{} fills above {}% of bar volume (max {:.1}%); impact is modeled, capacity is limited",
+                    above,
+                    self.cfg.participation_warn * 100.0,
+                    result.liquidity.max_participation * 100.0
+                ),
+            });
+        }
         result.final_cash = cash;
         result.final_positions = positions;
         Ok(result)
@@ -988,6 +1173,45 @@ impl<'p> Kernel<'p> {
         match self.bar_price(sym, t) {
             Some(p) => Some(p),
             None => self.last_price.get(&sym).copied(),
+        }
+    }
+
+    /// Volume of `sym` over decision bar `t` from the configured volume
+    /// relation: the tuple at `t`, or the sum of the fine tuples in its bucket.
+    pub fn bar_volume(&self, sym: Sym, t: i64) -> Option<f64> {
+        let id = self.volume_rel?;
+        let info = &self.rels[id];
+        let entity_pos = *info.entity_positions.first()?;
+        let col = self.volume_col;
+        if info.res == self.prog.resolution {
+            self.stores[id]
+                .by_time
+                .get(&t)
+                .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
+                .and_then(|tu| tu[col].as_f64())
+        } else {
+            let (lo, hi) = time::bucket_range(self.prog.resolution, t);
+            let mut sum = None;
+            for (_, tus) in self.stores[id].by_time.range(lo..=hi) {
+                for tu in tus.iter().filter(|tu| tu[entity_pos] == Value::Equity(sym)) {
+                    if let Some(v) = tu[col].as_f64() {
+                        sum = Some(sum.unwrap_or(0.0) + v);
+                    }
+                }
+            }
+            sum
+        }
+    }
+
+    /// Average daily volume of `sym` at `bars[end]`: the mean bar volume over
+    /// the `adv_window` bars ending there (inclusive); `None` without any.
+    pub fn adv(&self, sym: Sym, bars: &[i64], end: usize) -> Option<f64> {
+        let lo = end.saturating_sub(self.cfg.adv_window.max(1) - 1);
+        let vols: Vec<f64> = bars[lo..=end.min(bars.len() - 1)].iter().filter_map(|&t| self.bar_volume(sym, t)).collect();
+        if vols.is_empty() {
+            None
+        } else {
+            Some(vols.iter().sum::<f64>() / vols.len() as f64)
         }
     }
 
@@ -1229,6 +1453,12 @@ fn lit_magnitude(l: &Lit) -> Option<f64> {
         Lit::Equity(_) => None,
         _ => Some(l_num(l)),
     }
+}
+
+fn shares_column(sig: &Signature) -> Option<usize> {
+    sig.args
+        .iter()
+        .position(|a| a.mode == Mode::Out && matches!(&a.ty, Ty::Quantity(d) if d.c2 == 0 && d.s2 == 2 && d.t2 == 0))
 }
 
 fn price_column(sig: &Signature) -> Option<usize> {

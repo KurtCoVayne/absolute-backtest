@@ -804,7 +804,7 @@ strategy up_vs_prev {
     let bars = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap().decision_bars();
     let days: Vec<String> = bars.iter().map(|t| format_timestamp(*t)).collect();
     assert_eq!(days, vec!["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"]);
-    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    let r = run(&prog, &ds, ExecConfig::frictionless()).unwrap();
     // Tuesday fires (Monday has a bar); Wednesday has no close_d; Thursday's
     // prev is Wednesday, so it does not fire either; Friday fires again.
     let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();

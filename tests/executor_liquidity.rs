@@ -77,15 +77,20 @@ fn a_delta_order_fills_up_to_the_participation_cap_and_the_remainder_expires() {
     let prog = program(UP_DOWN, "up_down");
     // Volume 40 a bar: the cap is 4 shares of the 10 asked for.
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0], &[40.0; 5]);
-    let cfg = ExecConfig { initial_cash: 1000.0, participation_cap: 0.1, ..ExecConfig::frictionless() };
+    let cfg = ExecConfig {
+        initial_cash: 1000.0,
+        participation_cap: 0.1,
+        ..ExecConfig::frictionless()
+    };
     let r = run(&prog, &ds, cfg).unwrap();
     let fills: Vec<(String, f64)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity)).collect();
     // Buy 10 -> 4 filled; the sell is of what is held (4), within the cap.
     assert_eq!(fills, vec![("2024-01-10".to_string(), 4.0), ("2024-01-11".to_string(), -4.0), ("2024-01-12".to_string(), 4.0)]);
     assert!(r.fills.iter().all(|f| close(f.participation, 0.1)), "{:?}", r.fills);
     assert!(r.fills[0].partial && !r.fills[1].partial && r.fills[2].partial);
-    let partials: Vec<&String> = r.dropped.iter().map(|(_, _, reason)| reason).collect();
+    let partials: Vec<&String> = r.dropped.iter().map(|(_, _, reason)| reason).filter(|r| r.contains("partial fill")).collect();
     assert_eq!(partials.len(), 2, "{:?}", r.dropped);
+    assert_eq!(r.dropped.len(), 3, "plus the last bar's sell: {:?}", r.dropped);
     assert!(partials[0].contains("partial fill: 4 of 10 shares") && partials[0].contains("participation cap"), "{}", partials[0]);
     // Requested 10 + 4 + 10 = 24 shares, filled 12.
     assert!(close(r.liquidity.fill_ratio, 0.5), "{}", r.liquidity.fill_ratio);
@@ -99,12 +104,21 @@ fn a_target_re_issues_itself_until_reached() {
     let prog = program(FULL_ONCE, "full_once");
     // 1000 cash at 10 is 100 shares; volume 300 caps a bar at 30.
     let ds = market(&[10.0; 8], &[300.0; 8]);
-    let cfg = ExecConfig { initial_cash: 1000.0, participation_cap: 0.1, ..ExecConfig::frictionless() };
+    let cfg = ExecConfig {
+        initial_cash: 1000.0,
+        participation_cap: 0.1,
+        ..ExecConfig::frictionless()
+    };
     let r = run(&prog, &ds, cfg).unwrap();
     let fills: Vec<(String, f64)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity)).collect();
     assert_eq!(
         fills,
-        vec![("2024-01-09".to_string(), 30.0), ("2024-01-10".to_string(), 30.0), ("2024-01-11".to_string(), 30.0), ("2024-01-12".to_string(), 10.0)]
+        vec![
+            ("2024-01-09".to_string(), 30.0),
+            ("2024-01-10".to_string(), 30.0),
+            ("2024-01-11".to_string(), 30.0),
+            ("2024-01-12".to_string(), 10.0)
+        ]
     );
     // The strategy decided once; the executor carried the rest.
     assert_eq!(r.decisions.len(), 1);
@@ -125,17 +139,21 @@ strategy flip {
   resolution @1d
   mode target
   param w : Scalar = 1.0
-  rel first(@T: Timestamp)
-  first(T) :- bar(T), not has_prev(T).
+  rel opening(@T: Timestamp)
+  opening(T) :- bar(T), not has_prev(T).
   rel has_prev(@T: Timestamp)
   has_prev(T) :- bar(T), prev(T, _).
-  decide(T, target_weight(A, w)) :- universe(A, T), first(T).
+  decide(T, target_weight(A, w)) :- universe(A, T), opening(T).
   decide(T, target_weight(A, 0)) :- held(A, T, _), has_prev(T).
 }
 "#;
     let prog = program(src, "flip");
     let ds = market(&[10.0; 6], &[300.0; 6]);
-    let cfg = ExecConfig { initial_cash: 1000.0, participation_cap: 0.1, ..ExecConfig::frictionless() };
+    let cfg = ExecConfig {
+        initial_cash: 1000.0,
+        participation_cap: 0.1,
+        ..ExecConfig::frictionless()
+    };
     let r = run(&prog, &ds, cfg).unwrap();
     let fills: Vec<(String, f64)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity)).collect();
     // Bar 1 buys 30 of 100; bar 2's flat target sells 30 and the open 70 is gone.
@@ -149,7 +167,12 @@ fn impact_is_square_root_in_participation_of_adv() {
     // ADV 10_000 and 100 shares: participation 1%, impact 0.1 * sqrt(0.01) = 1%.
     let big = program(&UP_DOWN.replace("10 shares", "100 shares"), "up_down");
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0], &[10_000.0; 5]);
-    let cfg = ExecConfig { initial_cash: 100_000.0, impact_coef: 0.1, adv_window: 20, ..ExecConfig::frictionless() };
+    let cfg = ExecConfig {
+        initial_cash: 100_000.0,
+        impact_coef: 0.1,
+        adv_window: 20,
+        ..ExecConfig::frictionless()
+    };
     let r = run(&big, &ds, cfg.clone()).unwrap();
     assert!(close(r.fills[0].price, 10.0 * 1.01), "buy at 10 moved up 1%: {}", r.fills[0].price);
     assert!(close(r.fills[0].impact, 100.0 * 10.0 * 0.01), "{}", r.fills[0].impact);
@@ -168,7 +191,15 @@ fn impact_is_square_root_in_participation_of_adv() {
 fn turning_liquidity_models_off_is_warned() {
     let prog = program(UP_DOWN, "up_down");
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0], &[40.0; 5]);
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 1000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     let biases: Vec<&str> = r.warnings.iter().map(|w| w.bias.as_str()).collect();
     assert!(biases.contains(&"liquidity"), "{:?}", r.warnings);
     assert!(biases.contains(&"market-impact"), "{:?}", r.warnings);
@@ -176,6 +207,15 @@ fn turning_liquidity_models_off_is_warned() {
     assert_eq!(r.fills[0].quantity, 10.0);
     assert!(close(r.fills[0].participation, 0.25));
     // A volume relation that is not in the program is a configuration error.
-    let err = run(&prog, &ds, ExecConfig { volume_relation: Some("turnover".into()), ..ExecConfig::default() }).err().unwrap();
+    let err = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            volume_relation: Some("turnover".into()),
+            ..ExecConfig::default()
+        },
+    )
+    .err()
+    .unwrap();
     assert!(err.to_string().contains("turnover"), "{}", err);
 }

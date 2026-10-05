@@ -16,7 +16,7 @@ Oct 4, 2026 · John Gonzalez
 > | Milestone | Covers | Status |
 > | --- | --- | --- |
 > | M0 | Section 9 (changes forced on the semantic model), W5, W6, this document | implemented |
-> | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | costs and slippage implemented; the rest planned |
+> | M1 | Section 5 (execution realism): costs, slippage, impact, participation, margin, funding, borrow | costs, slippage, impact, liquidity and partial fills implemented; margin, funding and borrow planned |
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | planned |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | planned |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | planned |
@@ -233,8 +233,12 @@ write `AAPL`, and the bundle date fixes what that means.
 > funding, borrow proxy) and M2 (delisting, actions). Implemented: the cost
 > model (per-share commission with a per-order minimum, the regulatory fee on
 > sells, volatility-scaled slippage, non-zero defaults, a cost summary per
-> run, and a warning naming the bias when a model is turned off) and the
-> ruin, leverage and oversize policies of PR #48 (halt by default). The
+> run, and a warning naming the bias when a model is turned off), the
+> liquidity model (participation cap from bar volume, a delta remainder
+> expiring and a target re-issuing itself, square-root impact in
+> participation of ADV, fill ratio and participation reported, fills above a
+> threshold warned) and the ruin, leverage and oversize policies of PR #48
+> (halt by default). The
 > leverage default stays at 1x gross by the owner's ruling; Reg T (50 %
 > initial, 25 % maintenance) is a configuration preset, not the default.
 
