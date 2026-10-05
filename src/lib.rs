@@ -14,6 +14,7 @@ pub mod ir;
 pub mod kernel;
 pub mod lexer;
 pub mod parser;
+pub mod study;
 
 pub use check::{check_program, check_workspace, Code, Diagnostic, Program, Severity, Workspace};
 pub use ir::*;

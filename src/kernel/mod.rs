@@ -1407,6 +1407,29 @@ impl<'p> Kernel<'p> {
         self.rel_ids[name]
     }
 
+    /// The tuples of `relation` at bar `t` for the given `+` inputs (in
+    /// signature order), after a run: what a study reads back from a run
+    /// (data-bundle doc, section 7, "per-run relations on request").
+    pub fn query(&mut self, relation: &str, t: i64, inputs: &[Value]) -> Result<Vec<Tuple>, RunError> {
+        let rel = self
+            .rel_ids
+            .get(relation)
+            .copied()
+            .ok_or_else(|| RunError::Config(format!("`{}` is not a relation of this program", relation)))?;
+        let info = self.rels[rel].clone();
+        if inputs.len() != info.inputs.len() {
+            return Err(RunError::Config(format!("`{}` takes {} input(s), {} given", relation, info.inputs.len(), inputs.len())));
+        }
+        let width = self.prog.relations[relation].args.len();
+        let mut pattern: Vec<Option<Value>> = vec![None; width];
+        pattern[info.key_pos] = Some(Value::Time(t));
+        for (&i, v) in info.inputs.iter().zip(inputs) {
+            pattern[i] = Some(v.clone());
+        }
+        let found = self.call(rel, &pattern)?;
+        Ok(found.iter().map(|(tu, _)| tu.clone()).collect())
+    }
+
     /// Price of `sym` for marking at decision bar `t`: the bar's price, or
     /// the last price seen when the bar has none.
     pub fn price_at(&mut self, sym: Sym, t: i64) -> Option<f64> {

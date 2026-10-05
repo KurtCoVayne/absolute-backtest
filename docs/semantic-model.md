@@ -397,8 +397,8 @@ temporal key. Every body atom outside a resample form has the same resolution;
 `prev`, `lag`, `window`, and `prior_window` range over that resolution's time
 domain; a resample form's inner relation is strictly finer than, and aligned
 to, the head's resolution, and the form carries a `min K`. A strategy declares
-one decision resolution, and `decide`, `decided`, `position`, `cash`, and
-`fill` are at that resolution. Two relations at different resolutions can meet
+one decision resolution, and `decide`, `decided`, `position`, `cash`, `nav`
+and `fill` are at that resolution. Two relations at different resolutions can meet
 only through resample or the as-of join: a resample aggregates a strictly
 finer relation into the head's buckets, and `R(...) asof T` reads one tuple
 of R, at any resolution, keyed at or before T and so available by T. There
@@ -437,6 +437,7 @@ interface.
 | `split`, `dividend`, `delisted`, `member`, `classification` | catalog relations of `equities_1d_v2` (data-bundle doc, section 3) | yes | corporate actions as events at their ex-date or announcement, delisting as a status, point-in-time membership and classification; the executor applies splits, dividends and delistings to the book (section 4 of that doc), the `catalog` library derives `ret` and `close_adj` from them causally |
 | `position` | `(+A: Equity, @T, -Q: Quantity<Shares>)` | yes | executor |
 | `cash` | `(@T, -C: Notional<USD>)` | yes | executor |
+| `nav` | `(@T, -N: Notional<USD>)` | yes | executor: cash plus positions marked at T, before T's decisions (what the metrics library reads) |
 | `fill` | `(+A: Equity, @T, -Q: Quantity<Shares>, -P: Price<USD>)` | yes | executor |
 | `decided` | `(@T0, -D: Decision)` | yes | kernel, from the strategy's own output |
 

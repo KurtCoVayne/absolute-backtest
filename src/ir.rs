@@ -879,6 +879,14 @@ pub fn kernel_relations(res: Resolution) -> Vec<Signature> {
             span: Span::default(),
         },
         Signature {
+            name: "nav".into(),
+            args: vec![arg("T", Mode::Key, Ty::Timestamp), arg("N", Mode::Out, Ty::Quantity(Dim::notional("USD")))],
+            res: Some(res),
+            complete: true,
+            kind: Kind::Executor,
+            span: Span::default(),
+        },
+        Signature {
             name: "fill".into(),
             args: vec![
                 arg("A", Mode::Out, Ty::Equity),
