@@ -20,7 +20,7 @@ Oct 4, 2026 · John Gonzalez
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) checkpoints (serialisable state, monthly or every n bars, resumed by fingerprint), per-tuple availability with late tuples and the as-of join (`R(...) asof T`, section 4 of the semantic model) implemented; the opt-in fast aggregation mode is deferred, the exact mode being the only one |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | implemented: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library; lineages (`revises`, similarity attachment, disputes), the append-only trial log, `abt study declare|run|reveal|metrics|dispute` with grids, DSR over the lineage, PBO over the grid, trailing and block hold-outs with reveals, walk-forward schemes with efficiency, the parameter surface and sub-period stability, and `abt study report` (every warning with its bias, trials, reveals, thresholds, degrees of freedom, the forty-bias audit with the rows warnings touched) |
-> | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | planned |
+> | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | in progress: the pandas reference executor (`reference/engine.py`, `diff.py`, `abt run --dump`, `tests/reference.rs` over the daily corpus, policy variants and the four action markets) implemented; stylized facts and the LLM-authored corpus to come |
 
 Data is closed and system-supplied, the kernel is built online so that
 backtesting is replay of the same fold that will run live, and every one of
@@ -436,7 +436,12 @@ honestly.
 
 ## 8. Realism program
 
-> Status: M5.
+> Status: M5. The pandas reference is implemented for the daily execution
+> contract (`reference/`), run by `tests/reference.rs` on every daily corpus
+> strategy, on policy and model variants, and on the split, dividend,
+> spin-off and delisting markets with their hand-computed NAV; the minute
+> contract and a pandas feature library are not covered. Stylized facts and
+> the LLM-authored corpus follow.
 
 Realism is the provider's claim and is proven three ways: the kernel agrees
 with an independent slow implementation on the corpus, it reproduces the

@@ -669,6 +669,23 @@ raised with its bias and how often (the checker's W5 and W6 included), and
 the forty biases of `docs/data-bundle.md` sections 4 to 6 with their status
 and the rows a warning touched marked.
 
+## The reference engine
+
+`reference/` is a second implementation of the execution contract in plain
+Python over pandas, written from `docs/semantic-model.md` section 6 and
+sharing nothing with the kernel (`docs/data-bundle.md`, section 8). `abt run
+--dump DIR` writes what a run saw and did (the data as CSV, the
+configuration, decisions, fills, dropped decisions, actions, the book at
+every bar and the final state); `python3 reference/diff.py DIR` replays the
+decisions through the reference executor and requires fills identical in
+quantity (exactly under whole lots) and in price to floating tolerance, the
+book identical at the end, the NAV within tolerance at every bar and the
+same dropped count. `tests/reference.rs` runs every daily corpus strategy,
+policy and model variants and the four action markets through it, skipping
+with a note where python3 with pandas is absent. `ci/github-workflow.yml`
+is the GitHub Actions workflow (format, clippy, tests with pandas installed
+so the comparison runs); move it to `.github/workflows/ci.yml` to enable it.
+
 ## Development
 
 ```
@@ -692,4 +709,4 @@ bundles, the online fold kernel, the catalog, the bias audit and the study
 API), whose status table names the milestone each section lands in: M0
 section 9 and the warnings W5, W6; M1 execution realism; M2 catalog,
 identities and the bundle format; M3 the fold kernel and availability time
-(all done); M4 the study API (done); M5 the realism program.
+(all done); M4 the study API (done); M5 the realism program (in progress).

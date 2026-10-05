@@ -1,0 +1,28 @@
+# GitHub Actions workflow for the crate. The session that wrote it could not
+# push under .github/workflows (its credential lacks the `workflow` scope),
+# so it lives here: move it to .github/workflows/ci.yml to enable it.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the reference engine's dependency
+        run: python3 -m pip install pandas
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests (the reference comparison runs because pandas is installed)
+        run: cargo test
