@@ -101,6 +101,7 @@ fn usage_documents_every_option() {
         "--haircut",
         "--bundle",
         "--untested",
+        "--kernel",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

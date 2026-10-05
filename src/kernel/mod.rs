@@ -13,7 +13,9 @@ use std::rc::Rc;
 use crate::check::Program;
 use crate::ir::*;
 pub mod executor;
+pub mod fold;
 pub use executor::{Executor, SimExecutor};
+pub use fold::{run_fold, Event, EventLog, Fold};
 pub use value::{Ctor, Decision, Sym, Symbols, Value};
 
 pub type Tuple = Vec<Value>;
@@ -876,6 +878,9 @@ pub struct Kernel<'p> {
     pub(crate) volume_col: usize,
     pub(crate) last_price: HashMap<Sym, f64>,
     pub(crate) params: HashMap<(String, String), Value>,
+    /// Dataset symbol and label ids to the kernel's (identifier order).
+    pub(crate) remap_syms: Vec<Sym>,
+    pub(crate) remap_labels: Vec<Sym>,
     pub(crate) labels: Symbols,
     /// The security table with ids in the kernel's symbol order, and the
     /// bundle date ticker literals and command-line names resolve at.
@@ -891,6 +896,17 @@ pub struct Kernel<'p> {
 
 impl<'p> Kernel<'p> {
     pub fn new(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        Kernel::build(prog, dataset, cfg, true)
+    }
+
+    /// A kernel over the dataset's symbols and tables but none of its facts:
+    /// the fold feeds them as events (`insert_fact`) and opens the time
+    /// domains' buckets as the stream reaches them (`open_bucket`).
+    pub fn new_streaming(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        Kernel::build(prog, dataset, cfg, false)
+    }
+
+    fn build(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig, load_facts: bool) -> Result<Kernel<'p>, RunError> {
         // Resolve string overrides by their parameter's type, as the checker
         // did for the program's own literals.
         let mut cfg = cfg;
@@ -991,7 +1007,7 @@ impl<'p> Kernel<'p> {
         // Stores and time domains.
         let mut stores: Vec<Store> = rels.iter().map(|_| Store::default()).collect();
         let mut native: HashMap<Resolution, BTreeSet<i64>> = HashMap::new();
-        for (name, tuples) in &dataset.facts {
+        for (name, tuples) in dataset.facts.iter().filter(|_| load_facts) {
             let Some(&id) = rel_ids.get(name) else { continue };
             let info = &rels[id];
             for tu in tuples {
@@ -1167,7 +1183,51 @@ impl<'p> Kernel<'p> {
             literal_equities,
             last_price: HashMap::new(),
             params,
+            remap_syms: remap,
+            remap_labels,
         })
+    }
+
+    /// A dataset tuple with its symbols and labels in the kernel's order.
+    pub fn remap_tuple(&self, tu: &[Value]) -> Tuple {
+        tu.iter()
+            .map(|v| match v {
+                Value::Equity(s) => Value::Equity(self.remap_syms[*s as usize]),
+                Value::Label(s) => Value::Label(self.remap_labels[*s as usize]),
+                Value::Decision(d) => Value::Decision(Decision {
+                    ctor: d.ctor,
+                    equity: self.remap_syms[d.equity as usize],
+                    amount: d.amount,
+                }),
+                v => v.clone(),
+            })
+            .collect()
+    }
+
+    /// Insert one primitive fact (already in the kernel's symbol order) and
+    /// return its temporal key.
+    pub fn insert_fact(&mut self, rel: usize, tuple: Tuple) -> Result<i64, RunError> {
+        let info = &self.rels[rel];
+        let key = tuple[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", info.name)))?;
+        self.stores[rel].insert(key, tuple);
+        Ok(key)
+    }
+
+    /// A bucket of resolution `res` exists from now on.
+    pub fn open_bucket(&mut self, res: Resolution, label: i64) {
+        self.domains.entry(res).or_default().insert(label);
+    }
+
+    pub fn relation_id(&self, name: &str) -> Option<usize> {
+        self.rel_ids.get(name).copied()
+    }
+
+    pub fn relation_resolution(&self, rel: usize) -> Resolution {
+        self.rels[rel].res
+    }
+
+    pub fn is_primitive(&self, rel: usize) -> bool {
+        matches!(self.prog.relations[&self.rels[rel].name].kind, Kind::Primitive { .. })
     }
 
     pub fn program(&self) -> &'p Program {
