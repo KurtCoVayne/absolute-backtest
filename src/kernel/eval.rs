@@ -123,14 +123,18 @@ impl<'p> Kernel<'p> {
         if let Some(hit) = self.memo.get(&memo_key) {
             return Ok(narrow(hit));
         }
-        if !self.in_progress.insert(memo_key.clone()) {
+        // WF-4 rules out a relation depending on itself at the same time;
+        // debug builds (the tests) still check that the checker did its job.
+        if cfg!(debug_assertions) && !self.in_progress.insert(memo_key.clone()) {
             return Err(RunError::Internal(format!(
                 "`{}` depends on itself at the same time; the checker should have rejected this (WF-4)",
                 info.name
             )));
         }
         let mut results: Vec<(Tuple, usize)> = Vec::new();
-        let mut seen: super::hash::FxHashSet<Tuple> = Default::default();
+        // Duplicates are found by a scan while the set is small, by a hash
+        // set once it grows (most calls derive at most a tuple or two).
+        let mut seen: Option<super::hash::FxHashSet<Tuple>> = None;
         for &ri in &info.rules {
             let cr = self.compiled[ri].clone();
             let rule = &self.prog.rules[ri];
@@ -160,12 +164,24 @@ impl<'p> Kernel<'p> {
                 for term in &rule.head.terms {
                     tu.push(self.term_value(&cr, term, &sol)?);
                 }
-                if seen.insert(tu.clone()) {
+                let fresh = match &mut seen {
+                    Some(set) => set.insert(tu.clone()),
+                    None if results.len() < 8 => !results.iter().any(|(t, _)| *t == tu),
+                    None => {
+                        let mut set: super::hash::FxHashSet<Tuple> = results.iter().map(|(t, _)| t.clone()).collect();
+                        let fresh = set.insert(tu.clone());
+                        seen = Some(set);
+                        fresh
+                    }
+                };
+                if fresh {
                     results.push((tu, ri));
                 }
             }
         }
-        self.in_progress.remove(&memo_key);
+        if cfg!(debug_assertions) {
+            self.in_progress.remove(&memo_key);
+        }
         if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
             results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
         }
@@ -276,6 +292,40 @@ impl<'p> Kernel<'p> {
     fn atom_matches(&mut self, cr: &CompiledRule, atom: &Atom, env: &Env) -> Result<Vec<Env>, RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
         let pat = self.atom_pattern(cr, atom, env)?;
+        // A stored relation binds straight from its store's block: no result
+        // set, no tuple copies (decision patterns take the general path).
+        let (stored, key_pos, entity_pos) = {
+            let info = &self.rels[rel];
+            (info.stored, info.key_pos, info.entity_positions.first().copied())
+        };
+        if stored && !atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
+            let Some(Value::Time(key)) = pat[key_pos] else {
+                return Err(RunError::Internal(format!("`{}` requested with an unbound temporal key", atom.name)));
+            };
+            let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
+            let entity = entity_pos.and_then(|e| pat[e].clone());
+            let mut out = Vec::new();
+            'tuples: for tu in self.stores[rel].lookup(key, entity.as_ref()) {
+                if !pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true)) {
+                    continue;
+                }
+                let mut e = env.clone();
+                for (slot, val) in slots.iter().zip(tu.iter()) {
+                    if let Some(slot) = *slot {
+                        match &e[slot] {
+                            Some(x) => {
+                                if x != val {
+                                    continue 'tuples;
+                                }
+                            }
+                            None => e[slot] = Some(val.clone()),
+                        }
+                    }
+                }
+                out.push(e);
+            }
+            return Ok(out);
+        }
         let tuples = self.call(rel, &pat)?;
         self.bind_tuples(cr, atom, env, &tuples)
     }
@@ -318,6 +368,15 @@ impl<'p> Kernel<'p> {
                 match &pat[i] {
                     Some(v) => mkey.push(v.clone()),
                     None => return Err(RunError::Internal(format!("`{}` requested as of {} with its input #{} unbound", info.name, t, i + 1))),
+                }
+            }
+            // The common case: the latest bar itself has a tuple (a relation
+            // read at its previous row). Answered directly, nothing memoised.
+            if let Some(k) = self.domains.get(&info.res).and_then(|d| d.range(..=t).next_back().copied()) {
+                pat[info.key_pos] = Some(Value::Time(k));
+                let first = self.call(rel, &pat)?;
+                if !first.is_empty() {
+                    return self.bind_tuples(cr, atom, env, &first);
                 }
             }
             let mut walked: Vec<i64> = Vec::new();
