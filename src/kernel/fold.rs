@@ -189,6 +189,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             price_relation: kernel.price_rel.map(|id| kernel.rels[id].name.clone()),
             volume_relation: kernel.volume_rel.map(|id| kernel.rels[id].name.clone()),
             base_capital: (!kernel.cfg.compounding).then_some(kernel.cfg.initial_cash),
+            multipliers: kernel.contracts.iter().map(|(s, c)| (*s, c.multiplier)).collect(),
             ..Default::default()
         };
         Fold {

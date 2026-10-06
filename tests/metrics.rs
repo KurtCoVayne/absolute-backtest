@@ -213,3 +213,54 @@ fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
         .unwrap();
     assert_eq!(v.len(), 1);
 }
+
+/// Data-bundle doc, section 7: a fixed-base book is reported both ways.
+/// Four weekly NAV changes on a base of 100: +10, -20, +5, +5.
+#[test]
+fn a_fixed_base_book_reports_compounded_and_additive_conventions() {
+    use absolute_backtest::kernel::{FillRecord, RunResult};
+    use absolute_backtest::study::metrics::{convention_metrics, period_returns};
+    let day = 86_400;
+    let curve = vec![(0, 100.0), (7 * day, 110.0), (14 * day, 90.0), (21 * day, 95.0), (28 * day, 100.0)];
+    let fill = |t: i64, q: f64, p: f64| FillRecord {
+        t,
+        equity: 0,
+        quantity: q,
+        price: p,
+        at_last_price: false,
+        commission: 0.5,
+        fee: 0.0,
+        slippage: 0.0,
+        impact: 0.0,
+        participation: 0.0,
+        partial: false,
+        forced: false,
+    };
+    let r = RunResult {
+        equity_curve: curve,
+        base_capital: Some(100.0),
+        // Two round trips of a future worth 2 a point: +1 x 2 - 1 and -3 x 2 - 1.
+        fills: vec![fill(0, 1.0, 10.0), fill(day, -1.0, 11.0), fill(2 * day, 1.0, 10.0), fill(3 * day, -1.0, 7.0)],
+        multipliers: [(0u32, 2.0)].into_iter().collect(),
+        ..Default::default()
+    };
+    let x: Vec<f64> = period_returns(&r, false).iter().map(|(_, x, _)| *x).collect();
+    assert_eq!(x, vec![0.1, -0.2, 0.05, 0.05]);
+    let m = convention_metrics(&r, 52.0, false);
+    let e: f64 = 1.1 * 0.8 * 1.05 * 1.05;
+    assert!((m.cagr - (e.powf(52.0 / 4.0) - 1.0)).abs() < 1e-12, "{}", m.cagr);
+    // Compounded drawdown 1 - 0.88/1.1; additive 0.2 from the 0.1 peak.
+    assert!((m.max_drawdown - 0.2).abs() < 1e-12, "{}", m.max_drawdown);
+    assert!((m.max_drawdown_additive - 0.2).abs() < 1e-12);
+    let mu = 0.0;
+    let pop = ((0.01 + 0.04 + 0.0025 + 0.0025) / 4.0f64).sqrt();
+    assert!((m.sharpe_population - mu / pop * 52f64.sqrt()).abs() < 1e-12);
+    assert_eq!(m.annual_return, 0.0);
+    assert!((m.total_pnl - 0.0).abs() < 1e-12);
+    assert!((m.profit_factor - 20.0 / 20.0).abs() < 1e-12);
+    assert_eq!(m.trades, 2);
+    assert!((m.profit_factor_trades - 1.0 / 7.0).abs() < 1e-12, "{}", m.profit_factor_trades);
+    assert_eq!(m.win_rate, 0.5);
+    // By day, each week is its own day.
+    assert_eq!(period_returns(&r, true).len(), 4);
+}

@@ -673,6 +673,133 @@ pub fn capacity(r: &RunResult, periods_per_year: f64, threshold: f64) -> Option<
     Some(start * (threshold / tm.impact_drag).powi(2))
 }
 
+/// A run's returns per reporting period, with the NAV change behind each:
+/// per decision bar, or per calendar day (the bars of a day summed on a
+/// fixed base, compounded otherwise).
+pub fn period_returns(r: &RunResult, by_day: bool) -> Vec<(i64, f64, f64)> {
+    let pnl: Vec<f64> = r.equity_curve.windows(2).map(|w| w[1].1 - w[0].1).collect();
+    let bars: Vec<(i64, f64, f64)> = r.bar_returns().into_iter().zip(pnl).map(|((t, x), p)| (t, x, p)).collect();
+    if !by_day {
+        return bars;
+    }
+    let mut days: Vec<(i64, f64, f64)> = Vec::new();
+    for (t, x, p) in bars {
+        let d = time::day_key(t) * time::DAY;
+        match days.last_mut() {
+            Some(last) if last.0 == d => {
+                last.1 = if r.base_capital.is_some() { last.1 + x } else { (1.0 + last.1) * (1.0 + x) - 1.0 };
+                last.2 += p;
+            }
+            _ => days.push((d, x, p)),
+        }
+    }
+    days
+}
+
+/// The two conventions a book is reported in (data-bundle doc, section 7):
+/// returns compounded into a curve (CAGR and drawdown of the compounded
+/// curve, Sharpe with the sample and the population deviation), and the
+/// additive figures of a fixed base (the mean return a year, the drawdown
+/// of the cumulative sum, profit factors and trades).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ConventionMetrics {
+    pub periods: usize,
+    pub periods_per_year: f64,
+    pub cagr: f64,
+    pub max_drawdown: f64,
+    pub sharpe: f64,
+    /// Mean over the population standard deviation, annualised.
+    pub sharpe_population: f64,
+    pub volatility_population: f64,
+    /// Mean period return times the periods a year.
+    pub annual_return: f64,
+    /// Largest fall of the cumulative return from its running peak.
+    pub max_drawdown_additive: f64,
+    pub total_pnl: f64,
+    /// Gains over losses of the periods.
+    pub profit_factor: f64,
+    /// Round trips: a position from flat back to flat, per security.
+    pub trades: usize,
+    pub profit_factor_trades: f64,
+    pub win_rate: f64,
+}
+
+pub fn convention_metrics(r: &RunResult, periods_per_year: f64, by_day: bool) -> ConventionMetrics {
+    let rows = period_returns(r, by_day);
+    let x: Vec<f64> = rows.iter().map(|(_, x, _)| *x).collect();
+    let n = x.len();
+    let mut m = ConventionMetrics {
+        periods: n,
+        periods_per_year,
+        ..Default::default()
+    };
+    if n == 0 {
+        return m;
+    }
+    let mu = mean(&x);
+    let pop = (x.iter().map(|v| (v - mu).powi(2)).sum::<f64>() / n as f64).sqrt();
+    let sd = sample_std(&x);
+    let mut e = 1.0;
+    let mut peak = 1.0;
+    let mut mdd: f64 = 0.0;
+    let mut cum = 0.0;
+    let mut cum_peak: f64 = 0.0;
+    let mut mdd_add: f64 = 0.0;
+    for v in &x {
+        e *= 1.0 + v;
+        peak = f64::max(peak, e);
+        mdd = mdd.max(1.0 - e / peak);
+        cum += v;
+        cum_peak = cum_peak.max(cum);
+        mdd_add = mdd_add.max(cum_peak - cum);
+    }
+    m.cagr = if e > 0.0 { e.powf(periods_per_year / n as f64) - 1.0 } else { -1.0 };
+    m.max_drawdown = mdd;
+    m.sharpe = if sd > 0.0 { mu / sd * periods_per_year.sqrt() } else { 0.0 };
+    m.sharpe_population = if pop > 0.0 { mu / pop * periods_per_year.sqrt() } else { 0.0 };
+    m.volatility_population = pop * periods_per_year.sqrt();
+    m.annual_return = mu * periods_per_year;
+    m.max_drawdown_additive = mdd_add;
+    m.total_pnl = rows.iter().map(|(_, _, p)| *p).sum();
+    let factor = |vals: &mut dyn Iterator<Item = f64>| {
+        let (mut gain, mut loss) = (0.0, 0.0);
+        for v in vals {
+            if v > 0.0 {
+                gain += v;
+            } else {
+                loss -= v;
+            }
+        }
+        if loss > 0.0 {
+            gain / loss
+        } else {
+            f64::INFINITY
+        }
+    };
+    m.profit_factor = factor(&mut rows.iter().map(|(_, _, p)| *p));
+    // Round trips from the fills: cash flows of a security from flat to flat.
+    let mut open: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
+    let mut trades: Vec<f64> = Vec::new();
+    for f in &r.fills {
+        let mult = r.multipliers.get(&f.equity).copied().unwrap_or(1.0);
+        let (pos, flow) = open.entry(f.equity).or_insert((0.0, 0.0));
+        *pos += f.quantity;
+        *flow += -f.quantity * f.price * mult - f.commission - f.fee;
+        if pos.abs() < 1e-9 {
+            trades.push(*flow);
+            open.remove(&f.equity);
+        }
+    }
+    m.trades = trades.len();
+    m.profit_factor_trades = factor(&mut trades.iter().copied());
+    m.win_rate = if trades.is_empty() {
+        0.0
+    } else {
+        trades.iter().filter(|p| **p > 0.0).count() as f64 / trades.len() as f64
+    };
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

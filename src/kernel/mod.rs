@@ -938,6 +938,10 @@ pub struct RunResult {
     /// compound on equity.
     #[serde(default)]
     pub base_capital: Option<f64>,
+    /// The multiplier of every security that is not a share (what a fill's
+    /// price is worth per unit), for reading trades back from the fills.
+    #[serde(default)]
+    pub multipliers: BTreeMap<Sym, f64>,
     pub final_cash: f64,
     pub final_positions: BTreeMap<Sym, f64>,
     pub costs: CostSummary,
@@ -1539,6 +1543,7 @@ impl<'p> Kernel<'p> {
             price_relation: self.price_rel.map(|id| self.rels[id].name.clone()),
             volume_relation: self.volume_rel.map(|id| self.rels[id].name.clone()),
             base_capital: (!self.cfg.compounding).then_some(self.cfg.initial_cash),
+            multipliers: self.contracts.iter().map(|(s, c)| (*s, c.multiplier)).collect(),
             ..Default::default()
         };
         for (k, &t) in bars.iter().enumerate() {
