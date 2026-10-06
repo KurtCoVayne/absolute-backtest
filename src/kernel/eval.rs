@@ -33,7 +33,46 @@ pub(crate) struct RowsPlan {
 }
 
 /// A window's rows as their count and the aggregate's argument columns.
-type Columns = (usize, Vec<Vec<f64>>);
+/// A window's rows as their count and the aggregate's argument columns, or
+/// the aggregate itself when running sums answered it (no columns then).
+type Columns = (usize, Vec<Vec<f64>>, Option<f64>);
+
+/// The moment aggregate over a group's rows `lo..hi` (buffer positions)
+/// from its running sums, moved from the window they last covered by adding
+/// the rows that entered and removing those that left; rebuilt from the
+/// rows when the window moved back, jumped past them, or `n` rows were added
+/// since the last rebuild.
+fn running_value(st: &mut RowsState, agg: &str, lo: usize, hi: usize, n: usize) -> Option<f64> {
+    let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi as u64);
+    let reusable = match &st.sums {
+        Some(r) => r.lo <= lo_id && r.hi <= hi_id && r.lo >= st.base_id && r.hi >= lo_id && r.since_rebuild < n.max(8),
+        None => false,
+    };
+    if !reusable {
+        let first = &st.rows[lo].2;
+        let shift = (first.first().copied().unwrap_or(0.0), first.get(1).copied().unwrap_or(0.0));
+        let shift = (if shift.0.is_finite() { shift.0 } else { 0.0 }, if shift.1.is_finite() { shift.1 } else { 0.0 });
+        let mut r = RunningSums::new(lo_id, shift);
+        for i in lo..hi {
+            r.apply(&st.rows[i].2, 1.0);
+        }
+        r.hi = hi_id;
+        st.sums = Some(r);
+    } else {
+        let base = st.base_id;
+        let r = st.sums.as_mut().unwrap();
+        for id in r.hi..hi_id {
+            r.apply(&st.rows[(id - base) as usize].2, 1.0);
+            r.since_rebuild += 1;
+        }
+        for id in r.lo..lo_id {
+            r.apply(&st.rows[(id - base) as usize].2, -1.0);
+        }
+        r.lo = lo_id;
+        r.hi = hi_id;
+    }
+    st.sums.as_ref().unwrap().aggregate(agg)
+}
 
 /// Anchored bars a rows window group keeps beyond its N, so that a call a
 /// few bars back (a recursion reaching its previous row) is served too.
@@ -50,6 +89,13 @@ pub(crate) struct RowsState {
     from_start: bool,
     anchors: std::collections::VecDeque<i64>,
     rows: std::collections::VecDeque<(i64, Vec<Value>, Vec<f64>)>,
+    /// The id of `rows[0]`; a row's id is its position since the group began.
+    base_id: u64,
+    /// Row ids in the general path's order (their bound values, then time),
+    /// kept as rows arrive and leave, when that is not time order.
+    sorted: Vec<u64>,
+    /// Sums over the window last served, for the moment aggregates.
+    sums: Option<RunningSums>,
 }
 
 impl Default for RowsState {
@@ -59,8 +105,108 @@ impl Default for RowsState {
             from_start: false,
             anchors: Default::default(),
             rows: Default::default(),
+            base_id: 0,
+            sorted: Vec::new(),
+            sums: None,
         }
     }
+}
+
+/// A compensated (Neumaier) sum.
+#[derive(Clone, Copy, Debug, Default)]
+struct Neumaier {
+    sum: f64,
+    c: f64,
+}
+
+impl Neumaier {
+    fn add(&mut self, x: f64) {
+        let t = self.sum + x;
+        if self.sum.abs() >= x.abs() {
+            self.c += (self.sum - t) + x;
+        } else {
+            self.c += (x - t) + self.sum;
+        }
+        self.sum = t;
+    }
+    fn value(&self) -> f64 {
+        self.sum + self.c
+    }
+}
+
+/// Running sums over the rows with ids in `lo..hi` of a group: of a and b
+/// (the aggregate's first two arguments) shifted by the window's first
+/// values at the last re-anchor, their squares and their product. Adding a
+/// row and removing one are O(1); every `n` additions the sums are rebuilt
+/// from the rows, so rounding cannot accumulate over a long history.
+#[derive(Clone, Debug)]
+struct RunningSums {
+    lo: u64,
+    hi: u64,
+    shift: (f64, f64),
+    s: [Neumaier; 5],
+    /// Rows in the window with a non-finite argument (the exact path then
+    /// answers, as it does for any window holding one).
+    nonfinite: usize,
+    since_rebuild: usize,
+}
+
+impl RunningSums {
+    fn new(lo: u64, shift: (f64, f64)) -> RunningSums {
+        RunningSums {
+            lo,
+            hi: lo,
+            shift,
+            s: [Neumaier::default(); 5],
+            nonfinite: 0,
+            since_rebuild: 0,
+        }
+    }
+    fn apply(&mut self, vals: &[f64], sign: f64) {
+        let a = vals.first().copied().unwrap_or(0.0);
+        let b = vals.get(1).copied().unwrap_or(0.0);
+        if !a.is_finite() || !b.is_finite() {
+            if sign > 0.0 {
+                self.nonfinite += 1;
+            } else {
+                self.nonfinite -= 1;
+            }
+            return;
+        }
+        let (a, b) = (a - self.shift.0, b - self.shift.1);
+        for (k, x) in [a, b, a * a, b * b, a * b].into_iter().enumerate() {
+            self.s[k].add(sign * x);
+        }
+    }
+    /// The aggregate over the window, or `None` where the exact path must
+    /// answer (too few rows, or a series too close to constant for its
+    /// centred sums to mean anything).
+    fn aggregate(&self, agg: &str) -> Option<f64> {
+        let n = (self.hi - self.lo) as f64;
+        if n < 2.0 || self.nonfinite > 0 {
+            return None;
+        }
+        let [sa, sb, saa, sbb, sab] = self.s.map(|x| x.value());
+        let caa = saa - sa * sa / n;
+        let cbb = sbb - sb * sb / n;
+        let cab = sab - sa * sb / n;
+        // Centred sums below this share of the raw ones are rounding noise.
+        let flat = |c: f64, raw: f64| c <= 1e-10 * raw;
+        match agg {
+            "mean" => Some(self.shift.0 + sa / n),
+            "sum" => Some(self.shift.0 * n + sa),
+            "std" if !flat(caa, saa) => Some((caa / (n - 1.0)).sqrt()),
+            "cov" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (n - 1.0)),
+            "corr" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (caa * cbb).sqrt()),
+            "ols_beta" if !flat(cbb, sbb) => Some(cab / cbb),
+            _ => None,
+        }
+    }
+}
+
+/// The aggregates running sums answer.
+fn moment_aggregate(agg: &str) -> bool {
+    matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_beta")
 }
 
 /// A windowed aggregation group: the rule, the aggregation literal, and the
@@ -603,12 +749,14 @@ impl<'p> Kernel<'p> {
                 // environments are materialised and nothing is sorted.
                 let mut in_order = false;
                 if has_rows && self.cfg.window_cache {
-                    if let Some((count, cols)) = self.rows_columns(cr, lit, conj, agg, args, env)? {
+                    if let Some((count, cols, running)) = self.rows_columns(cr, lit, conj, agg, args, env)? {
                         if (count as i64) < min_count {
                             return Ok(());
                         }
                         let value = if agg == "count" {
                             Value::Count(count as i64)
+                        } else if let Some(v) = running {
+                            Value::Num(v)
                         } else {
                             match aggregate(agg, &cols) {
                                 Ok(Some(v)) => v,
@@ -1095,6 +1243,12 @@ impl<'p> Kernel<'p> {
                 } else {
                     locals.iter().map(|&s| row[s].clone().unwrap_or(Value::Count(0))).collect()
                 };
+                let id = st.base_id + st.rows.len() as u64;
+                if !time_first {
+                    let base = st.base_id;
+                    let pos = st.sorted.partition_point(|&i| st.rows[(i - base) as usize].1 <= key);
+                    st.sorted.insert(pos, id);
+                }
                 st.rows.push_back((t1, key, vals));
             }
         }
@@ -1113,19 +1267,30 @@ impl<'p> Kernel<'p> {
             let lo = st.rows.partition_point(|(t1, _, _)| *t1 < lo_t);
             let hi_r = st.rows.partition_point(|(t1, _, _)| *t1 <= t);
             let count = hi_r.saturating_sub(lo);
+            let running = if self.cfg.running_sums && moment_aggregate(agg) && count >= 2 {
+                running_value(&mut st, agg, lo, hi_r, n)
+            } else {
+                None
+            };
             let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(count); args.len()];
-            if agg != "count" && count > 0 {
-                let mut idx: Vec<usize> = (lo..hi_r).collect();
-                if !time_first {
-                    idx.sort_by(|&a, &b| st.rows[a].1.cmp(&st.rows[b].1));
-                }
-                for i in idx {
-                    for (j, v) in st.rows[i].2.iter().enumerate() {
+            if agg != "count" && count > 0 && running.is_none() {
+                let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi_r as u64);
+                let mut push = |vals: &[f64]| {
+                    for (j, v) in vals.iter().enumerate() {
                         cols[j].push(*v);
+                    }
+                };
+                if time_first {
+                    for i in lo..hi_r {
+                        push(&st.rows[i].2);
+                    }
+                } else {
+                    for &id in st.sorted.iter().filter(|&&id| lo_id <= id && id < hi_id) {
+                        push(&st.rows[(id - st.base_id) as usize].2);
                     }
                 }
             }
-            Some((count, cols))
+            Some((count, cols, running))
         } else {
             None
         };
@@ -1136,7 +1301,16 @@ impl<'p> Kernel<'p> {
         }
         let oldest = st.anchors.front().copied().unwrap_or(i64::MAX);
         while st.rows.front().map(|(t1, _, _)| *t1 < oldest).unwrap_or(false) {
+            if !st.sorted.is_empty() {
+                let (base, front) = (st.base_id, &st.rows[0].1);
+                let pos = st.sorted.partition_point(|&i| {
+                    let k = &st.rows[(i - base) as usize].1;
+                    k < front || (k == front && i < base)
+                });
+                st.sorted.remove(pos);
+            }
             st.rows.pop_front();
+            st.base_id += 1;
         }
         self.rows_state.insert(key, st);
         Ok(served)
@@ -1636,4 +1810,65 @@ pub fn aggregate(name: &str, cols: &[Vec<f64>]) -> Result<Option<Value>, String>
         _ => return Err(format!("unknown aggregate `{}`", name)),
     };
     Ok(Some(Value::Num(v)))
+}
+
+#[cfg(test)]
+mod running_tests {
+    use super::*;
+
+    /// A deterministic pseudo-random stream (xorshift) in [0, 1).
+    fn stream(seed: u64) -> impl FnMut() -> f64 {
+        let mut x = seed;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn state(rows: &[(f64, f64)]) -> RowsState {
+        let mut st = RowsState::default();
+        for (i, (a, b)) in rows.iter().enumerate() {
+            st.rows.push_back((i as i64, Vec::new(), vec![*a, *b]));
+        }
+        st
+    }
+
+    #[test]
+    fn running_sums_equal_the_exact_formulas_to_rounding_on_a_sliding_window() {
+        let mut r = stream(7);
+        // Prices far from zero (the cancellation case) and a trend regressor.
+        let rows: Vec<(f64, f64)> = (0..3000).map(|i| (1.0e4 + 50.0 * r() + 0.01 * i as f64, i as f64 + r())).collect();
+        let mut st = state(&rows);
+        for n in [4usize, 18, 40, 250] {
+            st.sums = None;
+            for hi in n..rows.len() {
+                let lo = hi - n;
+                for agg in ["mean", "sum", "std", "cov", "corr", "ols_beta"] {
+                    let got = running_value(&mut st, agg, lo, hi, n).unwrap_or_else(|| panic!("{} n={} hi={}: no running value", agg, n, hi));
+                    let cols = vec![rows[lo..hi].iter().map(|r| r.0).collect::<Vec<f64>>(), rows[lo..hi].iter().map(|r| r.1).collect()];
+                    let Some(Value::Num(want)) = aggregate(agg, &cols).unwrap() else { panic!() };
+                    let scale = want.abs().max(1e-300);
+                    assert!((got - want).abs() <= 1e-9 * scale, "{} n={} hi={}: running {} exact {}", agg, n, hi, got, want);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_or_non_finite_window_is_left_to_the_exact_path() {
+        let flat = vec![(5.0, 1.0); 30];
+        let mut st = state(&flat);
+        assert_eq!(running_value(&mut st, "mean", 0, 20, 20), Some(5.0));
+        for agg in ["std", "corr", "ols_beta"] {
+            assert_eq!(running_value(&mut st, agg, 0, 20, 20), None, "{}", agg);
+        }
+        let mut rows: Vec<(f64, f64)> = (0..30).map(|i| (i as f64, 2.0 * i as f64)).collect();
+        rows[10].0 = f64::NAN;
+        let mut st = state(&rows);
+        assert_eq!(running_value(&mut st, "mean", 5, 15, 10), None);
+        // Once the NaN has left the window, the sums answer again.
+        assert_eq!(running_value(&mut st, "mean", 11, 21, 10), Some(15.5));
+    }
 }

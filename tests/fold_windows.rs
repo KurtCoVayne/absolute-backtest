@@ -56,7 +56,11 @@ fn the_window_cache_is_exact_on_every_corpus_strategy_on_both_drivers() {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
         let p = program(&fs::read_to_string(&f).unwrap(), &name);
         let ds = dataset_for(&p, 11);
-        let cached = ExecConfig::default();
+        // Exact window sums: the cache (and its sorted windows) must not move a bit.
+        let cached = ExecConfig {
+            running_sums: false,
+            ..ExecConfig::default()
+        };
         let uncached = ExecConfig {
             window_cache: false,
             ..ExecConfig::default()

@@ -85,8 +85,13 @@ prices being 100x the exchange's) and its commission per contract per side.
 abt run --strategy r8l --bundle B --price-relation close_m --compounding off \
   --capital 1000000 --lot fractional --frictionless --margin-rate 0 \
   --on-leverage allow --on-margin-call allow --report-by day --report-calendar calendar \
-  --periods-per-year 252 corpus/env corpus/company/r8l.dsl
+  --periods-per-year 252 --window-sums exact corpus/env corpus/company/r8l.dsl
 ```
+
+`--window-sums exact` is needed for the exact match: with the default running
+sums the 20-session ATR differs from the book's in the last bits, which flips
+one leg's threshold test (ZT, 2018-03-09; 21,891 of 21,892 legs, Sharpe
+1.2782 against 1.2777).
 
 `--on-margin-call allow` because a futures book's notional is many times its
 equity and the book has no margin model. The run takes 3.9 s at a 0.6 GB

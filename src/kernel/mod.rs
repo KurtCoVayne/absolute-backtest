@@ -644,6 +644,14 @@ pub struct ExecConfig {
     /// so that a rolling feature solves each bar once (data-bundle doc,
     /// section 2, "State"); off only to prove the cache exact.
     pub window_cache: bool,
+    /// Rolling `mean`, `sum`, `std`, `cov`, `corr` and `ols_beta` over a rows
+    /// window from sliding sums (compensated, shifted, rebuilt exactly every
+    /// N rows): O(1) a bar instead of O(N), equal to the exact two-pass
+    /// formulas to rounding (about 1e-12 relative), not to the bit. A
+    /// decision on an exact tie or threshold can differ; false gives the
+    /// exact formulas. Records written before the option read as false.
+    #[serde(default)]
+    pub running_sums: bool,
     /// Delisting haircuts by reason label on the last trade price, and the
     /// haircut for a reason not listed (data-bundle doc, section 4 and
     /// section 10 item 2: conservative by default, 1 is a total loss).
@@ -739,6 +747,7 @@ impl Default for ExecConfig {
             price_relation: None,
             as_of: None,
             window_cache: true,
+            running_sums: true,
             delisting_haircuts: vec![("bankruptcy".into(), 1.0), ("regulatory".into(), 1.0), ("acquisition".into(), 0.0), ("voluntary".into(), 0.0)],
             delisting_haircut_default: 1.0,
             delist_at_last_price: false,

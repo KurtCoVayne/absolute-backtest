@@ -70,8 +70,14 @@ weekly inputs. Names that stop trading get a `delisted` event the week after.
 abt run --strategy mw14 --bundle B --untested --price-relation trclose --actions in-prices \
   --compounding off --capital 1000000 --lot fractional --frictionless --commission-bps 10 \
   --margin-rate 0 --on-leverage allow --delist-proceeds last-price \
-  --start 1991-01-01 --end 2026-07-02 --periods-per-year 52 corpus/env corpus/company/mw14.dsl
+  --start 1991-01-01 --end 2026-07-02 --periods-per-year 52 --window-sums exact \
+  corpus/env corpus/company/mw14.dsl
 ```
+
+`--window-sums exact` computes the rolling `mean`, `corr` and `ols_beta` with
+the two-pass formulas, so the weeks equal the canon bit for bit. With the
+default running sums the result is the same here (all 1,852 weeks), but a
+last-bit difference could in principle move a name across a band edge.
 
 `--untested` because the bundle's action-reconciliation test, calibrated on
 daily bars, flags 8,560 weekly moves of small caps beyond its thresholds; the

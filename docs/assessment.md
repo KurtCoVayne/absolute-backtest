@@ -53,8 +53,17 @@ days equal to the book. Every step is timed on the same machine (Apple M4,
 | 4. bounded memo | every derived result of every bar was kept: the memo is bucketed by time and the past beyond the program's lookback dropped (the latest of each as-of-read relation kept) | 21.8 s, 2.3 GB | 201 s, 3.3 GB | 8.4 s, 0.6 GB |
 | 3. incremental rows windows | each call re-walked its window and materialised an environment per row: groups keep their last N rows, solve only new bars, and hand the aggregate its columns in the general path's order | 17.0 s | 146 s, 3.4 GB | 4.1 s |
 | refinements | stored atoms bind from the block; an as-of read answered by the latest bar skips the walk; memo hits indexed by entity | 14.8 s, 2.3 GB | **145 s, 3.1 GB** | **3.9 s, 0.6 GB** |
+| sorted windows (exact) | each call re-sorted its window into the general path's order (8% of MW14, 25% of R8L): a group keeps its rows sorted as they arrive and leave | 14.3 s | 140 s, 3.1 GB | 3.0 s, 0.6 GB |
+| running sums (default) | rolling `mean`/`sum`/`std`/`cov`/`corr`/`ols_beta` in O(1) a bar from compensated, shifted sliding sums rebuilt every N rows; equal to rounding, not to the bit (`--window-sums exact` restores the two-pass formulas) | 14.3 s | **126 s, 3.1 GB** | **3.0 s, 0.6 GB** |
 
-MW14 is 6.6x faster in a third of the memory; R8L 3.5x faster. Studies
+MW14 is 7.6x faster in a third of the memory; R8L 4.6x faster.
+
+**Running sums and exactness.** The aggregate formulas themselves were never
+the cost (0.2% of MW14): the gain of running sums is not building a
+window's columns. With them MW14 still equals the canon on all 1,852 weeks;
+R8L loses one leg of 21,892 (ZT, 2018-03-09: a last-bit difference in the
+20-session ATR flips a threshold test), Sharpe 1.2782 against the book's
+1.2777. The parity runs therefore use `--window-sums exact`. Studies
 also evaluate grid points in parallel (`--threads`, default the cores up to
 4): four `size_proxy` points on the SPX bundle take 14.8 s on two threads
 against 24.1 s on one.
