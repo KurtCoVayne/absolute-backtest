@@ -32,6 +32,9 @@ pub(crate) struct RowsPlan {
     conj_slots: Vec<usize>,
 }
 
+/// A window's rows as their count and the aggregate's argument columns.
+type Columns = (usize, Vec<Vec<f64>>);
+
 /// Anchored bars a rows window group keeps beyond its N, so that a call a
 /// few bars back (a recursion reaching its previous row) is served too.
 const ROWS_SLACK: usize = 16;
@@ -961,7 +964,7 @@ impl<'p> Kernel<'p> {
     /// anchored bars and their rows. `None` when the window cannot be served
     /// so (a bar with more than one row, a base time read by the rows, or a
     /// call earlier than the group's last): the general path answers then.
-    fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<(usize, Vec<Vec<f64>>)>, RunError> {
+    fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<Columns>, RunError> {
         let plan = self.rows_plan(cr, lit, conj, args)?;
         if !plan.shareable || env[plan.wslot].is_some() {
             return Ok(None);
