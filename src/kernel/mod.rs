@@ -24,6 +24,76 @@ pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 pub type Tuple = Vec<Value>;
 /// Memo key: relation id, then the key time and the input values.
 pub(crate) type MemoKey = (usize, Vec<Value>);
+
+/// The memo of derived results, bucketed by the temporal key so that
+/// dropping the past costs only what is dropped; the latest old result of
+/// each relation read through `asof`, per inputs, is kept apart (a later bar
+/// may read it however old).
+#[derive(Default)]
+pub(crate) struct Memo {
+    by_time: BTreeMap<i64, FxHashMap<MemoKey, Derived>>,
+    latest: FxHashMap<(usize, Vec<Value>), (i64, Derived)>,
+    len: usize,
+}
+
+impl Memo {
+    fn time_of(key: &MemoKey) -> i64 {
+        key.1.first().and_then(|v| v.as_time()).unwrap_or(i64::MAX)
+    }
+
+    pub(crate) fn get(&self, key: &MemoKey) -> Option<&Derived> {
+        let t = Memo::time_of(key);
+        if let Some(hit) = self.by_time.get(&t).and_then(|b| b.get(key)) {
+            return Some(hit);
+        }
+        // Before the oldest bucket: only a kept latest result can answer.
+        if !self.latest.is_empty() && self.by_time.first_key_value().map(|(k, _)| t < *k).unwrap_or(true) {
+            if let Some((kt, d)) = self.latest.get(&(key.0, key.1[1..].to_vec())) {
+                if *kt == t {
+                    return Some(d);
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn insert(&mut self, key: MemoKey, d: Derived) {
+        if self.by_time.entry(Memo::time_of(&key)).or_default().insert(key, d).is_none() {
+            self.len += 1;
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Memo::default();
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len + self.latest.len()
+    }
+
+    /// Drop every result keyed before `cutoff`, keeping the latest of each
+    /// `keep` relation per inputs.
+    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>) {
+        let recent = self.by_time.split_off(&cutoff);
+        let old = std::mem::replace(&mut self.by_time, recent);
+        for (t, bucket) in old {
+            self.len -= bucket.len();
+            for (k, d) in bucket {
+                if !keep.contains(&k.0) {
+                    continue;
+                }
+                let ins = k.1[1..].to_vec();
+                match self.latest.get_mut(&(k.0, ins.clone())) {
+                    Some(slot) if slot.0 < t => *slot = (t, d),
+                    Some(_) => {}
+                    None => {
+                        self.latest.insert((k.0, ins), (t, d));
+                    }
+                }
+            }
+        }
+    }
+}
 pub(crate) type Derived = Rc<Vec<(Tuple, usize)>>;
 
 /// One row of the bundle's security table (data-bundle doc, section 3,
@@ -454,6 +524,9 @@ pub struct KernelStats {
     pub window_rows_cached: usize,
     /// Tuples that arrived after their bar closed (the fold only).
     pub late_tuples: usize,
+    /// Derived results held in the memo at the end of the run.
+    #[serde(default)]
+    pub memo_entries: usize,
 }
 
 /// Serde for an `f64` that may be infinite (JSON has no infinity): null
@@ -1136,7 +1209,7 @@ pub struct Kernel<'p> {
     pub(crate) rels: Vec<Rc<RelInfo>>,
     pub(crate) rel_ids: HashMap<String, usize>,
     pub(crate) compiled: Vec<Rc<CompiledRule>>,
-    pub(crate) memo: FxHashMap<MemoKey, Derived>,
+    pub(crate) memo: Memo,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -1167,6 +1240,20 @@ pub struct Kernel<'p> {
     /// For a `rows` window group, the solved bars at which its anchor (the
     /// conjunction's first atom) holds: the group's rows.
     pub(crate) rows_anchor: FxHashMap<eval::WindowKey, BTreeSet<i64>>,
+    /// Memo retention (data-bundle doc, section 2, "State"): derived tuples
+    /// older than `memo_horizon` seconds before the current bar (and than the
+    /// last few bars) are dropped, except the latest of each relation read
+    /// through `asof`, which a later bar may read however old. `None` keeps
+    /// everything (a lookback the program does not bound).
+    pub(crate) memo_horizon: Option<i64>,
+    pub(crate) asof_read: FxHashSet<usize>,
+    /// The longest `rows` window per resolution, in bars: a window cache
+    /// that went cold re-solves up to that many bars back, so the memo keeps
+    /// them (plus slack).
+    pub(crate) rows_lookback: Vec<(Resolution, usize)>,
+    pub(crate) asof_memo_next: usize,
+    /// Below this many results the memo is left alone.
+    pub(crate) memo_min: usize,
     pub stats: KernelStats,
     pub(crate) labels: Symbols,
     /// The security table with ids in the kernel's symbol order, and the
@@ -1498,6 +1585,67 @@ impl<'p> Kernel<'p> {
         let split_rel = primitive("split");
         let dividend_rel = primitive("dividend");
         let delisted_rel = primitive("delisted");
+        // What the memo must keep: the relations read through `asof`, and the
+        // longest calendar lookback (windows and lags) of any rule.
+        let mut asof_read: FxHashSet<usize> = FxHashSet::default();
+        let mut horizon: Option<i64> = Some(0);
+        let mut rows_lookback: Vec<(Resolution, usize)> = Vec::new();
+        for rule in &prog.rules {
+            let rule_res = prog.relations.get(&rule.head.name).and_then(|s| s.res).unwrap_or(prog.resolution);
+            let count = |e: &Expr| -> Option<usize> {
+                match e {
+                    Expr::Lit(Lit::Int(n), _) => Some(*n as usize),
+                    Expr::Param(p, _) => match params.get(&(rule.unit.clone(), p.clone())) {
+                        Some(Value::Count(n)) => Some(*n as usize),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            };
+            let dur_secs = |e: &Expr| -> Option<i64> {
+                let d = match e {
+                    Expr::Lit(Lit::Duration(d), _) => *d,
+                    Expr::Param(p, _) => match params.get(&(rule.unit.clone(), p.clone())) {
+                        Some(Value::Dur(d)) => **d,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                Some((d.months * 31 + d.days) * time::DAY)
+            };
+            let mut stack: Vec<&Literal> = rule.body.iter().collect();
+            while let Some(lit) = stack.pop() {
+                match lit {
+                    Literal::AsOf { atom, .. } => {
+                        if let Some(&id) = rel_ids.get(&atom.name) {
+                            asof_read.insert(id);
+                        }
+                    }
+                    Literal::Agg { conj, .. } => stack.extend(conj.iter()),
+                    Literal::Window { kind: WindowKind::Rows, dur, .. } => match count(dur) {
+                        Some(n) => match rows_lookback.iter_mut().find(|(r, _)| *r == rule_res) {
+                            Some(slot) => slot.1 = slot.1.max(n),
+                            None => rows_lookback.push((rule_res, n)),
+                        },
+                        None => horizon = None,
+                    },
+                    Literal::Window {
+                        kind: WindowKind::Window | WindowKind::Prior,
+                        dur,
+                        ..
+                    }
+                    | Literal::Builtin(Builtin::Lag { n: dur, .. }, _) => {
+                        horizon = match (horizon, dur_secs(dur)) {
+                            (Some(h), Some(d)) => Some(h.max(d)),
+                            _ => None,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // A week of slack covers `prev` across weekends and holidays at any resolution.
+        let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
         Ok(Kernel {
             prog,
             symbols,
@@ -1532,6 +1680,11 @@ impl<'p> Kernel<'p> {
             windows: Default::default(),
             rows_floor: Default::default(),
             rows_anchor: Default::default(),
+            memo_horizon,
+            asof_read,
+            rows_lookback,
+            asof_memo_next: 200_000,
+            memo_min: 200_000,
             stats: KernelStats::default(),
         })
     }
@@ -1541,6 +1694,7 @@ impl<'p> Kernel<'p> {
         KernelStats {
             window_groups: self.windows.len(),
             window_rows_cached: self.windows.values().map(|m| m.len()).sum(),
+            memo_entries: self.memo.len(),
             ..self.stats.clone()
         }
     }
@@ -1590,6 +1744,44 @@ impl<'p> Kernel<'p> {
         self.rows_floor.clear();
         self.rows_anchor.clear();
         self.stats.late_tuples += 1;
+    }
+
+    /// Drop memo entries no later bar needs (see `memo_horizon`): those keyed
+    /// before both `t - horizon` and `keep_from`, except the latest entry of
+    /// each relation read through `asof` for its inputs. A dropped entry is
+    /// recomputed if asked for, so this bounds memory, never changes results.
+    pub fn evict_memo(&mut self, t: i64, keep_from: i64) {
+        let Some(h) = self.memo_horizon else { return };
+        // A small memo is not worth a pass.
+        if self.memo.len() < self.memo_min && self.asof_memo.len() < self.memo_min {
+            return;
+        }
+        let mut cutoff = (t - h).min(keep_from);
+        for &(res, n) in &self.rows_lookback {
+            if let Some(&back) = self.domains.get(&res).and_then(|d| d.range(..=t).rev().nth(n + 3)) {
+                cutoff = cutoff.min(back);
+            } else {
+                return;
+            }
+        }
+        self.memo.evict_before(cutoff, &self.asof_read);
+        // The as-of shortcuts are not bucketed: scanned only once they double.
+        if self.asof_memo.len() >= self.asof_memo_next {
+            self.asof_memo.retain(|(_, _, k), _| *k >= cutoff);
+            self.asof_memo_next = (2 * self.asof_memo.len()).max(self.memo_min);
+        }
+    }
+
+    /// Evict at every bar however small the memo (what tests use to prove
+    /// that eviction never changes a result).
+    pub fn force_memo_eviction(&mut self) {
+        self.memo_min = 0;
+        self.asof_memo_next = 0;
+    }
+
+    /// Entries in the memo now (reported by `--timing`).
+    pub fn memo_len(&self) -> usize {
+        self.memo.len()
     }
 
     /// The kernel's symbol names, by symbol id (identifier order).
@@ -1658,6 +1850,8 @@ impl<'p> Kernel<'p> {
             exec.open_bar(self, t, &mut result)?;
             let by_equity = self.decide_at(t, &mut result)?;
             exec.on_decisions(self, t, &by_equity, &mut result)?;
+            // Bucketed by time, eviction costs only what it drops: every bar.
+            self.evict_memo(t, bars[k.saturating_sub(3)]);
         }
         exec.finish(self, &mut result);
         result.stats = self.stats();
