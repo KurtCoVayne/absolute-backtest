@@ -209,7 +209,11 @@ fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
     // The guard acted: some bar saw the drawdown cross the limit.
     assert!(r.decisions.iter().any(|d| d.decision.amount == 0.0), "the guard never fired");
     let v = k
-        .query("nav_vol", *r.bars.last().unwrap(), &[Value::Dur(absolute_backtest::Duration { months: 0, days: 20 }), Value::Num(10.0)])
+        .query(
+            "nav_vol",
+            *r.bars.last().unwrap(),
+            &[Value::Dur(Box::new(absolute_backtest::Duration { months: 0, days: 20 })), Value::Num(10.0)],
+        )
         .unwrap();
     assert_eq!(v.len(), 1);
 }

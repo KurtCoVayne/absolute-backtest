@@ -7,13 +7,16 @@ pub mod eval;
 pub mod time;
 pub mod value;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
+
+use hash::{FxHashMap, FxHashSet};
 
 use crate::check::Program;
 use crate::ir::*;
 pub mod executor;
 pub mod fold;
+pub mod hash;
 pub use executor::{Executor, SimExecutor};
 pub use fold::{fingerprint, run_fold, Checkpoint, CheckpointEvery, Event, EventLog, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
@@ -1043,7 +1046,7 @@ pub(crate) struct RelInfo {
 #[derive(Debug)]
 pub(crate) struct CompiledRule {
     pub idx: usize,
-    pub slots: HashMap<String, usize>,
+    pub slots: FxHashMap<String, usize>,
     pub nslots: usize,
     pub label: String,
 }
@@ -1088,14 +1091,15 @@ pub struct Kernel<'p> {
     pub(crate) prog: &'p Program,
     pub symbols: Symbols,
     pub(crate) stores: Vec<Store>,
-    pub(crate) rels: Vec<RelInfo>,
+    /// Shared so that a call holds its relation's facts without copying them.
+    pub(crate) rels: Vec<Rc<RelInfo>>,
     pub(crate) rel_ids: HashMap<String, usize>,
     pub(crate) compiled: Vec<Rc<CompiledRule>>,
-    pub(crate) memo: HashMap<MemoKey, Derived>,
+    pub(crate) memo: FxHashMap<MemoKey, Derived>,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
-    pub(crate) asof_memo: HashMap<(usize, Vec<Value>, i64), Option<i64>>,
-    pub(crate) in_progress: HashSet<MemoKey>,
+    pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
+    pub(crate) in_progress: FxHashSet<MemoKey>,
     pub(crate) domains: HashMap<Resolution, BTreeSet<i64>>,
     pub(crate) cfg: ExecConfig,
     pub(crate) price_rel: Option<usize>,
@@ -1108,20 +1112,20 @@ pub struct Kernel<'p> {
     pub(crate) open_rel: Option<(usize, usize)>,
     pub(crate) high_rel: Option<(usize, usize)>,
     pub(crate) low_rel: Option<(usize, usize)>,
-    pub(crate) last_price: HashMap<Sym, f64>,
-    pub(crate) params: HashMap<(String, String), Value>,
+    pub(crate) last_price: FxHashMap<Sym, f64>,
+    pub(crate) params: FxHashMap<(String, String), Value>,
     /// Dataset symbol and label ids to the kernel's (identifier order).
     pub(crate) remap_syms: Vec<Sym>,
     pub(crate) remap_labels: Vec<Sym>,
     /// The rows of every bar a windowed aggregation group has solved, by
     /// (rule, literal, the outer bindings the group reads), by bar.
-    pub(crate) windows: HashMap<eval::WindowKey, eval::WindowCache>,
+    pub(crate) windows: FxHashMap<eval::WindowKey, eval::WindowCache>,
     /// For a `rows` window group, the earliest bar with rows when every bar
     /// before it is known to have none (where a walk back may stop).
-    pub(crate) rows_floor: HashMap<eval::WindowKey, i64>,
+    pub(crate) rows_floor: FxHashMap<eval::WindowKey, i64>,
     /// For a `rows` window group, the solved bars at which its anchor (the
     /// conjunction's first atom) holds: the group's rows.
-    pub(crate) rows_anchor: HashMap<eval::WindowKey, BTreeSet<i64>>,
+    pub(crate) rows_anchor: FxHashMap<eval::WindowKey, BTreeSet<i64>>,
     pub stats: KernelStats,
     pub(crate) labels: Symbols,
     /// The security table with ids in the kernel's symbol order, and the
@@ -1135,22 +1139,30 @@ pub struct Kernel<'p> {
     /// What each equity literal of the program (a ticker) resolved to.
     pub(crate) literal_equities: HashMap<String, Sym>,
     /// Contract terms by kernel symbol (futures); a symbol absent is a share.
-    pub(crate) contracts: HashMap<Sym, Contract>,
+    pub(crate) contracts: FxHashMap<Sym, Contract>,
 }
 
 impl<'p> Kernel<'p> {
     pub fn new(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        Kernel::build(prog, dataset, cfg, true)
+        Kernel::build(prog, dataset, cfg, true, None)
     }
 
     /// A kernel over the dataset's symbols and tables but none of its facts:
     /// the fold feeds them as events (`insert_fact`) and opens the time
     /// domains' buckets as the stream reaches them (`open_bucket`).
     pub fn new_streaming(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        Kernel::build(prog, dataset, cfg, false)
+        Kernel::build(prog, dataset, cfg, false, None)
     }
 
-    fn build(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig, load_facts: bool) -> Result<Kernel<'p>, RunError> {
+    /// A kernel that takes the dataset's facts over instead of copying them:
+    /// one copy of the data in memory (what a run that does not need the
+    /// dataset afterwards should use).
+    pub fn from_dataset(prog: &'p Program, mut dataset: Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        let facts = std::mem::take(&mut dataset.facts);
+        Kernel::build(prog, &dataset, cfg, true, Some(facts))
+    }
+
+    fn build(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig, load_facts: bool, owned: Option<BTreeMap<String, Vec<Tuple>>>) -> Result<Kernel<'p>, RunError> {
         // Resolve string overrides by their parameter's type, as the checker
         // did for the program's own literals.
         let mut cfg = cfg;
@@ -1218,17 +1230,17 @@ impl<'p> Kernel<'p> {
                 ..s.clone()
             })
             .collect();
-        let contracts: HashMap<Sym, Contract> = dataset.contracts.iter().map(|(s, c)| (remap[*s as usize], c.clone())).collect();
+        let contracts: FxHashMap<Sym, Contract> = dataset.contracts.iter().map(|(s, c)| (remap[*s as usize], c.clone())).collect();
         let remap_value = |v: &Value| -> Value {
             match v {
                 Value::Equity(s) => Value::Equity(remap[*s as usize]),
                 Value::Label(s) => Value::Label(remap_labels[*s as usize]),
-                Value::Decision(d) => Value::Decision(Decision {
+                Value::Decision(d) => Value::Decision(Box::new(Decision {
                     ctor: d.ctor,
                     equity: remap[d.equity as usize],
                     amount: d.amount,
                     order: d.order,
-                }),
+                })),
                 v => v.clone(),
             }
         };
@@ -1240,7 +1252,7 @@ impl<'p> Kernel<'p> {
             let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
             let res = sig.res.ok_or_else(|| RunError::Internal(format!("relation `{}` has no resolution", name)))?;
             rel_ids.insert(name.clone(), rels.len());
-            rels.push(RelInfo {
+            rels.push(Rc::new(RelInfo {
                 name: name.clone(),
                 key_pos,
                 inputs: sig.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In).map(|(i, _)| i).collect(),
@@ -1248,19 +1260,39 @@ impl<'p> Kernel<'p> {
                 res,
                 rules: prog.rules_for(name),
                 entity_positions: sig.args.iter().enumerate().filter(|(_, a)| a.ty.is_entity()).map(|(i, _)| i).collect(),
-            });
+            }));
         }
         // Stores and time domains.
         let mut stores: Vec<Store> = rels.iter().map(|_| Store::default()).collect();
         let mut native: HashMap<Resolution, BTreeSet<i64>> = HashMap::new();
-        for (name, tuples) in dataset.facts.iter().filter(|_| load_facts) {
-            let Some(&id) = rel_ids.get(name) else { continue };
+        let mut load = |name: &str, tu: Tuple| -> Result<(), RunError> {
+            let Some(&id) = rel_ids.get(name) else { return Ok(()) };
             let info = &rels[id];
-            for tu in tuples {
-                let tu: Tuple = tu.iter().map(remap_value).collect();
-                let key = tu[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", name)))?;
-                native.entry(info.res).or_default().insert(key);
-                stores[id].insert(key, tu);
+            let key = tu[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", name)))?;
+            native.entry(info.res).or_default().insert(key);
+            stores[id].insert(key, tu);
+            Ok(())
+        };
+        match owned {
+            // Taken over: each tuple is remapped in place and moved into its store.
+            Some(facts) => {
+                for (name, tuples) in facts {
+                    for mut tu in tuples {
+                        for v in tu.iter_mut() {
+                            if matches!(v, Value::Equity(_) | Value::Label(_) | Value::Decision(_)) {
+                                *v = remap_value(v);
+                            }
+                        }
+                        load(&name, tu)?;
+                    }
+                }
+            }
+            None => {
+                for (name, tuples) in dataset.facts.iter().filter(|_| load_facts) {
+                    for tu in tuples {
+                        load(name, tu.iter().map(remap_value).collect())?;
+                    }
+                }
             }
         }
         let all_res = [Resolution::M1, Resolution::M5, Resolution::M15, Resolution::M30, Resolution::H1, Resolution::D1];
@@ -1279,7 +1311,7 @@ impl<'p> Kernel<'p> {
         // Compiled rules: variable slots.
         let mut compiled = Vec::new();
         for (i, rule) in prog.rules.iter().enumerate() {
-            let mut slots: HashMap<String, usize> = HashMap::new();
+            let mut slots: FxHashMap<String, usize> = FxHashMap::default();
             collect_vars(rule, &mut |v| {
                 let n = slots.len();
                 slots.entry(v.to_string()).or_insert(n);
@@ -1293,7 +1325,7 @@ impl<'p> Kernel<'p> {
             }));
         }
         // Parameters.
-        let mut params = HashMap::new();
+        let mut params = FxHashMap::default();
         let mut sym_tmp = symbols.clone();
         let mut lab_tmp = labels.clone();
         for (unit, ps) in &prog.params {
@@ -1425,9 +1457,9 @@ impl<'p> Kernel<'p> {
             rels,
             rel_ids,
             compiled,
-            memo: HashMap::new(),
-            asof_memo: HashMap::new(),
-            in_progress: HashSet::new(),
+            memo: Default::default(),
+            asof_memo: Default::default(),
+            in_progress: Default::default(),
             domains,
             cfg,
             price_rel,
@@ -1445,13 +1477,13 @@ impl<'p> Kernel<'p> {
             delisted_rel,
             literal_equities,
             contracts,
-            last_price: HashMap::new(),
+            last_price: Default::default(),
             params,
             remap_syms: remap,
             remap_labels,
-            windows: HashMap::new(),
-            rows_floor: HashMap::new(),
-            rows_anchor: HashMap::new(),
+            windows: Default::default(),
+            rows_floor: Default::default(),
+            rows_anchor: Default::default(),
             stats: KernelStats::default(),
         })
     }
@@ -1471,12 +1503,12 @@ impl<'p> Kernel<'p> {
             .map(|v| match v {
                 Value::Equity(s) => Value::Equity(self.remap_syms[*s as usize]),
                 Value::Label(s) => Value::Label(self.remap_labels[*s as usize]),
-                Value::Decision(d) => Value::Decision(Decision {
+                Value::Decision(d) => Value::Decision(Box::new(Decision {
                     ctor: d.ctor,
                     equity: self.remap_syms[d.equity as usize],
                     amount: d.amount,
                     order: d.order,
-                }),
+                })),
                 v => v.clone(),
             })
             .collect()
@@ -1812,7 +1844,7 @@ impl<'p> Kernel<'p> {
                 .ok_or_else(|| format!("`{}` is not a Timestamp (YYYY-MM-DD[THH:MM[:SS]])", raw)),
             Ty::Count => raw.parse().map(Value::Count).map_err(|_| format!("`{}` is not a Count", raw)),
             Ty::Duration => match crate::parser::parse_lit(raw) {
-                Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
+                Ok(Lit::Duration(d)) => Ok(Value::Dur(Box::new(d))),
                 _ => Err(format!("`{}` is not a Duration (such as 20d, 3mo or 1y)", raw)),
             },
             Ty::Quantity(_) => match crate::parser::parse_lit(raw) {
@@ -1840,7 +1872,7 @@ impl<'p> Kernel<'p> {
             Ok(Lit::Str(name) | Lit::Equity(name)) => self.equity(&name),
             Ok(Lit::Label(name)) => self.labels.get(&name).map(Value::Label).ok_or_else(|| format!("`{}` is not a label of the dataset", name)),
             Ok(Lit::Int(i)) => Ok(Value::Count(i)),
-            Ok(Lit::Duration(d)) => Ok(Value::Dur(d)),
+            Ok(Lit::Duration(d)) => Ok(Value::Dur(Box::new(d))),
             Ok(l) => Ok(Value::Num(l_num(&l))),
             Err(_) => Err(format!("`{}` is not an equity of the dataset, a timestamp or a literal", raw)),
         }
@@ -2002,7 +2034,7 @@ pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols, eq
     match l {
         Lit::Int(i) => Value::Count(*i),
         Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
-        Lit::Duration(d) => Value::Dur(*d),
+        Lit::Duration(d) => Value::Dur(Box::new(*d)),
         // A ticker literal is what `Kernel::new` resolved it to; one it did
         // not see (an unchecked program) reads as its own id.
         Lit::Str(s) | Lit::Equity(s) => Value::Equity(equities.get(s).copied().unwrap_or_else(|| symbols.intern(s))),
@@ -2169,6 +2201,26 @@ pub fn run(prog: &Program, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResu
             .spawn_scoped(s, || {
                 let mut k = Kernel::new(prog, dataset, cfg)?;
                 k.run()
+            })
+            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+            .join()
+            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
+/// `run` over a dataset the caller no longer needs: its facts move into the
+/// kernel (one copy in memory), and the kernel is not freed tuple by tuple
+/// at the end (the process is about to exit; a run of tens of millions of
+/// tuples spends seconds in deallocation otherwise).
+pub fn run_owned(prog: &Program, dataset: Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(s, || {
+                let mut k = Kernel::from_dataset(prog, dataset, cfg)?;
+                let out = k.run();
+                std::mem::forget(k);
+                out
             })
             .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
             .join()

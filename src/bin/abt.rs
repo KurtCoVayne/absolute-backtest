@@ -574,7 +574,7 @@ fn main() {
                 exit(1)
             };
             let checked_at = started.elapsed().as_secs_f64();
-            let (dataset, bundle_label) = load_dataset(&args, &prog);
+            let (mut dataset, bundle_label) = load_dataset(&args, &prog);
             let loaded_at = started.elapsed().as_secs_f64();
             let cfg = exec_config(&args);
             if args.cmd == "explain" {
@@ -653,8 +653,29 @@ fn main() {
                 return;
             }
             let verify = args.flags.contains("verify-causality");
+            // What the report needs from the data, read before a run may take it over.
+            let tuple_count: usize = dataset.facts.values().map(|tus| tus.len()).sum();
+            let calendar: Option<std::collections::BTreeSet<i64>> = args.opts.get("report-calendar").map(|rel| {
+                let Some(k) = prog.relations.get(rel).and_then(|s| s.key_pos()) else {
+                    eprintln!("--report-calendar: `{}` is not a relation of the program", rel);
+                    std::process::exit(2)
+                };
+                dataset
+                    .facts
+                    .get(rel)
+                    .map(|tus| tus.iter().filter_map(|tu| tu[k].as_time()).map(time_day).collect())
+                    .unwrap_or_default()
+            });
+            // The batch kernel takes the facts over when nothing reads the
+            // dataset after the run (one copy of the data in memory).
             let runner = make_runner(&args);
-            let result = runner(&prog, &dataset, cfg.clone()).unwrap_or_else(|e| {
+            let owned = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true) && !verify && !args.opts.contains_key("dump") && !args.opts.contains_key("study");
+            let outcome = if owned {
+                absolute_backtest::kernel::run_owned(&prog, std::mem::take(&mut dataset), cfg.clone())
+            } else {
+                runner(&prog, &dataset, cfg.clone())
+            };
+            let result = outcome.unwrap_or_else(|e| {
                 match e {
                     RunError::Request(m) => eprintln!("{}", m),
                     e => eprintln!("run halted: {}", e),
@@ -673,7 +694,7 @@ fn main() {
                     total,
                     result.bars.len(),
                     result.symbols.len(),
-                    dataset.facts.values().map(|tus| tus.len()).sum::<usize>(),
+                    tuple_count,
                     result.decisions.len(),
                     if run_s > 0.0 { result.bars.len() as f64 / run_s } else { 0.0 },
                     peak_rss_mb().map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into()),
@@ -706,18 +727,6 @@ fn main() {
             };
             let default_ppy = if by_day { 252.0 } else { absolute_backtest::study::metrics::periods_per_year(prog.resolution) };
             let ppy: f64 = option(&args.opts, "periods-per-year", "a number of periods", default_ppy);
-            // A reporting calendar: the keys of a relation of the data.
-            let calendar: Option<std::collections::BTreeSet<i64>> = args.opts.get("report-calendar").map(|rel| {
-                let Some(k) = prog.relations.get(rel).and_then(|s| s.key_pos()) else {
-                    eprintln!("--report-calendar: `{}` is not a relation of the program", rel);
-                    std::process::exit(2)
-                };
-                dataset
-                    .facts
-                    .get(rel)
-                    .map(|tus| tus.iter().filter_map(|tu| tu[k].as_time()).map(time_day).collect())
-                    .unwrap_or_default()
-            });
             let cm = absolute_backtest::study::metrics::convention_metrics_on(&result, ppy, by_day, calendar.as_ref());
             match result.base_capital {
                 Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested)", b),

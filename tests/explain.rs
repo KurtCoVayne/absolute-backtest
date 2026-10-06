@@ -128,7 +128,7 @@ fn explain_without_the_rule_inputs_names_them() {
     assert!(err.contains("features::sma#1") && err.contains("3 inputs"), "{}", err);
     assert!(err.contains("A: Equity") && err.contains("N: Duration") && err.contains("K: Count"), "{}", err);
     let x = k.symbols.get("X").unwrap();
-    let ten_days = Value::Dur(Duration { months: 0, days: 10 });
+    let ten_days = Value::Dur(Box::new(Duration { months: 0, days: 10 }));
     let ex = k.explain(sma, ts("2024-01-10"), &[Value::Equity(x), ten_days.clone(), Value::Count(3)]).unwrap();
     assert_eq!(ex.solutions, 1, "{}", ex);
     let ex = k.explain(sma, ts("2024-01-09"), &[Value::Equity(x), ten_days, Value::Count(3)]).unwrap();

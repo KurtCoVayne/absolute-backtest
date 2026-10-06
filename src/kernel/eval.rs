@@ -3,7 +3,7 @@
 //! or smaller set. Derived relations are requested through `call`, which
 //! memoises by temporal key and inputs.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use super::time;
@@ -68,7 +68,7 @@ impl<'p> Kernel<'p> {
             )));
         }
         let mut results: Vec<(Tuple, usize)> = Vec::new();
-        let mut seen: HashSet<Tuple> = HashSet::new();
+        let mut seen: super::hash::FxHashSet<Tuple> = Default::default();
         for &ri in &info.rules {
             let cr = self.compiled[ri].clone();
             let rule = &self.prog.rules[ri];
@@ -128,7 +128,7 @@ impl<'p> Kernel<'p> {
                     None => Order::default(),
                 };
                 match (e, a.as_f64()) {
-                    (Value::Equity(s), Some(x)) => Ok(Value::Decision(Decision { ctor, equity: s, amount: x, order })),
+                    (Value::Equity(s), Some(x)) => Ok(Value::Decision(Box::new(Decision { ctor, equity: s, amount: x, order }))),
                     _ => Err(RunError::Internal(format!("ill-typed decision in rule {}", cr.label))),
                 }
             }
@@ -400,7 +400,7 @@ impl<'p> Kernel<'p> {
                     let Value::Dur(d) = self.eval_expr(cr, n, env)? else {
                         return Err(RunError::Internal("lag length is not a Duration".into()));
                     };
-                    let bound = time::sub_duration(t, d);
+                    let bound = time::sub_duration(t, *d);
                     if let Some(&p) = self.domain(cr)?.range(..=bound).next_back() {
                         self.bind_time(cr, t1, env, p, out);
                     }
@@ -428,7 +428,7 @@ impl<'p> Kernel<'p> {
                 let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
                     return Err(RunError::Internal("window length is not a Duration".into()));
                 };
-                let lo = time::sub_duration(t, d);
+                let lo = time::sub_duration(t, *d);
                 let times: Vec<i64> = match kind {
                     WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
                     WindowKind::Prior | WindowKind::Rows => self.domain(cr)?.range(lo..t).copied().collect(),
@@ -495,7 +495,7 @@ impl<'p> Kernel<'p> {
                             {
                                 let t = self.time_of(cr, base, env)?;
                                 if let Value::Dur(d) = self.eval_expr(cr, dur, env)? {
-                                    let lo = time::sub_duration(t, d);
+                                    let lo = time::sub_duration(t, *d);
                                     self.stats.window_bars_solved += match kind {
                                         WindowKind::Window => self.domain(cr)?.range(lo..=t).count(),
                                         WindowKind::Prior | WindowKind::Rows => self.domain(cr)?.range(lo..t).count(),
@@ -690,7 +690,7 @@ impl<'p> Kernel<'p> {
         let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
             return Err(RunError::Internal("window length is not a Duration".into()));
         };
-        let lo = time::sub_duration(t, d);
+        let lo = time::sub_duration(t, *d);
         let times: Vec<i64> = match kind {
             WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
             WindowKind::Prior => self.domain(cr)?.range(lo..t).copied().collect(),

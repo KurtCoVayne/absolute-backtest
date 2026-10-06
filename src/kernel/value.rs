@@ -142,12 +142,18 @@ pub enum Value {
     Time(i64),
     Num(f64),
     Count(i64),
-    Dur(Duration),
-    Decision(Decision),
+    /// Boxed, as is `Decision`: both are rare as values, and keeping every
+    /// variant's payload to 8 bytes makes a `Value` 16 bytes.
+    Dur(Box<Duration>),
+    Decision(Box<Decision>),
     /// A name from the bundle's vocabulary (`Ty::Label`), interned in the
     /// dataset's label table, distinct from an equity of the same spelling.
     Label(Sym),
 }
+
+// Every variant's payload is at most 8 bytes: a value is 16 (the stores hold
+// tens of millions of them).
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
 
 fn bits(x: f64) -> u64 {
     // Fold -0.0 into 0.0 so that equal numbers hash equally.

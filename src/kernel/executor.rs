@@ -129,6 +129,451 @@ impl SimExecutor {
         }
     }
 
+    /// `Executor::fill` over the bar history `bars` (ending at the fill bar).
+    fn fill_over(&mut self, k: &mut Kernel, tn: i64, result: &mut RunResult, bars: &[i64]) -> Result<(), RunError> {
+        let Some(t) = self.pending_t.take() else { return Ok(()) };
+        let by_equity = std::mem::take(&mut self.pending);
+        let position = k.rel_id("position");
+        let cash_rel = k.rel_id("cash");
+        let fill_rel = k.rel_id("fill");
+        let end = bars.len() - 1;
+
+        // Funding over the calendar time to the execution bar: interest on
+        // cash or on the debit, borrow fee and rebate on short notional.
+        let dt = (tn - t) as f64 / (365.0 * 86_400.0);
+        if self.cash > 0.0 {
+            let i = self.cash * self.cfg.cash_rate * dt;
+            self.cash += i;
+            result.funding.cash_interest += i;
+        } else if self.cash < 0.0 {
+            let i = -self.cash * self.cfg.margin_rate * dt;
+            self.cash -= i;
+            result.funding.margin_interest += i;
+        }
+        // A future is sold, not borrowed: no borrow fee, no locate.
+        let shorts: Vec<(Sym, f64)> = self.positions.iter().filter(|(s, q)| **q < 0.0 && !k.is_future(**s)).map(|(s, q)| (*s, *q)).collect();
+        for (sym, q) in shorts {
+            self.shorts_held = true;
+            let Some(p) = k.price_at(sym, tn) else { continue };
+            let notional = q.abs() * p * k.multiplier(sym);
+            let bucket = self.cfg.borrow_bucket(k.adv(sym, bars, end));
+            let fee = notional * bucket.fee_bps / 10_000.0 * dt;
+            let rebate = notional * self.cfg.short_rebate * dt;
+            self.cash -= fee;
+            self.cash += rebate;
+            result.funding.borrow_fees += fee;
+            result.funding.short_rebate += rebate;
+        }
+        // Mark the book at the execution bar.
+        let mut equity_next = self.cash;
+        for (&sym, &q) in &self.positions {
+            if let Some(p) = k.price_at(sym, tn) {
+                equity_next += q * p * k.multiplier(sym);
+            }
+        }
+        // Orders that reduce a position fund the ones that open or add, so
+        // within a bar they fill first (symbol order within each group). A
+        // decision on an instrument supersedes its open target; the other
+        // open targets are re-issued (flagged, so they are not counted as
+        // new requests).
+        for sym in by_equity.keys() {
+            self.open_targets.remove(sym);
+            self.working.remove(sym);
+        }
+        let mut pending: Vec<Pending> = Vec::new();
+        for (d, r) in by_equity.values().flatten() {
+            if d.order.is_market() {
+                pending.push((d.clone(), *r, false, None));
+            } else {
+                self.working.insert(
+                    d.equity,
+                    Working {
+                        d: d.clone(),
+                        rule: *r,
+                        t,
+                        first_day: None,
+                        bars: 0,
+                        session_last: None,
+                    },
+                );
+            }
+        }
+        pending.extend(self.open_targets.values().map(|(d, r)| (d.clone(), *r, true, None)));
+        let syms: Vec<Sym> = self.working.keys().copied().collect();
+        for sym in syms {
+            let Some(mut w) = self.working.remove(&sym) else { continue };
+            match self.trigger(k, &mut w, tn) {
+                Trigger::Fill(p, at) => pending.push((w.d.clone(), w.rule, false, Some((p, at)))),
+                Trigger::Wait => {
+                    self.working.insert(sym, w);
+                }
+                Trigger::Expire(why) => result.dropped.push((w.t, w.d.clone(), why)),
+            }
+        }
+        let mut marks: HashMap<Sym, f64> = HashMap::new();
+        for (d, _, _, _) in &pending {
+            if let Some(p) = k.price_at(d.equity, tn) {
+                // The value of one unit held: price times the multiplier.
+                marks.insert(d.equity, p * k.multiplier(d.equity));
+            }
+        }
+        // What a weight is a fraction of: the book's equity, or the fixed
+        // capital when profits are not reinvested.
+        let base = if self.cfg.compounding { equity_next.max(0.0) } else { self.cfg.initial_cash };
+        {
+            let positions = &self.positions;
+            let reducing = |d: &Decision| -> bool {
+                let pos = positions.get(&d.equity).copied().unwrap_or(0.0);
+                match d.ctor {
+                    Ctor::Sell | Ctor::Cover => pos != 0.0,
+                    Ctor::Buy | Ctor::Short => false,
+                    Ctor::TargetQuantity => pos != 0.0 && d.amount.abs() < pos.abs() && d.amount * pos >= 0.0,
+                    Ctor::TargetWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
+                }
+            };
+            pending.sort_by_key(|(d, _, _, _)| !reducing(d));
+        }
+        // Ruin: a book without positive equity cannot size or fund an order.
+        if !pending.is_empty() && equity_next <= 0.0 && self.cfg.on_ruin == OnRuin::Halt {
+            let (d, rule, _, _) = &pending[0];
+            return Err(RunError::Risk {
+                t,
+                rule: k.prog.rule_label(*rule),
+                decision: result.describe_decision(d),
+                message: format!("ruin: equity at {} is {:.2}, not positive, with orders pending", time::format_timestamp(tn), equity_next),
+            });
+        }
+        let sizing_equity = base;
+        // A bar's transaction costs (commission, fee, slippage, impact) are
+        // never leverage: a fully invested book stays fully invested after
+        // paying them, carrying a debit of at most the bar's costs, which the
+        // next sizing sees (and margin interest prices).
+        let mut bar_costs = 0.0;
+        // Intraday positions opened at this step: flat again at their session's close.
+        let mut day_exits: Vec<(Sym, i64, usize)> = Vec::new();
+        for (d, rule, reissued, away) in &pending {
+            let sym = d.equity;
+            let is_target = matches!(d.ctor, Ctor::TargetWeight | Ctor::TargetQuantity);
+            let name = k.symbols.name(sym).to_string();
+            let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
+            // The bar the order executes at, and its base price: this bar's
+            // close, or what a working order triggered at.
+            let at = away.map(|(_, a)| a).unwrap_or(tn);
+            let bar_price = match away {
+                Some((p, _)) => Some(*p),
+                None => k.bar_price(sym, tn),
+            };
+            // Slippage against the order: the fixed part plus a multiple of
+            // the instrument's realized volatility at the fill bar.
+            let slip = self.cfg.slippage_bps / 10_000.0 + self.cfg.slippage_vol_mult * k.realized_vol(sym, bars, end).unwrap_or(0.0);
+            let slipped = |p: f64, buying: bool| if buying { p * (1.0 + slip) } else { p * (1.0 - slip) };
+            // Lot rounding applies to what the decision names: a delta order's
+            // quantity, or a target's quantity (so a kept name never ends a
+            // fraction of a share over its target).
+            let lot = self.cfg.lot;
+            let round = move |x: f64| -> f64 {
+                match lot {
+                    Lot::Whole => x.trunc(),
+                    Lot::Fractional => x,
+                }
+            };
+            let m = k.multiplier(sym);
+            let mut qty = match (d.ctor, bar_price) {
+                (Ctor::Buy | Ctor::Cover, _) => round(d.amount),
+                (Ctor::Sell | Ctor::Short, _) => -round(d.amount),
+                (Ctor::TargetQuantity, _) => round(d.amount) - pos,
+                // A long that is bought is sized at the price it will fill at,
+                // so the cash it spends is the weight of equity; any other
+                // target (a reduction, a short) is sized at the bar price,
+                // which is what the position is marked at.
+                (Ctor::TargetWeight, Some(p)) => {
+                    let target = round(d.amount * sizing_equity / (p * m));
+                    let target = if target > pos && target > 0.0 {
+                        round(d.amount * sizing_equity / (slipped(p, true) * m))
+                    } else {
+                        target
+                    };
+                    target - pos
+                }
+                // Without a price a weight cannot be sized, except the flat target.
+                (Ctor::TargetWeight, None) if d.amount == 0.0 => -pos,
+                (Ctor::TargetWeight, None) => {
+                    self.open_targets.remove(&sym);
+                    result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
+                    continue;
+                }
+            };
+            if qty == 0.0 {
+                // A target that is held: nothing to do, and an open one is reached.
+                self.open_targets.remove(&sym);
+                continue;
+            }
+            // Oversize: a delta order that would carry the position across zero.
+            let crosses = matches!(d.ctor, Ctor::Sell | Ctor::Cover) && pos != 0.0 && (pos + qty) * pos < 0.0;
+            if crosses {
+                let message = format!(
+                    "{} {} of {} shares {}: the order would cross zero",
+                    d.ctor.name(),
+                    qty.abs(),
+                    pos.abs(),
+                    if pos > 0.0 { "held" } else { "short" }
+                );
+                match self.cfg.on_oversize {
+                    OnOversize::Halt => {
+                        return Err(RunError::Risk {
+                            t,
+                            rule: k.prog.rule_label(*rule),
+                            decision: result.describe_decision(d),
+                            message,
+                        });
+                    }
+                    OnOversize::Clamp => {
+                        let excess = qty.abs() - pos.abs();
+                        result
+                            .dropped
+                            .push((t, d.clone(), format!("clamped at position: {} of {} shares filled, {} dropped", pos.abs(), qty.abs(), excess)));
+                        qty = -pos;
+                    }
+                    OnOversize::Allow => {}
+                }
+            }
+            // Participation: a fill is at most the cap times the bar's volume.
+            let requested = qty.abs();
+            if !*reissued {
+                self.requested_total += requested;
+            }
+            let bar_volume = k.bar_volume(sym, at);
+            let mut partial = false;
+            if let (true, Some(v)) = (self.cfg.participation_cap > 0.0, bar_volume) {
+                let cap = round(self.cfg.participation_cap * v);
+                if requested > cap {
+                    partial = true;
+                    qty = qty.signum() * cap;
+                }
+            }
+            let cap_pct = self.cfg.participation_cap * 100.0;
+            let partial_note = move |filled: f64| {
+                format!(
+                    "partial fill: {} of {} shares (participation cap {}% of volume {})",
+                    filled,
+                    requested,
+                    cap_pct,
+                    bar_volume.unwrap_or(0.0)
+                )
+            };
+            if qty == 0.0 {
+                if is_target && d.order.is_market() {
+                    self.open_targets.insert(sym, (d.clone(), *rule));
+                } else {
+                    result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(0.0))));
+                }
+                continue;
+            }
+            // The order shrinks the position without crossing zero: it is a
+            // liquidation (fillable at the last price) and never leverage.
+            let reduces = pos != 0.0 && (pos + qty) * pos >= 0.0 && (pos + qty).abs() < pos.abs();
+            // Price: the bar's, or the last known one for a liquidation.
+            let (p, at_last_price) = match bar_price {
+                Some(p) => (p, false),
+                None => match k.last_price.get(&sym).copied() {
+                    Some(p) if reduces => (p, true),
+                    _ => {
+                        self.open_targets.remove(&sym);
+                        result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
+                        continue;
+                    }
+                },
+            };
+            // Impact: square root in participation of average daily volume.
+            let imp = match (self.cfg.impact_coef > 0.0, k.adv(sym, bars, end)) {
+                (true, Some(adv)) if adv > 0.0 => self.cfg.impact_coef * (qty.abs() / adv).sqrt(),
+                _ => 0.0,
+            };
+            let fill_price = if qty > 0.0 { p * (1.0 + slip + imp) } else { p * (1.0 - slip - imp) };
+            let commission = self.commission(k, sym, qty, fill_price);
+            let fee = if qty < 0.0 { qty.abs() * fill_price * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
+            let cost = qty * fill_price * m + commission + fee;
+            let slippage = qty.abs() * p * m * slip;
+            let impact = qty.abs() * p * m * imp;
+            let allowance = bar_costs + commission + fee + slippage + impact;
+            // Borrow availability: an order that opens or adds to a short
+            // needs its instrument's ADV bucket to be shortable.
+            if pos + qty < 0.0 && pos + qty < pos && !k.is_future(sym) {
+                let adv = k.adv(sym, bars, end);
+                let bucket = self.cfg.borrow_bucket(adv);
+                if !bucket.shortable {
+                    self.not_shortable += 1;
+                    self.open_targets.remove(&sym);
+                    result.dropped.push((
+                        t,
+                        d.clone(),
+                        format!(
+                            "not shortable: ADV {} of {} is below {} (the smallest borrow bucket)",
+                            adv.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "unknown".into()),
+                            name,
+                            bucket.adv_below
+                        ),
+                    ));
+                    continue;
+                }
+            }
+            // Leverage: only an order that adds exposure can borrow, and only
+            // up to the configured gross multiple of equity.
+            if !reduces {
+                let new_cash = self.cash - cost;
+                let mut gross = 0.0;
+                let mut net = new_cash;
+                for (&s2, &q2) in &self.positions {
+                    let q2 = if s2 == sym { q2 + qty } else { q2 };
+                    let p2 = if s2 == sym { p } else { k.price_at(s2, tn).unwrap_or(0.0) };
+                    let m2 = k.multiplier(s2);
+                    gross += q2.abs() * p2 * m2;
+                    net += q2 * p2 * m2;
+                }
+                if !self.positions.contains_key(&sym) {
+                    gross += qty.abs() * p * m;
+                    net += qty * p * m;
+                }
+                let tol = 1e-9 * (1.0 + net.abs()) + allowance;
+                let max_gross = self.cfg.max_gross.max(1.0);
+                // Leverage is judged against equity; when profits are not
+                // reinvested, against the fixed capital, and cash may go
+                // negative (a loss is carried, not refunded by selling).
+                let breach = if self.cfg.compounding {
+                    new_cash < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol
+                } else {
+                    gross > max_gross * self.cfg.initial_cash + tol
+                };
+                if breach {
+                    let message = format!(
+                        "leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2} (limit {}x gross)",
+                        new_cash, gross, net, max_gross
+                    );
+                    match self.cfg.on_leverage {
+                        OnLeverage::Halt => {
+                            return Err(RunError::Risk {
+                                t,
+                                rule: k.prog.rule_label(*rule),
+                                decision: result.describe_decision(d),
+                                message,
+                            });
+                        }
+                        OnLeverage::Reject => {
+                            result.dropped.push((
+                                t,
+                                d.clone(),
+                                format!("rejected, would exceed {}x equity: cash {:.2}, gross {:.2} against equity {:.2}", max_gross, new_cash, gross, net),
+                            ));
+                            continue;
+                        }
+                        OnLeverage::Allow => {}
+                    }
+                }
+            }
+            self.cash -= cost;
+            let new_pos = pos + qty;
+            if new_pos.abs() < 1e-9 {
+                self.positions.remove(&sym);
+            } else {
+                self.positions.insert(sym, new_pos);
+            }
+            k.last_price.insert(sym, fill_price);
+            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
+            bar_costs += commission + fee + slippage + impact;
+            result.costs.commissions += commission;
+            result.costs.fees += fee;
+            result.costs.slippage += slippage;
+            result.costs.impact += impact;
+            result.costs.turnover += qty.abs() * fill_price * m;
+            self.filled_total += qty.abs();
+            let participation = bar_volume.filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0);
+            if bar_volume.is_some() {
+                self.participations.push(participation);
+            }
+            result.fills.push(FillRecord {
+                t: at,
+                equity: sym,
+                quantity: qty,
+                price: fill_price,
+                at_last_price,
+                commission,
+                fee,
+                slippage,
+                impact,
+                participation,
+                partial,
+                forced: false,
+            });
+            if d.order.kind == OrderKind::MooMoc {
+                day_exits.push((sym, at, *rule));
+            }
+            // The remainder of a capped order: a delta order expires, a target
+            // re-issues itself at the next bar.
+            if partial {
+                if is_target && d.order.is_market() {
+                    self.open_targets.insert(sym, (d.clone(), *rule));
+                } else {
+                    result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(qty.abs()))));
+                }
+            } else if is_target {
+                self.open_targets.remove(&sym);
+            }
+        }
+        for (sym, at, rule) in day_exits {
+            // Entered at the session's last print: flat again at its close, now.
+            if k.session_last_bar(sym, at) == Some(tn) {
+                if let (Some(&pos), Some(p)) = (self.positions.get(&sym), k.bar_price(sym, tn)) {
+                    let qty = -pos;
+                    let m = k.multiplier(sym);
+                    let commission = self.commission(k, sym, qty, p);
+                    self.cash -= qty * p * m + commission;
+                    self.positions.remove(&sym);
+                    result.costs.commissions += commission;
+                    result.costs.turnover += qty.abs() * p * m;
+                    k.last_price.insert(sym, p);
+                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
+                    result.fills.push(FillRecord {
+                        t: tn,
+                        equity: sym,
+                        quantity: qty,
+                        price: p,
+                        at_last_price: false,
+                        commission,
+                        fee: 0.0,
+                        slippage: 0.0,
+                        impact: 0.0,
+                        participation: 0.0,
+                        partial: false,
+                        forced: false,
+                    });
+                    continue;
+                }
+            }
+            let exit = Decision {
+                ctor: Ctor::TargetQuantity,
+                equity: sym,
+                amount: 0.0,
+                order: super::value::Order { kind: OrderKind::Moc, tif: Tif::Day },
+            };
+            self.working.insert(
+                sym,
+                Working {
+                    d: exit,
+                    rule,
+                    t: at,
+                    first_day: None,
+                    bars: 0,
+                    session_last: None,
+                },
+            );
+        }
+        for (&sym, &q) in &self.positions {
+            k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
+        }
+        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.cash)]);
+        Ok(())
+    }
+
     /// Whether a working order executes at `tn`, and at what base price.
     fn trigger(&self, k: &mut Kernel, w: &mut Working, tn: i64) -> Trigger {
         let sym = w.d.equity;
@@ -501,452 +946,20 @@ impl Executor for SimExecutor {
     }
 
     fn fill(&mut self, k: &mut Kernel, tn: i64, result: &mut RunResult) -> Result<(), RunError> {
-        let Some(t) = self.pending_t.take() else { return Ok(()) };
-        let by_equity = std::mem::take(&mut self.pending);
-        let position = k.rel_id("position");
-        let cash_rel = k.rel_id("cash");
-        let fill_rel = k.rel_id("fill");
         // The fill bar in the executor's own list of bars (what ADV and
-        // realized volatility look back over).
-        let mut bars = self.bars.clone();
-        if bars.last() != Some(&tn) {
+        // realized volatility look back over), extended by the fill bar for
+        // this step only: moved out and back rather than copied.
+        let mut bars = std::mem::take(&mut self.bars);
+        let pushed = bars.last() != Some(&tn);
+        if pushed {
             bars.push(tn);
         }
-        let end = bars.len() - 1;
-        // Funding over the calendar time to the execution bar: interest on
-        // cash or on the debit, borrow fee and rebate on short notional.
-        let dt = (tn - t) as f64 / (365.0 * 86_400.0);
-        if self.cash > 0.0 {
-            let i = self.cash * self.cfg.cash_rate * dt;
-            self.cash += i;
-            result.funding.cash_interest += i;
-        } else if self.cash < 0.0 {
-            let i = -self.cash * self.cfg.margin_rate * dt;
-            self.cash -= i;
-            result.funding.margin_interest += i;
+        let out = self.fill_over(k, tn, result, &bars);
+        if pushed {
+            bars.pop();
         }
-        // A future is sold, not borrowed: no borrow fee, no locate.
-        let shorts: Vec<(Sym, f64)> = self.positions.iter().filter(|(s, q)| **q < 0.0 && !k.is_future(**s)).map(|(s, q)| (*s, *q)).collect();
-        for (sym, q) in shorts {
-            self.shorts_held = true;
-            let Some(p) = k.price_at(sym, tn) else { continue };
-            let notional = q.abs() * p * k.multiplier(sym);
-            let bucket = self.cfg.borrow_bucket(k.adv(sym, &bars, end));
-            let fee = notional * bucket.fee_bps / 10_000.0 * dt;
-            let rebate = notional * self.cfg.short_rebate * dt;
-            self.cash -= fee;
-            self.cash += rebate;
-            result.funding.borrow_fees += fee;
-            result.funding.short_rebate += rebate;
-        }
-        // Mark the book at the execution bar.
-        let mut equity_next = self.cash;
-        for (&sym, &q) in &self.positions {
-            if let Some(p) = k.price_at(sym, tn) {
-                equity_next += q * p * k.multiplier(sym);
-            }
-        }
-        // Orders that reduce a position fund the ones that open or add, so
-        // within a bar they fill first (symbol order within each group). A
-        // decision on an instrument supersedes its open target; the other
-        // open targets are re-issued (flagged, so they are not counted as
-        // new requests).
-        for sym in by_equity.keys() {
-            self.open_targets.remove(sym);
-            self.working.remove(sym);
-        }
-        let mut pending: Vec<Pending> = Vec::new();
-        for (d, r) in by_equity.values().flatten() {
-            if d.order.is_market() {
-                pending.push((d.clone(), *r, false, None));
-            } else {
-                self.working.insert(
-                    d.equity,
-                    Working {
-                        d: d.clone(),
-                        rule: *r,
-                        t,
-                        first_day: None,
-                        bars: 0,
-                        session_last: None,
-                    },
-                );
-            }
-        }
-        pending.extend(self.open_targets.values().map(|(d, r)| (d.clone(), *r, true, None)));
-        let syms: Vec<Sym> = self.working.keys().copied().collect();
-        for sym in syms {
-            let Some(mut w) = self.working.remove(&sym) else { continue };
-            match self.trigger(k, &mut w, tn) {
-                Trigger::Fill(p, at) => pending.push((w.d.clone(), w.rule, false, Some((p, at)))),
-                Trigger::Wait => {
-                    self.working.insert(sym, w);
-                }
-                Trigger::Expire(why) => result.dropped.push((w.t, w.d.clone(), why)),
-            }
-        }
-        let mut marks: HashMap<Sym, f64> = HashMap::new();
-        for (d, _, _, _) in &pending {
-            if let Some(p) = k.price_at(d.equity, tn) {
-                // The value of one unit held: price times the multiplier.
-                marks.insert(d.equity, p * k.multiplier(d.equity));
-            }
-        }
-        // What a weight is a fraction of: the book's equity, or the fixed
-        // capital when profits are not reinvested.
-        let base = if self.cfg.compounding { equity_next.max(0.0) } else { self.cfg.initial_cash };
-        {
-            let positions = &self.positions;
-            let reducing = |d: &Decision| -> bool {
-                let pos = positions.get(&d.equity).copied().unwrap_or(0.0);
-                match d.ctor {
-                    Ctor::Sell | Ctor::Cover => pos != 0.0,
-                    Ctor::Buy | Ctor::Short => false,
-                    Ctor::TargetQuantity => pos != 0.0 && d.amount.abs() < pos.abs() && d.amount * pos >= 0.0,
-                    Ctor::TargetWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
-                }
-            };
-            pending.sort_by_key(|(d, _, _, _)| !reducing(d));
-        }
-        // Ruin: a book without positive equity cannot size or fund an order.
-        if !pending.is_empty() && equity_next <= 0.0 && self.cfg.on_ruin == OnRuin::Halt {
-            let (d, rule, _, _) = &pending[0];
-            return Err(RunError::Risk {
-                t,
-                rule: k.prog.rule_label(*rule),
-                decision: result.describe_decision(d),
-                message: format!("ruin: equity at {} is {:.2}, not positive, with orders pending", time::format_timestamp(tn), equity_next),
-            });
-        }
-        let sizing_equity = base;
-        // A bar's transaction costs (commission, fee, slippage, impact) are
-        // never leverage: a fully invested book stays fully invested after
-        // paying them, carrying a debit of at most the bar's costs, which the
-        // next sizing sees (and margin interest prices).
-        let mut bar_costs = 0.0;
-        // Intraday positions opened at this step: flat again at their session's close.
-        let mut day_exits: Vec<(Sym, i64, usize)> = Vec::new();
-        for (d, rule, reissued, away) in &pending {
-            let sym = d.equity;
-            let is_target = matches!(d.ctor, Ctor::TargetWeight | Ctor::TargetQuantity);
-            let name = k.symbols.name(sym).to_string();
-            let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
-            // The bar the order executes at, and its base price: this bar's
-            // close, or what a working order triggered at.
-            let at = away.map(|(_, a)| a).unwrap_or(tn);
-            let bar_price = match away {
-                Some((p, _)) => Some(*p),
-                None => k.bar_price(sym, tn),
-            };
-            // Slippage against the order: the fixed part plus a multiple of
-            // the instrument's realized volatility at the fill bar.
-            let slip = self.cfg.slippage_bps / 10_000.0 + self.cfg.slippage_vol_mult * k.realized_vol(sym, &bars, end).unwrap_or(0.0);
-            let slipped = |p: f64, buying: bool| if buying { p * (1.0 + slip) } else { p * (1.0 - slip) };
-            // Lot rounding applies to what the decision names: a delta order's
-            // quantity, or a target's quantity (so a kept name never ends a
-            // fraction of a share over its target).
-            let lot = self.cfg.lot;
-            let round = move |x: f64| -> f64 {
-                match lot {
-                    Lot::Whole => x.trunc(),
-                    Lot::Fractional => x,
-                }
-            };
-            let m = k.multiplier(sym);
-            let mut qty = match (d.ctor, bar_price) {
-                (Ctor::Buy | Ctor::Cover, _) => round(d.amount),
-                (Ctor::Sell | Ctor::Short, _) => -round(d.amount),
-                (Ctor::TargetQuantity, _) => round(d.amount) - pos,
-                // A long that is bought is sized at the price it will fill at,
-                // so the cash it spends is the weight of equity; any other
-                // target (a reduction, a short) is sized at the bar price,
-                // which is what the position is marked at.
-                (Ctor::TargetWeight, Some(p)) => {
-                    let target = round(d.amount * sizing_equity / (p * m));
-                    let target = if target > pos && target > 0.0 {
-                        round(d.amount * sizing_equity / (slipped(p, true) * m))
-                    } else {
-                        target
-                    };
-                    target - pos
-                }
-                // Without a price a weight cannot be sized, except the flat target.
-                (Ctor::TargetWeight, None) if d.amount == 0.0 => -pos,
-                (Ctor::TargetWeight, None) => {
-                    self.open_targets.remove(&sym);
-                    result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
-                    continue;
-                }
-            };
-            if qty == 0.0 {
-                // A target that is held: nothing to do, and an open one is reached.
-                self.open_targets.remove(&sym);
-                continue;
-            }
-            // Oversize: a delta order that would carry the position across zero.
-            let crosses = matches!(d.ctor, Ctor::Sell | Ctor::Cover) && pos != 0.0 && (pos + qty) * pos < 0.0;
-            if crosses {
-                let message = format!(
-                    "{} {} of {} shares {}: the order would cross zero",
-                    d.ctor.name(),
-                    qty.abs(),
-                    pos.abs(),
-                    if pos > 0.0 { "held" } else { "short" }
-                );
-                match self.cfg.on_oversize {
-                    OnOversize::Halt => {
-                        return Err(RunError::Risk {
-                            t,
-                            rule: k.prog.rule_label(*rule),
-                            decision: result.describe_decision(d),
-                            message,
-                        });
-                    }
-                    OnOversize::Clamp => {
-                        let excess = qty.abs() - pos.abs();
-                        result
-                            .dropped
-                            .push((t, d.clone(), format!("clamped at position: {} of {} shares filled, {} dropped", pos.abs(), qty.abs(), excess)));
-                        qty = -pos;
-                    }
-                    OnOversize::Allow => {}
-                }
-            }
-            // Participation: a fill is at most the cap times the bar's volume.
-            let requested = qty.abs();
-            if !*reissued {
-                self.requested_total += requested;
-            }
-            let bar_volume = k.bar_volume(sym, at);
-            let mut partial = false;
-            if let (true, Some(v)) = (self.cfg.participation_cap > 0.0, bar_volume) {
-                let cap = round(self.cfg.participation_cap * v);
-                if requested > cap {
-                    partial = true;
-                    qty = qty.signum() * cap;
-                }
-            }
-            let cap_pct = self.cfg.participation_cap * 100.0;
-            let partial_note = move |filled: f64| {
-                format!(
-                    "partial fill: {} of {} shares (participation cap {}% of volume {})",
-                    filled,
-                    requested,
-                    cap_pct,
-                    bar_volume.unwrap_or(0.0)
-                )
-            };
-            if qty == 0.0 {
-                if is_target && d.order.is_market() {
-                    self.open_targets.insert(sym, (d.clone(), *rule));
-                } else {
-                    result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(0.0))));
-                }
-                continue;
-            }
-            // The order shrinks the position without crossing zero: it is a
-            // liquidation (fillable at the last price) and never leverage.
-            let reduces = pos != 0.0 && (pos + qty) * pos >= 0.0 && (pos + qty).abs() < pos.abs();
-            // Price: the bar's, or the last known one for a liquidation.
-            let (p, at_last_price) = match bar_price {
-                Some(p) => (p, false),
-                None => match k.last_price.get(&sym).copied() {
-                    Some(p) if reduces => (p, true),
-                    _ => {
-                        self.open_targets.remove(&sym);
-                        result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
-                        continue;
-                    }
-                },
-            };
-            // Impact: square root in participation of average daily volume.
-            let imp = match (self.cfg.impact_coef > 0.0, k.adv(sym, &bars, end)) {
-                (true, Some(adv)) if adv > 0.0 => self.cfg.impact_coef * (qty.abs() / adv).sqrt(),
-                _ => 0.0,
-            };
-            let fill_price = if qty > 0.0 { p * (1.0 + slip + imp) } else { p * (1.0 - slip - imp) };
-            let commission = self.commission(k, sym, qty, fill_price);
-            let fee = if qty < 0.0 { qty.abs() * fill_price * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
-            let cost = qty * fill_price * m + commission + fee;
-            let slippage = qty.abs() * p * m * slip;
-            let impact = qty.abs() * p * m * imp;
-            let allowance = bar_costs + commission + fee + slippage + impact;
-            // Borrow availability: an order that opens or adds to a short
-            // needs its instrument's ADV bucket to be shortable.
-            if pos + qty < 0.0 && pos + qty < pos && !k.is_future(sym) {
-                let adv = k.adv(sym, &bars, end);
-                let bucket = self.cfg.borrow_bucket(adv);
-                if !bucket.shortable {
-                    self.not_shortable += 1;
-                    self.open_targets.remove(&sym);
-                    result.dropped.push((
-                        t,
-                        d.clone(),
-                        format!(
-                            "not shortable: ADV {} of {} is below {} (the smallest borrow bucket)",
-                            adv.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "unknown".into()),
-                            name,
-                            bucket.adv_below
-                        ),
-                    ));
-                    continue;
-                }
-            }
-            // Leverage: only an order that adds exposure can borrow, and only
-            // up to the configured gross multiple of equity.
-            if !reduces {
-                let new_cash = self.cash - cost;
-                let mut gross = 0.0;
-                let mut net = new_cash;
-                for (&s2, &q2) in &self.positions {
-                    let q2 = if s2 == sym { q2 + qty } else { q2 };
-                    let p2 = if s2 == sym { p } else { k.price_at(s2, tn).unwrap_or(0.0) };
-                    let m2 = k.multiplier(s2);
-                    gross += q2.abs() * p2 * m2;
-                    net += q2 * p2 * m2;
-                }
-                if !self.positions.contains_key(&sym) {
-                    gross += qty.abs() * p * m;
-                    net += qty * p * m;
-                }
-                let tol = 1e-9 * (1.0 + net.abs()) + allowance;
-                let max_gross = self.cfg.max_gross.max(1.0);
-                // Leverage is judged against equity; when profits are not
-                // reinvested, against the fixed capital, and cash may go
-                // negative (a loss is carried, not refunded by selling).
-                let breach = if self.cfg.compounding {
-                    new_cash < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol
-                } else {
-                    gross > max_gross * self.cfg.initial_cash + tol
-                };
-                if breach {
-                    let message = format!(
-                        "leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2} (limit {}x gross)",
-                        new_cash, gross, net, max_gross
-                    );
-                    match self.cfg.on_leverage {
-                        OnLeverage::Halt => {
-                            return Err(RunError::Risk {
-                                t,
-                                rule: k.prog.rule_label(*rule),
-                                decision: result.describe_decision(d),
-                                message,
-                            });
-                        }
-                        OnLeverage::Reject => {
-                            result.dropped.push((
-                                t,
-                                d.clone(),
-                                format!("rejected, would exceed {}x equity: cash {:.2}, gross {:.2} against equity {:.2}", max_gross, new_cash, gross, net),
-                            ));
-                            continue;
-                        }
-                        OnLeverage::Allow => {}
-                    }
-                }
-            }
-            self.cash -= cost;
-            let new_pos = pos + qty;
-            if new_pos.abs() < 1e-9 {
-                self.positions.remove(&sym);
-            } else {
-                self.positions.insert(sym, new_pos);
-            }
-            k.last_price.insert(sym, fill_price);
-            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
-            bar_costs += commission + fee + slippage + impact;
-            result.costs.commissions += commission;
-            result.costs.fees += fee;
-            result.costs.slippage += slippage;
-            result.costs.impact += impact;
-            result.costs.turnover += qty.abs() * fill_price * m;
-            self.filled_total += qty.abs();
-            let participation = bar_volume.filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0);
-            if bar_volume.is_some() {
-                self.participations.push(participation);
-            }
-            result.fills.push(FillRecord {
-                t: at,
-                equity: sym,
-                quantity: qty,
-                price: fill_price,
-                at_last_price,
-                commission,
-                fee,
-                slippage,
-                impact,
-                participation,
-                partial,
-                forced: false,
-            });
-            if d.order.kind == OrderKind::MooMoc {
-                day_exits.push((sym, at, *rule));
-            }
-            // The remainder of a capped order: a delta order expires, a target
-            // re-issues itself at the next bar.
-            if partial {
-                if is_target && d.order.is_market() {
-                    self.open_targets.insert(sym, (d.clone(), *rule));
-                } else {
-                    result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(qty.abs()))));
-                }
-            } else if is_target {
-                self.open_targets.remove(&sym);
-            }
-        }
-        for (sym, at, rule) in day_exits {
-            // Entered at the session's last print: flat again at its close, now.
-            if k.session_last_bar(sym, at) == Some(tn) {
-                if let (Some(&pos), Some(p)) = (self.positions.get(&sym), k.bar_price(sym, tn)) {
-                    let qty = -pos;
-                    let m = k.multiplier(sym);
-                    let commission = self.commission(k, sym, qty, p);
-                    self.cash -= qty * p * m + commission;
-                    self.positions.remove(&sym);
-                    result.costs.commissions += commission;
-                    result.costs.turnover += qty.abs() * p * m;
-                    k.last_price.insert(sym, p);
-                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
-                    result.fills.push(FillRecord {
-                        t: tn,
-                        equity: sym,
-                        quantity: qty,
-                        price: p,
-                        at_last_price: false,
-                        commission,
-                        fee: 0.0,
-                        slippage: 0.0,
-                        impact: 0.0,
-                        participation: 0.0,
-                        partial: false,
-                        forced: false,
-                    });
-                    continue;
-                }
-            }
-            let exit = Decision {
-                ctor: Ctor::TargetQuantity,
-                equity: sym,
-                amount: 0.0,
-                order: super::value::Order { kind: OrderKind::Moc, tif: Tif::Day },
-            };
-            self.working.insert(
-                sym,
-                Working {
-                    d: exit,
-                    rule,
-                    t: at,
-                    first_day: None,
-                    bars: 0,
-                    session_last: None,
-                },
-            );
-        }
-        for (&sym, &q) in &self.positions {
-            k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
-        }
-        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.cash)]);
-        Ok(())
+        self.bars = bars;
+        out
     }
 
     fn checkpoint(&self) -> Result<serde_json::Value, String> {
@@ -1086,7 +1099,7 @@ impl Kernel<'_> {
                     message: "delta decisions require a positive quantity".into(),
                 });
             }
-            by_equity.entry(d.equity).or_default().push((d.clone(), *rule));
+            by_equity.entry(d.equity).or_default().push(((**d).clone(), *rule));
         }
         for (sym, ds) in &by_equity {
             if ds.len() > 1 {
@@ -1103,7 +1116,7 @@ impl Kernel<'_> {
         for ds in by_equity.values() {
             for (d, rule) in ds {
                 result.decisions.push(DecisionRecord { t, decision: d.clone(), rule: *rule });
-                self.stores[decided].insert(t, vec![Value::Time(t), Value::Decision(d.clone())]);
+                self.stores[decided].insert(t, vec![Value::Time(t), Value::Decision(Box::new(d.clone()))]);
             }
         }
         Ok(by_equity)
