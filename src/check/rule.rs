@@ -870,7 +870,11 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     );
                 }
                 let b = self.time_var_bound(base, "the base of the window");
-                self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
+                if *kind == WindowKind::Rows {
+                    self.expect_expr(dur, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the number of rows)");
+                } else {
+                    self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
+                }
                 self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum observation count)");
                 let strict = *kind == WindowKind::Prior;
                 let prov = b.map(|b| Self::derived_prov(self.prov_of(&b), strict)).unwrap_or(TimeProv::Other);
@@ -993,11 +997,13 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 };
                 self.bind(var, rty, TimeProv::Other);
             }
-            Literal::Top { n, atom, by, span } => {
+            Literal::Top { n, atom, by, rank, span } => {
                 if in_agg {
                     self.err(Code::B, *span, "a reduction is not permitted inside an aggregation");
                 }
-                self.expect_expr(n, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count");
+                if let Some(n) = n {
+                    self.expect_expr(n, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count");
+                }
                 if let Some(sig) = self.cx.relations.get(&atom.name).cloned() {
                     if let Some(k) = sig.key_pos() {
                         if let Term::Var(v, sp) = &atom.terms[k] {
@@ -1046,6 +1052,16 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         ),
                     );
                 }
+                if let Some((k, _, ksp)) = rank {
+                    if self.vars.contains_key(k) {
+                        self.err(Code::B, *ksp, format!("the rank `{}` must be a fresh variable", k));
+                    } else {
+                        self.bind(k, Some(Ty::scalar()), TimeProv::Other);
+                    }
+                }
+                // Averaged ties need no total order: the rank of a run of
+                // equal keys does not depend on how the run is ordered.
+                let identity = if matches!(rank, Some((_, Ties::Average, _))) { Vec::new() } else { identity };
                 for pos in identity {
                     let arg = &info.sig.args[pos];
                     match &atom.terms[pos] {

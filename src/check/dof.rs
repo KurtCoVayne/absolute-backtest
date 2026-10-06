@@ -93,7 +93,9 @@ pub fn literals_in_rule_mut(rule: &mut Rule, f: &mut dyn FnMut(&mut Lit, Span)) 
                 conj.iter_mut().for_each(|c| literal(c, f));
             }
             Literal::Top { n, atom, .. } => {
-                expr(n, f);
+                if let Some(n) = n {
+                    expr(n, f);
+                }
                 terms(&mut atom.terms, f);
             }
             Literal::Resample { inner, min, aggs, .. } => {
@@ -144,7 +146,9 @@ fn literal(l: &Literal, out: &mut Vec<(Lit, Span)>) {
             }
         }
         Literal::Top { n, atom, .. } => {
-            expr(n, out);
+            if let Some(n) = n {
+                expr(n, out);
+            }
             terms(&atom.terms, out);
         }
         Literal::Resample { inner, min, aggs, .. } => {

@@ -582,12 +582,25 @@ pub enum Builtin {
 pub enum WindowKind {
     Window,
     Prior,
+    /// `T1 in rows(T, N, min K)`: the N latest bars at or before T at which
+    /// the rest of the aggregation's conjunction holds for the group (a
+    /// count of the group's own rows, as a rolling window over a table).
+    Rows,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     Asc,
     Desc,
+}
+
+/// How `rank` numbers tied tuples: by their position in the total order
+/// (`ordinal`, the order must be total), or the mean of the positions a run
+/// of equal keys spans (`average`, the order need not be total).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ties {
+    Ordinal,
+    Average,
 }
 
 /// The seven literal forms of section 4, plus the temporal builtins and the
@@ -625,10 +638,14 @@ pub enum Literal {
         conj: Vec<Literal>,
         span: Span,
     },
+    /// `top(N, R(...), by (...))` keeps at most N tuples per group;
+    /// `rank(R(...), by (...)[, ties average], as K)` keeps every tuple and
+    /// binds K to its 1-based rank in the group (`n` is then `None`).
     Top {
-        n: Expr,
+        n: Option<Expr>,
         atom: Atom,
         by: Option<Vec<(String, Dir, Span)>>,
+        rank: Option<(String, Ties, Span)>,
         span: Span,
     },
     Resample {
@@ -672,14 +689,26 @@ impl Literal {
                 Builtin::MonthStart { t } => format!("month_start({})", t),
                 Builtin::DayStart { t } => format!("day_start({})", t),
             },
-            Literal::Window { var, kind, base, dur, min, .. } => format!("{} in {}({}, {}, min {})", var, if *kind == WindowKind::Window { "window" } else { "prior_window" }, base, dur, min),
+            Literal::Window { var, kind, base, dur, min, .. } => format!(
+                "{} in {}({}, {}, min {})",
+                var,
+                match kind {
+                    WindowKind::Window => "window",
+                    WindowKind::Prior => "prior_window",
+                    WindowKind::Rows => "rows",
+                },
+                base,
+                dur,
+                min
+            ),
             Literal::Cmp { op, lhs, rhs, .. } => format!("{} {} {}", lhs, op, rhs),
             Literal::Assign { var, expr, .. } => format!("{} = {}", var, expr),
             Literal::Agg { var, agg, args, .. } => {
                 let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
                 format!("{} = {}({}) over (...)", var, agg, a.join(", "))
             }
-            Literal::Top { n, atom, .. } => format!("top({}, {}, ...)", n, atom),
+            Literal::Top { n: Some(n), atom, .. } => format!("top({}, {}, ...)", n, atom),
+            Literal::Top { atom, rank, .. } => format!("rank({}, ..., as {})", atom, rank.as_ref().map(|(k, _, _)| k.as_str()).unwrap_or("_")),
             Literal::Resample { inner, to, as_var, .. } => format!("resample({} to {} as {}, ...)", inner, to, as_var),
             Literal::AsOf { atom, at, .. } => format!("{} asof {}", atom, at),
         }
@@ -805,7 +834,10 @@ pub const RESERVED_NAMES: &[&str] = &[
     "day_start",
     "window",
     "prior_window",
+    "rows",
     "top",
+    "rank",
+    "ties",
     "resample",
     "decide",
     "decided",

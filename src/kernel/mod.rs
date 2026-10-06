@@ -1096,6 +1096,9 @@ pub struct Kernel<'p> {
     /// The rows of every bar a windowed aggregation group has solved, by
     /// (rule, literal, the outer bindings the group reads), by bar.
     pub(crate) windows: HashMap<eval::WindowKey, eval::WindowCache>,
+    /// For a `rows` window group, the earliest bar with rows when every bar
+    /// before it is known to have none (where a walk back may stop).
+    pub(crate) rows_floor: HashMap<eval::WindowKey, i64>,
     pub stats: KernelStats,
     pub(crate) labels: Symbols,
     /// The security table with ids in the kernel's symbol order, and the
@@ -1424,6 +1427,7 @@ impl<'p> Kernel<'p> {
             remap_syms: remap,
             remap_labels,
             windows: HashMap::new(),
+            rows_floor: HashMap::new(),
             stats: KernelStats::default(),
         })
     }
@@ -1479,7 +1483,13 @@ impl<'p> Kernel<'p> {
             let keep = std::mem::take(cache);
             *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
         }
+        self.rows_floor.clear();
         self.stats.late_tuples += 1;
+    }
+
+    /// The kernel's symbol names, by symbol id (identifier order).
+    pub fn symbol_names(&self) -> &[String] {
+        self.symbols.names()
     }
 
     pub fn relation_id(&self, name: &str) -> Option<usize> {
@@ -2014,7 +2024,9 @@ fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
                 conj.iter().for_each(|c| lit(c, f));
             }
             Literal::Top { n, atom, .. } => {
-                expr(n, f);
+                if let Some(n) = n {
+                    expr(n, f);
+                }
                 atom.terms.iter().for_each(|t| term(t, f));
             }
             Literal::Resample { inner, min, aggs, .. } => {
@@ -2081,11 +2093,16 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
                 args.iter().for_each(|a| expr(a, f));
                 conj.iter().for_each(|c| lit(c, f));
             }
-            Literal::Top { n, atom, by, .. } => {
-                expr(n, f);
+            Literal::Top { n, atom, by, rank, .. } => {
+                if let Some(n) = n {
+                    expr(n, f);
+                }
                 atom.terms.iter().for_each(|t| term(t, f));
                 if let Some(by) = by {
                     by.iter().for_each(|(k, _, _)| f(k));
+                }
+                if let Some((k, _, _)) = rank {
+                    f(k);
                 }
             }
             Literal::Resample { inner, as_var, min, aggs, .. } => {

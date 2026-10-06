@@ -411,6 +411,9 @@ impl<'p> Kernel<'p> {
                     }
                 }
             },
+            Literal::Window { kind: WindowKind::Rows, .. } => {
+                return Err(RunError::Internal("a `rows` window is solved by its aggregation".into()));
+            }
             Literal::Window { var, kind, base, dur, .. } => {
                 let t = self.time_of(cr, base, env)?;
                 let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
@@ -419,7 +422,7 @@ impl<'p> Kernel<'p> {
                 let lo = time::sub_duration(t, d);
                 let times: Vec<i64> = match kind {
                     WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
-                    WindowKind::Prior => self.domain(cr)?.range(lo..t).copied().collect(),
+                    WindowKind::Prior | WindowKind::Rows => self.domain(cr)?.range(lo..t).copied().collect(),
                 };
                 for t1 in times {
                     self.bind_time(cr, var, env, t1, out);
@@ -458,9 +461,17 @@ impl<'p> Kernel<'p> {
                 }
                 self.stats.window_calls += 1;
                 // The rows of the group with the aggregate's arguments evaluated
-                // on each: from the per-bar cache when the group has exactly one
-                // window (the common case), else solved whole.
-                let cached = if self.cfg.window_cache { self.window_rows(cr, lit, conj, agg, args, env)? } else { None };
+                // on each: a `rows` window walks back over the group's own
+                // bars; otherwise from the per-bar cache when the group has
+                // exactly one window (the common case), else solved whole.
+                let has_rows = conj.iter().any(|l| matches!(l, Literal::Window { kind: WindowKind::Rows, .. }));
+                let cached = if has_rows {
+                    Some(self.rows_window(cr, lit, conj, agg, args, env)?)
+                } else if self.cfg.window_cache {
+                    self.window_rows(cr, lit, conj, agg, args, env)?
+                } else {
+                    None
+                };
                 let mut rows: Vec<(Env, Vec<f64>)> = match cached {
                     Some(rows) => rows,
                     None => {
@@ -478,7 +489,7 @@ impl<'p> Kernel<'p> {
                                     let lo = time::sub_duration(t, d);
                                     self.stats.window_bars_solved += match kind {
                                         WindowKind::Window => self.domain(cr)?.range(lo..=t).count(),
-                                        WindowKind::Prior => self.domain(cr)?.range(lo..t).count(),
+                                        WindowKind::Prior | WindowKind::Rows => self.domain(cr)?.range(lo..t).count(),
                                     };
                                 }
                             }
@@ -521,11 +532,10 @@ impl<'p> Kernel<'p> {
                 e[cr.slots[var]] = Some(value);
                 out.push(e);
             }
-            Literal::Top { n, atom, by, .. } => {
-                let n = self.eval_expr(cr, n, env)?.as_f64().unwrap_or(0.0).max(0.0) as usize;
+            Literal::Top { n, atom, by, rank, .. } => {
                 let mut rows = self.atom_matches(cr, atom, env)?;
                 let keys: Vec<(usize, Dir)> = by.as_ref().map(|b| b.iter().map(|(k, d, _)| (cr.slots[k], *d)).collect()).unwrap_or_default();
-                rows.sort_by(|a, b| {
+                let by_keys = |a: &Env, b: &Env| -> std::cmp::Ordering {
                     for (slot, dir) in &keys {
                         let o = a[*slot].cmp(&b[*slot]);
                         let o = if *dir == Dir::Desc { o.reverse() } else { o };
@@ -533,9 +543,32 @@ impl<'p> Kernel<'p> {
                             return o;
                         }
                     }
-                    a.cmp(b)
-                });
-                rows.truncate(n);
+                    std::cmp::Ordering::Equal
+                };
+                rows.sort_by(|a, b| by_keys(a, b).then_with(|| a.cmp(b)));
+                if let Some(n) = n {
+                    let n = self.eval_expr(cr, n, env)?.as_f64().unwrap_or(0.0).max(0.0) as usize;
+                    rows.truncate(n);
+                }
+                if let Some((k, ties, _)) = rank {
+                    // 1-based positions; a run of equal keys shares the mean
+                    // of its positions under `ties average`.
+                    let slot = cr.slots[k];
+                    let mut i = 0;
+                    while i < rows.len() {
+                        let mut j = i + 1;
+                        if *ties == Ties::Average {
+                            while j < rows.len() && by_keys(&rows[i], &rows[j]) == std::cmp::Ordering::Equal {
+                                j += 1;
+                            }
+                        }
+                        let r = (i + 1 + j) as f64 / 2.0;
+                        for row in &mut rows[i..j] {
+                            row[slot] = Some(Value::Num(if *ties == Ties::Average { r } else { (i + 1) as f64 }));
+                        }
+                        i = j;
+                    }
+                }
                 out.extend(rows);
             }
             Literal::Resample { inner, to, as_var, min, aggs, .. } => {
@@ -652,6 +685,7 @@ impl<'p> Kernel<'p> {
         let times: Vec<i64> = match kind {
             WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
             WindowKind::Prior => self.domain(cr)?.range(lo..t).copied().collect(),
+            WindowKind::Rows => return Ok(None),
         };
         // The outer bindings the conjunction reads (not the window variable):
         // the rows of a bar are a function of them and the bar.
@@ -746,6 +780,132 @@ impl<'p> Kernel<'p> {
         cache = cache.split_off(&lo);
         self.windows.insert(key, cache);
         Ok(Some(rows))
+    }
+
+    /// The rows of a `rows` window group: walking back from the base bar,
+    /// the N latest bars at which the rest of the conjunction has rows for
+    /// the group (data-bundle doc, section 2, "State": each bar is solved
+    /// once and kept while it can be among the group's last N; a walk stops
+    /// at the group's first bar once it is known).
+    fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<WindowRows, RunError> {
+        let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
+        let Some(Literal::Window {
+            var: Term::Var(wvar, _),
+            base: base @ Term::Var(bvar, _),
+            dur,
+            ..
+        }) = windows.first().map(|&i| &conj[i])
+        else {
+            return Err(RunError::Internal("a `rows` window needs a variable and a bound base time".into()));
+        };
+        if windows.len() != 1 {
+            return Err(RunError::Internal("a `rows` window cannot share its aggregation with another window".into()));
+        }
+        let wslot = cr.slots[wvar];
+        let t = self.time_of(cr, base, env)?;
+        let n = self.eval_expr(cr, dur, env)?.as_f64().unwrap_or(0.0).max(0.0) as usize;
+        let mut refs: Vec<String> = Vec::new();
+        for (i, l) in conj.iter().enumerate() {
+            if i != windows[0] {
+                literal_vars(l, &mut refs);
+            }
+        }
+        for a in args {
+            let mut vs = Vec::new();
+            a.vars(&mut vs);
+            refs.extend(vs.into_iter().map(|(v, _)| v));
+        }
+        // Rows that read the base time change with every call: no sharing.
+        let shareable = self.cfg.window_cache && !refs.iter().any(|v| v == bvar);
+        let mut vs = Vec::new();
+        dur.vars(&mut vs);
+        refs.extend(vs.into_iter().map(|(v, _)| v));
+        let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
+        outer.sort_unstable();
+        outer.dedup();
+        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        let key = WindowKey {
+            rule: cr.idx,
+            literal,
+            outer: outer.into_iter().map(|s| env[s].clone()).collect(),
+        };
+        let order: Vec<Literal> = conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect();
+        let mut cache = if shareable { self.windows.remove(&key).unwrap_or_default() } else { WindowCache::new() };
+        let floor = if shareable { self.rows_floor.get(&key).copied() } else { None };
+        let mut found: Vec<i64> = Vec::new();
+        let mut reached_start = true;
+        let mut upper = t;
+        'walk: while found.len() < n {
+            // The domain in chunks, latest first, so that solving can borrow the kernel.
+            let chunk: Vec<i64> = self.domain(cr)?.range(..=upper).rev().take(64).copied().collect();
+            if chunk.is_empty() {
+                break;
+            }
+            for &t1 in &chunk {
+                if floor.map(|f| t1 < f).unwrap_or(false) {
+                    break 'walk;
+                }
+                if !cache.contains_key(&t1) {
+                    let mut e = env.clone();
+                    e[wslot] = Some(Value::Time(t1));
+                    let solved = self.solve(cr, &order, vec![e]).and_then(|sols| {
+                        let mut rows = Vec::with_capacity(sols.len());
+                        for row in sols {
+                            let vals = if agg == "count" { Vec::new() } else { self.agg_args(cr, args, &row)? };
+                            rows.push((row, vals));
+                        }
+                        Ok(rows)
+                    });
+                    let rows = match solved {
+                        Ok(r) => r,
+                        Err(err) => {
+                            if shareable {
+                                self.windows.insert(key, cache);
+                            }
+                            return Err(err);
+                        }
+                    };
+                    self.stats.window_bars_solved += 1;
+                    cache.insert(t1, rows);
+                }
+                if !cache[&t1].is_empty() {
+                    found.push(t1);
+                    if found.len() == n {
+                        reached_start = false;
+                        break 'walk;
+                    }
+                }
+            }
+            match chunk.last() {
+                Some(&last) if last > i64::MIN => upper = last - 1,
+                _ => break,
+            }
+        }
+        let mut rows = Vec::new();
+        for t1 in found.iter().rev() {
+            for (row, vals) in &cache[t1] {
+                let mut e = env.clone();
+                for (i, v) in row.iter().enumerate() {
+                    if env[i].is_none() {
+                        e[i] = v.clone();
+                    }
+                }
+                rows.push((e, vals.clone()));
+            }
+        }
+        if shareable {
+            // Every bar before the earliest one found is either known empty
+            // (the walk reached the start) or not needed by a later bar.
+            if reached_start && floor.is_none() {
+                self.rows_floor.insert(key.clone(), found.last().copied().unwrap_or(t + 1));
+            }
+            match found.last() {
+                Some(&oldest) => cache = cache.split_off(&oldest),
+                None => cache.clear(),
+            }
+            self.windows.insert(key, cache);
+        }
+        Ok(rows)
     }
 
     fn arith(&self, cr: &CompiledRule, env: &Env, expr: &Expr, message: &str) -> RunError {
@@ -909,11 +1069,16 @@ pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {
             args.iter().for_each(|a| expr(a, out));
             conj.iter().for_each(|c| literal_vars(c, out));
         }
-        Literal::Top { n, atom, by, .. } => {
-            expr(n, out);
+        Literal::Top { n, atom, by, rank, .. } => {
+            if let Some(n) = n {
+                expr(n, out);
+            }
             atom.terms.iter().for_each(|t| term(t, out));
             if let Some(keys) = by {
                 out.extend(keys.iter().map(|(k, _, _)| k.clone()));
+            }
+            if let Some((k, _, _)) = rank {
+                out.push(k.clone());
             }
         }
         Literal::Resample { inner, as_var, min, aggs, .. } => {
