@@ -891,3 +891,37 @@ strategy lagz {
         other => panic!("expected the override to be refused, got {:?}", other.map(|r| r.decisions.len())),
     }
 }
+
+/// Data-bundle doc, section 7: the run's window. Bars before `start` are
+/// data only (a lag reaches them), the executor and the decisions start at
+/// `start`, and nothing runs after `end`; both drivers agree.
+#[test]
+fn a_run_window_warms_up_on_earlier_bars_and_trades_inside_it() {
+    let src = r#"
+strategy windowed {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  rel up(-A: Equity, @T: Timestamp)
+  up(A, T) :- universe(A, T), close(A, T, P), prev(T, T0), close(A, T0, P0), P > P0.
+  decide(T, target_weight(A, 0.5)) :- up(A, T).
+}
+"#;
+    let (prog, _) = program(src, "windowed");
+    let ds = crafted_daily(&[10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+    let days = absolute_backtest::data::business_days((2024, 1, 8), 6);
+    let cfg = ExecConfig {
+        start: Some(days[2]),
+        end: Some(days[4]),
+        ..ExecConfig::frictionless()
+    };
+    let r = run(&prog, &ds, cfg.clone()).unwrap();
+    assert_eq!(r.bars, days[2..=4].to_vec());
+    // The first decision bar sees day 2 through prev: it decides at once.
+    assert_eq!(r.decisions.first().map(|d| d.t), Some(days[2]));
+    assert_eq!(r.equity_curve.first().map(|(t, _)| *t), Some(days[2]));
+    let f = absolute_backtest::kernel::run_fold(&prog, &ds, cfg).unwrap();
+    assert_eq!(f.bars, r.bars);
+    assert_eq!(f.final_cash.to_bits(), r.final_cash.to_bits());
+}

@@ -600,6 +600,14 @@ pub struct ExecConfig {
     pub on_ruin: OnRuin,
     /// Rounding of order quantities; whole shares by default.
     pub lot: Lot,
+    /// The run's window (data-bundle doc, section 7): the first and last
+    /// decision bars at which the executor runs and the strategy decides.
+    /// Bars before `start` remain data, so features and recursions warm up
+    /// on them; `None` is the data's first or last bar.
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
 }
 
 impl Default for ExecConfig {
@@ -659,6 +667,8 @@ impl Default for ExecConfig {
             on_oversize: OnOversize::Halt,
             on_ruin: OnRuin::Halt,
             lot: Lot::Whole,
+            start: None,
+            end: None,
         }
     }
 }
@@ -1512,8 +1522,12 @@ impl<'p> Kernel<'p> {
         self.prog
     }
 
+    /// The decision bars of the run: the domain at the decision resolution
+    /// within the configured window.
     pub fn decision_bars(&self) -> Vec<i64> {
-        self.domains[&self.prog.resolution].iter().copied().collect()
+        let lo = self.cfg.start.unwrap_or(i64::MIN);
+        let hi = self.cfg.end.unwrap_or(i64::MAX);
+        self.domains[&self.prog.resolution].range(lo..=hi).copied().collect()
     }
 
     fn rel(&self, name: &str) -> Result<usize, RunError> {

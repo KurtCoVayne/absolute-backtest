@@ -345,6 +345,10 @@ impl<'p, 'e> Fold<'p, 'e> {
         if res != self.kernel.prog.resolution {
             return Ok(());
         }
+        // Outside the run's window a bar is data only.
+        if self.kernel.cfg.start.map(|s| label < s).unwrap_or(false) || self.kernel.cfg.end.map(|e| label > e).unwrap_or(false) {
+            return Ok(());
+        }
         if self.decided_once {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
