@@ -3,6 +3,40 @@
 Oct 5, 2026 · after the first runs on real data (branch `handoff/local-test`).
 The data and its decisions are in [`handoff-data.md`](handoff-data.md).
 
+## Update, Oct 6, 2026: two production books reproduced
+
+Two of the company's production strategies now run in abt with the same
+results as their reference implementations (`docs/parity-mw14.md`,
+`docs/parity-r8l.md`):
+
+- **MW14**, the weekly S&P 1500 momentum book: its 1,852 weekly returns over
+  1991–2026 equal the Python canon to 8e-15 (CAGR 20.90%, max drawdown
+  −26.18%, Sharpe 1.02, P&L $7.53M on a fixed $1M). The run takes 18 minutes
+  at a 7.9 GB peak (4,240 names, 4.2M asset-weeks; 1.7 bars/s).
+- **MORNIGHT-R8L**, the intraday futures opening-range book: its 21,892 legs
+  are the book's, and with the book's entry convention every leg and every
+  one of 6,850 days equals it (+18.95%/yr, Sharpe 1.28, drawdown 19.67%,
+  $5.15M). The run takes 14 s at 1.5 GB (26 roots; 13,600 bars/s).
+
+What that required of the engine, all opt-in or with the old default kept
+except accounting: fixed-base accounting as the default, order types with a
+time in force (market, MOO, MOC, MOO-MOC, limit, stop), futures contracts
+(multiplier, per-contract commission, prices across zero, no borrow), row
+windows and a rank reduction in the DSL, delisting at the last price,
+dividends reinvested, actions carried by a total-return price, a run window,
+both metric conventions on a reporting calendar, and two fixes: completeness
+of recursive relations (a greatest fixpoint), and as-of reads of daily bars
+from a minute rule (which could see the day's own bar intraday).
+
+CSV is gone (gap A4, first half): every file abt reads or writes outside a
+bundle's log is Parquet, and the symbol history is indexed. On the SPX
+bundle the build fell from 7.6 s / 3.6 GB to 4.9 s / 2.0 GB, about 1.0 KB
+per price row. The second half of A4 (streaming the rows instead of holding
+them) and A1 (incremental windows) remain: MW14 spends its 18 minutes in
+windowed aggregation, and a full-minute futures bundle (about 47M bars) does
+not fit this machine, which is why the R8L bundle keeps the minute prints the
+book reads rather than every minute.
+
 ## Verdict
 
 **Correctness carries over to real data.** The path from the company's
@@ -106,7 +140,7 @@ Not run, because RAM says stop:
 | A1 | **Incremental (sliding) windowed aggregation.** Keep running sums and counts, or a monotone deque for min/max, per group, instead of rebuilding each aggregate over its whole window every bar. The expected gain is about the window length (~100–250×) on the strategies that dominate run time. | L | `src/kernel/eval.rs` (`Literal::Agg`, `window_rows`), `src/kernel/fold.rs` (checkpointed windows) | ~216 bar-solves per window call; run time tracks lookback length (6.9 s for a 60-day window against ~100 s for 252-day) |
 | A2 | **Columnar, compact stores.** Tuples are `Vec<Value>` on the heap at ~220 B each; one column of `f64` per relation and attribute, keyed by (time, symbol), would be ~16 B. | L | `src/kernel/mod.rs` (`Store`, `Dataset`), `src/bundle.rs` (`read_facts`) | ~216 B per tuple across two copies (3.5 GB for 16.4M tuples, `size_proxy`); 7 GB peak per run at 756 names |
 | A3 | **One in-memory copy.** Drop or stream the `Dataset` once the kernel's stores are built; read bundle partitions straight into the stores. | M | `src/bin/abt.rs` (`load_dataset` and the runner), `src/kernel/mod.rs` (`Kernel::new`) | Code read: `load_dataset` keeps the `Dataset` alive for the whole run, next to the stores built from it |
-| A4 | **Streaming, indexed ingest.** The CSV adapter reads each file whole into a `BTreeMap` per row and looks symbols up by a linear scan of the history. Stream the rows, keep a `HashMap<symbol, intervals>`, and write partitions as they fill. Better still, read the lake's Parquet directly and skip the CSV hop. | M | `src/ingest.rs` (`read_csv`, `SymbolHistory::id_at`), `src/bundle.rs` (`write_bundle`) | 1.8 KB per price row at build: the Russell 1000 needs 7.65 GB; Russell 3000 projects to ~21 GB |
+| A4 | **Streaming, indexed ingest.** *Half done (Oct 6): inputs are Parquet read by column, the symbol history is indexed; the build is 1.0 KB per price row.* The adapters still hold every tuple before writing; stream the rows and write partitions as they fill. | M | `src/ingest.rs` (`read_csv`, `SymbolHistory::id_at`), `src/bundle.rs` (`write_bundle`) | 1.8 KB per price row at build: the Russell 1000 needs 7.65 GB; Russell 3000 projects to ~21 GB |
 | A5 | **Symbol-indexed lookups.** `bar_price`, `bar_volume` and `call` on stored relations scan every tuple at a key, O(universe) each, so O(N²) per bar. Not dominant up to 1,800 names; it becomes so at full US (~15,000 names a bar). | M | `src/kernel/mod.rs` (`bar_price`, `bar_volume`), `src/kernel/eval.rs` (`call`) | Code read; slope 1.04 says not yet dominant |
 | A6 | **O(history) executor bookkeeping.** The dividend scan walks `by_time.range(..=t)`, the whole dividend history, every bar; `fill` clones the bar list every bar. | S | `src/kernel/executor.rs` (`actions`, `fill`) | Code read |
 | A7 | **Bounded retention and checkpoint size in the fold.** Windows and stores grow with history; checkpoints serialise them as JSON. | M | `src/kernel/fold.rs` | The fold ran at 17% more memory than batch; checkpoint size not measured this session |

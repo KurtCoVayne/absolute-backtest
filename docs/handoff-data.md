@@ -80,7 +80,7 @@ contract multiplier, roll or margin by contract. Both stay recorded as gaps
 
 ## 4. Decisions taken to build `equities_1d_v2@2026.10` (S&P 500, point in time, 2014–2026)
 
-Script: `scripts/ingest/norgate_parquet_to_csv.py` (DuckDB, streamed to CSV
+Script: `scripts/ingest/norgate_lake_to_inputs.py` (formerly `norgate_parquet_to_csv.py`; DuckDB, streamed to Parquet since 2026-10-06, CSV before
 with `COPY`). The report is `ingest-report.json` in the output directory.
 
 | # | Decision | Why |
@@ -121,10 +121,10 @@ Action reconciliation, in detail:
      others.
 
    Loosening the band would also hide a missing split. Instead, a bundle may
-   carry **reviewed exceptions** (`exceptions.csv`: `test,security,date,reason`).
+   carry **reviewed exceptions** (`exceptions.parquet`: `test,security,date,reason`; a text file until 2026-10-06).
    The test accepts a listed problem and counts it in its detail. **Added in
    `src/bundle.rs`, `src/ingest.rs` and `abt bundle build`.** The reviewed file
-   is `scripts/ingest/reviewed/norgate-spx-2014.csv` (383 rows), drafted by
+   is `scripts/ingest/reviewed/norgate-spx-2014.parquet` (383 rows; edit with `scripts/ingest/exceptions_edit.py`), drafted by
    `scripts/ingest/reconcile_report.py --propose` and reviewed by category.
 3. **Real data errors kept, not corrected:**
    - TFCF and TFCFA on 2019-03-19: Norgate books the Fox Corp separation as a

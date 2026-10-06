@@ -635,6 +635,29 @@ manifest records the source and the schema decisions of
 `docs/data-bundle.md` section 10 (consolidated bars, the availability
 offset as the processing delay).
 
+## Company books
+
+Two of the company's production strategies run in abt with their reference
+results reproduced: `corpus/company/mw14.dsl`, the weekly S&P 1500 momentum
+book (exact to its canonical weekly returns, 1991–2026), and
+`corpus/company/r8l.dsl`, the intraday futures opening-range book (exact to its
+legs and daily P&L, 2000–2026). How each maps onto the DSL, the run command,
+the comparison and the known differences: `docs/parity-mw14.md`,
+`docs/parity-r8l.md`; inputs and checksums: `docs/parity-inputs.md`. Their
+data comes from `scripts/ingest/ndlake_weekly.py` (env `equities_1w`) and
+`scripts/ingest/tradestation_sessions.py` (env `futures_sessions`), and
+`scripts/parity/` holds the comparisons.
+
+They use what the executor and the DSL gained for them: fixed-base
+accounting (the default; `--compounding on` compounds), order types with a
+time in force (`decide(T, target_weight(A, W, moc))`; `market`, `moo`,
+`moc`, `moo_moc`, `limit(P, tif)`, `stop(P, tif)`), futures contracts in the
+security table, `rows(T, N, min K)` windows over a group's own rows,
+`rank(R(...), by (...), as K)`, `--actions in-prices`, `--delist-proceeds`,
+`--dividends reinvest`, `--commission-bps`, `--start`/`--end`, and metrics in
+both conventions (`--report-by day --report-calendar REL`,
+`--periods-per-year`, `--returns FILE`).
+
 ## Studies
 
 `docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial. A
