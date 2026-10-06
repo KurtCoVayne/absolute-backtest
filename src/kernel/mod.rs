@@ -585,6 +585,11 @@ pub struct ExecConfig {
     /// of the same name, at no cost (a total-return book).
     #[serde(default)]
     pub reinvest_dividends: bool,
+    /// Splits and dividends are already in the execution prices (a total
+    /// return series as `price_relation`): the executor does not apply them
+    /// to the book. Delistings still apply. False by default.
+    #[serde(default)]
+    pub actions_in_prices: bool,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -662,6 +667,7 @@ impl Default for ExecConfig {
             delisting_haircut_default: 1.0,
             delist_at_last_price: false,
             reinvest_dividends: false,
+            actions_in_prices: false,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
             on_oversize: OnOversize::Halt,
@@ -1113,6 +1119,9 @@ pub struct Kernel<'p> {
     /// For a `rows` window group, the earliest bar with rows when every bar
     /// before it is known to have none (where a walk back may stop).
     pub(crate) rows_floor: HashMap<eval::WindowKey, i64>,
+    /// For a `rows` window group, the solved bars at which its anchor (the
+    /// conjunction's first atom) holds: the group's rows.
+    pub(crate) rows_anchor: HashMap<eval::WindowKey, BTreeSet<i64>>,
     pub stats: KernelStats,
     pub(crate) labels: Symbols,
     /// The security table with ids in the kernel's symbol order, and the
@@ -1442,6 +1451,7 @@ impl<'p> Kernel<'p> {
             remap_labels,
             windows: HashMap::new(),
             rows_floor: HashMap::new(),
+            rows_anchor: HashMap::new(),
             stats: KernelStats::default(),
         })
     }
@@ -1498,6 +1508,7 @@ impl<'p> Kernel<'p> {
             *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
         }
         self.rows_floor.clear();
+        self.rows_anchor.clear();
         self.stats.late_tuples += 1;
     }
 
@@ -1669,6 +1680,11 @@ impl<'p> Kernel<'p> {
     /// Currency per point per unit held: a future's multiplier, 1 for a share.
     pub fn multiplier(&self, sym: Sym) -> f64 {
         self.contracts.get(&sym).map(|c| c.multiplier).unwrap_or(1.0)
+    }
+
+    /// A future: sold short without a borrow, priced back-adjusted.
+    pub fn is_future(&self, sym: Sym) -> bool {
+        self.contracts.get(&sym).map(|c| c.future).unwrap_or(false)
     }
 
     /// A future's commission per contract per side, when it has one.

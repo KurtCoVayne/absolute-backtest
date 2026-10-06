@@ -677,6 +677,29 @@ pub fn capacity(r: &RunResult, periods_per_year: f64, threshold: f64) -> Option<
 /// per decision bar, or per calendar day (the bars of a day summed on a
 /// fixed base, compounded otherwise).
 pub fn period_returns(r: &RunResult, by_day: bool) -> Vec<(i64, f64, f64)> {
+    period_returns_on(r, by_day, None)
+}
+
+/// The period returns per day on a reporting calendar: every calendar day
+/// from the run's first to its last, a day without activity counting zero,
+/// and only those days (a book reported on its lead market's sessions).
+pub fn period_returns_on(r: &RunResult, by_day: bool, calendar: Option<&std::collections::BTreeSet<i64>>) -> Vec<(i64, f64, f64)> {
+    let rows = period_returns_raw(r, by_day);
+    let Some(cal) = calendar.filter(|_| by_day) else { return rows };
+    let (Some(&(first, _)), Some(&(last, _))) = (r.equity_curve.first(), r.equity_curve.last()) else {
+        return vec![];
+    };
+    let (lo, hi) = (time::day_key(first) * time::DAY, time::day_key(last) * time::DAY);
+    let by: BTreeMap<i64, (f64, f64)> = rows.into_iter().map(|(t, x, p)| (t, (x, p))).collect();
+    cal.range(lo..=hi)
+        .map(|d| {
+            let (x, p) = by.get(d).copied().unwrap_or((0.0, 0.0));
+            (*d, x, p)
+        })
+        .collect()
+}
+
+fn period_returns_raw(r: &RunResult, by_day: bool) -> Vec<(i64, f64, f64)> {
     let pnl: Vec<f64> = r.equity_curve.windows(2).map(|w| w[1].1 - w[0].1).collect();
     let bars: Vec<(i64, f64, f64)> = r.bar_returns().into_iter().zip(pnl).map(|((t, x), p)| (t, x, p)).collect();
     if !by_day {
@@ -725,7 +748,11 @@ pub struct ConventionMetrics {
 }
 
 pub fn convention_metrics(r: &RunResult, periods_per_year: f64, by_day: bool) -> ConventionMetrics {
-    let rows = period_returns(r, by_day);
+    convention_metrics_on(r, periods_per_year, by_day, None)
+}
+
+pub fn convention_metrics_on(r: &RunResult, periods_per_year: f64, by_day: bool, calendar: Option<&std::collections::BTreeSet<i64>>) -> ConventionMetrics {
+    let rows = period_returns_on(r, by_day, calendar);
     let x: Vec<f64> = rows.iter().map(|(_, x, _)| *x).collect();
     let n = x.len();
     let mut m = ConventionMetrics {

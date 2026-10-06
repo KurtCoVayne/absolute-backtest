@@ -238,3 +238,42 @@ strategy intraday {{
     let errs = errors(&check(&minute("close(A, _, P) asof T"), "intraday").1);
     assert!(errs.is_empty(), "{:?}", errs);
 }
+
+/// A daily bar is available at its close (section 3, bar labels): read as
+/// of a minute of its own day it is not there yet, so an intraday rule sees
+/// the previous day's bar until the day ends, and both drivers agree.
+#[test]
+fn a_minute_rule_reads_the_previous_days_bar_until_the_day_closes() {
+    let src = r#"
+strategy intraday_daily {
+  env asof_1d
+  resolution @1m
+  mode delta
+  param unit : Quantity<Shares> = 1 shares
+  rel seen(+A: Equity, @T: Timestamp, -P: Price<USD>, -D: Timestamp)
+  seen(A, T, P, D) :- universe_m(A, T), close(A, D, P) asof T.
+  decide(T, buy(A, Q)) :- universe_m(A, T), seen(A, T, P, _), Q = P / (1 USD/share) * unit.
+}
+"#;
+    let p = program(src, "intraday_daily");
+    let mut ds = Dataset::new();
+    let x = ds.intern("X");
+    // Daily closes 10 then 20; minute bars at 09:31 on both days.
+    for (d, c) in [("2024-01-08", 10.0), ("2024-01-09", 20.0)] {
+        ds.add("close", vec![Value::Equity(x), Value::Time(day(d)), Value::Num(c)]);
+        ds.add("universe", vec![Value::Equity(x), Value::Time(day(d))]);
+        for m in ["09:31:00", "09:32:00"] {
+            let t = day(&format!("{}T{}", d, m));
+            ds.add("close_m", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            ds.add("universe_m", vec![Value::Equity(x), Value::Time(t)]);
+        }
+    }
+    ds.derive_tickers();
+    let r = run(&p, &ds, ExecConfig::frictionless()).unwrap();
+    // On the first day nothing daily is closed yet; on the second the first
+    // day's close of 10 is what a minute rule sees, never 20.
+    let qty: Vec<(String, f64)> = r.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect();
+    assert_eq!(qty, vec![("2024-01-09T09:31:00".into(), 10.0), ("2024-01-09T09:32:00".into(), 10.0)], "{:?}", qty);
+    let f = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
+    assert_eq!(f.decisions.len(), r.decisions.len());
+}

@@ -3,7 +3,7 @@
 //! or smaller set. Derived relations are requested through `call`, which
 //! memoises by temporal key and inputs.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::rc::Rc;
 
 use super::time;
@@ -146,6 +146,7 @@ impl<'p> Kernel<'p> {
                     "market" => OrderKind::Market,
                     "moo" => OrderKind::Moo,
                     "moc" => OrderKind::Moc,
+                    "moo_moc" => OrderKind::MooMoc,
                     _ => return Err(bad()),
                 },
                 tif: Tif::Day,
@@ -225,8 +226,16 @@ impl<'p> Kernel<'p> {
     /// with the answer memoised for every bar walked.
     fn asof_matches(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, env: &Env) -> Result<Vec<Env>, RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
-        let t = self.time_of(cr, at, env)?;
+        let at_t = self.time_of(cr, at, env)?;
         let info = self.rels[rel].clone();
+        // A tuple is available at its bar's close (section 3): a daily bar is
+        // labelled by its date, so read from a finer rule it counts only once
+        // its day has ended by T (an intraday label is already the close).
+        let rule_res = self.prog.relations.get(&self.prog.rules[cr.idx].head.name).and_then(|s| s.res);
+        let t = match (info.res, rule_res) {
+            (Resolution::D1, Some(r)) if r.finer_than(Resolution::D1) => at_t - time::DAY + 1,
+            _ => at_t,
+        };
         let mut pat = self.atom_pattern(cr, atom, env)?;
         pat[info.key_pos] = None;
         let tuples = if info.stored {
@@ -783,10 +792,13 @@ impl<'p> Kernel<'p> {
     }
 
     /// The rows of a `rows` window group: walking back from the base bar,
-    /// the N latest bars at which the rest of the conjunction has rows for
-    /// the group (data-bundle doc, section 2, "State": each bar is solved
+    /// the N latest bars at which the conjunction's first atom holds for the
+    /// group (the group's rows, the index of a rolling window), and of those
+    /// the rows where the whole conjunction holds (what the window
+    /// aggregates; `min K` counts them, like a rolling window's minimum of
+    /// periods). Data-bundle doc, section 2, "State": each bar is solved
     /// once and kept while it can be among the group's last N; a walk stops
-    /// at the group's first bar once it is known).
+    /// at the group's first bar once it is known.
     fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<WindowRows, RunError> {
         let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
         let Some(Literal::Window {
@@ -830,7 +842,10 @@ impl<'p> Kernel<'p> {
             outer: outer.into_iter().map(|s| env[s].clone()).collect(),
         };
         let order: Vec<Literal> = conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect();
+        // The anchor: the first positive atom, which says where the group has a row.
+        let anchor: Vec<Literal> = conj.iter().find(|l| matches!(l, Literal::Atom(_))).cloned().into_iter().collect();
         let mut cache = if shareable { self.windows.remove(&key).unwrap_or_default() } else { WindowCache::new() };
+        let mut anchored = if shareable { self.rows_anchor.remove(&key).unwrap_or_default() } else { BTreeSet::new() };
         let floor = if shareable { self.rows_floor.get(&key).copied() } else { None };
         let mut found: Vec<i64> = Vec::new();
         let mut reached_start = true;
@@ -848,6 +863,10 @@ impl<'p> Kernel<'p> {
                 if !cache.contains_key(&t1) {
                     let mut e = env.clone();
                     e[wslot] = Some(Value::Time(t1));
+                    let is_row = anchor.is_empty() || !self.solve(cr, &anchor, vec![e.clone()]).map(|s| s.is_empty()).unwrap_or(true);
+                    if is_row {
+                        anchored.insert(t1);
+                    }
                     let solved = self.solve(cr, &order, vec![e]).and_then(|sols| {
                         let mut rows = Vec::with_capacity(sols.len());
                         for row in sols {
@@ -860,7 +879,8 @@ impl<'p> Kernel<'p> {
                         Ok(r) => r,
                         Err(err) => {
                             if shareable {
-                                self.windows.insert(key, cache);
+                                self.windows.insert(key.clone(), cache);
+                                self.rows_anchor.insert(key, anchored);
                             }
                             return Err(err);
                         }
@@ -868,7 +888,7 @@ impl<'p> Kernel<'p> {
                     self.stats.window_bars_solved += 1;
                     cache.insert(t1, rows);
                 }
-                if !cache[&t1].is_empty() {
+                if anchored.contains(&t1) || !cache[&t1].is_empty() {
                     found.push(t1);
                     if found.len() == n {
                         reached_start = false;
@@ -900,10 +920,17 @@ impl<'p> Kernel<'p> {
                 self.rows_floor.insert(key.clone(), found.last().copied().unwrap_or(t + 1));
             }
             match found.last() {
-                Some(&oldest) => cache = cache.split_off(&oldest),
-                None => cache.clear(),
+                Some(&oldest) => {
+                    cache = cache.split_off(&oldest);
+                    anchored = anchored.split_off(&oldest);
+                }
+                None => {
+                    cache.clear();
+                    anchored.clear();
+                }
             }
-            self.windows.insert(key, cache);
+            self.windows.insert(key.clone(), cache);
+            self.rows_anchor.insert(key, anchored);
         }
         Ok(rows)
     }

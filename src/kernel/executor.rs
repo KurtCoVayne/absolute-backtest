@@ -23,7 +23,7 @@ pub trait Executor {
     fn open_bar(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> Result<(), RunError>;
     fn on_decisions(&mut self, k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, result: &mut RunResult) -> Result<(), RunError>;
     fn fill(&mut self, k: &mut Kernel, tn: i64, result: &mut RunResult) -> Result<(), RunError>;
-    fn finish(&mut self, k: &Kernel, result: &mut RunResult);
+    fn finish(&mut self, k: &mut Kernel, result: &mut RunResult);
     /// The executor's state for a checkpoint (data-bundle doc, section 2),
     /// and the state back from one.
     fn checkpoint(&self) -> Result<serde_json::Value, String>;
@@ -151,7 +151,7 @@ impl SimExecutor {
                     Some(_) => Trigger::Wait,
                 }
             }
-            OrderKind::Moo => match k.bar_open(sym, tn) {
+            OrderKind::Moo | OrderKind::MooMoc => match k.bar_open(sym, tn) {
                 Some(o) => Trigger::Fill(o, tn),
                 None if day != first => Trigger::Expire(format!("moo: {} did not open in the session after {}", name, time::format_timestamp(w.t))),
                 None => Trigger::Wait,
@@ -223,7 +223,9 @@ impl SimExecutor {
     fn actions(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
         let fill_rel = k.rel_id("fill");
         let mut book_changed = false;
-        if let Some(id) = k.split_rel {
+        let split_rel = if self.cfg.actions_in_prices { None } else { k.split_rel };
+        let dividend_rel = if self.cfg.actions_in_prices { None } else { k.dividend_rel };
+        if let Some(id) = split_rel {
             let entity_pos = k.rels[id].entity_positions.first().copied().unwrap_or(0);
             let splits: Vec<(Sym, f64)> = k.stores[id]
                 .by_time
@@ -260,7 +262,7 @@ impl SimExecutor {
         // Dividends going ex at t: a receivable for the shares held now, or
         // shares bought with it at the ex-date close.
         let mut reinvest: Vec<(Sym, f64, f64)> = Vec::new();
-        if let Some(id) = k.dividend_rel {
+        if let Some(id) = dividend_rel {
             let info = &k.rels[id];
             let entity_pos = info.entity_positions.first().copied().unwrap_or(0);
             let sig = &k.prog.relations[&info.name];
@@ -522,7 +524,8 @@ impl Executor for SimExecutor {
             self.cash -= i;
             result.funding.margin_interest += i;
         }
-        let shorts: Vec<(Sym, f64)> = self.positions.iter().filter(|(_, q)| **q < 0.0).map(|(s, q)| (*s, *q)).collect();
+        // A future is sold, not borrowed: no borrow fee, no locate.
+        let shorts: Vec<(Sym, f64)> = self.positions.iter().filter(|(s, q)| **q < 0.0 && !k.is_future(**s)).map(|(s, q)| (*s, *q)).collect();
         for (sym, q) in shorts {
             self.shorts_held = true;
             let Some(p) = k.price_at(sym, tn) else { continue };
@@ -620,6 +623,8 @@ impl Executor for SimExecutor {
         // paying them, carrying a debit of at most the bar's costs, which the
         // next sizing sees (and margin interest prices).
         let mut bar_costs = 0.0;
+        // Intraday positions opened at this step: flat again at their session's close.
+        let mut day_exits: Vec<(Sym, i64, usize)> = Vec::new();
         for (d, rule, reissued, away) in &pending {
             let sym = d.equity;
             let is_target = matches!(d.ctor, Ctor::TargetWeight | Ctor::TargetQuantity);
@@ -767,7 +772,7 @@ impl Executor for SimExecutor {
             let allowance = bar_costs + commission + fee + slippage + impact;
             // Borrow availability: an order that opens or adds to a short
             // needs its instrument's ADV bucket to be shortable.
-            if pos + qty < 0.0 && pos + qty < pos {
+            if pos + qty < 0.0 && pos + qty < pos && !k.is_future(sym) {
                 let adv = k.adv(sym, &bars, end);
                 let bucket = self.cfg.borrow_bucket(adv);
                 if !bucket.shortable {
@@ -873,6 +878,9 @@ impl Executor for SimExecutor {
                 partial,
                 forced: false,
             });
+            if d.order.kind == OrderKind::MooMoc {
+                day_exits.push((sym, at, *rule));
+            }
             // The remainder of a capped order: a delta order expires, a target
             // re-issues itself at the next bar.
             if partial {
@@ -884,6 +892,25 @@ impl Executor for SimExecutor {
             } else if is_target {
                 self.open_targets.remove(&sym);
             }
+        }
+        for (sym, at, rule) in day_exits {
+            let exit = Decision {
+                ctor: Ctor::TargetQuantity,
+                equity: sym,
+                amount: 0.0,
+                order: super::value::Order { kind: OrderKind::Moc, tif: Tif::Day },
+            };
+            self.working.insert(
+                sym,
+                Working {
+                    d: exit,
+                    rule,
+                    t: at,
+                    first_day: None,
+                    bars: 0,
+                    session_last: None,
+                },
+            );
         }
         for (&sym, &q) in &self.positions {
             k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
@@ -901,7 +928,7 @@ impl Executor for SimExecutor {
         Ok(())
     }
 
-    fn finish(&mut self, _k: &Kernel, result: &mut RunResult) {
+    fn finish(&mut self, k: &mut Kernel, result: &mut RunResult) {
         // A decision on the last bar has no bar to fill at: it is recorded in
         // `decided` like any other, and dropped here so that decisions =
         // fills + dropped.
@@ -910,6 +937,23 @@ impl Executor for SimExecutor {
                 for (d, _) in ds {
                     result.dropped.push((t, d.clone(), "no next bar".to_string()));
                 }
+            }
+        }
+        // A market-on-close order whose session closed within the data is
+        // settled at that close in one last step (nothing else fills there).
+        let last = self.bars.last().copied();
+        let settle = last.is_some_and(|l| {
+            self.working
+                .values()
+                .any(|w| w.d.order.kind == OrderKind::Moc && k.session_last_bar(w.d.equity, w.t).is_some_and(|c| c <= l))
+        });
+        if let (true, Some(l)) = (settle, last) {
+            self.pending_t = Some(l);
+            if let Err(e) = self.fill(k, l + 1, result) {
+                result.warnings.push(RunWarning {
+                    bias: "settlement".into(),
+                    message: format!("the closing settlement of the last session failed: {}", e),
+                });
             }
         }
         for w in std::mem::take(&mut self.working).into_values() {

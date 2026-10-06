@@ -611,9 +611,9 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     /// types): `market`, `moo`, `moc`, or `limit(P[, TIF])` / `stop(P[, TIF])`
     /// with P a bound price and TIF one of `day`, `gtc`, `bars(N)`.
     fn order_term(&mut self, ctor: &str, term: &Term) {
-        let shape = "an order is `market`, `moo`, `moc`, `limit(P)`, `stop(P)`, or `limit`/`stop` with a time in force (`day`, `gtc`, `bars(N)`)";
+        let shape = "an order is `market`, `moo`, `moc`, `moo_moc`, `limit(P)`, `stop(P)`, or `limit`/`stop` with a time in force (`day`, `gtc`, `bars(N)`)";
         match term {
-            Term::Param(p, _) if matches!(p.as_str(), "market" | "moo" | "moc") => {}
+            Term::Param(p, _) if matches!(p.as_str(), "market" | "moo" | "moc" | "moo_moc") => {}
             Term::Ctor(c, subs, sp) if c == "limit" || c == "stop" => {
                 if subs.is_empty() || subs.len() > 2 {
                     self.err(Code::T, *sp, format!("`{}` takes a price and an optional time in force; {}", c, shape));

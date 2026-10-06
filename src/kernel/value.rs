@@ -52,13 +52,16 @@ impl Ctor {
 /// How an order executes (section 6, order types): at the next bar's
 /// close (`Market`, the v1 contract), at the open of the instrument's next
 /// bar (`Moo`), at the close of the last bar of the session containing the
-/// decision (`Moc`), or when a bar trades through a price (`Limit`, `Stop`).
+/// decision (`Moc`), at the next open and back to flat at the close of that
+/// session (`MooMoc`, an intraday position), or when a bar trades through a
+/// price (`Limit`, `Stop`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum OrderKind {
     #[default]
     Market,
     Moo,
     Moc,
+    MooMoc,
     Limit(f64),
     Stop(f64),
 }
@@ -87,6 +90,7 @@ impl Order {
             OrderKind::Market => (0, 0),
             OrderKind::Moo => (1, 0),
             OrderKind::Moc => (2, 0),
+            OrderKind::MooMoc => (5, 0),
             OrderKind::Limit(p) => (3, bits(p)),
             OrderKind::Stop(p) => (4, bits(p)),
         };
@@ -113,6 +117,7 @@ impl std::fmt::Display for Order {
             OrderKind::Market => f.write_str("market"),
             OrderKind::Moo => f.write_str("moo"),
             OrderKind::Moc => f.write_str("moc"),
+            OrderKind::MooMoc => f.write_str("moo_moc"),
             OrderKind::Limit(p) => write!(f, "limit({}, {})", p, tif),
             OrderKind::Stop(p) => write!(f, "stop({}, {})", p, tif),
         }

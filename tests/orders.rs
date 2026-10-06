@@ -204,3 +204,67 @@ strategy pattern {
     let (p, diags) = checked(src, "pattern");
     assert!(p.is_none() && diags.iter().any(|d| d.contains("takes 2 fields")), "{:?}", diags);
 }
+
+const MINUTE_ENV: &str = r#"
+environment orders_1m {
+  open_m(+A: Equity, @T: Timestamp, -O: Price<USD>) @1m
+  close_m(+A: Equity, @T: Timestamp, -P: Price<USD>) @1m
+  universe_m(-A: Equity, @T: Timestamp) @1m complete
+}
+"#;
+
+/// `moo_moc`: an intraday position, opened at the instrument's next open
+/// and flattened at the close of that session; when the entry is the
+/// session's last print, it is flat again at that print's close.
+#[test]
+fn a_moo_moc_order_opens_at_the_next_open_and_is_flat_at_the_session_close() {
+    let src = r#"
+strategy day_trade {
+  env orders_1m
+  resolution @1m
+  mode delta
+  param qty : Quantity<Shares> = 2 shares
+  rel first_bar(-A: Equity, @T: Timestamp)
+  first_bar(A, T) :- universe_m(A, T), day_start(T).
+  decide(T, buy(A, qty, moo_moc)) :- first_bar(A, T).
+}
+"#;
+    let mut ws = corpus::base_workspace();
+    ws.add_source(MINUTE_ENV).unwrap();
+    ws.add_source(src).unwrap();
+    let (p, diags) = check_program(&ws, "day_trade");
+    let p = p.unwrap_or_else(|| panic!("{:?}", diags.iter().map(|d| d.to_string()).collect::<Vec<_>>()));
+    let mut ds = Dataset::new();
+    let x = ds.intern("X");
+    // Day one: three bars (open, close); day two: two bars.
+    let bars = [
+        ("2024-01-08T09:31:00", 10.0, 10.5),
+        ("2024-01-08T09:32:00", 10.6, 11.0),
+        ("2024-01-08T09:33:00", 11.1, 12.0),
+        ("2024-01-09T09:31:00", 20.0, 20.5),
+        ("2024-01-09T09:32:00", 20.6, 21.0),
+    ];
+    for (stamp, o, c) in bars {
+        let t = parse_timestamp(stamp).unwrap();
+        ds.add("open_m", vec![Value::Equity(x), Value::Time(t), Value::Num(o)]);
+        ds.add("close_m", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+        ds.add("universe_m", vec![Value::Equity(x), Value::Time(t)]);
+    }
+    ds.derive_tickers();
+    let r = run(&p, &ds, cfg()).unwrap();
+    let got: Vec<(String, f64, f64)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity, f.price)).collect();
+    assert_eq!(
+        got,
+        vec![
+            // Day one: in at 09:32's open, out at 09:33's close.
+            ("2024-01-08T09:32:00".into(), 2.0, 10.6),
+            ("2024-01-08T09:33:00".into(), -2.0, 12.0),
+            // Day two: in at 09:32's open, the session's last print, out at its close.
+            ("2024-01-09T09:32:00".into(), 2.0, 20.6),
+            ("2024-01-09T09:32:00".into(), -2.0, 21.0),
+        ],
+        "{:?}",
+        r.dropped
+    );
+    assert!(r.final_positions.is_empty());
+}

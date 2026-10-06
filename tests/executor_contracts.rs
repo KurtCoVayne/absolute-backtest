@@ -204,3 +204,50 @@ fn a_basis_point_commission_is_charged_on_both_sides() {
     // 2 x 100 x 10 bps on the buy, 2 x 103 x 10 bps on the sell.
     assert!((r.costs.commissions - (0.2 + 0.206)).abs() < 1e-12, "{}", r.costs.commissions);
 }
+
+#[test]
+fn actions_already_in_the_prices_are_not_applied_to_the_book() {
+    let (mut ds, x, days) = market(&[20.0, 20.0, 10.0, 10.0]);
+    ds.add("split", vec![Value::Equity(x), Value::Time(days[2]), Value::Num(2.0)]);
+    let p = program(HOLD, "contracts_hold");
+    let applied = run(&p, &ds, cfg()).unwrap();
+    assert_eq!(applied.final_positions.values().copied().collect::<Vec<_>>(), vec![20.0]);
+    let in_prices = run(&p, &ds, ExecConfig { actions_in_prices: true, ..cfg() }).unwrap();
+    assert_eq!(in_prices.final_positions.values().copied().collect::<Vec<_>>(), vec![10.0]);
+    assert!(in_prices.actions.is_empty());
+}
+
+#[test]
+fn a_future_is_shorted_without_a_borrow_fee_or_a_locate() {
+    let src = r#"
+strategy short_future {
+  env equities_1d_v2
+  uses catalog
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 2 shares
+  decide(T, short(A, qty)) :- universe(A, T), not position(A, T, _).
+}
+"#;
+    let (mut ds, x, _) = market(&[100.0, 100.0, 100.0, 100.0]);
+    ds.contracts.insert(
+        x,
+        Contract {
+            multiplier: 50.0,
+            future: true,
+            commission_per_contract: None,
+        },
+    );
+    // Default borrow buckets and margin: a share would pay a fee (or be refused).
+    let r = run(
+        &program(src, "short_future"),
+        &ds,
+        ExecConfig {
+            lot: Lot::Fractional,
+            ..ExecConfig::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.fills.first().map(|f| f.quantity), Some(-2.0), "{:?}", r.dropped);
+    assert_eq!(r.funding.borrow_fees, 0.0);
+}

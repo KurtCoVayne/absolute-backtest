@@ -473,7 +473,7 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
         }
     }
     push("bar labels", problems);
-    // Positive prices.
+    // Positive prices (a future's excepted).
     let mut problems = Vec::new();
     for (rel, sig) in &prog.relations {
         let Some(tuples) = ds.facts.get(rel) else { continue };
@@ -481,7 +481,9 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
             if let Ty::Quantity(d) = &arg.ty {
                 if d.c2 == 2 && d.s2 == -2 {
                     for tu in tuples {
-                        if tu[i].as_f64().map(|x| x <= 0.0).unwrap_or(false) {
+                        // A future's back-adjusted price may cross zero.
+                        let future = tu.iter().any(|v| matches!(v, Value::Equity(s) if ds.is_future(*s)));
+                        if !future && tu[i].as_f64().map(|x| x <= 0.0).unwrap_or(false) {
                             problems.push(format!(
                                 "{}: {} at {} is not a positive price",
                                 rel,

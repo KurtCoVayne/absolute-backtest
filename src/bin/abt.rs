@@ -6,7 +6,7 @@
 //!           [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
 //!           [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow]
 //!           [--cash-rate X] [--margin-rate X] [--short-rebate X]
-//!           [--price-relation REL] [--as-of DATE] [--start DATE] [--end DATE] [--haircut REASON=X]... [--delist-proceeds by-reason|last-price] [--dividends cash|reinvest] [--param NAME=VALUE]...
+//!           [--price-relation REL] [--as-of DATE] [--start DATE] [--end DATE] [--haircut REASON=X]... [--delist-proceeds by-reason|last-price] [--dividends cash|reinvest] [--actions apply|in-prices] [--param NAME=VALUE]...
 //!           [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]
 //!           [--verify-causality] [--all] [--fills] [--nav FILE] [--quiet] <files...>
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]...
@@ -44,8 +44,10 @@ struct Args {
 const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "untested", "timing"];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 68] = [
+const OPTIONS: [&str; 70] = [
     "strategy",
+    "report-calendar",
+    "actions",
     "start",
     "end",
     "periods-per-year",
@@ -161,8 +163,10 @@ fn usage(code: i32) -> ! {
   --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)
   --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)
   --delist-proceeds P   by-reason (default: last trade less the reason's haircut, with commission) or last-price (last trade, no haircut, no cost)
-  --dividends D         cash (default: credited at the pay date) or reinvest (fractional shares at the ex-date close, no cost)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage
+  --dividends D         cash (default: credited at the pay date) or reinvest (fractional shares at the ex-date close, no cost)
+  --actions A           apply (default: splits and dividends adjust the book) or in-prices (the price relation is a total-return series that already carries them; delistings still apply)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage
   --returns FILE        write the returns per reporting period to FILE as Parquet: t,ret,pnl
+  --report-calendar REL with --report-by day, report on the days of relation REL (zero for a day without activity, days outside it left out)
   --report-by bar|day   the reporting period of the metrics and --returns: the decision bar (default) or the calendar day
   --periods-per-year X  periods a year for annualising (default: by the resolution per bar, 252 per day; 52 for a weekly book)\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --capital X           the fixed base under --compounding off, the starting cash otherwise (an alias of --cash; default 1000000)
   --compounding on|off  off (default): weights size against the fixed capital, leverage is judged against it and a bar's return is the NAV change over it; on: weights size against equity and returns compound
@@ -339,6 +343,14 @@ fn exec_config(args: &Args) -> ExecConfig {
             Some("last-price") => true,
             Some(other) => {
                 eprintln!("--delist-proceeds: `{}` is not one of by-reason, last-price", other);
+                exit(2)
+            }
+        },
+        actions_in_prices: match args.opts.get("actions").map(|s| s.as_str()) {
+            None | Some("apply") => base.actions_in_prices,
+            Some("in-prices") => true,
+            Some(other) => {
+                eprintln!("--actions: `{}` is not one of apply, in-prices", other);
                 exit(2)
             }
         },
@@ -694,7 +706,19 @@ fn main() {
             };
             let default_ppy = if by_day { 252.0 } else { absolute_backtest::study::metrics::periods_per_year(prog.resolution) };
             let ppy: f64 = option(&args.opts, "periods-per-year", "a number of periods", default_ppy);
-            let cm = absolute_backtest::study::metrics::convention_metrics(&result, ppy, by_day);
+            // A reporting calendar: the keys of a relation of the data.
+            let calendar: Option<std::collections::BTreeSet<i64>> = args.opts.get("report-calendar").map(|rel| {
+                let Some(k) = prog.relations.get(rel).and_then(|s| s.key_pos()) else {
+                    eprintln!("--report-calendar: `{}` is not a relation of the program", rel);
+                    std::process::exit(2)
+                };
+                dataset
+                    .facts
+                    .get(rel)
+                    .map(|tus| tus.iter().filter_map(|tu| tu[k].as_time()).map(time_day).collect())
+                    .unwrap_or_default()
+            });
+            let cm = absolute_backtest::study::metrics::convention_metrics_on(&result, ppy, by_day, calendar.as_ref());
             match result.base_capital {
                 Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested)", b),
                 None => println!("accounting: compounding; a period's return is the NAV change over the previous NAV"),
@@ -715,7 +739,7 @@ fn main() {
                 cm.annual_return, cm.max_drawdown_additive, cm.total_pnl, cm.profit_factor, cm.profit_factor_trades, cm.trades, cm.win_rate
             );
             if let Some(path) = args.opts.get("returns") {
-                let rows = absolute_backtest::study::metrics::period_returns(&result, by_day);
+                let rows = absolute_backtest::study::metrics::period_returns_on(&result, by_day, calendar.as_ref());
                 use absolute_backtest::table::{write_table, Col};
                 write_table(
                     Path::new(path),
@@ -1321,4 +1345,9 @@ fn main() {
         }
         _ => usage(1),
     }
+}
+
+/// The midnight of a timestamp's day.
+fn time_day(t: i64) -> i64 {
+    absolute_backtest::kernel::time::day_key(t) * absolute_backtest::kernel::time::DAY
 }

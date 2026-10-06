@@ -138,3 +138,38 @@ fn the_checker_judges_rows_and_rank() {
     let (p, diags) = checked(&rebound, "rolling");
     assert!(p.is_none() && diags.iter().any(|d| d.contains("fresh")), "{:?}", diags);
 }
+
+/// A rows window counts the group's rows by the conjunction's first atom
+/// and aggregates the rows where the whole conjunction holds, as a rolling
+/// window with a minimum of periods: a row without a value still takes a
+/// place in the window.
+#[test]
+fn a_rows_window_counts_the_anchors_rows_and_aggregates_the_valid_ones() {
+    let src = r#"
+strategy sparse {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  # A value only on days with a close above 11.
+  rel high_close(+A: Equity, @T: Timestamp, -P: Price<USD>)
+  high_close(A, T, P) :- close(A, T, P), P > 11 USD/share.
+  rel last3(+A: Equity, @T: Timestamp, -M: Price<USD>)
+  last3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows(T, 3, min 1), universe(A, T1), high_close(A, T1, P)).
+  decide(T, target_weight(A, 0.1)) :- universe(A, T), last3(A, T, _).
+}
+"#;
+    let p = program(src, "sparse");
+    let (ds, days) = market();
+    let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
+    k.run().unwrap();
+    let get = |k: &mut Kernel, t: i64| {
+        let id = k.symbol_names().iter().position(|n| n == "AAA").unwrap() as u32;
+        k.query("last3", t, &[Value::Equity(id)]).unwrap().first().and_then(|tu| tu[2].as_f64())
+    };
+    // AAA closes 10, 11, 12, 13: on day 4 the window is days 2 to 4 and only
+    // 12 and 13 have values.
+    assert_eq!(get(&mut k, days[3]), Some(12.5));
+    // Day 2: the window is days 1 and 2, neither above 11: no value at all.
+    assert_eq!(get(&mut k, days[1]), None);
+}
