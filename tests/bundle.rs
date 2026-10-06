@@ -9,7 +9,7 @@ mod corpus;
 use std::fs;
 use std::path::PathBuf;
 
-use absolute_backtest::bundle::{load_bundle, read_manifest, run_tests, test_bundle, write_bundle};
+use absolute_backtest::bundle::{load_bundle, read_manifest, run_tests, run_tests_with, test_bundle, write_bundle, Exception};
 use absolute_backtest::check::{check_program, Code, Program, Severity};
 use absolute_backtest::data::synthetic_daily_v2;
 use absolute_backtest::kernel::{run, ExecConfig, Value};
@@ -190,4 +190,84 @@ library pinned_lib {
         "{:?}",
         diags.iter().map(|d| d.to_string()).collect::<Vec<_>>()
     );
+}
+
+/// E1's closes from bar `k` on, scaled by `scale`, and the bar `k` itself.
+fn rescale_from(ds: &mut absolute_backtest::kernel::Dataset, id: &str, k: usize, scale: f64) -> (Value, i64, f64) {
+    let sym = Value::Equity(ds.symbols.get(id).unwrap());
+    let mut times: Vec<i64> = ds.facts["close"].iter().filter(|tu| tu[0] == sym).filter_map(|tu| tu[1].as_time()).collect();
+    times.sort_unstable();
+    let (t, prev_t) = (times[k], times[k - 1]);
+    let prev = ds.facts["close"].iter().find(|tu| tu[0] == sym && tu[1].as_time() == Some(prev_t)).unwrap()[2].as_f64().unwrap();
+    for tu in ds.facts.get_mut("close").unwrap() {
+        if tu[0] == sym && tu[1].as_time().unwrap() >= t {
+            tu[2] = Value::Num(tu[2].as_f64().unwrap() * scale);
+        }
+    }
+    (sym, t, prev)
+}
+
+#[test]
+fn a_dividend_explains_the_gap_at_its_ex_date() {
+    // A spin-off delivered as a distribution worth half the share: the close
+    // halves at the ex-date and the dividend makes the holder whole.
+    let p = corpus_strategy("total_return_momentum");
+    let mut ds = synthetic_daily_v2(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
+    let (sym, t, prev) = rescale_from(&mut ds, "E1", 30, 0.5);
+    let gap = run_tests(&p, &ds);
+    assert!(!gap.iter().find(|r| r.name == "action reconciliation").unwrap().passed, "a bare halving is unexplained");
+    ds.add("dividend", vec![sym.clone(), Value::Time(t), Value::Time(t), Value::Time(t), Value::Num(prev * 0.5)]);
+    let r = run_tests(&p, &ds);
+    let rec = r.iter().find(|r| r.name == "action reconciliation").unwrap();
+    assert!(rec.passed, "{:?}", rec);
+    // A reverse split on the same day as a distribution (amount per new
+    // share): the close is unchanged, the position halves, the cash pays
+    // for the rest.
+    let mut ds = synthetic_daily_v2(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
+    let (sym, t, prev) = rescale_from(&mut ds, "E1", 30, 1.0);
+    ds.add("split", vec![sym.clone(), Value::Time(t), Value::Num(0.5)]);
+    assert!(!run_tests(&p, &ds).iter().find(|r| r.name == "action reconciliation").unwrap().passed, "a split with no gap");
+    ds.add("dividend", vec![sym, Value::Time(t), Value::Time(t), Value::Time(t), Value::Num(prev)]);
+    let rec = run_tests(&p, &ds).into_iter().find(|r| r.name == "action reconciliation").unwrap();
+    assert!(rec.passed, "{:?}", rec);
+}
+
+#[test]
+fn a_reviewed_exception_admits_a_real_price_move_and_is_counted() {
+    let p = corpus_strategy("total_return_momentum");
+    let mut ds = synthetic_daily_v2(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
+    let (_, t, _) = rescale_from(&mut ds, "E1", 40, 0.45);
+    let rec = run_tests(&p, &ds).into_iter().find(|r| r.name == "action reconciliation").unwrap();
+    assert!(!rec.passed);
+    let exceptions = vec![Exception {
+        test: "action reconciliation".into(),
+        security: "E1".into(),
+        t,
+        reason: "real move: a short-seller report".into(),
+    }];
+    let rec = run_tests_with(&p, &ds, &exceptions).into_iter().find(|r| r.name == "action reconciliation").unwrap();
+    assert!(rec.passed, "{:?}", rec);
+    assert!(rec.detail.contains("1 reviewed exception"), "{:?}", rec);
+    // An exception for another day does not excuse this one.
+    let wrong = vec![Exception {
+        t: t + 86_400,
+        ..exceptions[0].clone()
+    }];
+    assert!(!run_tests_with(&p, &ds, &wrong).into_iter().find(|r| r.name == "action reconciliation").unwrap().passed);
+    // In a bundle, the exceptions live in exceptions.csv next to the manifest.
+    let dir = scratch("exceptions");
+    write_bundle(&p, &ds, &dir, "equities_1d_v2", "2026.10").unwrap();
+    let (m, _) = test_bundle(&p, &dir).unwrap();
+    assert!(m.tests.is_none(), "without the file the bundle fails");
+    fs::write(
+        dir.join("exceptions.csv"),
+        format!(
+            "test,security,date,reason\naction reconciliation,E1,{},real move: a short-seller report\n",
+            absolute_backtest::kernel::time::format_timestamp(t)
+        ),
+    )
+    .unwrap();
+    let (m, results) = test_bundle(&p, &dir).unwrap();
+    assert!(m.tests.is_some(), "{:?}", results);
+    let _ = fs::remove_dir_all(&dir);
 }

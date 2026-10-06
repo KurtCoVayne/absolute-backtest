@@ -135,3 +135,43 @@ fn explain_outside_the_time_domain_says_so() {
     assert!(stdout.contains("decide#1") && stdout.contains("2023-02-24"), "{}", stdout);
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus").is_dir());
 }
+
+#[test]
+fn timing_prints_one_stderr_line_with_every_field() {
+    let (code, stdout, stderr) = abt(&["run", "--strategy", "sma_crossover", "--synthetic", "--days", "60", "--timing", "--quiet", "corpus/"]);
+    assert_eq!(code, 0, "{}\n{}", stdout, stderr);
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("timing ")).collect();
+    assert_eq!(lines.len(), 1, "{}", stderr);
+    let fields: Vec<(&str, &str)> = lines[0]["timing ".len()..].split(' ').filter_map(|kv| kv.split_once('=')).collect();
+    let names: Vec<&str> = fields.iter().map(|(k, _)| *k).collect();
+    for want in [
+        "load_s",
+        "build_s",
+        "run_s",
+        "total_s",
+        "bars",
+        "symbols",
+        "tuples",
+        "decisions",
+        "bars_per_s",
+        "peak_rss_mb",
+        "window_calls",
+        "window_bars_solved",
+        "window_groups",
+        "window_rows_cached",
+        "late_tuples",
+    ] {
+        assert!(names.contains(&want), "timing lacks {}: {}", want, lines[0]);
+    }
+    let get = |k: &str| fields.iter().find(|(n, _)| *n == k).unwrap().1;
+    assert_eq!(get("bars"), "60", "{}", lines[0]);
+    assert!(get("tuples").parse::<usize>().unwrap() > 0, "{}", lines[0]);
+    for k in ["load_s", "build_s", "run_s", "total_s"] {
+        assert!(get(k).parse::<f64>().unwrap() >= 0.0, "{}", lines[0]);
+    }
+    let rss = get("peak_rss_mb");
+    assert!(rss == "unavailable" || rss.parse::<f64>().unwrap() > 0.0, "{}", lines[0]);
+    // Without the flag there is no timing line.
+    let (_, _, stderr) = abt(&["run", "--strategy", "sma_crossover", "--synthetic", "--days", "60", "--quiet", "corpus/"]);
+    assert!(!stderr.contains("timing "), "{}", stderr);
+}

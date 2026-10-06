@@ -41,7 +41,7 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested"];
+const FLAGS: [&str; 9] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested", "timing"];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
 const OPTIONS: [&str; 57] = [
@@ -146,7 +146,7 @@ type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::ker
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--dump DIR] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export (prices.csv, symbols.csv, splits.csv, dividends.csv, delistings.csv, membership.csv, classification.csv)\n  --from-databento DIR  build from a Databento-style minute export (ohlcv-1m.csv with optional ts_recv, symbology.csv); --processing-delay S adds S seconds to every tuple's availability\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--dump DIR] [--quiet] [--timing] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export (prices.csv, symbols.csv, splits.csv, dividends.csv, delistings.csv, membership.csv, classification.csv, exceptions.csv: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export (ohlcv-1m.csv with optional ts_recv, symbology.csv); --processing-delay S adds S seconds to every tuple's availability\n  --frictionless        every cost and liquidity model off (the run is warned)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
     );
     exit(code)
 }
@@ -428,6 +428,38 @@ fn make_runner(args: &Args) -> Box<Runner> {
     runner
 }
 
+/// The process's peak resident set in MB: `VmHWM` on Linux, `getrusage`'s
+/// `ru_maxrss` (bytes) on macOS, unavailable elsewhere.
+fn peak_rss_mb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb / 1024.0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // struct rusage: two timevals, then ru_maxrss as the first long.
+        #[repr(C)]
+        struct Rusage {
+            times: [i64; 4],
+            longs: [i64; 14],
+        }
+        extern "C" {
+            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+        }
+        let mut u = Rusage { times: [0; 4], longs: [0; 14] };
+        // SAFETY: getrusage writes one struct rusage, whose layout on 64-bit macOS this mirrors.
+        let rc = unsafe { getrusage(0, &mut u) };
+        (rc == 0).then(|| u.longs[0] as f64 / (1024.0 * 1024.0))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 fn main() {
     let args = parse_args();
     match args.cmd.as_str() {
@@ -454,6 +486,7 @@ fn main() {
             exit(if errors > 0 { 1 } else { 0 })
         }
         "run" | "explain" => {
+            let started = std::time::Instant::now();
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
             let (prog, diags) = check_program(&ws, &name);
@@ -464,7 +497,9 @@ fn main() {
                 eprintln!("strategy `{}` does not check; fix the errors above", name);
                 exit(1)
             };
+            let checked_at = started.elapsed().as_secs_f64();
             let (dataset, bundle_label) = load_dataset(&args, &prog);
+            let loaded_at = started.elapsed().as_secs_f64();
             let cfg = exec_config(&args);
             if args.cmd == "explain" {
                 let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
@@ -550,6 +585,29 @@ fn main() {
                 }
                 exit(1)
             });
+            if args.flags.contains("timing") {
+                let total = started.elapsed().as_secs_f64();
+                let run_s = total - loaded_at;
+                let s = &result.stats;
+                eprintln!(
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={}",
+                    loaded_at - checked_at,
+                    checked_at,
+                    run_s,
+                    total,
+                    result.bars.len(),
+                    result.symbols.len(),
+                    dataset.facts.values().map(|tus| tus.len()).sum::<usize>(),
+                    result.decisions.len(),
+                    if run_s > 0.0 { result.bars.len() as f64 / run_s } else { 0.0 },
+                    peak_rss_mb().map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into()),
+                    s.window_calls,
+                    s.window_bars_solved,
+                    s.window_groups,
+                    s.window_rows_cached,
+                    s.late_tuples
+                );
+            }
             println!(
                 "strategy {} over {} bars ({} to {}), {} symbols",
                 prog.strategy,
@@ -1029,6 +1087,7 @@ fn main() {
                             exit(1)
                         });
                     let mut source: Option<String> = None;
+                    let mut exceptions = Vec::new();
                     let processing_delay: i64 = option(&args.opts, "processing-delay", "a number of seconds", 0);
                     let ds = if args.flags.contains("synthetic") {
                         synthetic_for(&prog, &args.opts)
@@ -1041,6 +1100,7 @@ fn main() {
                             eprintln!("note: {}", n);
                         }
                         source = Some(ingested.source);
+                        exceptions = ingested.exceptions;
                         ingested.dataset
                     } else if let Some(from) = args.opts.get("from-databento") {
                         let ingested = absolute_backtest::ingest::databento_minute(Path::new(from), &prog, processing_delay).unwrap_or_else(|e| {
@@ -1065,6 +1125,10 @@ fn main() {
                         usage(1)
                     };
                     let m = absolute_backtest::bundle::write_bundle(&prog, &ds, Path::new(&out), &env, &version).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    absolute_backtest::bundle::write_exceptions(Path::new(&out), &exceptions).unwrap_or_else(|e| {
                         eprintln!("{}", e);
                         exit(2)
                     });

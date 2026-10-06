@@ -103,6 +103,8 @@ pub struct Ingested {
     /// The schema decisions taken (section 10), for the manifest's `source`.
     pub source: String,
     pub notes: Vec<String>,
+    /// Reviewed bundle-test exceptions, keyed by identifier (`exceptions.csv`).
+    pub exceptions: Vec<crate::bundle::Exception>,
 }
 
 /// The Norgate-style daily layout (catalog v1, `equities_1d_v2`), one file
@@ -117,6 +119,8 @@ pub struct Ingested {
 /// - `membership.csv` (optional): `symbol,index,from,to` (`to` empty while
 ///   current), expanded to every trading day of the price data.
 /// - `classification.csv` (optional): `symbol,scheme,code,from,to`.
+/// - `exceptions.csv` (optional): `test,symbol,date,reason`, problems a
+///   person reviewed and accepted; the bundle keeps them by identifier.
 ///
 /// `universe(A, T)` holds every security with a price on T that is not
 /// delisted by T; `delisted` holds from the delisting date through the
@@ -237,12 +241,33 @@ pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
             }
         }
     }
+    let mut exceptions = Vec::new();
+    let path = dir.join("exceptions.csv");
+    if path.exists() {
+        for row in read_csv(&path)? {
+            let t = date(&row, "date", &path)?;
+            let reason = field(&row, "reason", &path)?;
+            if reason.is_empty() {
+                return Err(format!("{}: an exception needs a reason", path.display()));
+            }
+            exceptions.push(crate::bundle::Exception {
+                test: field(&row, "test", &path)?.to_string(),
+                security: history.id_at(field(&row, "symbol", &path)?, t)?,
+                t,
+                reason: reason.to_string(),
+            });
+        }
+    }
     ds.derive_tickers();
-    let notes = vec![format!("{} price rows over {} trading days; {} securities", rows.len(), days.len(), ds.symbols.len())];
+    let mut notes = vec![format!("{} price rows over {} trading days; {} securities", rows.len(), days.len(), ds.symbols.len())];
+    if !exceptions.is_empty() {
+        notes.push(format!("{} reviewed bundle-test exceptions", exceptions.len()));
+    }
     Ok(Ingested {
         dataset: ds,
         source: "norgate daily export: OHLCV as traded, actions as events, membership and classification expanded to trading days; availability at bar close".into(),
         notes,
+        exceptions,
     })
 }
 
@@ -317,5 +342,6 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
             if processing_delay > 0 { format!(" plus {} s", processing_delay) } else { String::new() }
         ),
         notes,
+        exceptions: vec![],
     })
 }
