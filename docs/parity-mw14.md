@@ -22,13 +22,16 @@ deviation, CAGR and drawdown compounded on the fixed-base returns).
 | P&L on the fixed $1M | $7,534,877 | $7,534,876.54 |
 | weekly correlation | | 1.000000 |
 | largest weekly difference | | 7.9e-15 |
+| fixed-capital (additive) drawdown | −29.27% ($292,686) | −29.2686% ($292,686) |
 | 1990s / 2000s / 2010s / 2020–26 CAGR | 25.54 / 16.04 / 12.30 / 36.88% | 25.54 / 16.04 / 12.30 / 36.88% |
 
 Every one of the 1,852 weeks equals the canon to floating-point rounding
 (`scripts/parity/mw14_compare.py`); so every target, every banded trade and
 every cost agreed. abt's own report over the canon window (`--end
 2026-07-02`, so that the book's last week, which books its cost with no
-return, has the bar after it) prints the same figures.
+return, has the bar after it) prints the same figures: `cagr 0.208995
+max_drawdown 0.261782 sharpe 1.0196 (population 1.0199)`, and on the
+additive side `total_pnl 7534876.54`, drawdown 0.292686.
 
 ## How the book maps onto abt
 
@@ -73,8 +76,8 @@ abt run --strategy mw14 --bundle B --untested --price-relation trclose --actions
 `--untested` because the bundle's action-reconciliation test, calibrated on
 daily bars, flags 8,560 weekly moves of small caps beyond its thresholds; the
 data is the book's as it uses it, and the other five tests pass. The run
-takes 18 minutes at a 7.9 GB peak on an Apple M4 (4,240 names, 4.2M
-asset-weeks, 1.7 bars/s), almost all of it windowed aggregation (gap A1 in
+takes 16 to 18 minutes at an 8 to 10 GB peak on an Apple M4 (4,240 names,
+4.2M asset-weeks, 1.9 bars/s), almost all of it windowed aggregation (gap A1 in
 `docs/assessment.md`).
 
 ## Known differences, none of which occurred
@@ -86,8 +89,10 @@ week of 1991–2026, but they are the places to look on other data:
   price; the book drops it at no cost and may re-buy it.
 - A held weight drifts as quantity x price / base here and as w (1 + r) in
   the book: equal up to rounding, which could flip a trade at the band's edge.
-- An order decided on the data's last week has no next bar; the book books
-  that week's cost alone.
+- The book's last decision week books its cost with no return. Here that
+  needs a bar after it: the market series run past the equities, so ending
+  the run at 2026-07-02 includes it (a run ending on the equities' last week
+  settles its closing orders at the end of the run instead).
 
 ## Engine pieces the book needed
 

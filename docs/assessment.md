@@ -11,8 +11,8 @@ results as their reference implementations (`docs/parity-mw14.md`,
 
 - **MW14**, the weekly S&P 1500 momentum book: its 1,852 weekly returns over
   1991–2026 equal the Python canon to 8e-15 (CAGR 20.90%, max drawdown
-  −26.18%, Sharpe 1.02, P&L $7.53M on a fixed $1M). The run takes 18 minutes
-  at a 7.9 GB peak (4,240 names, 4.2M asset-weeks; 1.7 bars/s).
+  −26.18%, Sharpe 1.02, P&L $7.53M on a fixed $1M). The run takes 16–18 minutes
+  at an 8–10 GB peak (4,240 names, 4.2M asset-weeks; 1.9 bars/s).
 - **MORNIGHT-R8L**, the intraday futures opening-range book: its 21,892 legs
   are the book's, and with the book's entry convention every leg and every
   one of 6,850 days equals it (+18.95%/yr, Sharpe 1.28, drawdown 19.67%,
