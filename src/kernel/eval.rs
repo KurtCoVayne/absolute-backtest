@@ -17,6 +17,49 @@ pub type WindowRows = Vec<(Env, Vec<f64>)>;
 /// A group's cached bars.
 pub type WindowCache = BTreeMap<i64, WindowRows>;
 
+/// The static shape of a rows window literal.
+#[derive(Debug)]
+pub(crate) struct RowsPlan {
+    literal: usize,
+    wslot: usize,
+    base: Term,
+    dur: Expr,
+    outer: Vec<usize>,
+    shareable: bool,
+    order: Vec<Literal>,
+    anchor: Vec<Literal>,
+    /// Every slot the conjunction mentions, ascending.
+    conj_slots: Vec<usize>,
+}
+
+/// Anchored bars a rows window group keeps beyond its N, so that a call a
+/// few bars back (a recursion reaching its previous row) is served too.
+const ROWS_SLACK: usize = 16;
+
+/// A rows window group's running state: its last N anchored bars and the
+/// rows among them (time, the row's locally bound slots in slot order, which
+/// is the order the general path sorts environments by, and the aggregate's
+/// argument values), through `upto`.
+#[derive(Clone, Debug)]
+pub(crate) struct RowsState {
+    upto: i64,
+    /// The buffer reaches the group's first bar.
+    from_start: bool,
+    anchors: std::collections::VecDeque<i64>,
+    rows: std::collections::VecDeque<(i64, Vec<Value>, Vec<f64>)>,
+}
+
+impl Default for RowsState {
+    fn default() -> RowsState {
+        RowsState {
+            upto: i64::MIN,
+            from_start: false,
+            anchors: Default::default(),
+            rows: Default::default(),
+        }
+    }
+}
+
 /// A windowed aggregation group: the rule, the aggregation literal, and the
 /// outer bindings its conjunction reads apart from the window's base time.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -25,6 +68,9 @@ pub struct WindowKey {
     pub literal: usize,
     pub outer: Vec<Option<Value>>,
 }
+
+/// Result sets larger than this are kept sorted by their first entity.
+const SORTED_MIN: usize = 16;
 
 impl<'p> Kernel<'p> {
     /// All tuples of `rel` matching `pattern` (`Some` at the key, at every
@@ -50,13 +96,29 @@ impl<'p> Kernel<'p> {
             }
         }
         let memo_key = (rel, mkey);
-        if let Some(hit) = self.memo.get(&memo_key) {
-            let hit = hit.clone();
-            return Ok(if pattern.iter().all(|p| p.is_none()) || hit.iter().all(|(tu, _)| matches(tu)) {
-                hit
+        // A memoised result set of more than a few tuples is sorted by the
+        // relation's first entity: a call that binds it reads its run.
+        let entity = info.entity_positions.first().copied();
+        let narrow = |rc: &super::Derived| -> super::Derived {
+            if pattern.iter().all(|p| p.is_none()) {
+                return rc.clone();
+            }
+            let slice: &[(Tuple, usize)] = match (entity, entity.and_then(|e| pattern[e].as_ref())) {
+                (Some(e), Some(v)) if rc.len() > SORTED_MIN => {
+                    let lo = rc.partition_point(|(t, _)| t[e] < *v);
+                    let hi = lo + rc[lo..].partition_point(|(t, _)| t[e] <= *v);
+                    &rc[lo..hi]
+                }
+                _ => &rc[..],
+            };
+            if slice.len() == rc.len() && slice.iter().all(|(tu, _)| matches(tu)) {
+                rc.clone()
             } else {
-                Rc::new(hit.iter().filter(|(tu, _)| matches(tu)).cloned().collect())
-            });
+                Rc::new(slice.iter().filter(|(tu, _)| matches(tu)).cloned().collect())
+            }
+        };
+        if let Some(hit) = self.memo.get(&memo_key) {
+            return Ok(narrow(hit));
         }
         if !self.in_progress.insert(memo_key.clone()) {
             return Err(RunError::Internal(format!(
@@ -101,13 +163,12 @@ impl<'p> Kernel<'p> {
             }
         }
         self.in_progress.remove(&memo_key);
+        if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
+            results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+        }
         let rc = Rc::new(results);
         self.memo.insert(memo_key, rc.clone());
-        Ok(if rc.iter().all(|(tu, _)| matches(tu)) {
-            rc
-        } else {
-            Rc::new(rc.iter().filter(|(tu, _)| matches(tu)).cloned().collect())
-        })
+        Ok(narrow(&rc))
     }
 
     fn term_value(&mut self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<Value, RunError> {
@@ -474,8 +535,39 @@ impl<'p> Kernel<'p> {
                 // bars; otherwise from the per-bar cache when the group has
                 // exactly one window (the common case), else solved whole.
                 let has_rows = conj.iter().any(|l| matches!(l, Literal::Window { kind: WindowKind::Rows, .. }));
+                // A rows window whose time variable is the first slot the
+                // conjunction binds yields rows already in the order the
+                // environments sort to (time order, one row a bar): no
+                // environments are materialised and nothing is sorted.
+                let mut in_order = false;
+                if has_rows && self.cfg.window_cache {
+                    if let Some((count, cols)) = self.rows_columns(cr, lit, conj, agg, args, env)? {
+                        if (count as i64) < min_count {
+                            return Ok(());
+                        }
+                        let value = if agg == "count" {
+                            Value::Count(count as i64)
+                        } else {
+                            match aggregate(agg, &cols) {
+                                Ok(Some(v)) => v,
+                                Ok(None) => return Ok(()),
+                                Err(m) => {
+                                    let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+                                    return Err(self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), &m));
+                                }
+                            }
+                        };
+                        let mut e = env.clone();
+                        e[cr.slots[var]] = Some(value);
+                        out.push(e);
+                        return Ok(());
+                    }
+                }
                 let cached = if has_rows {
-                    Some(self.rows_window(cr, lit, conj, agg, args, env)?)
+                    let ordered = self.time_ordered(cr, lit, conj, env);
+                    let (rows, sorted) = self.rows_window(cr, lit, conj, agg, args, env, !ordered)?;
+                    in_order = sorted;
+                    Some(rows)
                 } else if self.cfg.window_cache {
                     self.window_rows(cr, lit, conj, agg, args, env)?
                 } else {
@@ -516,7 +608,9 @@ impl<'p> Kernel<'p> {
                 if (rows.len() as i64) < min_count {
                     return Ok(());
                 }
-                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                if !in_order {
+                    rows.sort_by(|a, b| a.0.cmp(&b.0));
+                }
                 if agg == "count" {
                     let mut e = env.clone();
                     e[cr.slots[var]] = Some(Value::Count(rows.len() as i64));
@@ -799,7 +893,219 @@ impl<'p> Kernel<'p> {
     /// periods). Data-bundle doc, section 2, "State": each bar is solved
     /// once and kept while it can be among the group's last N; a walk stops
     /// at the group's first bar once it is known.
-    fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<WindowRows, RunError> {
+    /// The static shape of a rows window (rule, literal): computed once.
+    fn rows_plan(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Result<Rc<RowsPlan>, RunError> {
+        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        if let Some(p) = self.rows_plans.get(&(cr.idx, literal)) {
+            return Ok(p.clone());
+        }
+        let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
+        let (
+            Some(Literal::Window {
+                var: Term::Var(wvar, _),
+                base: Term::Var(bvar, _),
+                dur,
+                ..
+            }),
+            1,
+        ) = (windows.first().map(|&i| &conj[i]), windows.len())
+        else {
+            return Err(RunError::Internal("a `rows` window needs one window, a variable and a bound base time".into()));
+        };
+        let mut refs: Vec<String> = Vec::new();
+        for (i, l) in conj.iter().enumerate() {
+            if i != windows[0] {
+                literal_vars(l, &mut refs);
+            }
+        }
+        for a in args {
+            let mut vs = Vec::new();
+            a.vars(&mut vs);
+            refs.extend(vs.into_iter().map(|(v, _)| v));
+        }
+        let shareable = !refs.iter().any(|v| v == bvar);
+        let mut vs = Vec::new();
+        dur.vars(&mut vs);
+        refs.extend(vs.into_iter().map(|(v, _)| v));
+        let wslot = cr.slots[wvar];
+        let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
+        outer.sort_unstable();
+        outer.dedup();
+        let plan = Rc::new(RowsPlan {
+            literal,
+            wslot,
+            base: Term::Var(bvar.clone(), crate::ir::Span::default()),
+            dur: dur.clone(),
+            outer,
+            shareable,
+            order: conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect(),
+            anchor: conj.iter().find(|l| matches!(l, Literal::Atom(_))).cloned().into_iter().collect(),
+            conj_slots: {
+                let mut vars = Vec::new();
+                for l in conj {
+                    literal_vars(l, &mut vars);
+                }
+                let mut slots: Vec<usize> = vars.iter().map(|v| cr.slots[v]).collect();
+                slots.sort_unstable();
+                slots.dedup();
+                slots
+            },
+        });
+        self.rows_plans.insert((cr.idx, literal), plan.clone());
+        Ok(plan)
+    }
+
+    /// A time-ordered rows window as columns of its aggregate's arguments, in
+    /// time order, kept incrementally per group: each call solves only the
+    /// bars since the group's previous call, and the group holds its last N
+    /// anchored bars and their rows. `None` when the window cannot be served
+    /// so (a bar with more than one row, a base time read by the rows, or a
+    /// call earlier than the group's last): the general path answers then.
+    fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<(usize, Vec<Vec<f64>>)>, RunError> {
+        let plan = self.rows_plan(cr, lit, conj, args)?;
+        if !plan.shareable || env[plan.wslot].is_some() {
+            return Ok(None);
+        }
+        let t = self.time_of(cr, &plan.base, env)?;
+        let n = self.eval_expr(cr, &plan.dur, env)?.as_f64().unwrap_or(0.0).max(0.0) as usize;
+        // The slots the rows bind; their values order the rows exactly as
+        // the general path's sort of whole environments does.
+        let locals: Vec<usize> = plan.conj_slots.iter().copied().filter(|&s| env[s].is_none()).collect();
+        let time_first = locals.first() == Some(&plan.wslot);
+        let key = WindowKey {
+            rule: cr.idx,
+            literal: plan.literal,
+            outer: plan.outer.iter().map(|&s| env[s].clone()).collect(),
+        };
+        let mut st = self.rows_state.remove(&key).unwrap_or_default();
+        // Bring the group up to t: a new group walks back to N (plus slack)
+        // anchored bars; a known one solves only the bars since its last call.
+        let fresh: Vec<i64> = if st.anchors.is_empty() && st.rows.is_empty() && st.upto == i64::MIN {
+            let mut bars: Vec<i64> = Vec::new();
+            let mut anchors = 0usize;
+            let mut upper = t;
+            st.from_start = true;
+            'walk: loop {
+                let chunk: Vec<i64> = self.domain(cr)?.range(..=upper).rev().take(64).copied().collect();
+                if chunk.is_empty() {
+                    break;
+                }
+                for &t1 in &chunk {
+                    let mut e = env.clone();
+                    e[plan.wslot] = Some(Value::Time(t1));
+                    if plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e])?.is_empty() {
+                        anchors += 1;
+                    }
+                    bars.push(t1);
+                    if anchors >= n + ROWS_SLACK {
+                        st.from_start = false;
+                        break 'walk;
+                    }
+                }
+                match chunk.last() {
+                    Some(&last) if last > i64::MIN => upper = last - 1,
+                    _ => break,
+                }
+            }
+            bars.reverse();
+            bars
+        } else if t > st.upto {
+            self.domain(cr)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied().collect()
+        } else {
+            Vec::new()
+        };
+        for t1 in fresh {
+            let mut e = env.clone();
+            e[plan.wslot] = Some(Value::Time(t1));
+            let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
+            let sols = self.solve(cr, &plan.order, vec![e])?;
+            self.stats.window_bars_solved += 1;
+            if sols.len() > 1 {
+                return Ok(None);
+            }
+            if anchored {
+                st.anchors.push_back(t1);
+            }
+            if let Some(row) = sols.first() {
+                let vals = if agg == "count" { Vec::new() } else { self.agg_args(cr, args, row)? };
+                let key: Vec<Value> = if time_first {
+                    Vec::new()
+                } else {
+                    locals.iter().map(|&s| row[s].clone().unwrap_or(Value::Count(0))).collect()
+                };
+                st.rows.push_back((t1, key, vals));
+            }
+        }
+        st.upto = st.upto.max(t);
+        // Serve t from the buffer: its last N anchored bars at or before t
+        // (all of them when the buffer reaches the group's first bar).
+        let hi = st.anchors.partition_point(|a| *a <= t);
+        let served = if hi >= n || st.from_start {
+            let lo_t = if hi >= n && n > 0 {
+                st.anchors[hi - n]
+            } else if hi > 0 {
+                st.anchors[0]
+            } else {
+                i64::MAX
+            };
+            let lo = st.rows.partition_point(|(t1, _, _)| *t1 < lo_t);
+            let hi_r = st.rows.partition_point(|(t1, _, _)| *t1 <= t);
+            let count = hi_r.saturating_sub(lo);
+            let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(count); args.len()];
+            if agg != "count" && count > 0 {
+                let mut idx: Vec<usize> = (lo..hi_r).collect();
+                if !time_first {
+                    idx.sort_by(|&a, &b| st.rows[a].1.cmp(&st.rows[b].1));
+                }
+                for i in idx {
+                    for (j, v) in st.rows[i].2.iter().enumerate() {
+                        cols[j].push(*v);
+                    }
+                }
+            }
+            Some((count, cols))
+        } else {
+            None
+        };
+        // Keep N plus slack anchored bars (a call a few bars back is served).
+        while st.anchors.len() > n + ROWS_SLACK {
+            st.anchors.pop_front();
+            st.from_start = false;
+        }
+        let oldest = st.anchors.front().copied().unwrap_or(i64::MAX);
+        while st.rows.front().map(|(t1, _, _)| *t1 < oldest).unwrap_or(false) {
+            st.rows.pop_front();
+        }
+        self.rows_state.insert(key, st);
+        Ok(served)
+    }
+
+    /// Whether a rows window's time variable is the lowest slot among the
+    /// variables its conjunction binds (then rows in time order are rows in
+    /// environment order). Judged once per rule and literal.
+    fn time_ordered(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], env: &Env) -> bool {
+        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        if let Some(&known) = self.time_ordered_memo.get(&(cr.idx, literal)) {
+            return known;
+        }
+        let Some(Literal::Window { var: Term::Var(wvar, _), .. }) = conj.iter().find(|l| matches!(l, Literal::Window { .. })) else {
+            return false;
+        };
+        let wslot = cr.slots[wvar];
+        let mut vars = Vec::new();
+        for l in conj {
+            literal_vars(l, &mut vars);
+        }
+        let ordered = vars.iter().all(|v| {
+            let s = cr.slots[v];
+            s == wslot || env[s].is_some() || s > wslot
+        });
+        self.time_ordered_memo.insert((cr.idx, literal), ordered);
+        ordered
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env, want_env: bool) -> Result<(WindowRows, bool), RunError> {
         let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
         let Some(Literal::Window {
             var: Term::Var(wvar, _),
@@ -902,8 +1208,15 @@ impl<'p> Kernel<'p> {
             }
         }
         let mut rows = Vec::new();
+        // Without environments only when every bar has at most one row (the
+        // order within a bar is the environments').
+        let bare = !want_env && found.iter().all(|t1| cache[t1].len() <= 1);
         for t1 in found.iter().rev() {
             for (row, vals) in &cache[t1] {
+                if bare {
+                    rows.push((Vec::new(), vals.clone()));
+                    continue;
+                }
                 let mut e = env.clone();
                 for (i, v) in row.iter().enumerate() {
                     if env[i].is_none() {
@@ -932,7 +1245,7 @@ impl<'p> Kernel<'p> {
             self.windows.insert(key.clone(), cache);
             self.rows_anchor.insert(key, anchored);
         }
-        Ok(rows)
+        Ok((rows, bare))
     }
 
     fn arith(&self, cr: &CompiledRule, env: &Env, expr: &Expr, message: &str) -> RunError {

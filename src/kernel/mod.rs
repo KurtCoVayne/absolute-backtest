@@ -1240,6 +1240,11 @@ pub struct Kernel<'p> {
     /// For a `rows` window group, the solved bars at which its anchor (the
     /// conjunction's first atom) holds: the group's rows.
     pub(crate) rows_anchor: FxHashMap<eval::WindowKey, BTreeSet<i64>>,
+    /// Per (rule, literal): whether its rows window yields rows in
+    /// environment order (see `eval::time_ordered`).
+    pub(crate) time_ordered_memo: FxHashMap<(usize, usize), bool>,
+    pub(crate) rows_plans: FxHashMap<(usize, usize), Rc<eval::RowsPlan>>,
+    pub(crate) rows_state: FxHashMap<eval::WindowKey, eval::RowsState>,
     /// Memo retention (data-bundle doc, section 2, "State"): derived tuples
     /// older than `memo_horizon` seconds before the current bar (and than the
     /// last few bars) are dropped, except the latest of each relation read
@@ -1680,6 +1685,9 @@ impl<'p> Kernel<'p> {
             windows: Default::default(),
             rows_floor: Default::default(),
             rows_anchor: Default::default(),
+            time_ordered_memo: Default::default(),
+            rows_plans: Default::default(),
+            rows_state: Default::default(),
             memo_horizon,
             asof_read,
             rows_lookback,
@@ -1743,6 +1751,7 @@ impl<'p> Kernel<'p> {
         }
         self.rows_floor.clear();
         self.rows_anchor.clear();
+        self.rows_state.clear();
         self.stats.late_tuples += 1;
     }
 
