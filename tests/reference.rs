@@ -107,6 +107,28 @@ fn policy_and_model_variants_agree_with_the_reference() {
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 400, 11);
     let lsq = program(&read("long_short_quantile"), "long_short_quantile");
     diff("reg-t", &lsq, &ds, ExecConfig::reg_t()).unwrap_or_else(|e| panic!("{}", e));
+    // Both accountings: the default fixed base, and weights of equity.
+    diff(
+        "compounding",
+        &lsq,
+        &ds,
+        ExecConfig {
+            compounding: true,
+            ..ExecConfig::reg_t()
+        },
+    )
+    .unwrap_or_else(|e| panic!("{}", e));
+    let top = program(&read("momentum_top_n"), "momentum_top_n");
+    diff(
+        "compounding-long",
+        &top,
+        &ds,
+        ExecConfig {
+            compounding: true,
+            ..ExecConfig::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("{}", e));
     diff(
         "liquidate",
         &lsq,
@@ -131,7 +153,6 @@ fn policy_and_model_variants_agree_with_the_reference() {
         },
     )
     .unwrap_or_else(|e| panic!("{}", e));
-    let top = program(&read("momentum_top_n"), "momentum_top_n");
     diff(
         "partial-fills",
         &top,

@@ -417,6 +417,9 @@ impl Executor for SimExecutor {
                 marks.insert(d.equity, p);
             }
         }
+        // What a weight is a fraction of: the book's equity, or the fixed
+        // capital when profits are not reinvested.
+        let base = if self.cfg.compounding { equity_next.max(0.0) } else { self.cfg.initial_cash };
         {
             let positions = &self.positions;
             let reducing = |d: &Decision| -> bool {
@@ -425,7 +428,7 @@ impl Executor for SimExecutor {
                     Ctor::Sell | Ctor::Cover => pos != 0.0,
                     Ctor::Buy | Ctor::Short => false,
                     Ctor::TargetQuantity => pos != 0.0 && d.amount.abs() < pos.abs() && d.amount * pos >= 0.0,
-                    Ctor::TargetWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * equity_next.max(0.0) < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
+                    Ctor::TargetWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
                 }
             };
             pending.sort_by_key(|(d, _, _)| !reducing(d));
@@ -440,7 +443,7 @@ impl Executor for SimExecutor {
                 message: format!("ruin: equity at {} is {:.2}, not positive, with orders pending", time::format_timestamp(tn), equity_next),
             });
         }
-        let sizing_equity = equity_next.max(0.0);
+        let sizing_equity = base;
         // A bar's transaction costs (commission, fee, slippage, impact) are
         // never leverage: a fully invested book stays fully invested after
         // paying them, carrying a debit of at most the bar's costs, which the
@@ -623,7 +626,15 @@ impl Executor for SimExecutor {
                 }
                 let tol = 1e-9 * (1.0 + net.abs()) + allowance;
                 let max_gross = self.cfg.max_gross.max(1.0);
-                if new_cash < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol {
+                // Leverage is judged against equity; when profits are not
+                // reinvested, against the fixed capital, and cash may go
+                // negative (a loss is carried, not refunded by selling).
+                let breach = if self.cfg.compounding {
+                    new_cash < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol
+                } else {
+                    gross > max_gross * self.cfg.initial_cash + tol
+                };
+                if breach {
                     let message = format!(
                         "leverage: after the fill cash would be {:.2} and gross exposure {:.2} against equity {:.2} (limit {}x gross)",
                         new_cash, gross, net, max_gross

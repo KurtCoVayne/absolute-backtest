@@ -92,6 +92,10 @@ class Config:
             raise AttributeError(name) from e
 
     @property
+    def compounding(self) -> bool:
+        return bool(self.raw.get("compounding", False))
+
+    @property
     def lot_whole(self) -> bool:
         return str(self.raw.get("lot", "Whole")).lower() == "whole"
 
@@ -441,12 +445,15 @@ class Reference:
             if ctor == "target_quantity":
                 return pos != 0.0 and abs(amount) < abs(pos) and amount * pos >= 0.0
             # target_weight
-            return pos != 0.0 and (amount == 0.0 or amount * pos < 0.0 or abs(amount) * max(equity_next, 0.0) < abs(pos) * marks.get(sym, 0.0))
+            base = max(equity_next, 0.0) if cfg.compounding else float(cfg.initial_cash)
+            return pos != 0.0 and (amount == 0.0 or amount * pos < 0.0 or abs(amount) * base < abs(pos) * marks.get(sym, 0.0))
 
         pending.sort(key=lambda d: not reducing(d))
         if pending and equity_next <= 0.0 and cfg.policy("on_ruin") == "halt":
             raise Halt(f"ruin at {stamp(tn)}: equity {equity_next:.2f}")
-        sizing_equity = max(equity_next, 0.0)
+        # What a weight is a fraction of: equity, or the fixed capital when
+        # profits are not reinvested (`compounding` off, the default).
+        sizing_equity = max(equity_next, 0.0) if cfg.compounding else float(cfg.initial_cash)
         bar_costs = 0.0
         for sym, ctor, amount, rule, reissued in pending:
             is_target = ctor in ("target_weight", "target_quantity")
@@ -542,7 +549,12 @@ class Reference:
                     net += qty * p
                 tol = 1e-9 * (1.0 + abs(net)) + allowance
                 max_gross = max(float(cfg.max_gross), 1.0)
-                if new_cash < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol:
+                if cfg.compounding:
+                    breach = new_cash < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol
+                else:
+                    # On a fixed base leverage is gross against the capital; cash may go negative.
+                    breach = gross > max_gross * float(cfg.initial_cash) + tol
+                if breach:
                     policy = cfg.policy("on_leverage")
                     if policy == "halt":
                         raise Halt(f"leverage at {stamp(tn)}: cash {new_cash:.2f} gross {gross:.2f} equity {net:.2f}")

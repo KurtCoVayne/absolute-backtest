@@ -159,7 +159,16 @@ fn a_study_counts_its_trials_deflates_by_them_and_embargoes_the_hold_out() {
     let project = Project::open(&dir);
     let prog = program(&momentum("studied", ""), "studied");
     let (spec, opened) = project
-        .declare(&prog, Holdout::Trailing { years: 1 }, "sharpe", vec![Threshold::parse("sharpe>=0.5").unwrap()], ExecConfig::default())
+        .declare(
+            &prog,
+            Holdout::Trailing { years: 1 },
+            "sharpe",
+            vec![Threshold::parse("sharpe>=0.5").unwrap()],
+            ExecConfig {
+                compounding: true,
+                ..ExecConfig::default()
+            },
+        )
         .unwrap();
     assert_eq!(spec.lineage, opened.lineage);
     assert!(spec.warnings.iter().any(|w| w.bias == "cash-management"), "{:?}", spec.warnings);

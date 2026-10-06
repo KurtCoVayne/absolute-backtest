@@ -518,7 +518,7 @@ struct Evaluated {
 fn evaluate(prog: &Program, data: &Dataset, cfg: ExecConfig, runner: &Runner, keep: &dyn Fn(i64) -> bool) -> Result<Evaluated, String> {
     let ppy = periods_per_year(prog.resolution);
     let result = runner(prog, data, cfg).map_err(|e| e.to_string())?;
-    let curve = masked_curve(&result.equity_curve, keep);
+    let curve = masked_curve(&result.metric_curve(), keep);
     let metrics = return_metrics(&curve, ppy);
     let trading = trading_metrics(&result, ppy);
     Ok(Evaluated { result, curve, metrics, trading })
@@ -959,7 +959,7 @@ pub fn log_untracked(project: &Project, prog: &Program, result: &RunResult, cfg:
         objective: "sharpe".into(),
         scheme: None,
         holdout: "none".into(),
-        metrics: return_metrics(&result.equity_curve, ppy),
+        metrics: return_metrics(&result.metric_curve(), ppy),
         trading: trading_metrics(result, ppy),
         note: Some("untracked: run outside a study".into()),
         warnings: result

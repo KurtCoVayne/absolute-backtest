@@ -489,7 +489,16 @@ pub struct ExposureRecord {
 /// Executor configuration: part of the kernel, not of the program (section 6).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecConfig {
+    /// The starting cash, and under fixed-base accounting the capital every
+    /// weight is a fraction of.
     pub initial_cash: f64,
+    /// Accounting (data-bundle doc, section 5): off (the default), the book
+    /// is a fixed base of `initial_cash`: `target_weight` sizes against it,
+    /// leverage is measured against it, and a bar's return is the change in
+    /// NAV over it, so profits are not reinvested; on, weights size against
+    /// the book's equity and returns compound.
+    #[serde(default)]
+    pub compounding: bool,
     /// Fixed slippage applied to the fill price, in basis points, against
     /// the order; added to the volatility-scaled part.
     pub slippage_bps: f64,
@@ -578,6 +587,7 @@ impl Default for ExecConfig {
     fn default() -> ExecConfig {
         ExecConfig {
             initial_cash: 1_000_000.0,
+            compounding: false,
             slippage_bps: 0.0,
             slippage_vol_mult: 0.1,
             vol_window: 20,
@@ -896,6 +906,11 @@ pub struct RunResult {
     pub dropped: Vec<(i64, Decision, String)>,
     /// Cash plus marked positions at each bar, before that bar's decisions.
     pub equity_curve: Vec<(i64, f64)>,
+    /// The fixed capital a bar's return is measured against when profits are
+    /// not reinvested (`ExecConfig::compounding` off); `None` when returns
+    /// compound on equity.
+    #[serde(default)]
+    pub base_capital: Option<f64>,
     pub final_cash: f64,
     pub final_positions: BTreeMap<Sym, f64>,
     pub costs: CostSummary,
@@ -915,6 +930,34 @@ pub struct RunResult {
 }
 
 impl RunResult {
+    /// The bar returns under the run's accounting: the change in NAV over
+    /// the previous bar's equity, or over the fixed capital when profits are
+    /// not reinvested.
+    pub fn bar_returns(&self) -> Vec<(i64, f64)> {
+        self.equity_curve
+            .windows(2)
+            .map(|w| {
+                let base = self.base_capital.unwrap_or(w[0].1);
+                (w[1].0, if base > 0.0 { (w[1].1 - w[0].1) / base } else { 0.0 })
+            })
+            .collect()
+    }
+
+    /// The curve the metrics read: the equity curve when returns compound,
+    /// otherwise the capital compounded by the fixed-base bar returns (what
+    /// a CAGR or a drawdown of a non-reinvesting book is computed on).
+    pub fn metric_curve(&self) -> Vec<(i64, f64)> {
+        let Some(base) = self.base_capital else { return self.equity_curve.clone() };
+        let Some(&(t0, _)) = self.equity_curve.first() else { return vec![] };
+        let mut e = base;
+        let mut out = vec![(t0, e)];
+        for (t, r) in self.bar_returns() {
+            e *= 1.0 + r;
+            out.push((t, e));
+        }
+        out
+    }
+
     pub fn decisions_at(&self, t: i64) -> Vec<&Decision> {
         self.decisions.iter().filter(|d| d.t == t).map(|d| &d.decision).collect()
     }
@@ -1426,6 +1469,7 @@ impl<'p> Kernel<'p> {
             warnings: self.cfg.warnings(),
             price_relation: self.price_rel.map(|id| self.rels[id].name.clone()),
             volume_relation: self.volume_rel.map(|id| self.rels[id].name.clone()),
+            base_capital: (!self.cfg.compounding).then_some(self.cfg.initial_cash),
             ..Default::default()
         };
         for (k, &t) in bars.iter().enumerate() {

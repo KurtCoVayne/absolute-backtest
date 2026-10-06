@@ -122,6 +122,7 @@ strategy half {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
+            compounding: true,
             ..ExecConfig::frictionless()
         },
     )
@@ -132,6 +133,24 @@ strategy half {
     let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
     assert_eq!(qty, vec![50.0, -13.0]);
     assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![37.0]);
+    // On a fixed base (the default) the weight is of the capital: 50 shares
+    // at 20 are 1000 = 0.5 * 2000, too much; the target is 25 shares.
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
+    let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
+    assert_eq!(qty, vec![50.0, -25.0]);
+    assert_eq!(r.base_capital, Some(1000.0));
+    // The bar returns (days 2 to 5) are the NAV changes over the capital:
+    // the 50 shares gain 500 on day 3, +500 / 1000; nothing moves after.
+    let rets: Vec<f64> = r.bar_returns().iter().map(|(_, x)| *x).collect();
+    assert_eq!(rets, vec![0.0, 0.5, 0.0, 0.0]);
 }
 
 #[test]
