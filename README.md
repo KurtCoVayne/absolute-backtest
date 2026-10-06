@@ -695,9 +695,9 @@ quantity (exactly under whole lots) and in price to floating tolerance, the
 book identical at the end, the NAV within tolerance at every bar and the
 same dropped count. `tests/reference.rs` runs every daily corpus strategy,
 policy and model variants and the four action markets through it, skipping
-with a note where python3 with pandas is absent. `ci/github-workflow.yml`
+with a note where python3 with pandas is absent. `.github/workflows/ci.yml`
 is the GitHub Actions workflow (format, clippy, tests with pandas installed
-so the comparison runs); move it to `.github/workflows/ci.yml` to enable it.
+so the comparison runs).
 
 ## Stylized facts
 

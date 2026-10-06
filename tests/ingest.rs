@@ -24,8 +24,12 @@ fn program(src: &str, name: &str) -> Program {
     p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
 }
 
+/// A fresh directory per call: tests run in parallel and several build the
+/// same fixture, so a tag and the process id alone would collide.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("abt-ingest-{}-{}", tag, std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("abt-ingest-{}-{}-{}", tag, std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -288,5 +292,47 @@ fn an_adapter_refuses_a_program_of_another_environment() {
     let prog = program(HOLD, "hold_v2");
     let dir = databento_fixture(false);
     assert!(databento_minute(&dir, &prog, 0).err().unwrap().contains("equities_1m"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reviewed_exceptions_travel_from_the_export_into_the_bundle_by_identifier() {
+    let dir = norgate_fixture();
+    let days = absolute_backtest::data::business_days((2024, 1, 8), 10);
+    fs::write(
+        dir.join("exceptions.csv"),
+        format!("test,symbol,date,reason\naction reconciliation,Y,{},real move: reviewed\n", format_timestamp(days[2])),
+    )
+    .unwrap();
+    let prog = program(HOLD, "hold_v2");
+    let ingested = norgate_daily(&dir, &prog).unwrap();
+    assert_eq!(ingested.exceptions.len(), 1);
+    assert_eq!(ingested.exceptions[0].security, "E2", "the ticker maps to its identifier on the date");
+    let out = dir.join("bundle");
+    let o = out.to_string_lossy().into_owned();
+    let from = dir.to_string_lossy().into_owned();
+    let files = [
+        format!("{}/corpus/env", env!("CARGO_MANIFEST_DIR")),
+        format!("{}/corpus/lib", env!("CARGO_MANIFEST_DIR")),
+        format!("{}/corpus/strategies/total_return_momentum.dsl", env!("CARGO_MANIFEST_DIR")),
+    ];
+    let (code, stdout, stderr) = abt(&[
+        "bundle",
+        "build",
+        "--from-norgate",
+        &from,
+        "--env",
+        "equities_1d_v2",
+        "--version",
+        "2026.10",
+        "--out",
+        &o,
+        &files[0],
+        &files[1],
+        &files[2],
+    ]);
+    assert_eq!(code, 0, "{}\n{}", stdout, stderr);
+    let written = absolute_backtest::bundle::read_exceptions(&out).unwrap();
+    assert_eq!(written, ingested.exceptions);
     let _ = fs::remove_dir_all(&dir);
 }

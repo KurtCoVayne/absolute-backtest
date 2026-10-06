@@ -1,6 +1,4 @@
-# GitHub Actions workflow for the crate. The session that wrote it could not
-# push under .github/workflows (its credential lacks the `workflow` scope),
-# so it lives here: move it to .github/workflows/ci.yml to enable it.
+# GitHub Actions workflow for the crate.
 name: ci
 
 on:

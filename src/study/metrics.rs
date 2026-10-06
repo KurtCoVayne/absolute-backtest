@@ -450,7 +450,7 @@ pub struct DeflatedSharpe {
 /// the expected maximum of `trials` Sharpe ratios whose variance across
 /// trials is `var_trials` (per period).
 pub fn deflated_sharpe(sr: f64, n: usize, skew: f64, excess_kurtosis: f64, trials: usize, var_trials: f64) -> DeflatedSharpe {
-    const EULER: f64 = 0.577_215_664_901_532_9;
+    const EULER: f64 = std::f64::consts::EULER_GAMMA;
     let trials = trials.max(1);
     let expected_max_sr = if trials == 1 || var_trials <= 0.0 {
         0.0
