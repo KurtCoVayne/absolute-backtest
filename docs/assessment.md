@@ -11,12 +11,13 @@ results as their reference implementations (`docs/parity-mw14.md`,
 
 - **MW14**, the weekly S&P 1500 momentum book: its 1,852 weekly returns over
   1991–2026 equal the Python canon to 8e-15 (CAGR 20.90%, max drawdown
-  −26.18%, Sharpe 1.02, P&L $7.53M on a fixed $1M). The run takes 16–18 minutes
-  at an 8–10 GB peak (4,240 names, 4.2M asset-weeks; 1.9 bars/s).
+  −26.18%, Sharpe 1.02, P&L $7.53M on a fixed $1M). The run took 16–18
+  minutes at an 8–10 GB peak; after the performance work below it takes
+  145 s at 3.1 GB.
 - **MORNIGHT-R8L**, the intraday futures opening-range book: its 21,892 legs
   are the book's, and with the book's entry convention every leg and every
   one of 6,850 days equals it (+18.95%/yr, Sharpe 1.28, drawdown 19.67%,
-  $5.15M). The run takes 14 s at 1.5 GB (26 roots; 13,600 bars/s).
+  $5.15M). The run took 14 s at 1.5 GB; now 3.9 s at 0.6 GB.
 
 What that required of the engine, all opt-in or with the old default kept
 except accounting: fixed-base accounting as the default, order types with a
@@ -37,7 +38,44 @@ windowed aggregation, and a full-minute futures bundle (about 47M bars) does
 not fit this machine, which is why the R8L bundle keeps the minute prints the
 book reads rather than every minute.
 
-## Verdict
+## Performance work, Oct 6, 2026
+
+Profiled with macOS `sample` on release builds (line tables on). Each change
+kept MW14's 1,852 weeks equal to the canon (to 8e-15) and R8L's legs and
+days equal to the book. Every step is timed on the same machine (Apple M4,
+16 GB):
+
+| Step | What it fixed (profile share before) | MW14 1991–95 | MW14 full | R8L full |
+| --- | --- | ---: | ---: | ---: |
+| before | | 56.8 s, 7.1 GB | 963 s, 9.6 GB | 13.7 s, 1.5 GB |
+| 1. copies and layout | the executor cloned its bar history every step (35% of R8L); `RelInfo` cloned per call; `Value` had grown to 48 bytes (now 16); SipHash on the memo; two copies of the data (the CLI's dataset now moves into the kernel); freeing at exit | 41.5 s, 3.8 GB | | 7.9 s, 0.8 GB |
+| 2. indexed stores | an instrument-bound read of a stored relation scanned the bar's whole block (48% of MW14): blocks are sorted by entity lazily and binary-searched | 20.0 s, 4.0 GB | 174 s, 7.9 GB | |
+| 4. bounded memo | every derived result of every bar was kept: the memo is bucketed by time and the past beyond the program's lookback dropped (the latest of each as-of-read relation kept) | 21.8 s, 2.3 GB | 201 s, 3.3 GB | 8.4 s, 0.6 GB |
+| 3. incremental rows windows | each call re-walked its window and materialised an environment per row: groups keep their last N rows, solve only new bars, and hand the aggregate its columns in the general path's order | 17.0 s | 146 s, 3.4 GB | 4.1 s |
+| refinements | stored atoms bind from the block; an as-of read answered by the latest bar skips the walk; memo hits indexed by entity | 14.8 s, 2.3 GB | **145 s, 3.1 GB** | **3.9 s, 0.6 GB** |
+
+MW14 is 6.6x faster in a third of the memory; R8L 3.5x faster. Studies
+also evaluate grid points in parallel (`--threads`, default the cores up to
+4): four `size_proxy` points on the SPX bundle take 14.8 s on two threads
+against 24.1 s on one.
+
+**What the profile shows now.** MW14's remaining time is the evaluator's
+per-call overhead (an environment and a result vector per derivation, the
+memo key, deallocation), spread over the recursive running products and
+latches (`cumf`, `row`, `lp`, about a fifth) and the rolling features of
+~4,240 names a week. The next levers, in order:
+
+- **Columnar primitive stores** (plan step 5): typed column blocks instead of
+  a `Vec<Value>` per tuple would cut the data's ~1.6 GB to ~0.4 GB and make a
+  full-minute futures bundle fit.
+- **Set-at-a-time evaluation of the cross-section**: evaluating a derived
+  relation for all instruments of a bar in one pass over column blocks,
+  instead of one demand-driven call per instrument, would remove most of the
+  per-call overhead; it is a new evaluator, kept equal to the current one by
+  the parity runs.
+- **Parallel instruments within a bar**: once evaluation is set-at-a-time the
+  per-instrument work is independent and can be split over threads.
+
 
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:

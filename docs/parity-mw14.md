@@ -76,9 +76,9 @@ abt run --strategy mw14 --bundle B --untested --price-relation trclose --actions
 `--untested` because the bundle's action-reconciliation test, calibrated on
 daily bars, flags 8,560 weekly moves of small caps beyond its thresholds; the
 data is the book's as it uses it, and the other five tests pass. The run
-takes 16 to 18 minutes at an 8 to 10 GB peak on an Apple M4 (4,240 names,
-4.2M asset-weeks, 1.9 bars/s), almost all of it windowed aggregation (gap A1 in
-`docs/assessment.md`).
+takes 145 s at a 3.1 GB peak on an Apple M4 (4,240 names, 4.2M asset-weeks,
+12.8 bars/s; it took 16–18 minutes and 8–10 GB before the performance work
+recorded in `docs/assessment.md`).
 
 ## Known differences, none of which occurred
 

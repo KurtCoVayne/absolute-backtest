@@ -89,8 +89,9 @@ abt run --strategy r8l --bundle B --price-relation close_m --compounding off \
 ```
 
 `--on-margin-call allow` because a futures book's notional is many times its
-equity and the book has no margin model. The run takes 14 s at a 1.5 GB
-peak (Apple M4, 187,397 decision bars, 13,600 bars/s).
+equity and the book has no margin model. The run takes 3.9 s at a 0.6 GB
+peak (Apple M4, 183,175 decision bars, 47,000 bars/s; 14 s and 1.5 GB before
+the performance work in `docs/assessment.md`).
 
 ## Engine pieces the book needed
 
