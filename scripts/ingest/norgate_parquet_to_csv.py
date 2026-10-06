@@ -344,9 +344,18 @@ def main() -> int:
         if not rows or rows[0].strip() != "test,symbol,date,reason":
             log(f"error: {args.exceptions} must start with the header test,symbol,date,reason")
             return 2
-        (out / "exceptions.csv").write_text("\n".join(rows) + "\n")
-        report["written"]["exceptions.csv"] = len(rows) - 1
-        log(f"wrote exceptions.csv: {len(rows) - 1} reviewed exceptions from {args.exceptions}")
+        # Keep the rows whose symbol carries an asset of this export on that
+        # date (a --limit subset has fewer; a ticker may belong to another
+        # asset at another time).
+        def carried(row: str) -> bool:
+            _, symbol, day, _ = row.split(",", 3)
+            return one(f"""SELECT count(*) FROM intervals WHERE ticker = ? AND "from" <= DATE '{day}'
+                           AND ("to" IS NULL OR "to" >= DATE '{day}')""".replace("?", "'" + symbol.replace("'", "''") + "'")) > 0
+        kept = [rows[0]] + [r for r in rows[1:] if r.strip() and carried(r)]
+        (out / "exceptions.csv").write_text("\n".join(kept) + "\n")
+        report["written"]["exceptions.csv"] = len(kept) - 1
+        report["drops"]["exception_for_symbol_not_exported"] = len(rows) - len(kept)
+        log(f"wrote exceptions.csv: {len(kept) - 1} reviewed exceptions from {args.exceptions}")
 
     report["decisions"] = [
         "prices are Norgate RAW (as traded); the lake's Phase-0 gate refuses adjusted series",
