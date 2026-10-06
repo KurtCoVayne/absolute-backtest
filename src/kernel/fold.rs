@@ -266,6 +266,10 @@ impl<'p, 'e> Fold<'p, 'e> {
             return Err(RunError::Config("the checkpoint's relations do not match the program's".into()));
         }
         kernel.stores = cp.stores;
+        // A checkpoint's blocks may predate the index: re-sort on first use.
+        for (st, info) in kernel.stores.iter_mut().zip(kernel.rels.iter()) {
+            st.index_by(info.entity_positions.first().copied());
+        }
         kernel.domains = cp.domains.into_iter().map(|(r, v)| (r, v.into_iter().collect::<BTreeSet<i64>>())).collect();
         kernel.last_price = cp.last_price.into_iter().collect();
         kernel.windows = cp.windows.into_iter().map(|(key, rows)| (key, rows.into_iter().collect())).collect();

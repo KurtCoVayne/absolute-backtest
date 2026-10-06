@@ -1020,15 +1020,56 @@ impl RunResult {
     }
 }
 
-/// A stored relation (primitive, executor or kernel state), indexed by key.
+/// A stored relation (primitive, executor or kernel state), indexed by key
+/// and, within a key's block, by the relation's first entity: a lookup that
+/// binds the entity is a binary search, not a scan of the bar's tuples.
+/// Blocks are sorted lazily: an insert marks its block dirty and the next
+/// indexed lookup sorts it once (bulk loads and event streams stay linear).
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Store {
     pub by_time: BTreeMap<i64, Vec<Tuple>>,
+    /// The argument position the blocks are sorted by; `None` for a
+    /// relation without an entity (then every lookup scans).
+    #[serde(default)]
+    pub entity_pos: Option<usize>,
+    /// Keys whose block may be out of order.
+    #[serde(default)]
+    pub dirty: BTreeSet<i64>,
 }
 
 impl Store {
     pub fn insert(&mut self, key: i64, tuple: Tuple) {
         self.by_time.entry(key).or_default().push(tuple);
+        if self.entity_pos.is_some() {
+            self.dirty.insert(key);
+        }
+    }
+
+    /// Index the store by `entity_pos` (every block re-sorted on first use).
+    pub fn index_by(&mut self, entity_pos: Option<usize>) {
+        self.entity_pos = entity_pos;
+        self.dirty = if entity_pos.is_some() { self.by_time.keys().copied().collect() } else { BTreeSet::new() };
+    }
+
+    /// The tuples at `key`, narrowed to those whose entity is `entity` when
+    /// the store is indexed and the entity is bound (a superset of the
+    /// matches otherwise: callers still filter on the full pattern).
+    pub fn lookup(&mut self, key: i64, entity: Option<&Value>) -> &[Tuple] {
+        let Some(e) = self.entity_pos else {
+            return self.by_time.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        };
+        let Some(block) = self.by_time.get_mut(&key) else { return &[] };
+        if self.dirty.remove(&key) {
+            block.sort_by(|a, b| a[e].cmp(&b[e]));
+        }
+        match entity {
+            Some(v) => {
+                let lo = block.partition_point(|t| t[e] < *v);
+                let hi = lo + block[lo..].partition_point(|t| t[e] <= *v);
+                &block[lo..hi]
+            }
+            None => block,
+        }
     }
 }
 
@@ -1263,7 +1304,14 @@ impl<'p> Kernel<'p> {
             }));
         }
         // Stores and time domains.
-        let mut stores: Vec<Store> = rels.iter().map(|_| Store::default()).collect();
+        let mut stores: Vec<Store> = rels
+            .iter()
+            .map(|r| {
+                let mut st = Store::default();
+                st.index_by(r.entity_positions.first().copied());
+                st
+            })
+            .collect();
         let mut native: HashMap<Resolution, BTreeSet<i64>> = HashMap::new();
         let mut load = |name: &str, tu: Tuple| -> Result<(), RunError> {
             let Some(&id) = rel_ids.get(name) else { return Ok(()) };
@@ -1799,15 +1847,12 @@ impl<'p> Kernel<'p> {
     /// bar has no price, so that the executor drops rather than fills.
     pub fn bar_price(&mut self, sym: Sym, t: i64) -> Option<f64> {
         let id = self.price_rel?;
-        let info = &self.rels[id];
+        let info = self.rels[id].clone();
         let entity_pos = *info.entity_positions.first()?;
         let col = self.price_col;
         let found = if info.res == self.prog.resolution {
-            self.stores[id]
-                .by_time
-                .get(&t)
-                .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
-                .and_then(|tu| tu[col].as_f64())
+            let key = Value::Equity(sym);
+            self.stores[id].lookup(t, Some(&key)).iter().find(|tu| tu[entity_pos] == key).and_then(|tu| tu[col].as_f64())
         } else {
             let (lo, hi) = time::bucket_range(self.prog.resolution, t);
             self.stores[id]

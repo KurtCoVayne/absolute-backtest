@@ -38,11 +38,8 @@ impl<'p> Kernel<'p> {
         };
         let matches = |tu: &Tuple| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
         if info.stored {
-            let tuples: Vec<(Tuple, usize)> = self.stores[rel]
-                .by_time
-                .get(&key)
-                .map(|tus| tus.iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)).collect())
-                .unwrap_or_default();
+            let entity = info.entity_positions.first().and_then(|&e| pattern[e].as_ref());
+            let tuples: Vec<(Tuple, usize)> = self.stores[rel].lookup(key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)).collect();
             return Ok(Rc::new(tuples));
         }
         let mut mkey: Vec<Value> = vec![Value::Time(key)];
@@ -241,11 +238,14 @@ impl<'p> Kernel<'p> {
         let tuples = if info.stored {
             let matches = |tu: &Tuple| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
             let mut found: Vec<(Tuple, usize)> = Vec::new();
-            for (_, tus) in self.stores[rel].by_time.range(..=t).rev() {
-                found.extend(tus.iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)));
-                if !found.is_empty() {
+            let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
+            let mut cur = t;
+            while let Some(k) = self.stores[rel].by_time.range(..=cur).next_back().map(|(k, _)| *k) {
+                found.extend(self.stores[rel].lookup(k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)));
+                if !found.is_empty() || k == i64::MIN {
                     break;
                 }
+                cur = k - 1;
             }
             Rc::new(found)
         } else {
