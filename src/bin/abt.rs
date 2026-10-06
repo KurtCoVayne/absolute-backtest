@@ -44,8 +44,9 @@ struct Args {
 const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "untested", "timing"];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 70] = [
+const OPTIONS: [&str; 71] = [
     "strategy",
+    "threads",
     "report-calendar",
     "actions",
     "start",
@@ -155,7 +156,7 @@ fn parse_args() -> Args {
 }
 
 /// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
-type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError>;
+type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError> + Sync;
 
 fn usage(code: i32) -> ! {
     eprintln!(
@@ -164,7 +165,8 @@ fn usage(code: i32) -> ! {
   --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)
   --delist-proceeds P   by-reason (default: last trade less the reason's haircut, with commission) or last-price (last trade, no haircut, no cost)
   --dividends D         cash (default: credited at the pay date) or reinvest (fractional shares at the ex-date close, no cost)
-  --actions A           apply (default: splits and dividends adjust the book) or in-prices (the price relation is a total-return series that already carries them; delistings still apply)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage
+  --actions A           apply (default: splits and dividends adjust the book) or in-prices (the price relation is a total-return series that already carries them; delistings still apply)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)
+  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage
   --returns FILE        write the returns per reporting period to FILE as Parquet: t,ret,pnl
   --report-calendar REL with --report-by day, report on the days of relation REL (zero for a day without activity, days outside it left out)
   --report-by bar|day   the reporting period of the metrics and --returns: the decision bar (default) or the calendar day
@@ -538,6 +540,13 @@ fn peak_rss_mb() -> Option<f64> {
 
 fn main() {
     let args = parse_args();
+    if let Some(n) = args.opts.get("threads") {
+        let n: usize = n.parse().unwrap_or_else(|_| {
+            eprintln!("--threads: `{}` is not a count", n);
+            exit(2)
+        });
+        absolute_backtest::study::set_threads(n);
+    }
     match args.cmd.as_str() {
         "check" => {
             let ws = workspace(&args.files);
