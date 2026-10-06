@@ -144,7 +144,8 @@ impl SimExecutor {
                 let last = *w.session_last.get_or_insert_with(|| k.session_last_bar(sym, w.t));
                 match last {
                     None => Trigger::Expire(format!("moc: no price for {} in the session of {}", name, time::format_timestamp(w.t))),
-                    Some(l) if l < tn => match k.bar_price(sym, l) {
+                    // At the step of its closing bar, like a market order at its fill bar.
+                    Some(l) if l <= tn => match k.bar_price(sym, l) {
                         Some(p) => Trigger::Fill(p, l),
                         None => Trigger::Expire(format!("moc: no close for {} at {}", name, time::format_timestamp(l))),
                     },
@@ -894,6 +895,35 @@ impl Executor for SimExecutor {
             }
         }
         for (sym, at, rule) in day_exits {
+            // Entered at the session's last print: flat again at its close, now.
+            if k.session_last_bar(sym, at) == Some(tn) {
+                if let (Some(&pos), Some(p)) = (self.positions.get(&sym), k.bar_price(sym, tn)) {
+                    let qty = -pos;
+                    let m = k.multiplier(sym);
+                    let commission = self.commission(k, sym, qty, p);
+                    self.cash -= qty * p * m + commission;
+                    self.positions.remove(&sym);
+                    result.costs.commissions += commission;
+                    result.costs.turnover += qty.abs() * p * m;
+                    k.last_price.insert(sym, p);
+                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
+                    result.fills.push(FillRecord {
+                        t: tn,
+                        equity: sym,
+                        quantity: qty,
+                        price: p,
+                        at_last_price: false,
+                        commission,
+                        fee: 0.0,
+                        slippage: 0.0,
+                        impact: 0.0,
+                        participation: 0.0,
+                        partial: false,
+                        forced: false,
+                    });
+                    continue;
+                }
+            }
             let exit = Decision {
                 ctor: Ctor::TargetQuantity,
                 equity: sym,

@@ -35,9 +35,12 @@ Written (bars keyed at their CLOSE, the abt label: a bar starting 08:30 is 08:31
   securities              id = root, multiplier, asset_class future, and the
                           commission per contract per side (--commissions JSON)
 
-The book's own fallbacks are not printed into the data: where minute 30 did not
-trade, the entry is the next traded minute here, where the book fills at the
-minute-29 close.
+The book's own fallbacks are not printed into the data by default: where
+minute 30 did not trade, the entry is the next traded minute here, where the
+book fills at the close before minute 30 (its audit F-015). With
+--entry-fallback signal-close the entry print of such a session is placed at
+minute 30 at that close, reproducing the book's convention (a print that did
+not happen; for replication only).
 """
 import argparse
 import json
@@ -168,6 +171,8 @@ def main() -> int:
     ap.add_argument("--commissions", required=True, type=Path, help="JSON {root: commission per contract per side}")
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--universe", default="home26", choices=["home26"])
+    ap.add_argument("--entry-fallback", default="next-print", choices=["next-print", "signal-close"],
+                    help="where minute 30 did not trade: the next traded minute (default) or the book's close before minute 30 (replication)")
     args = ap.parse_args()
     started = _time.time()
     out = args.out
@@ -211,6 +216,13 @@ def main() -> int:
         eo, je = first_finite(sub) if sub.shape[1] else (np.full(len(days), np.nan), np.full(len(days), -1))
         je = np.where(je >= 0, je + 30, -1)
         entry_close = np.where(je >= 0, a["close"][np.arange(len(days)), np.clip(je, 0, m - 1)], np.nan)
+        if args.entry_fallback == "signal-close" and m > 30:
+            c30v, j30 = last_finite(a["close"][:, :30])
+            fb = np.isnan(a["open"][:, 30]) & (j30 >= 0)
+            eo = np.where(fb, c30v, eo)
+            entry_close = np.where(fb, c30v, entry_close)
+            je = np.where(fb, 30, je)
+            report.setdefault("entry_fallback_sessions", {})[root] = int(fb.sum())
         prints = []
         ok = je >= 0
         prints.append(pd.DataFrame({"A": root, "T": label(je)[ok].astype("datetime64[ns]"), "O": eo[ok], "P": entry_close[ok]}))

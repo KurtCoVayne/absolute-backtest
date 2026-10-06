@@ -47,12 +47,12 @@ strategy r8l {
   param no_price : Price<USD> = 0 USD/share
   param dollars : Notional<USD> = 6493.912071090746 USD
 
-  # Daily features over each root's own sessions.
+  # Daily features over each root's own sessions (a root's first session has
+  # no true range: it has no previous close).
   rel prev_close(+A: Equity, @T: Timestamp, -P: Price<USD>) @1d
   prev_close(A, T, P) :- session(A, T), prev(T, T1), close_d(A, _, P) asof T1.
   rel trange(+A: Equity, @T: Timestamp, -V: Price<USD>) @1d
   trange(A, T, V) :- high_d(A, T, H), low_d(A, T, L), prev_close(A, T, C), V = greatest(H - L, abs(H - C), abs(L - C)).
-  trange(A, T, V) :- high_d(A, T, H), low_d(A, T, L), session(A, T), not prev_close(A, T, _), V = H - L.
   rel atr(+A: Equity, @T: Timestamp, -V: Price<USD>) @1d
   atr(A, T, V) :- session(A, T), V = mean(R) over (T1 in rows(T, atr_n, min atr_n), session(A, T1), trange(A, T1, R)).
 
@@ -68,16 +68,17 @@ strategy r8l {
   rel m_med(+A: Equity, @T: Timestamp, -Q: Scalar) @1d
   m_med(A, T, Q) :- session(A, T), Q = median(V) over (T1 in rows(T, med_n, min med_min), session(A, T1), abs_m(A, T1, V)).
 
-  # At the decision time: today's prints, and the daily features as of the
-  # previous session (a daily bar is there once its day has closed).
+  # At the decision time: today's prints, and the daily features of the
+  # previous session (a daily bar is there once its day has closed; a feature
+  # the previous session lacks is missing, not carried from an earlier one).
   rel sig(-A: Equity, @T: Timestamp, -M: Scalar, -G: Scalar, -V: Price<USD>, -Q: Scalar, -O: Price<USD>, -C20: Price<USD>)
   sig(A, T, M, G, V, Q, O, C20) :- clock(A, T, S),
       open0_m(A, T0, O) asof T, T0 > S,
       close30_m(A, T3, C30) asof T, T3 > S,
       close20_m(A, T2, C20) asof T, T2 > S,
-      atr(A, _, V) asof T, V > no_price,
-      close_d(A, _, PC) asof T,
-      m_med(A, _, Q) asof T,
+      close_d(A, D, PC) asof T,
+      atr(A, D1, V) asof T, D1 = D, V > no_price,
+      m_med(A, D2, Q) asof T, D2 = D,
       M = (C30 - O) / V, G = (O - PC) / V.
 
   rel aligned(+A: Equity, @T: Timestamp)
