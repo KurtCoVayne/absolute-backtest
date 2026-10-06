@@ -56,6 +56,7 @@ pub fn write_dump(prog: &Program, ds: &Dataset, cfg: &ExecConfig, result: &RunRe
             ("equity", strs(ds_.iter().map(|d| sym(d.decision.equity)))),
             ("ctor", strs(ds_.iter().map(|d| d.decision.ctor.name().to_string()))),
             ("amount", nums(ds_.iter().map(|d| d.decision.amount))),
+            ("order", strs(ds_.iter().map(|d| d.decision.order.to_string()))),
             ("rule", strs(ds_.iter().map(|d| prog.rule_label(d.rule)))),
         ],
     )?;

@@ -210,6 +210,8 @@ class Reference:
         decisions = _rows(os.path.join(directory, "decisions.parquet"))
         self.decisions: dict[int, list[tuple]] = {}
         for _, r in decisions.iterrows():
+            if r.get("order", "market") not in ("", "market"):
+                raise Halt(f"the reference executes market orders only; {r['order']} at {r['t']} is not replayed")
             self.decisions.setdefault(epoch(r["t"]), []).append((r["equity"], r["ctor"], float(r["amount"]), r["rule"]))
         # The book.
         self.cash = float(self.cfg.initial_cash)

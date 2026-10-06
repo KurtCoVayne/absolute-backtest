@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 
 use super::time;
-use super::value::{Ctor, Decision, Value};
+use super::value::{Ctor, Decision, Order, OrderKind, Tif, Value};
 use super::{CompiledRule, Env, Kernel, RunError, Tuple};
 use crate::ir::*;
 
@@ -123,11 +123,53 @@ impl<'p> Kernel<'p> {
                 let ctor = Ctor::parse(c).ok_or_else(|| RunError::Internal(format!("unknown constructor `{}`", c)))?;
                 let e = self.term_value(cr, &subs[0], env)?;
                 let a = self.term_value(cr, &subs[1], env)?;
+                let order = match subs.get(2) {
+                    Some(o) => self.order_value(cr, o, env)?,
+                    None => Order::default(),
+                };
                 match (e, a.as_f64()) {
-                    (Value::Equity(s), Some(x)) => Ok(Value::Decision(Decision { ctor, equity: s, amount: x })),
+                    (Value::Equity(s), Some(x)) => Ok(Value::Decision(Decision { ctor, equity: s, amount: x, order })),
                     _ => Err(RunError::Internal(format!("ill-typed decision in rule {}", cr.label))),
                 }
             }
+        }
+    }
+
+    /// The order term of a decision (section 6, order types): `market`,
+    /// `moo`, `moc`, or `limit(P[, TIF])` / `stop(P[, TIF])` with TIF one of
+    /// `day`, `gtc`, `bars(N)`; the checker has judged its shape.
+    fn order_value(&mut self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<Order, RunError> {
+        let bad = || RunError::Internal(format!("ill-formed order term in rule {}", cr.label));
+        match term {
+            Term::Param(p, _) => Ok(Order {
+                kind: match p.as_str() {
+                    "market" => OrderKind::Market,
+                    "moo" => OrderKind::Moo,
+                    "moc" => OrderKind::Moc,
+                    _ => return Err(bad()),
+                },
+                tif: Tif::Day,
+            }),
+            Term::Ctor(c, subs, _) => {
+                let price = self.term_value(cr, subs.first().ok_or_else(bad)?, env)?.as_f64().ok_or_else(bad)?;
+                let kind = match c.as_str() {
+                    "limit" => OrderKind::Limit(price),
+                    "stop" => OrderKind::Stop(price),
+                    _ => return Err(bad()),
+                };
+                let tif = match subs.get(1) {
+                    None => Tif::Day,
+                    Some(Term::Param(t, _)) if t == "day" => Tif::Day,
+                    Some(Term::Param(t, _)) if t == "gtc" => Tif::Gtc,
+                    Some(Term::Ctor(b, n, _)) if b == "bars" && n.len() == 1 => {
+                        let v = self.term_value(cr, &n[0], env)?;
+                        Tif::Bars(v.as_f64().ok_or_else(bad)?.max(1.0) as u32)
+                    }
+                    _ => return Err(bad()),
+                };
+                Ok(Order { kind, tif })
+            }
+            _ => Err(bad()),
         }
     }
 
@@ -731,7 +773,8 @@ impl<'p> Kernel<'p> {
             Value::Num(x) => format!("{}", x),
             Value::Count(c) => format!("{}", c),
             Value::Dur(d) => format!("{}", d),
-            Value::Decision(d) => format!("{}({}, {})", d.ctor.name(), self.symbols.name(d.equity), d.amount),
+            Value::Decision(d) if d.order.is_market() => format!("{}({}, {})", d.ctor.name(), self.symbols.name(d.equity), d.amount),
+            Value::Decision(d) => format!("{}({}, {}, {})", d.ctor.name(), self.symbols.name(d.equity), d.amount, d.order),
             Value::Label(s) => self.labels.name(*s).to_string(),
         }
     }

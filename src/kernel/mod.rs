@@ -16,7 +16,7 @@ pub mod executor;
 pub mod fold;
 pub use executor::{Executor, SimExecutor};
 pub use fold::{fingerprint, run_fold, Checkpoint, CheckpointEvery, Event, EventLog, Fold};
-pub use value::{Ctor, Decision, Sym, Symbols, Value};
+pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 
 pub type Tuple = Vec<Value>;
 /// Memo key: relation id, then the key time and the input values.
@@ -989,7 +989,11 @@ impl RunResult {
         self.decisions.iter().filter(|d| d.t == t).map(|d| &d.decision).collect()
     }
     pub fn describe_decision(&self, d: &Decision) -> String {
-        format!("{}({}, {})", d.ctor.name(), self.symbols[d.equity as usize], d.amount)
+        if d.order.is_market() {
+            format!("{}({}, {})", d.ctor.name(), self.symbols[d.equity as usize], d.amount)
+        } else {
+            format!("{}({}, {}, {})", d.ctor.name(), self.symbols[d.equity as usize], d.amount, d.order)
+        }
     }
 }
 
@@ -1078,6 +1082,12 @@ pub struct Kernel<'p> {
     pub(crate) price_col: usize,
     pub(crate) volume_rel: Option<usize>,
     pub(crate) volume_col: usize,
+    /// The price relation's open, high and low companions (`open` next to
+    /// `close`, `open_m` next to `close_m`), with their price columns: what
+    /// market-on-open, limit and stop orders execute against.
+    pub(crate) open_rel: Option<(usize, usize)>,
+    pub(crate) high_rel: Option<(usize, usize)>,
+    pub(crate) low_rel: Option<(usize, usize)>,
     pub(crate) last_price: HashMap<Sym, f64>,
     pub(crate) params: HashMap<(String, String), Value>,
     /// Dataset symbol and label ids to the kernel's (identifier order).
@@ -1191,6 +1201,7 @@ impl<'p> Kernel<'p> {
                     ctor: d.ctor,
                     equity: remap[d.equity as usize],
                     amount: d.amount,
+                    order: d.order,
                 }),
                 v => v.clone(),
             }
@@ -1360,6 +1371,19 @@ impl<'p> Kernel<'p> {
             }
         };
         let volume_col = volume_rel.and_then(|id| shares_column(prog.relations.get(&rels[id].name).unwrap())).unwrap_or(0);
+        let companion = |which: &str| -> Option<(usize, usize)> {
+            let id = price_rel?;
+            let name = rels[id].name.replacen("close", which, 1);
+            if name == rels[id].name {
+                return None;
+            }
+            let sig = prog.relations.get(&name)?;
+            if !matches!(sig.kind, Kind::Primitive { .. }) {
+                return None;
+            }
+            Some((*rel_ids.get(&name)?, price_column(sig)?))
+        };
+        let (open_rel, high_rel, low_rel) = (companion("open"), companion("high"), companion("low"));
         // The catalog's actions, by name (data-bundle doc, section 3).
         let primitive = |name: &str| -> Option<usize> {
             let id = *rel_ids.get(name)?;
@@ -1384,6 +1408,9 @@ impl<'p> Kernel<'p> {
             price_col,
             volume_rel,
             volume_col,
+            open_rel,
+            high_rel,
+            low_rel,
             labels,
             securities,
             as_of,
@@ -1420,6 +1447,7 @@ impl<'p> Kernel<'p> {
                     ctor: d.ctor,
                     equity: self.remap_syms[d.equity as usize],
                     amount: d.amount,
+                    order: d.order,
                 }),
                 v => v.clone(),
             })
@@ -1551,6 +1579,62 @@ impl<'p> Kernel<'p> {
             Some(p) => Some(p),
             None => self.last_price.get(&sym).copied(),
         }
+    }
+
+    /// A field of `sym`'s bar at decision bar `t` from a companion of the
+    /// price relation: the tuple at `t`, or over the fine tuples of its
+    /// bucket the first (`open`), the largest (`high`) or the smallest (`low`).
+    fn bar_field(&self, rel: Option<(usize, usize)>, sym: Sym, t: i64, pick: fn(Option<f64>, f64) -> f64) -> Option<f64> {
+        let (id, col) = rel?;
+        let info = &self.rels[id];
+        let entity_pos = *info.entity_positions.first()?;
+        if info.res == self.prog.resolution {
+            return self.stores[id]
+                .by_time
+                .get(&t)
+                .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
+                .and_then(|tu| tu[col].as_f64());
+        }
+        let (lo, hi) = time::bucket_range(self.prog.resolution, t);
+        let mut acc = None;
+        for (_, tus) in self.stores[id].by_time.range(lo..=hi) {
+            for tu in tus.iter().filter(|tu| tu[entity_pos] == Value::Equity(sym)) {
+                if let Some(v) = tu[col].as_f64() {
+                    acc = Some(pick(acc, v));
+                }
+            }
+        }
+        acc
+    }
+
+    /// The open of `sym`'s bar at `t` (the first fine open of its bucket).
+    pub fn bar_open(&self, sym: Sym, t: i64) -> Option<f64> {
+        self.bar_field(self.open_rel, sym, t, |acc, v| acc.unwrap_or(v))
+    }
+
+    pub fn bar_high(&self, sym: Sym, t: i64) -> Option<f64> {
+        self.bar_field(self.high_rel, sym, t, |acc, v| acc.map(|a| a.max(v)).unwrap_or(v))
+    }
+
+    pub fn bar_low(&self, sym: Sym, t: i64) -> Option<f64> {
+        self.bar_field(self.low_rel, sym, t, |acc, v| acc.map(|a| a.min(v)).unwrap_or(v))
+    }
+
+    /// The last decision bar at or after `t` within `t`'s calendar day at
+    /// which `sym` has a price: the close a market-on-close order decided at
+    /// `t` executes at (the session's last print; at @1d, `t` itself).
+    pub fn session_last_bar(&self, sym: Sym, t: i64) -> Option<i64> {
+        let id = self.price_rel?;
+        let info = &self.rels[id];
+        let entity_pos = *info.entity_positions.first()?;
+        let lo = time::bucket_range(self.prog.resolution, t).0.min(t);
+        let day_end = time::floor_div(t, time::DAY) * time::DAY + time::DAY - 1;
+        self.stores[id]
+            .by_time
+            .range(lo..=day_end)
+            .rev()
+            .find(|(_, tus)| tus.iter().any(|tu| tu[entity_pos] == Value::Equity(sym)))
+            .map(|(&ts, _)| if info.res == self.prog.resolution { ts } else { time::bucket(self.prog.resolution, ts) })
     }
 
     /// Currency per point per unit held: a future's multiplier, 1 for a share.

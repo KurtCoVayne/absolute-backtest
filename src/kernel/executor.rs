@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::time;
+use super::value::{OrderKind, Tif};
 use super::{
     Action, ActionRecord, Ctor, Decision, DecisionRecord, ExecConfig, ExposureRecord, FillRecord, Kernel, LiquiditySummary, Lot, OnLeverage, OnMarginCall, OnOversize, OnRuin, RunError, RunResult,
     RunWarning, Sym, Value,
@@ -29,6 +30,38 @@ pub trait Executor {
     fn restore(&mut self, state: serde_json::Value) -> Result<(), String>;
 }
 
+/// An order that does not execute at the next bar's close (section 6, order
+/// types): market-on-open, market-on-close, limit and stop orders work
+/// until they execute, expire by their time in force, or a new decision on
+/// the instrument supersedes them.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Working {
+    d: Decision,
+    rule: usize,
+    /// The decision bar.
+    t: i64,
+    /// The calendar day of the first bar the order could execute at (what
+    /// `day` measures).
+    first_day: Option<i64>,
+    /// Bars the order has worked.
+    bars: u32,
+    /// For a market-on-close order, the session's last bar (looked up once).
+    session_last: Option<Option<i64>>,
+}
+
+/// An order to fill at this step: the decision, its rule, whether it is an
+/// open target re-issued, and the base price and bar of an order that
+/// executes away from this bar's close.
+type Pending = (Decision, usize, bool, Option<(f64, i64)>);
+
+/// What a working order does at a bar.
+enum Trigger {
+    /// Execute at this base price, at this bar.
+    Fill(f64, i64),
+    Wait,
+    Expire(String),
+}
+
 /// The simulated executor: the book, the open targets, the receivables and
 /// the counters behind the run's summaries.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -42,6 +75,9 @@ pub struct SimExecutor {
     pending: BTreeMap<Sym, Vec<(Decision, usize)>>,
     pending_t: Option<i64>,
     open_targets: BTreeMap<Sym, (Decision, usize)>,
+    /// Orders working beyond the bar after their decision.
+    #[serde(default)]
+    working: BTreeMap<Sym, Working>,
     requested_total: f64,
     filled_total: f64,
     participations: Vec<f64>,
@@ -64,6 +100,7 @@ impl SimExecutor {
             pending: BTreeMap::new(),
             pending_t: None,
             open_targets: BTreeMap::new(),
+            working: BTreeMap::new(),
             requested_total: 0.0,
             filled_total: 0.0,
             participations: Vec::new(),
@@ -89,6 +126,76 @@ impl SimExecutor {
             bps
         } else {
             (self.cfg.commission_per_share * qty.abs()).max(self.cfg.commission_min_per_order) + bps
+        }
+    }
+
+    /// Whether a working order executes at `tn`, and at what base price.
+    fn trigger(&self, k: &mut Kernel, w: &mut Working, tn: i64) -> Trigger {
+        let sym = w.d.equity;
+        let name = k.symbols.name(sym).to_string();
+        let day = time::day_key(tn);
+        let first = *w.first_day.get_or_insert(day);
+        match w.d.order.kind {
+            OrderKind::Market => match k.bar_price(sym, tn) {
+                Some(p) => Trigger::Fill(p, tn),
+                None => Trigger::Expire(format!("no price for {} at {}", name, time::format_timestamp(tn))),
+            },
+            OrderKind::Moc => {
+                let last = *w.session_last.get_or_insert_with(|| k.session_last_bar(sym, w.t));
+                match last {
+                    None => Trigger::Expire(format!("moc: no price for {} in the session of {}", name, time::format_timestamp(w.t))),
+                    Some(l) if l < tn => match k.bar_price(sym, l) {
+                        Some(p) => Trigger::Fill(p, l),
+                        None => Trigger::Expire(format!("moc: no close for {} at {}", name, time::format_timestamp(l))),
+                    },
+                    Some(_) => Trigger::Wait,
+                }
+            }
+            OrderKind::Moo => match k.bar_open(sym, tn) {
+                Some(o) => Trigger::Fill(o, tn),
+                None if day != first => Trigger::Expire(format!("moo: {} did not open in the session after {}", name, time::format_timestamp(w.t))),
+                None => Trigger::Wait,
+            },
+            OrderKind::Limit(level) | OrderKind::Stop(level) => {
+                let expired = match w.d.order.tif {
+                    Tif::Day => day != first,
+                    Tif::Gtc => false,
+                    Tif::Bars(n) => w.bars >= n,
+                };
+                if expired {
+                    return Trigger::Expire(format!("{} expired unfilled ({})", w.d.order, name));
+                }
+                w.bars += 1;
+                let (Some(o), Some(h), Some(l)) = (k.bar_open(sym, tn), k.bar_high(sym, tn), k.bar_low(sym, tn)) else {
+                    return Trigger::Wait;
+                };
+                // The side of the order: a delta constructor's, or a target's
+                // from where the book is against it at the open.
+                let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
+                let buying = match w.d.ctor {
+                    Ctor::Buy | Ctor::Cover => true,
+                    Ctor::Sell | Ctor::Short => false,
+                    Ctor::TargetQuantity => w.d.amount > pos,
+                    Ctor::TargetWeight => {
+                        let base = if self.cfg.compounding { self.cash.max(0.0) } else { self.cfg.initial_cash };
+                        w.d.amount * base > pos * o * k.multiplier(sym)
+                    }
+                };
+                let limit = matches!(w.d.order.kind, OrderKind::Limit(_));
+                // A limit buys at or below its level, a stop at or above
+                // (mirrored for sells); a bar that opens through the level
+                // fills at the open.
+                let fill = match (limit, buying) {
+                    (true, true) => (o <= level).then_some(o).or((l <= level).then_some(level)),
+                    (true, false) => (o >= level).then_some(o).or((h >= level).then_some(level)),
+                    (false, true) => (o >= level).then_some(o).or((h >= level).then_some(level)),
+                    (false, false) => (o <= level).then_some(o).or((l <= level).then_some(level)),
+                };
+                match fill {
+                    Some(p) => Trigger::Fill(p, tn),
+                    None => Trigger::Wait,
+                }
+            }
         }
     }
 
@@ -442,11 +549,40 @@ impl Executor for SimExecutor {
         // new requests).
         for sym in by_equity.keys() {
             self.open_targets.remove(sym);
+            self.working.remove(sym);
         }
-        let mut pending: Vec<(Decision, usize, bool)> = by_equity.values().flatten().map(|(d, r)| (d.clone(), *r, false)).collect();
-        pending.extend(self.open_targets.values().map(|(d, r)| (d.clone(), *r, true)));
+        let mut pending: Vec<Pending> = Vec::new();
+        for (d, r) in by_equity.values().flatten() {
+            if d.order.is_market() {
+                pending.push((d.clone(), *r, false, None));
+            } else {
+                self.working.insert(
+                    d.equity,
+                    Working {
+                        d: d.clone(),
+                        rule: *r,
+                        t,
+                        first_day: None,
+                        bars: 0,
+                        session_last: None,
+                    },
+                );
+            }
+        }
+        pending.extend(self.open_targets.values().map(|(d, r)| (d.clone(), *r, true, None)));
+        let syms: Vec<Sym> = self.working.keys().copied().collect();
+        for sym in syms {
+            let Some(mut w) = self.working.remove(&sym) else { continue };
+            match self.trigger(k, &mut w, tn) {
+                Trigger::Fill(p, at) => pending.push((w.d.clone(), w.rule, false, Some((p, at)))),
+                Trigger::Wait => {
+                    self.working.insert(sym, w);
+                }
+                Trigger::Expire(why) => result.dropped.push((w.t, w.d.clone(), why)),
+            }
+        }
         let mut marks: HashMap<Sym, f64> = HashMap::new();
-        for (d, _, _) in &pending {
+        for (d, _, _, _) in &pending {
             if let Some(p) = k.price_at(d.equity, tn) {
                 // The value of one unit held: price times the multiplier.
                 marks.insert(d.equity, p * k.multiplier(d.equity));
@@ -466,11 +602,11 @@ impl Executor for SimExecutor {
                     Ctor::TargetWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
                 }
             };
-            pending.sort_by_key(|(d, _, _)| !reducing(d));
+            pending.sort_by_key(|(d, _, _, _)| !reducing(d));
         }
         // Ruin: a book without positive equity cannot size or fund an order.
         if !pending.is_empty() && equity_next <= 0.0 && self.cfg.on_ruin == OnRuin::Halt {
-            let (d, rule, _) = &pending[0];
+            let (d, rule, _, _) = &pending[0];
             return Err(RunError::Risk {
                 t,
                 rule: k.prog.rule_label(*rule),
@@ -484,12 +620,18 @@ impl Executor for SimExecutor {
         // paying them, carrying a debit of at most the bar's costs, which the
         // next sizing sees (and margin interest prices).
         let mut bar_costs = 0.0;
-        for (d, rule, reissued) in &pending {
+        for (d, rule, reissued, away) in &pending {
             let sym = d.equity;
             let is_target = matches!(d.ctor, Ctor::TargetWeight | Ctor::TargetQuantity);
             let name = k.symbols.name(sym).to_string();
             let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
-            let bar_price = k.bar_price(sym, tn);
+            // The bar the order executes at, and its base price: this bar's
+            // close, or what a working order triggered at.
+            let at = away.map(|(_, a)| a).unwrap_or(tn);
+            let bar_price = match away {
+                Some((p, _)) => Some(*p),
+                None => k.bar_price(sym, tn),
+            };
             // Slippage against the order: the fixed part plus a multiple of
             // the instrument's realized volatility at the fill bar.
             let slip = self.cfg.slippage_bps / 10_000.0 + self.cfg.slippage_vol_mult * k.realized_vol(sym, &bars, end).unwrap_or(0.0);
@@ -569,7 +711,7 @@ impl Executor for SimExecutor {
             if !*reissued {
                 self.requested_total += requested;
             }
-            let bar_volume = k.bar_volume(sym, tn);
+            let bar_volume = k.bar_volume(sym, at);
             let mut partial = false;
             if let (true, Some(v)) = (self.cfg.participation_cap > 0.0, bar_volume) {
                 let cap = round(self.cfg.participation_cap * v);
@@ -589,7 +731,7 @@ impl Executor for SimExecutor {
                 )
             };
             if qty == 0.0 {
-                if is_target {
+                if is_target && d.order.is_market() {
                     self.open_targets.insert(sym, (d.clone(), *rule));
                 } else {
                     result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(0.0))));
@@ -718,7 +860,7 @@ impl Executor for SimExecutor {
                 self.participations.push(participation);
             }
             result.fills.push(FillRecord {
-                t: tn,
+                t: at,
                 equity: sym,
                 quantity: qty,
                 price: fill_price,
@@ -734,7 +876,7 @@ impl Executor for SimExecutor {
             // The remainder of a capped order: a delta order expires, a target
             // re-issues itself at the next bar.
             if partial {
-                if is_target {
+                if is_target && d.order.is_market() {
                     self.open_targets.insert(sym, (d.clone(), *rule));
                 } else {
                     result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(qty.abs()))));
@@ -769,6 +911,9 @@ impl Executor for SimExecutor {
                     result.dropped.push((t, d.clone(), "no next bar".to_string()));
                 }
             }
+        }
+        for w in std::mem::take(&mut self.working).into_values() {
+            result.dropped.push((w.t, w.d.clone(), format!("{}: the data ended before it executed", w.d.order)));
         }
         result.liquidity = LiquiditySummary {
             fill_ratio: if self.requested_total > 0.0 { self.filled_total / self.requested_total } else { 1.0 },
