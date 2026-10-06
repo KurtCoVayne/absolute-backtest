@@ -419,6 +419,13 @@ pub enum Action {
         reason: String,
         haircut: f64,
     },
+    /// `amount` a share on `shares` held at the ex-date, reinvested at the
+    /// ex-date close in `added` shares of the same name.
+    Reinvest {
+        amount: f64,
+        shares: f64,
+        added: f64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -512,6 +519,10 @@ pub struct ExecConfig {
     pub vol_min_obs: usize,
     /// Commission per share, subject to a per-order minimum.
     pub commission_per_share: f64,
+    /// Commission in basis points of the traded notional, on both sides
+    /// (0 by default), added to the per-share schedule.
+    #[serde(default)]
+    pub commission_bps: f64,
     pub commission_min_per_order: f64,
     /// Regulatory fee on the notional of sells (and shorts), in basis points.
     pub fee_bps_on_sells: f64,
@@ -562,6 +573,18 @@ pub struct ExecConfig {
     /// section 10 item 2: conservative by default, 1 is a total loss).
     pub delisting_haircuts: Vec<(String, f64)>,
     pub delisting_haircut_default: f64,
+    /// Delisting proceeds (data-bundle doc, section 4): false (the
+    /// default), a delisted name is closed at its last trade less the
+    /// haircut for its reason, with commission; true, at its last trade
+    /// with no haircut and no cost (a vendor's convention that a name which
+    /// stops printing leaves the book at its last price).
+    #[serde(default)]
+    pub delist_at_last_price: bool,
+    /// Dividends: false (the default), a receivable credited in cash at the
+    /// pay date; true, reinvested at the ex-date close in fractional shares
+    /// of the same name, at no cost (a total-return book).
+    #[serde(default)]
+    pub reinvest_dividends: bool,
     /// Primitive relation that supplies fill and valuation prices; `None`
     /// picks a Price-valued primitive, preferring one named `close`.
     pub price_relation: Option<String>,
@@ -593,6 +616,7 @@ impl Default for ExecConfig {
             vol_window: 20,
             vol_min_obs: 10,
             commission_per_share: 0.005,
+            commission_bps: 0.0,
             commission_min_per_order: 1.0,
             fee_bps_on_sells: 0.278,
             participation_cap: 0.1,
@@ -628,6 +652,8 @@ impl Default for ExecConfig {
             window_cache: true,
             delisting_haircuts: vec![("bankruptcy".into(), 1.0), ("regulatory".into(), 1.0), ("acquisition".into(), 0.0), ("voluntary".into(), 0.0)],
             delisting_haircut_default: 1.0,
+            delist_at_last_price: false,
+            reinvest_dividends: false,
             param_overrides: Vec::new(),
             on_leverage: OnLeverage::Halt,
             on_oversize: OnOversize::Halt,
@@ -648,6 +674,7 @@ impl ExecConfig {
             slippage_bps: 0.0,
             slippage_vol_mult: 0.0,
             commission_per_share: 0.0,
+            commission_bps: 0.0,
             commission_min_per_order: 0.0,
             fee_bps_on_sells: 0.0,
             participation_cap: 0.0,
@@ -1071,6 +1098,8 @@ pub struct Kernel<'p> {
     pub(crate) delisted_rel: Option<usize>,
     /// What each equity literal of the program (a ticker) resolved to.
     pub(crate) literal_equities: HashMap<String, Sym>,
+    /// Contract terms by kernel symbol (futures); a symbol absent is a share.
+    pub(crate) contracts: HashMap<Sym, Contract>,
 }
 
 impl<'p> Kernel<'p> {
@@ -1153,6 +1182,7 @@ impl<'p> Kernel<'p> {
                 ..s.clone()
             })
             .collect();
+        let contracts: HashMap<Sym, Contract> = dataset.contracts.iter().map(|(s, c)| (remap[*s as usize], c.clone())).collect();
         let remap_value = |v: &Value| -> Value {
             match v {
                 Value::Equity(s) => Value::Equity(remap[*s as usize]),
@@ -1361,6 +1391,7 @@ impl<'p> Kernel<'p> {
             dividend_rel,
             delisted_rel,
             literal_equities,
+            contracts,
             last_price: HashMap::new(),
             params,
             remap_syms: remap,
@@ -1522,6 +1553,16 @@ impl<'p> Kernel<'p> {
         }
     }
 
+    /// Currency per point per unit held: a future's multiplier, 1 for a share.
+    pub fn multiplier(&self, sym: Sym) -> f64 {
+        self.contracts.get(&sym).map(|c| c.multiplier).unwrap_or(1.0)
+    }
+
+    /// A future's commission per contract per side, when it has one.
+    pub fn commission_per_contract(&self, sym: Sym) -> Option<f64> {
+        self.contracts.get(&sym).and_then(|c| c.commission_per_contract)
+    }
+
     /// Volume of `sym` over decision bar `t` from the configured volume
     /// relation: the tuple at `t`, or the sum of the fine tuples in its bucket.
     pub fn bar_volume(&self, sym: Sym, t: i64) -> Option<f64> {
@@ -1575,7 +1616,10 @@ impl<'p> Kernel<'p> {
         for &t in &bars[lo..=end.min(bars.len() - 1)] {
             let p = self.bar_price(sym, t);
             if let (Some(a), Some(b)) = (prev, p) {
-                rets.push((b / a).ln());
+                // A back-adjusted future may cross zero: no log return there.
+                if a > 0.0 && b > 0.0 {
+                    rets.push((b / a).ln());
+                }
             }
             if p.is_some() {
                 prev = p;

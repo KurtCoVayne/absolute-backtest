@@ -94,6 +94,7 @@ pub fn write_dump(prog: &Program, ds: &Dataset, cfg: &ExecConfig, result: &RunRe
             crate::kernel::Action::Split { factor } => ("split".into(), format!("{}", factor)),
             crate::kernel::Action::Dividend { amount, shares } => ("dividend".into(), format!("{} x {}", amount, shares)),
             crate::kernel::Action::Delisting { reason, haircut } => ("delisting".into(), format!("{} {}", reason, haircut)),
+            crate::kernel::Action::Reinvest { amount, shares, added } => ("reinvest".into(), format!("{} x {} -> {}", amount, shares, added)),
         }
     };
     write_table(

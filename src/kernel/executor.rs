@@ -76,11 +76,19 @@ impl SimExecutor {
         }
     }
 
-    fn commission(&self, qty: f64) -> f64 {
+    /// Commission on an order of `qty` of `sym`: a future's per-contract
+    /// rate when the security table gives one, else the per-share schedule.
+    /// The basis-point commission on both sides is added on the notional
+    /// (`price` per unit, times the multiplier).
+    fn commission(&self, k: &Kernel, sym: Sym, qty: f64, price: f64) -> f64 {
+        let bps = self.cfg.commission_bps * qty.abs() * price.abs() * k.multiplier(sym) / 10_000.0;
+        if let Some(c) = k.commission_per_contract(sym) {
+            return c * qty.abs() + bps;
+        }
         if self.cfg.commission_per_share == 0.0 && self.cfg.commission_min_per_order == 0.0 {
-            0.0
+            bps
         } else {
-            (self.cfg.commission_per_share * qty.abs()).max(self.cfg.commission_min_per_order)
+            (self.cfg.commission_per_share * qty.abs()).max(self.cfg.commission_min_per_order) + bps
         }
     }
 
@@ -122,7 +130,8 @@ impl SimExecutor {
                 }
                 let exact = pos * factor;
                 let kept = if self.cfg.lot == Lot::Whole { exact.trunc() } else { exact };
-                let fraction_cash = k.price_at(sym, t).map(|p| (exact - kept) * p).unwrap_or(0.0);
+                let m = k.multiplier(sym);
+                let fraction_cash = k.price_at(sym, t).map(|p| (exact - kept) * p * m).unwrap_or(0.0);
                 self.cash += fraction_cash;
                 if kept.abs() < 1e-9 {
                     self.positions.remove(&sym);
@@ -141,7 +150,9 @@ impl SimExecutor {
                 book_changed = true;
             }
         }
-        // Dividends going ex at t: a receivable for the shares held now.
+        // Dividends going ex at t: a receivable for the shares held now, or
+        // shares bought with it at the ex-date close.
+        let mut reinvest: Vec<(Sym, f64, f64)> = Vec::new();
         if let Some(id) = k.dividend_rel {
             let info = &k.rels[id];
             let entity_pos = info.entity_positions.first().copied().unwrap_or(0);
@@ -154,13 +165,29 @@ impl SimExecutor {
                         if let (Some(sym), Some(ex), Some(pay), Some(amount)) = (tu[entity_pos].as_equity(), tu[ex_col].as_time(), tu[pay_col].as_time(), tu[amount_col].as_f64()) {
                             if ex == t {
                                 if let Some(&pos) = self.positions.get(&sym) {
-                                    self.receivables.push((pay.max(ex), sym, pos * amount, amount, pos));
+                                    if self.cfg.reinvest_dividends {
+                                        reinvest.push((sym, amount, pos));
+                                    } else {
+                                        self.receivables.push((pay.max(ex), sym, pos * amount, amount, pos));
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+        for (sym, amount, shares) in reinvest {
+            let Some(p) = k.price_at(sym, t).filter(|p| *p > 0.0) else { continue };
+            let added = shares * amount / p;
+            self.positions.insert(sym, shares + added);
+            result.actions.push(ActionRecord {
+                t,
+                equity: sym,
+                action: Action::Reinvest { amount, shares, added },
+                cash: 0.0,
+            });
+            book_changed = true;
         }
         let (due, later): (Vec<_>, Vec<_>) = self.receivables.drain(..).partition(|(pay, ..)| *pay <= t);
         self.receivables = later;
@@ -197,19 +224,24 @@ impl SimExecutor {
                     continue;
                 }
                 let Some(pos) = self.positions.get(&sym).copied() else { continue };
-                let haircut = self.cfg.delisting_haircut(&reason).clamp(0.0, 1.0);
-                if haircut == 0.0 && matches!(reason.as_str(), "bankruptcy" | "regulatory") {
+                let haircut = if self.cfg.delist_at_last_price {
+                    0.0
+                } else {
+                    self.cfg.delisting_haircut(&reason).clamp(0.0, 1.0)
+                };
+                if haircut == 0.0 && !self.cfg.delist_at_last_price && matches!(reason.as_str(), "bankruptcy" | "regulatory") {
                     self.zero_haircut_involuntary += 1;
                 }
                 let last = k.price_at(sym, t).unwrap_or(0.0);
                 let price = last * (1.0 - haircut);
                 let qty = -pos;
-                let commission = self.commission(qty);
-                let proceeds = -qty * price - commission;
+                let m = k.multiplier(sym);
+                let commission = if self.cfg.delist_at_last_price { 0.0 } else { self.commission(k, sym, qty, price) };
+                let proceeds = -qty * price * m - commission;
                 self.cash += proceeds;
                 self.positions.remove(&sym);
                 result.costs.commissions += commission;
-                result.costs.turnover += qty.abs() * price;
+                result.costs.turnover += qty.abs() * price * m;
                 k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
                 result.fills.push(FillRecord {
                     t,
@@ -257,9 +289,10 @@ impl Executor for SimExecutor {
         let mut net = 0.0;
         for (&sym, &q) in &self.positions {
             if let Some(p) = k.price_at(sym, t) {
-                equity += q * p;
-                gross += q.abs() * p;
-                net += q * p;
+                let m = k.multiplier(sym);
+                equity += q * p * m;
+                gross += q.abs() * p * m;
+                net += q * p * m;
             }
         }
         // Maintenance: positive equity below the margin of gross exposure is
@@ -299,12 +332,13 @@ impl Executor for SimExecutor {
                         if qty == 0.0 || qty.abs() > pos.abs() {
                             qty = -pos;
                         }
-                        let commission = self.commission(qty);
-                        let fee = if qty < 0.0 { qty.abs() * p * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
-                        self.cash -= qty * p + commission + fee;
+                        let m = k.multiplier(sym);
+                        let commission = self.commission(k, sym, qty, p);
+                        let fee = if qty < 0.0 { qty.abs() * p * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
+                        self.cash -= qty * p * m + commission + fee;
                         equity -= commission + fee;
-                        gross -= qty.abs() * p;
-                        net -= -qty * p;
+                        gross -= qty.abs() * p * m;
+                        net -= -qty * p * m;
                         let new_pos = pos + qty;
                         if new_pos.abs() < 1e-9 {
                             self.positions.remove(&sym);
@@ -313,7 +347,7 @@ impl Executor for SimExecutor {
                         }
                         result.costs.commissions += commission;
                         result.costs.fees += fee;
-                        result.costs.turnover += qty.abs() * p;
+                        result.costs.turnover += qty.abs() * p * m;
                         k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
                         result.fills.push(FillRecord {
                             t,
@@ -385,7 +419,7 @@ impl Executor for SimExecutor {
         for (sym, q) in shorts {
             self.shorts_held = true;
             let Some(p) = k.price_at(sym, tn) else { continue };
-            let notional = q.abs() * p;
+            let notional = q.abs() * p * k.multiplier(sym);
             let bucket = self.cfg.borrow_bucket(k.adv(sym, &bars, end));
             let fee = notional * bucket.fee_bps / 10_000.0 * dt;
             let rebate = notional * self.cfg.short_rebate * dt;
@@ -398,7 +432,7 @@ impl Executor for SimExecutor {
         let mut equity_next = self.cash;
         for (&sym, &q) in &self.positions {
             if let Some(p) = k.price_at(sym, tn) {
-                equity_next += q * p;
+                equity_next += q * p * k.multiplier(sym);
             }
         }
         // Orders that reduce a position fund the ones that open or add, so
@@ -414,7 +448,8 @@ impl Executor for SimExecutor {
         let mut marks: HashMap<Sym, f64> = HashMap::new();
         for (d, _, _) in &pending {
             if let Some(p) = k.price_at(d.equity, tn) {
-                marks.insert(d.equity, p);
+                // The value of one unit held: price times the multiplier.
+                marks.insert(d.equity, p * k.multiplier(d.equity));
             }
         }
         // What a weight is a fraction of: the book's equity, or the fixed
@@ -469,6 +504,7 @@ impl Executor for SimExecutor {
                     Lot::Fractional => x,
                 }
             };
+            let m = k.multiplier(sym);
             let mut qty = match (d.ctor, bar_price) {
                 (Ctor::Buy | Ctor::Cover, _) => round(d.amount),
                 (Ctor::Sell | Ctor::Short, _) => -round(d.amount),
@@ -478,9 +514,9 @@ impl Executor for SimExecutor {
                 // target (a reduction, a short) is sized at the bar price,
                 // which is what the position is marked at.
                 (Ctor::TargetWeight, Some(p)) => {
-                    let target = round(d.amount * sizing_equity / p);
+                    let target = round(d.amount * sizing_equity / (p * m));
                     let target = if target > pos && target > 0.0 {
-                        round(d.amount * sizing_equity / slipped(p, true))
+                        round(d.amount * sizing_equity / (slipped(p, true) * m))
                     } else {
                         target
                     };
@@ -581,11 +617,11 @@ impl Executor for SimExecutor {
                 _ => 0.0,
             };
             let fill_price = if qty > 0.0 { p * (1.0 + slip + imp) } else { p * (1.0 - slip - imp) };
-            let commission = self.commission(qty);
-            let fee = if qty < 0.0 { qty.abs() * fill_price * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
-            let cost = qty * fill_price + commission + fee;
-            let slippage = qty.abs() * p * slip;
-            let impact = qty.abs() * p * imp;
+            let commission = self.commission(k, sym, qty, fill_price);
+            let fee = if qty < 0.0 { qty.abs() * fill_price * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
+            let cost = qty * fill_price * m + commission + fee;
+            let slippage = qty.abs() * p * m * slip;
+            let impact = qty.abs() * p * m * imp;
             let allowance = bar_costs + commission + fee + slippage + impact;
             // Borrow availability: an order that opens or adds to a short
             // needs its instrument's ADV bucket to be shortable.
@@ -617,12 +653,13 @@ impl Executor for SimExecutor {
                 for (&s2, &q2) in &self.positions {
                     let q2 = if s2 == sym { q2 + qty } else { q2 };
                     let p2 = if s2 == sym { p } else { k.price_at(s2, tn).unwrap_or(0.0) };
-                    gross += q2.abs() * p2;
-                    net += q2 * p2;
+                    let m2 = k.multiplier(s2);
+                    gross += q2.abs() * p2 * m2;
+                    net += q2 * p2 * m2;
                 }
                 if !self.positions.contains_key(&sym) {
-                    gross += qty.abs() * p;
-                    net += qty * p;
+                    gross += qty.abs() * p * m;
+                    net += qty * p * m;
                 }
                 let tol = 1e-9 * (1.0 + net.abs()) + allowance;
                 let max_gross = self.cfg.max_gross.max(1.0);
@@ -674,7 +711,7 @@ impl Executor for SimExecutor {
             result.costs.fees += fee;
             result.costs.slippage += slippage;
             result.costs.impact += impact;
-            result.costs.turnover += qty.abs() * fill_price;
+            result.costs.turnover += qty.abs() * fill_price * m;
             self.filled_total += qty.abs();
             let participation = bar_volume.filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0);
             if bar_volume.is_some() {
