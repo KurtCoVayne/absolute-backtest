@@ -761,6 +761,13 @@ not survive costs, halted), and across briefs the first-attempt pass rate,
 the distribution of diagnostics and the mean attempts to a valid program.
 Measured and stored, never asserted.
 
+`docs/llm-usability.md` reports the study of whether an LLM can write the
+company books from the docs alone: Haiku 4.5 and Sonnet 5.5 agents given only
+the language description, a plain-language spec, the checker and the data
+wrote MW14, R8L and two briefs. Sonnet's files land within rounding of both
+books; Haiku's check clean and never trade. Every attempt, the scores, the
+root causes and the ranked fixes are in `experiments/llm-usability/`.
+
 ## Development
 
 ```

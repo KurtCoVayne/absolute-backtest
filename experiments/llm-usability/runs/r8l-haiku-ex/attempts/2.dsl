@@ -1,0 +1,104 @@
+strategy r8l {
+  env futures_sessions
+  resolution @1m
+  mode delta
+
+  # Daily true range: max(high - low, |high - prev_close|, |low - prev_close|)
+  rel tr(-A: Equity, @T: Timestamp, -TR: Price<USD>)
+  tr(A, T, TR) :- session(A, T), high_d(A, T, H), low_d(A, T, L),
+      prev(T, T0), close_d(A, T0, P0),
+      TR1 = abs(H - P0), TR2 = abs(L - P0),
+      TR = greatest(H - L, TR1, TR2).
+  tr(A, T, TR) :- session(A, T), high_d(A, T, H), low_d(A, T, L),
+      not prev(T, _),
+      TR = H - L.
+
+  # ATR: mean true range over last 20 sessions
+  rel atr(-A: Equity, @T: Timestamp, -ATR: Price<USD>)
+  atr(A, T, ATR) :- session(A, T),
+      ATR = mean(TR) over (T1 in window(T, 0d, min 20), tr(A, T1, TR)).
+
+  # At decision time, read previous session's ATR using asof
+  rel prev_atr(-A: Equity, @T: Timestamp, -ATR: Price<USD>)
+  prev_atr(A, T, ATR) :- clock(A, T, _), atr(A, TP, ATR) asof T.
+
+  # m = (close_before_30 - open_0) / ATR
+  rel m_val(-A: Equity, @T: Timestamp, -M: Scalar)
+  m_val(A, T, M) :- clock(A, T, _), close30_m(A, T, C30), open0_m(A, T, O0),
+      prev_atr(A, T, ATR), ATR > 0 USD,
+      M = (C30 - O0) / ATR.
+
+  # g = (open_0 - prev_close) / ATR
+  rel g_val(-A: Equity, @T: Timestamp, -G: Scalar)
+  g_val(A, T, G) :- clock(A, T, S), open0_m(A, T, O0),
+      prev(S, SP), close_d(A, SP, P0),
+      prev_atr(A, T, ATR), ATR > 0 USD,
+      G = (O0 - P0) / ATR.
+
+  # m_med: median of |m| over last 250 sessions (at least 100 with values)
+  rel m_med(-A: Equity, @T: Timestamp, -MMED: Scalar)
+  m_med(A, T, MMED) :- clock(A, T, _),
+      MMED = median(M) over (T1 in window(T, 0d, min 100),
+                              m_val(A, T1, M)).
+
+  # latefrac = (close_before_30 - close_before_20) / (close_before_30 - open_0)
+  rel latefrac(-A: Equity, @T: Timestamp, -LF: Scalar)
+  latefrac(A, T, LF) :- clock(A, T, _), close30_m(A, T, C30), close20_m(A, T, C20),
+      open0_m(A, T, O0),
+      LF = (C30 - C20) / (C30 - O0).
+
+  # Check if gap is aligned: |g| < 1 OR same sign as m
+  rel gap_aligned(-A: Equity, @T: Timestamp)
+  gap_aligned(A, T) :- m_val(A, T, M), g_val(A, T, G),
+      (abs(G) < 1.0 or (G > 0 and M > 0) or (G < 0 and M < 0)).
+
+  # Main entry (long): |m| >= 2 * m_med AND gap aligned AND latefrac <= 1/3 AND m > 0
+  rel main_long(-A: Equity, @T: Timestamp)
+  main_long(A, T) :- clock(A, T, _), m_val(A, T, M), m_med(A, T, MMED),
+      gap_aligned(A, T), latefrac(A, T, LF),
+      abs(M) >= 2.0 * MMED,
+      LF <= 0.333333,
+      M > 0.
+
+  # Main entry (short): |m| >= 2 * m_med AND gap aligned AND latefrac <= 1/3 AND m < 0
+  rel main_short(-A: Equity, @T: Timestamp)
+  main_short(A, T) :- clock(A, T, _), m_val(A, T, M), m_med(A, T, MMED),
+      gap_aligned(A, T), latefrac(A, T, LF),
+      abs(M) >= 2.0 * MMED,
+      LF <= 0.333333,
+      M < 0.
+
+  # Sidecar entry (always short): |m| < 2 * m_med AND g <= -0.75
+  rel sidecar(-A: Equity, @T: Timestamp)
+  sidecar(A, T) :- clock(A, T, _), m_val(A, T, M), m_med(A, T, MMED),
+      g_val(A, T, G),
+      abs(M) < 2.0 * MMED,
+      G <= -0.75.
+
+  # Sizing: contracts = direction * D / (ATR * multiplier)
+  # D = 6493.912071090746
+  rel entry_qty_long(-A: Equity, @T: Timestamp, -Q: Quantity<Shares>)
+  entry_qty_long(A, T, Q) :- main_long(A, T),
+      prev_atr(A, T, ATR), multiplier(A, T, M), ATR > 0 USD, M > 0,
+      D = 6493.912071090746 USD,
+      Q = D / (ATR * M).
+
+  rel entry_qty_short(-A: Equity, @T: Timestamp, -Q: Quantity<Shares>)
+  entry_qty_short(A, T, Q) :- main_short(A, T),
+      prev_atr(A, T, ATR), multiplier(A, T, M), ATR > 0 USD, M > 0,
+      D = 6493.912071090746 USD,
+      Q = D / (ATR * M).
+  entry_qty_short(A, T, Q) :- sidecar(A, T),
+      prev_atr(A, T, ATR), multiplier(A, T, M), ATR > 0 USD, M > 0,
+      D = 6493.912071090746 USD,
+      Q = D / (ATR * M).
+
+  # Decisions: enter at clock time, exit at close_m
+  decide(T, buy(A, Q)) :- main_long(A, T), entry_qty_long(A, T, Q).
+  decide(T, short(A, Q)) :- main_short(A, T), entry_qty_short(A, T, Q).
+  decide(T, short(A, Q)) :- sidecar(A, T), entry_qty_short(A, T, Q).
+
+  # Exit: sell all at session close
+  decide(T, sell(A, Q)) :- close_m(A, T, _), position(A, T, Q), Q > 0 shares.
+  decide(T, cover(A, Q)) :- close_m(A, T, _), position(A, T, Q), Q < 0 shares.
+}

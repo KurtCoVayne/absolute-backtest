@@ -1,0 +1,4 @@
+warning [W5] r8l at 59:7 in rule r8l::decide#1: literal `3` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 65:7 in rule r8l::decide#2: literal `3` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+r8l: degrees of freedom: 3 params, 2 literals, 4 rules (+ 4 library literals)
+1 strategies, 6 libraries checked: 0 error(s), 2 warning(s)

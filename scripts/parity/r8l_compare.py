@@ -43,7 +43,8 @@ def main() -> int:
     # abt legs: decisions (one per market-session) and their two fills.
     dec = pd.read_parquet(f"{args.dump}/decisions.parquet")
     dec["day"] = pd.to_datetime(dec["t"]).dt.normalize()
-    dec["dir"] = np.sign(dec["amount"])
+    # A target quantity is signed; a delta order (sell, short) records a positive amount.
+    dec["dir"] = np.where(dec["ctor"].isin(["sell", "short"]), -1, 1) * np.sign(dec["amount"])
     fills = pd.read_parquet(f"{args.dump}/fills.parquet")
     fills["day"] = pd.to_datetime(fills["t"]).dt.normalize()
     fills["flow"] = 0.0

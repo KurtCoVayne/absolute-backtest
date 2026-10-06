@@ -1,0 +1,64 @@
+warning [W5] r8l at 59:7 in rule r8l::decide#1: literal `3` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 65:7 in rule r8l::decide#2: literal `3` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+strategy r8l over 183175 bars (2000-01-03T08:31:00 to 2026-08-14T15:00:00), 26 symbols
+decisions: 21903   fills: 43806   dropped: 0
+    end_equity: 130614055.3977
+  max_drawdown: 0.1812
+  start_equity: 1000000.0000
+  total_return: 129.6141
+accounting: fixed base 1000000.00; a period's return is the NAV change over it (not reinvested)
+metrics per day (252 a year, 6850 periods): cagr 0.195281   max_drawdown 0.179974   sharpe 1.2769 (population 1.2770)   volatility 0.1483
+additive: annual_return 0.189439   max_drawdown 0.191678   total_pnl 5149436.82   profit_factor 1.311 per period, 1.184 per trade   trades 21903   win_rate 0.528
+costs: commissions 1024756.38   fees 0.00   slippage 0.00   impact 0.00   turnover 44695048415.89
+liquidity: fill ratio 1.000   participation avg 0.00%   max 0.00%
+funding: cash interest 0.00   margin interest 0.00   borrow fees 0.00   short rebate 0.00
+actions: 0 splits   0 dividends   0 delistings
+exposure: max gross 57298268.76   max leverage 15.382
+warning (cash-management): cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)
+warning (transaction-cost neglect): commissions and fees are zero; fills cost nothing but their price
+warning (slippage): slippage is zero; every order fills at the bar's close
+warning (liquidity): no participation cap; an order fills whole whatever the bar's volume
+warning (market-impact): impact is zero; a large order fills at the quoted price
+warning (leverage): 8893 margin calls (equity below 25% of gross) ignored
+  2000-07-07T09:00:00 buy(ES, 5.98517241575184, moo_moc) (rule r8l::decide#1)
+  2000-07-11T09:00:00 buy(ES, 5.9679835231161364, moo_moc) (rule r8l::decide#1)
+  2000-07-27T09:00:00 buy(ES, 6.760090640042417, moo_moc) (rule r8l::decide#1)
+  2000-08-16T09:00:00 buy(NQ, 2.305667342833569, moo_moc) (rule r8l::decide#1)
+  2000-09-01T09:00:00 short(ES, 8.252787381846858, moo_moc) (rule r8l::decide#2)
+  2000-09-13T09:00:00 buy(NQ, 3.0871937585408826, moo_moc) (rule r8l::decide#1)
+  2000-10-05T09:00:00 buy(ES, 5.759567247087136, moo_moc) (rule r8l::decide#1)
+  2000-10-09T09:00:00 short(NQ, 2.0517889640097144, moo_moc) (rule r8l::decide#2)
+  2000-10-13T09:00:00 buy(NQ, 1.975034084881614, moo_moc) (rule r8l::decide#1)
+  2000-10-17T09:00:00 short(NQ, 1.9318494931104406, moo_moc) (rule r8l::decide#2)
+  2000-10-18T09:00:00 short(ES, 4.474702546832556, moo_moc) (rule r8l::decide#2)
+  2000-10-30T09:00:00 buy(ES, 4.010134818118561, moo_moc) (rule r8l::decide#1)
+  2000-11-22T09:00:00 buy(NQ, 1.905211110779154, moo_moc) (rule r8l::decide#1)
+  2000-11-30T09:00:00 short(ES, 4.976177832253446, moo_moc) (rule r8l::decide#3)
+  2000-11-30T09:00:00 short(NQ, 2.0911003288007555, moo_moc) (rule r8l::decide#3)
+  2001-01-03T09:00:00 buy(NQ, 1.8855726106535269, moo_moc) (rule r8l::decide#1)
+  2001-01-05T09:00:00 short(ES, 4.068229958396709, moo_moc) (rule r8l::decide#2)
+  2001-01-08T09:00:00 short(NQ, 1.7941461724245742, moo_moc) (rule r8l::decide#2)
+  2001-01-12T09:00:00 short(ES, 4.139545543324779, moo_moc) (rule r8l::decide#2)
+  2001-02-06T09:00:00 buy(NQ, 2.6990490736038013, moo_moc) (rule r8l::decide#1)
+  ... 21883 more (--all prints every decision)
+final cash 6149436.82; positions: 
+dump written to $STUDY/results/r8l-sonnet-docs/dump
+warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it
+        4.48 real         4.05 user         0.27 sys
+           662388736  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               41283  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                4162  voluntary context switches
+                1556  involuntary context switches
+         60510637474  instructions retired
+         15624838391  cycles elapsed
+           547587008  peak memory footprint

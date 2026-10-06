@@ -1,0 +1,9 @@
+1.dsl		
+2.dsl		
+3.dsl	1 strategies, 6 libraries checked: 18 error(s), 13 warning(s)	 4 error[F] r; 6 error[T] r; 8 error[X] r; 13 warning[W5] r;
+4.dsl	1 strategies, 6 libraries checked: 17 error(s), 13 warning(s)	 2 error[B] r; 5 error[F] r; 4 error[T] r; 6 error[X] r; 13 warning[W5] r;
+5.dsl	1 strategies, 6 libraries checked: 11 error(s), 15 warning(s)	 1 error[B] r; 4 error[T] r; 6 error[X] r; 2 warning[W1] r; 13 warning[W5] r;
+6.dsl	1 strategies, 6 libraries checked: 13 error(s), 13 warning(s)	 2 error[B] r; 1 error[F] r; 6 error[T] r; 4 error[X] r; 13 warning[W5] r;
+7.dsl	1 strategies, 6 libraries checked: 13 error(s), 13 warning(s)	 2 error[B] r; 1 error[F] r; 6 error[T] r; 4 error[X] r; 13 warning[W5] r;
+8.dsl	1 strategies, 6 libraries checked: 9 error(s), 13 warning(s)	 2 error[B] r; 1 error[F] r; 2 error[T] r; 4 error[X] r; 13 warning[W5] r;
+9.dsl	1 strategies, 6 libraries checked: 0 error(s), 11 warning(s)	 11 warning[W5] r;

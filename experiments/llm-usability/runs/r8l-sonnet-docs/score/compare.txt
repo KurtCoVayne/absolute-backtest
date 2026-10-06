@@ -1,0 +1,30 @@
+legs: python 21892, abt 21903; matched 21891, python only 1, abt only 12
+matched direction equal: 100.0000%
+matched leg P&L equal to 1e-6: 100.0000%; P&L sum python 5,141,809.15 abt 5,141,809.15
+  of the unequal: fallback-fill legs 0 of 0
+python-only legs (first 10):
+     mkt        day  kind  dir_py         m         g     m_med          pnl
+1924  CL 2020-09-02  main    -1.0 -0.214505  0.234934  0.086884  8193.207673
+abt-only legs (first 10):
+      mkt        day  dir_abt      pnl_abt
+1303   CL 2007-04-19     -1.0  3163.645537
+14137  ZB 2016-11-29     -1.0 -4416.507470
+14415  ZB 2023-07-26      1.0  -192.496134
+14822  ZC 2013-06-04      1.0  2554.092230
+15304  ZC 2025-01-21     -1.0 -5301.515977
+15479  ZF 2004-12-08      1.0  5952.464114
+17309  ZL 2026-01-02      1.0  3476.800085
+18562  ZN 2012-01-13      1.0  2377.970122
+20338  ZT 2009-08-06     -1.0 -2709.760780
+20642  ZT 2016-09-29     -1.0 -3369.748033
+
+calendar days 6850 (2000-01-03 .. 2026-08-14)
+                 python          abt       diff
+ann_ret        0.189460     0.189439  -0.000021
+vol            0.148278     0.148348   0.000070
+sharpe         1.277734     1.276992  -0.000742
+maxDD          0.196680     0.191678  -0.005002
+total_$M       5.150002     5.149437  -0.000566
+pf             1.311314     1.311028  -0.000285
+reference (results/r42 scorecard): ann 0.1895, sharpe 1.2777, maxDD 0.1967, total 5.15, pf 1.3113, legs 21,892
+daily correlation 0.999814; days equal to 1e-9 99.81%

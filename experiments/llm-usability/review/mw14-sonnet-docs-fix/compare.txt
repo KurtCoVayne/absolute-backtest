@@ -1,0 +1,24 @@
+weeks compared: 1852 (abt 1852, canon 1852); abt weeks 1991-01-11 .. 2026-07-02
+                    canon            abt         diff
+cagr             0.208995       0.208995     0.000000
+maxdd           -0.261782      -0.261782     0.000000
+sharpe           1.019903       1.019903     0.000000
+vol              0.207434       0.207434     0.000000
+pnl        7534876.544421 7534876.544421     0.000000
+weekly correlation 1.000000; |diff| mean 9.37e-16, max 7.85e-15; weeks equal to 1e-9: 100.0%, to 1e-4: 100.0%
+canon reference (RESULTS.md MW-126): cagr 0.2089947950, maxdd -0.2617817195, sharpe 1.0199, pnl 7,534,877
+largest weekly differences (decision week of the book = the bar before):
+  2011-05-27  canon  0.034820  abt  0.034820  diff -0.000000
+  2013-05-03  canon  0.043981  abt  0.043981  diff -0.000000
+  2015-07-24  canon -0.022394  abt -0.022394  diff -0.000000
+  2015-12-31  canon -0.008163  abt -0.008163  diff  0.000000
+  2016-01-29  canon  0.020214  abt  0.020214  diff -0.000000
+  2016-12-16  canon -0.014125  abt -0.014125  diff -0.000000
+  2018-02-09  canon -0.051380  abt -0.051380  diff  0.000000
+  2021-03-26  canon -0.048917  abt -0.048917  diff  0.000000
+  2023-11-10  canon -0.015812  abt -0.015812  diff  0.000000
+  2026-01-16  canon  0.041783  abt  0.041783  diff -0.000000
+  era 1990s: canon cagr 0.2554  abt 0.2554
+  era 2000s: canon cagr 0.1604  abt 0.1604
+  era 2010s: canon cagr 0.1230  abt 0.1230
+  era 2020-26: canon cagr 0.3688  abt 0.3688

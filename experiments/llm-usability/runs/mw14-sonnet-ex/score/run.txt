@@ -1,0 +1,82 @@
+note: bundle `equities_1w@mw14-2026.06` has not passed its tests; its decisions are not causality-certified
+strategy mw14 over 1853 bars (1991-01-04 to 2026-07-02), 4240 symbols
+decisions: 4848   fills: 4976   dropped: 21
+    end_equity: 809050990.7223
+  max_drawdown: 0.2618
+  start_equity: 1000000.0000
+  total_return: 808.0510
+accounting: fixed base 1000000.00; a period's return is the NAV change over it (not reinvested)
+metrics per bar (52 a year, 1852 periods): cagr 0.206839   max_drawdown 0.261782   sharpe 1.0143 (population 1.0146)   volatility 0.2066
+additive: annual_return 0.209612   max_drawdown 0.292686   total_pnl 7465408.61   profit_factor 1.488 per period, 2.240 per trade   trades 1946   win_rate 0.503
+costs: commissions 216975.67   fees 0.00   slippage 0.00   impact 0.00   turnover 223983853.70
+liquidity: fill ratio 1.000   participation avg 0.00%   max 0.00%
+funding: cash interest 0.00   margin interest 0.00   borrow fees 0.00   short rebate 0.00
+actions: 0 splits   0 dividends   149 delistings
+exposure: max gross 1314773.87   max leverage 1.081
+warning (cash-management): cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)
+warning (transaction-cost neglect): commissions and fees are zero; fills cost nothing but their price
+warning (slippage): slippage is zero; every order fills at the bar's close
+warning (liquidity): no participation cap; an order fills whole whatever the bar's volume
+warning (market-impact): impact is zero; a large order fills at the quoted price
+  1991-01-18 target_weight(0000124698, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000130574, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000132371, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000136817, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000137611, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000140824, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000143684, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000257457, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000265648, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000265913, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-18 target_weight(0000267162, 0.09090909090909091, moc) (rule mw14::decide#2)
+  1991-01-25 target_weight(0000126228, 0.08333333333333333, moc) (rule mw14::decide#2)
+  1991-01-25 target_weight(0000132213, 0.08333333333333333, moc) (rule mw14::decide#2)
+  1991-01-25 target_weight(0000140824, 0, moc) (rule mw14::decide#3)
+  1991-02-08 target_weight(0000124698, 0.07692307692307693, moc) (rule mw14::decide#1)
+  1991-02-08 target_weight(0000136817, 0.07692307692307693, moc) (rule mw14::decide#1)
+  1991-02-08 target_weight(0000144161, 0.07692307692307693, moc) (rule mw14::decide#2)
+  1991-02-08 target_weight(0000257457, 0.07692307692307693, moc) (rule mw14::decide#1)
+  1991-02-08 target_weight(0000267162, 0.07692307692307693, moc) (rule mw14::decide#1)
+  1991-02-15 target_weight(0000130574, 0.07142857142857142, moc) (rule mw14::decide#1)
+  ... 4828 more (--all prints every decision)
+  dropped 2026-07-02 target_weight(0000126412, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000129132, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000129138, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000130649, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000131536, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000132833, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000133104, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000134978, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000138773, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000140448, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000143253, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000143705, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000145854, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0000670463, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0001644878, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0002076329, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0002375201, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0002468741, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0002824843, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0002859474, 0, moc): no next bar
+  dropped 2026-07-02 target_weight(0003724185, 0, moc): no next bar
+final cash 7868639.46; positions: 0000126412=110.81704784035495, 0000129132=7498.237206524067, 0000129138=2411.5828607610574, 0000130649=1242527.2663305318, 0000131536=2172.9683302436797, 0000132833=71.43090489839756, 0000133104=1012.6037549108813, 0000134978=47.07459562048953, 0000138773=30.954691865935104, 0000140448=22725.42882739824, 0000143253=302.033365180315, 0000143705=1311.7654245727506, 0000145854=133.8238276957604, 0000670463=237.60650871929906, 0001644878=11008.54741428869, 0002076329=533.0165660532585, 0002375201=19196.026059025655, 0002468741=9801.264728341594, 0002824843=6267.283338295457, 0002859474=23953.301127214057, 0003724185=556.1948975587563
+warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it
+      238.63 real       233.36 user         4.30 sys
+          8017903616  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1532064  page reclaims
+                 134  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               10087  voluntary context switches
+               24693  involuntary context switches
+       3114800760999  instructions retired
+        942701545748  cycles elapsed
+         11884356512  peak memory footprint
