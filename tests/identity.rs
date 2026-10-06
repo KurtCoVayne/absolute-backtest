@@ -9,9 +9,10 @@ mod corpus;
 use std::fs;
 
 use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{business_days, check_identities, load_csv_dir, write_csv_dir};
+use absolute_backtest::data::{business_days, check_identities, load_parquet_dir, write_parquet_dir};
 use absolute_backtest::kernel::time::format_timestamp;
 use absolute_backtest::kernel::{run, Dataset, ExecConfig, RunError, Value};
+use absolute_backtest::table::{to_text, write_text_table};
 
 fn program(src: &str, name: &str) -> Program {
     let mut ws = corpus::base_workspace();
@@ -188,18 +189,18 @@ fn the_identity_bundle_tests_catch_overlaps() {
 }
 
 #[test]
-fn the_security_table_loads_and_round_trips_through_csv() {
+fn the_security_table_loads_and_round_trips_through_parquet() {
     let p = program(HOLD_NAMED, "hold_named");
     let dir = std::env::temp_dir().join(format!("abt-identity-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    write_csv_dir(&p, &market(), &dir).unwrap();
-    let securities = fs::read_to_string(dir.join("securities.csv")).unwrap();
+    write_parquet_dir(&p, &market(), &dir).unwrap();
+    let securities = to_text(&dir.join("securities.parquet")).unwrap();
     assert!(securities.starts_with("id,ticker,from,to\n"), "{}", securities);
     assert!(securities.contains("E2,BBB,2024-01-08,2024-01-11\n") && securities.contains("E2,BBX,2024-01-11,\n"), "{}", securities);
     // The derived ticker relation is not written: it is rebuilt from the table.
-    assert!(!dir.join("ticker.csv").exists());
-    let (ds, notes) = load_csv_dir(&p, &dir).unwrap();
+    assert!(!dir.join("ticker.parquet").exists());
+    let (ds, notes) = load_parquet_dir(&p, &dir).unwrap();
     assert!(notes.is_empty(), "{:?}", notes);
     assert_eq!(ds.securities.len(), 4);
     assert_eq!(ds.facts["ticker"].len(), 14);
@@ -213,13 +214,13 @@ fn the_security_table_loads_and_round_trips_through_csv() {
     )
     .unwrap();
     assert_eq!(r.symbols[r.fills[0].equity as usize], "E3");
-    // An equity field that is not a security id is an error naming the line.
-    fs::write(dir.join("close.csv"), "A,T,P\nE9,2024-01-08,1.0\n").unwrap();
-    let err = load_csv_dir(&p, &dir).expect_err("E9 is not in the table");
-    assert!(err.contains("close.csv:2") && err.contains("E9") && err.contains("securities.csv"), "{}", err);
+    // An equity field that is not a security id is an error naming the row.
+    write_text_table(&dir.join("close.parquet"), "A,T,P\nE9,2024-01-08,1.0\n").unwrap();
+    let err = load_parquet_dir(&p, &dir).expect_err("E9 is not in the table");
+    assert!(err.contains("close.parquet row 1") && err.contains("E9") && err.contains("securities.parquet"), "{}", err);
     // A malformed table is an error too.
-    fs::write(dir.join("securities.csv"), "id,ticker,from,to\nE1,AAA,2024-01-08,\nE2,AAA,2024-01-09,\n").unwrap();
-    let err = load_csv_dir(&p, &dir).expect_err("overlapping tickers");
+    write_text_table(&dir.join("securities.parquet"), "id,ticker,from,to\nE1,AAA,2024-01-08,\nE2,AAA,2024-01-09,\n").unwrap();
+    let err = load_parquet_dir(&p, &dir).expect_err("overlapping tickers");
     assert!(err.contains("AAA"), "{}", err);
     let _ = fs::remove_dir_all(&dir);
 }

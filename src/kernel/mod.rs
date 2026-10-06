@@ -65,6 +65,32 @@ pub struct Dataset {
     pub securities: Vec<Security>,
     /// The bundle date a ticker literal resolves at; the last bar when unset.
     pub as_of: Option<i64>,
+    /// Contract terms of the securities that are not plain shares (a
+    /// future's multiplier and per-contract commission); a security absent
+    /// here is a share with multiplier 1.
+    pub contracts: BTreeMap<Sym, Contract>,
+}
+
+/// The contract terms of a security (data-bundle doc, section 3, the
+/// security table's contract columns).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Contract {
+    /// Currency per point per contract: P&L is quantity x price change x multiplier.
+    pub multiplier: f64,
+    /// A future: its (back-adjusted) price may be zero or negative.
+    pub future: bool,
+    /// Commission per contract per side, replacing the per-share schedule.
+    pub commission_per_contract: Option<f64>,
+}
+
+impl Default for Contract {
+    fn default() -> Contract {
+        Contract {
+            multiplier: 1.0,
+            future: false,
+            commission_per_contract: None,
+        }
+    }
 }
 
 impl Dataset {
@@ -73,6 +99,13 @@ impl Dataset {
     }
     pub fn intern(&mut self, name: &str) -> Sym {
         self.symbols.intern(name)
+    }
+    /// The contract terms of a security (a share's when none were recorded).
+    pub fn contract(&self, s: Sym) -> Contract {
+        self.contracts.get(&s).cloned().unwrap_or_default()
+    }
+    pub fn is_future(&self, s: Sym) -> bool {
+        self.contracts.get(&s).map(|c| c.future).unwrap_or(false)
     }
     /// Record that security `id` carried `ticker` over `[from, to)`.
     pub fn add_security(&mut self, id: &str, ticker: &str, from: i64, to: Option<i64>) -> Sym {
@@ -204,6 +237,7 @@ impl Dataset {
             available_at: BTreeMap::new(),
             securities: self.securities.clone(),
             as_of: Some(self.bundle_date().unwrap_or(t).min(t)),
+            contracts: self.contracts.clone(),
         };
         // The close of the decision bar t: what a decision at t can have seen.
         let horizon = time::bucket_range(prog.resolution, t).1.max(t);

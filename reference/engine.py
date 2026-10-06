@@ -116,10 +116,33 @@ class Config:
         return last
 
 
-def _rows(path: str) -> pd.DataFrame:
+def _stamp(t) -> str:
+    """A timestamp as the kernel writes one in text: the date, with the time
+    of day when it is not midnight."""
+    if t.hour == 0 and t.minute == 0 and t.second == 0:
+        return t.strftime("%Y-%m-%d")
+    return t.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def read_rows(path: str) -> pd.DataFrame:
+    """A Parquet table of the dump as text cells: timestamps formatted as the
+    kernel formats them, booleans as `true`/`false`, nulls as empty."""
     if not os.path.exists(path):
         return pd.DataFrame()
-    return pd.read_csv(path, dtype=str, keep_default_na=False)
+    frame = pd.read_parquet(path)
+    out = pd.DataFrame(index=frame.index)
+    for col in frame.columns:
+        series = frame[col]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            out[col] = [("" if pd.isna(v) else _stamp(v)) for v in series]
+        elif pd.api.types.is_bool_dtype(series):
+            out[col] = ["true" if v else "false" for v in series]
+        else:
+            out[col] = ["" if (v is None or (isinstance(v, float) and math.isnan(v))) else repr(v) if isinstance(v, float) else str(v) for v in series]
+    return out
+
+
+_rows = read_rows
 
 
 @dataclass
@@ -143,25 +166,25 @@ class Data:
             return frame.columns[-1]
 
         if cfg.price_relation:
-            frame = _rows(os.path.join(data_dir, f"{cfg.price_relation}.csv"))
+            frame = _rows(os.path.join(data_dir, f"{cfg.price_relation}.parquet"))
             if not frame.empty:
                 col = numeric_last(frame)
                 for _, r in frame.iterrows():
                     d.price[(r.iloc[0], epoch(r.iloc[1]))] = float(r[col])
         if cfg.volume_relation:
-            frame = _rows(os.path.join(data_dir, f"{cfg.volume_relation}.csv"))
+            frame = _rows(os.path.join(data_dir, f"{cfg.volume_relation}.parquet"))
             if not frame.empty:
                 col = numeric_last(frame)
                 for _, r in frame.iterrows():
                     d.volume[(r.iloc[0], epoch(r.iloc[1]))] = float(r[col])
-        frame = _rows(os.path.join(data_dir, "split.csv"))
+        frame = _rows(os.path.join(data_dir, "split.parquet"))
         for _, r in frame.iterrows():
             d.splits.setdefault(epoch(r.iloc[1]), []).append((r.iloc[0], float(r.iloc[-1])))
-        frame = _rows(os.path.join(data_dir, "dividend.csv"))
+        frame = _rows(os.path.join(data_dir, "dividend.parquet"))
         for _, r in frame.iterrows():
             # dividend(+A, @T, -Ex, -Pay, -Amount)
             d.dividends.append((epoch(r.iloc[1]), r.iloc[0], epoch(r.iloc[2]), epoch(r.iloc[3]), float(r.iloc[4])))
-        frame = _rows(os.path.join(data_dir, "delisted.csv"))
+        frame = _rows(os.path.join(data_dir, "delisted.parquet"))
         for _, r in frame.iterrows():
             d.delisted.setdefault(epoch(r.iloc[1]), []).append((r.iloc[0], r.iloc[2] if len(r) > 2 else ""))
         return d
@@ -180,7 +203,7 @@ class Reference:
         self.order = {s: i for i, s in enumerate(self.symbols)}
         self.bars: list[int] = [epoch(b) for b in config["bars"]]
         self.data = Data.load(directory, self.cfg)
-        decisions = _rows(os.path.join(directory, "decisions.csv"))
+        decisions = _rows(os.path.join(directory, "decisions.parquet"))
         self.decisions: dict[int, list[tuple]] = {}
         for _, r in decisions.iterrows():
             self.decisions.setdefault(epoch(r["t"]), []).append((r["equity"], r["ctor"], float(r["amount"]), r["rule"]))

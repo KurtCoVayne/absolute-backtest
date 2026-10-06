@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert the NDLake Norgate Parquet lake into the CSV layout of
+"""Convert the NDLake Norgate Parquet lake into the Parquet input layout of
 `src/ingest.rs::norgate_daily` (`abt bundle build --from-norgate DIR`).
 
 Lake layout (s3://ndlake-094828274452 or a local mirror such as ~/ndlake):
@@ -10,20 +10,20 @@ Lake layout (s3://ndlake-094828274452 or a local mirror such as ~/ndlake):
   indexes/index_membership.parquet              half-open [member_from, member_to)
   classification/classification_full/...        GICS/TRBC, ONE snapshot (not point in time)
 
-Output (all dates YYYY-MM-DD; the adapter's `to` columns are inclusive):
+Output (Parquet files, dates as DATE columns; the adapter's `to` columns are inclusive):
 
-  prices.csv          symbol,date,open,high,low,close,volume      as traded
-  symbols.csv         id,symbol,from,to                           id = Norgate asset_id
-  splits.csv          symbol,ex_date,factor                       new shares per old
-  dividends.csv       symbol,announce_date,ex_date,pay_date,amount  announce = pay = ex
-  delistings.csv      symbol,date,reason                          date = first bar after the last print
-  membership.csv      symbol,index,from,to
-  classification.csv  symbol,scheme,code,from,to                  from = the snapshot date
+  prices.parquet          symbol,date,open,high,low,close,volume      as traded
+  symbols.parquet         id,symbol,from,to                           id = Norgate asset_id
+  splits.parquet          symbol,ex_date,factor                       new shares per old
+  dividends.parquet       symbol,announce_date,ex_date,pay_date,amount  announce = pay = ex
+  delistings.parquet      symbol,date,reason                          date = first bar after the last print
+  membership.parquet      symbol,index,from,to
+  classification.parquet  symbol,scheme,code,from,to                  from = the snapshot date
   ingest-report.json  rows in/out, drops by reason, ranges, histograms
 
 The universe is point in time: every equity that was a member of `--index`
 at any time in [--from, --to], never the current list. All heavy work runs
-inside DuckDB and is streamed to CSV with COPY; nothing large is loaded into
+inside DuckDB and is streamed to Parquet with COPY; nothing large is loaded into
 Python.
 
 Decisions that the data forces (also written to the report):
@@ -68,7 +68,7 @@ def main() -> int:
     ap.add_argument("--to", dest="date_to", default=None, help="last date (default: the data's last bar)")
     ap.add_argument("--limit", type=int, default=None, help="keep only N assets (by asset_id), for smoke runs")
     ap.add_argument("--scheme", default="GICS", help="classification scheme to emit (level 1 codes)")
-    ap.add_argument("--exceptions", help="a reviewed exceptions file (test,symbol,date,reason) to copy into the export")
+    ap.add_argument("--exceptions", help="a reviewed exceptions Parquet file (test,symbol,date,reason) to copy into the export")
     args = ap.parse_args()
 
     started = time.time()
@@ -221,18 +221,18 @@ def main() -> int:
 
     def copy(sql: str, name: str) -> int:
         path = out / name
-        con.execute(f"COPY ({sql}) TO '{path}' (HEADER, DELIMITER ',', QUOTE '', ESCAPE '', DATEFORMAT '%Y-%m-%d')")
+        con.execute(f"COPY ({sql}) TO '{path}' (FORMAT parquet, COMPRESSION zstd)")
         n = one(f"SELECT count(*) FROM ({sql})")
         log(f"wrote {name}: {n} rows")
         return n
 
     report["written"] = {}
-    report["written"]["prices.csv"] = copy(
+    report["written"]["prices.parquet"] = copy(
         # The lake stores float32-derived doubles; 6 decimals keeps sub-cent prints positive.
         """SELECT symbol, date, round(open, 6) AS open, round(high, 6) AS high, round(low, 6) AS low,
-                  round(close, 6) AS close, volume FROM sym_bars ORDER BY date, symbol""", "prices.csv")
-    report["written"]["symbols.csv"] = copy(
-        """SELECT asset_id AS id, ticker AS symbol, "from", "to" FROM intervals ORDER BY asset_id, "from" """, "symbols.csv")
+                  round(close, 6) AS close, volume FROM sym_bars ORDER BY date, symbol""", "prices.parquet")
+    report["written"]["symbols.parquet"] = copy(
+        """SELECT asset_id AS id, ticker AS symbol, "from", "to" FROM intervals ORDER BY asset_id, "from" """, "symbols.parquet")
 
     # Helper: the symbol carrying an asset on a date.
     sym_at = """(SELECT i.ticker FROM intervals i WHERE i.asset_id = {a} AND {d} >= i."from" AND (i."to" IS NULL OR {d} <= i."to"))"""
@@ -251,8 +251,8 @@ def main() -> int:
         JOIN sym_bars b ON b.asset_id = c.asset_id AND b.date = c.ex_date
         WHERE c.action_type = 'SPLIT' AND c.split_ratio > 0 AND c.split_ratio <> 1
     """)
-    n_splits = copy("SELECT symbol, ex_date, factor FROM splits ORDER BY ex_date, symbol", "splits.csv")
-    report["written"]["splits.csv"] = n_splits
+    n_splits = copy("SELECT symbol, ex_date, factor FROM splits ORDER BY ex_date, symbol", "splits.parquet")
+    report["written"]["splits.parquet"] = n_splits
     report["drops"]["split_not_on_a_bar_or_unit"] = split_all - n_splits
     div_all = one("SELECT count(*) FROM ca WHERE action_type = 'DIV'")
     # Norgate quotes a dividend per share before a same-day split; the
@@ -268,9 +268,9 @@ def main() -> int:
     """)
     report["dividends_rescaled_for_same_day_split"] = one("SELECT count(*) FROM divs WHERE rescaled")
     report["drops"]["dividend_outside_symbol_span_or_nonpositive"] = div_all - one("SELECT count(*) FROM divs WHERE symbol IS NOT NULL")
-    report["written"]["dividends.csv"] = copy(
+    report["written"]["dividends.parquet"] = copy(
         "SELECT symbol, ex_date AS announce_date, ex_date, ex_date AS pay_date, round(amount, 6) AS amount FROM divs WHERE symbol IS NOT NULL ORDER BY ex_date, symbol",
-        "dividends.csv")
+        "dividends.parquet")
 
     # 5. Delistings with an inferred reason (see the module docstring).
     con.execute(f"""
@@ -296,7 +296,7 @@ def main() -> int:
         "master_date_differs": one("SELECT count(*) FROM delist WHERE delisting_date IS NOT NULL AND delisting_date <> last_bar"),
         "stops_trading_but_master_active": one("SELECT count(*) FROM delist WHERE status = 'active'"),
     }
-    report["written"]["delistings.csv"] = copy("SELECT symbol, delist_date AS date, reason FROM delist ORDER BY date, symbol", "delistings.csv")
+    report["written"]["delistings.parquet"] = copy("SELECT symbol, delist_date AS date, reason FROM delist ORDER BY date, symbol", "delistings.parquet")
 
     # 6. Membership: half-open [member_from, member_to) in the lake, inclusive
     # in the adapter, clipped to each symbol interval and to the asset's bars,
@@ -323,39 +323,40 @@ def main() -> int:
         FROM member_bars GROUP BY symbol, f, island
     """)
     report["membership_intervals_split_at_missing_bars"] = one("SELECT count(*) FROM mem") - one("SELECT count(*) FROM mem0 WHERE f <= t")
-    report["written"]["membership.csv"] = copy(
+    report["written"]["membership.parquet"] = copy(
         f"""SELECT symbol, '{args.label}' AS "index", f AS "from",
                    CASE WHEN open_ended AND t >= DATE '{last_day}' THEN NULL ELSE t END AS "to"
-            FROM mem WHERE f <= t ORDER BY symbol, f""", "membership.csv")
+            FROM mem WHERE f <= t ORDER BY symbol, f""", "membership.parquet")
 
     # 7. Classification: one snapshot, emitted from its snapshot date onward.
     snap = one(f"SELECT max(snapshot_date) FROM read_parquet({p('classification/classification_full/data.parquet')}) WHERE scheme = '{args.scheme}'")
     report["classification_snapshot"] = str(snap)
-    report["written"]["classification.csv"] = copy(
+    report["written"]["classification.parquet"] = copy(
         f"""SELECT i.ticker AS symbol, c.scheme, c.code, greatest(c.snapshot_date, i."from") AS "from", i."to"
             FROM read_parquet({p('classification/classification_full/data.parquet')}) c
             JOIN ids USING (asset_id) JOIN intervals i USING (asset_id)
             WHERE c.scheme = '{args.scheme}' AND c.level = 1 AND c.snapshot_date <= DATE '{last_day}'
               AND (i."to" IS NULL OR i."to" >= c.snapshot_date)
-            ORDER BY symbol""", "classification.csv")
+            ORDER BY symbol""", "classification.parquet")
 
     if args.exceptions:
-        rows = Path(args.exceptions).read_text().splitlines()
-        if not rows or rows[0].strip() != "test,symbol,date,reason":
-            log(f"error: {args.exceptions} must start with the header test,symbol,date,reason")
+        src = f"read_parquet('{args.exceptions}')"
+        cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()]
+        if cols != ["test", "symbol", "date", "reason"]:
+            log(f"error: {args.exceptions} must have the columns test,symbol,date,reason (has {cols})")
             return 2
         # Keep the rows whose symbol carries an asset of this export on that
         # date (a --limit subset has fewer; a ticker may belong to another
         # asset at another time).
-        def carried(row: str) -> bool:
-            _, symbol, day, _ = row.split(",", 3)
-            return one(f"""SELECT count(*) FROM intervals WHERE ticker = ? AND "from" <= DATE '{day}'
-                           AND ("to" IS NULL OR "to" >= DATE '{day}')""".replace("?", "'" + symbol.replace("'", "''") + "'")) > 0
-        kept = [rows[0]] + [r for r in rows[1:] if r.strip() and carried(r)]
-        (out / "exceptions.csv").write_text("\n".join(kept) + "\n")
-        report["written"]["exceptions.csv"] = len(kept) - 1
-        report["drops"]["exception_for_symbol_not_exported"] = len(rows) - len(kept)
-        log(f"wrote exceptions.csv: {len(kept) - 1} reviewed exceptions from {args.exceptions}")
+        kept_sql = f"""SELECT e.test, e.symbol, CAST(e.date AS DATE) AS date, e.reason FROM {src} e
+            WHERE EXISTS (SELECT 1 FROM intervals i WHERE i.ticker = e.symbol AND i."from" <= CAST(e.date AS DATE)
+                          AND (i."to" IS NULL OR i."to" >= CAST(e.date AS DATE)))
+            ORDER BY date, symbol"""
+        total = one(f"SELECT count(*) FROM {src}")
+        kept = copy(kept_sql, "exceptions.parquet")
+        report["written"]["exceptions.parquet"] = kept
+        report["drops"]["exception_for_symbol_not_exported"] = total - kept
+        log(f"wrote exceptions.parquet: {kept} reviewed exceptions from {args.exceptions}")
 
     report["decisions"] = [
         "prices are Norgate RAW (as traded); the lake's Phase-0 gate refuses adjusted series",

@@ -8,7 +8,7 @@
 # (asset counts, 0 = every member since FROM), FROM=2014-01-01, LIMIT=1800
 # (seconds per cell), ABT=target/release/abt, PY=python3 (with duckdb).
 #
-# Each rung: convert a subset of the lake (scripts/ingest/norgate_parquet_to_csv.py
+# Each rung: convert a subset of the lake (scripts/ingest/norgate_lake_to_inputs.py
 # --limit N), build and test the bundle, then run momentum_12_1, low_volatility
 # and total_return_momentum (n = a tenth of the names, at most 50; 20 long-only) with --timing on the batch kernel, and on the fold
 # kernel at the 500 rung. Prints a Markdown table and the log-log slope of run
@@ -26,7 +26,7 @@ LIMIT=${LIMIT:-1800}
 ABT=${ABT:-target/release/abt}
 PY=${PY:-python3}
 CORPUS="corpus/env corpus/lib corpus/strategies"
-EXCEPTIONS=scripts/ingest/reviewed/norgate-spx-2014.csv
+EXCEPTIONS=scripts/ingest/reviewed/norgate-spx-2014.parquet
 mkdir -p "$OUT"
 ROWS="$OUT/rows.tsv"
 : >"$ROWS"
@@ -62,14 +62,14 @@ cell() {
 }
 
 for rung in $RUNGS; do
-  csv="$OUT/csv-$rung" bundle="$OUT/bundle-$rung"
+  inputs="$OUT/inputs-$rung" bundle="$OUT/bundle-$rung"
   limit=(); [ "$rung" != 0 ] && limit=(--limit "$rung")
   t=$(now)
-  "$PY" scripts/ingest/norgate_parquet_to_csv.py --lake "$LAKE" --out "$csv" --from "$FROM" ${limit[@]+"${limit[@]}"} --exceptions "$EXCEPTIONS" 2>"$OUT/convert-$rung.log" || { echo "convert $rung failed" >&2; continue; }
+  "$PY" scripts/ingest/norgate_lake_to_inputs.py --lake "$LAKE" --out "$inputs" --from "$FROM" ${limit[@]+"${limit[@]}"} --exceptions "$EXCEPTIONS" 2>"$OUT/convert-$rung.log" || { echo "convert $rung failed" >&2; continue; }
   convert_s=$(since "$t")
   rm -rf "$bundle"; t=$(now)
   tflag=-v; [ "$(uname)" = Darwin ] && tflag=-l
-  /usr/bin/time $tflag "$ABT" bundle build --from-norgate "$csv" --env equities_1d_v2 --version bench --out "$bundle" $CORPUS >"$OUT/build-$rung.log" 2>&1 \
+  /usr/bin/time $tflag "$ABT" bundle build --from-norgate "$inputs" --env equities_1d_v2 --version bench --out "$bundle" $CORPUS >"$OUT/build-$rung.log" 2>&1 \
     || { echo "bundle build $rung failed: $(grep -v '^ ' "$OUT/build-$rung.log" | tail -1)" >&2; continue; }
   build_s=$(since "$t"); t=$(now)
   "$ABT" bundle test "$bundle" $CORPUS >"$OUT/test-$rung.log" 2>&1
@@ -98,7 +98,7 @@ else
 fi
 echo "abt $(git rev-parse --short HEAD 2>/dev/null), $(rustc --version 2>/dev/null || ~/.cargo/bin/rustc --version 2>/dev/null || echo rustc unknown)"
 echo
-echo "Ingest (convert = lake to CSV, build = CSV to bundle):"
+echo "Ingest (convert = lake to Parquet inputs, build = inputs to bundle):"
 echo
 echo "| names | price rows | convert s | bundle build s | build peak RSS bytes | bundle test s | test result |"
 echo "| ---: | ---: | ---: | ---: | ---: | ---: | --- |"

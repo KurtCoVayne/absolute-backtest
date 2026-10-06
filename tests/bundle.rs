@@ -41,7 +41,7 @@ fn a_bundle_round_trips_a_catalog_market_through_parquet() {
     let m = write_bundle(&p, &ds, &dir, "equities_1d_v2", "2026.10").unwrap();
     assert_eq!(m.name, "equities_1d_v2");
     assert_eq!(m.version, "2026.10");
-    assert!(dir.join("manifest.json").exists() && dir.join("securities.csv").exists());
+    assert!(dir.join("manifest.json").exists() && dir.join("securities.parquet").exists());
     // One partition per relation and month of the temporal key.
     let close = m.relations.iter().find(|r| r.name == "close").unwrap();
     assert_eq!(close.rows, ds.facts["close"].len());
@@ -254,19 +254,12 @@ fn a_reviewed_exception_admits_a_real_price_move_and_is_counted() {
         ..exceptions[0].clone()
     }];
     assert!(!run_tests_with(&p, &ds, &wrong).into_iter().find(|r| r.name == "action reconciliation").unwrap().passed);
-    // In a bundle, the exceptions live in exceptions.csv next to the manifest.
+    // In a bundle, the exceptions live in exceptions.parquet next to the manifest.
     let dir = scratch("exceptions");
     write_bundle(&p, &ds, &dir, "equities_1d_v2", "2026.10").unwrap();
     let (m, _) = test_bundle(&p, &dir).unwrap();
     assert!(m.tests.is_none(), "without the file the bundle fails");
-    fs::write(
-        dir.join("exceptions.csv"),
-        format!(
-            "test,security,date,reason\naction reconciliation,E1,{},real move: a short-seller report\n",
-            absolute_backtest::kernel::time::format_timestamp(t)
-        ),
-    )
-    .unwrap();
+    absolute_backtest::bundle::write_exceptions(&dir, &exceptions).unwrap();
     let (m, results) = test_bundle(&p, &dir).unwrap();
     assert!(m.tests.is_some(), "{:?}", results);
     let _ = fs::remove_dir_all(&dir);

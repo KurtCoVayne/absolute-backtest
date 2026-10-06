@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The bundle test's action reconciliation (src/bundle.rs::run_tests), run on
-a `--from-norgate` CSV directory and printed in full rather than the first
+a `--from-norgate` input directory (Parquet) and printed in full rather than the first
 five problems, each classified so a person can decide whether the data or
 the test is wrong:
 
@@ -22,17 +22,17 @@ import duckdb
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("dir")
-    ap.add_argument("--csv", help="write every problem to this CSV")
-    ap.add_argument("--propose", help="write a DRAFT exceptions file (test,symbol,date,reason) for a person to review")
+    ap.add_argument("--problems", help="write every problem to this Parquet file")
+    ap.add_argument("--propose", help="write a DRAFT exceptions Parquet file (test,symbol,date,reason) for a person to review, then exceptions_edit.py merge")
     args = ap.parse_args()
     d = args.dir.rstrip("/")
     con = duckdb.connect()
     con.execute(f"""
         CREATE TABLE px AS SELECT symbol, date, close,
-            lag(close) OVER w AS prev, lead(close, 5) OVER w AS ahead5 FROM read_csv('{d}/prices.csv', header=true)
+            lag(close) OVER w AS prev, lead(close, 5) OVER w AS ahead5 FROM read_parquet('{d}/prices.parquet')
             WINDOW w AS (PARTITION BY symbol ORDER BY date)""")
-    con.execute(f"CREATE TABLE sp AS SELECT * FROM read_csv('{d}/splits.csv', header=true)")
-    con.execute(f"CREATE TABLE dv AS SELECT symbol, ex_date, sum(amount) amount FROM read_csv('{d}/dividends.csv', header=true) GROUP BY ALL")
+    con.execute(f"CREATE TABLE sp AS SELECT * FROM read_parquet('{d}/splits.parquet')")
+    con.execute(f"CREATE TABLE dv AS SELECT symbol, ex_date, sum(amount) amount FROM read_parquet('{d}/dividends.parquet') GROUP BY ALL")
     con.execute("""
         CREATE TABLE problems AS
         SELECT p.symbol, p.date, p.prev, p.close, (p.close + coalesce(dv.amount, 0)) / p.prev AS ratio, s.factor, dv.amount AS dividend,
@@ -50,11 +50,11 @@ def main() -> int:
     print(con.sql("SELECT kind, count(*) n, count(DISTINCT symbol) symbols FROM problems GROUP BY 1 ORDER BY 2 DESC"))
     print(con.sql("SELECT symbol, count(*) n, min(date) AS first_date, max(date) AS last_date FROM problems GROUP BY 1 ORDER BY 2 DESC LIMIT 25"))
     print(con.sql("SELECT * FROM problems WHERE kind <> 'jump_reverting' ORDER BY kind, date LIMIT 80").df().to_string())
-    if args.csv:
-        con.execute(f"COPY problems TO '{args.csv}' (HEADER)")
+    if args.problems:
+        con.execute(f"COPY problems TO '{args.problems}' (FORMAT parquet)")
     if args.propose:
         # Reasons by category; every row is a claim a person must check.
-        con.execute(f"CREATE TABLE gone AS SELECT * FROM read_csv('{d}/delistings.csv', header=true)")
+        con.execute(f"CREATE TABLE gone AS SELECT * FROM read_parquet('{d}/delistings.parquet')")
         con.execute(f"""
             COPY (
               SELECT 'action reconciliation' AS test, p.symbol, p.date,
@@ -68,7 +68,7 @@ def main() -> int:
                   ELSE 'single-name event move of ' || round(100 * (p.ratio - 1)) || '% with no split in the vendor table'
                 END AS reason
               FROM problems p LEFT JOIN gone g ON g.symbol = p.symbol ORDER BY p.date, p.symbol
-            ) TO '{args.propose}' (HEADER, QUOTE '', ESCAPE '', DATEFORMAT '%Y-%m-%d')""")
+            ) TO '{args.propose}' (FORMAT parquet)""")
         print(f"draft exceptions written to {args.propose}; review every row before using it", file=sys.stderr)
     return 0
 

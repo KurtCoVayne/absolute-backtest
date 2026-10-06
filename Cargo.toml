@@ -19,7 +19,7 @@ path = "src/bin/abt.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 arrow = { version = "60", default-features = false }
-parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
 
 [profile.release]
 lto = "thin"

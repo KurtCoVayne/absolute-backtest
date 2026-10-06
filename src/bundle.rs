@@ -1,7 +1,7 @@
 //! The bundle format (data-bundle doc, section 2 "Storage", section 3
 //! "Bundle tests"): a versioned directory the system ships. `manifest.json`
 //! names the environment, the version, the bundle date and every relation
-//! with its availability convention and partitions; `securities.csv` is the
+//! with its availability convention and partitions; `securities.parquet` is the
 //! security table; `log/<relation>/<YYYY-MM>.parquet` are append-only
 //! partitions of the primitive facts by the month of their temporal key;
 //! `snapshots/` is reserved for the fold kernel's checkpoints. A bundle whose
@@ -24,6 +24,7 @@ use crate::data::check_identities;
 use crate::ir::*;
 use crate::kernel::time::{bucket, format_timestamp, parse_timestamp};
 use crate::kernel::{Dataset, Value};
+use crate::table::{write_table, Col, Table};
 
 /// One relation of the bundle.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -56,7 +57,7 @@ pub struct TestReport {
 
 /// A problem a person reviewed and accepted (section 3, bundle tests): the
 /// test, the security id, the bar, and why the data is right and the test
-/// too strict there. Read from `exceptions.csv` next to the manifest
+/// too strict there. Read from `exceptions.parquet` next to the manifest
 /// (`test,security,date,reason`); an accepted problem passes the test and
 /// is counted in its detail.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,26 +70,20 @@ pub struct Exception {
 
 /// The reviewed exceptions of a bundle; none without the file.
 pub fn read_exceptions(dir: &Path) -> Result<Vec<Exception>, String> {
-    let path = dir.join("exceptions.csv");
+    let path = dir.join("exceptions.parquet");
     if !path.exists() {
         return Ok(vec![]);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let t = Table::read(&path)?;
+    let (ct, cs, cd, cr) = (t.col("test")?, t.col("security")?, t.col("date")?, t.col("reason")?);
     let mut out = Vec::new();
-    for (i, line) in text.lines().enumerate().skip(1).filter(|(_, l)| !l.trim().is_empty()) {
-        let fields: Vec<&str> = line.splitn(4, ',').map(|f| f.trim()).collect();
-        let [test, security, date, reason] = fields[..] else {
-            return Err(format!("{}:{}: expected test,security,date,reason", path.display(), i + 1));
-        };
-        let t = crate::kernel::time::parse_timestamp(date).ok_or_else(|| format!("{}:{}: `{}` is not a date", path.display(), i + 1, date))?;
-        if reason.is_empty() {
-            return Err(format!("{}:{}: an exception needs a reason", path.display(), i + 1));
-        }
+    for row in 0..t.len() {
+        let reason = t.text(cr, row).ok_or_else(|| format!("{}: an exception needs a reason", t.at(row)))?;
         out.push(Exception {
-            test: test.to_string(),
-            security: security.to_string(),
-            t,
-            reason: reason.to_string(),
+            test: t.string(ct, row)?,
+            security: t.string(cs, row)?,
+            t: t.time(cd, row)?,
+            reason,
         });
     }
     Ok(out)
@@ -99,19 +94,30 @@ pub fn write_exceptions(dir: &Path, exceptions: &[Exception]) -> Result<(), Stri
     if exceptions.is_empty() {
         return Ok(());
     }
-    let mut text = String::from("test,security,date,reason\n");
-    for e in exceptions {
-        if e.test.contains(',') || e.security.contains(',') {
-            return Err(format!("exception {:?}: a test or security id with a comma", e));
-        }
-        text.push_str(&format!("{},{},{},{}\n", e.test, e.security, format_timestamp(e.t), e.reason.replace('\n', " ")));
-    }
-    let path = dir.join("exceptions.csv");
-    std::fs::write(&path, text).map_err(|e| format!("{}: {}", path.display(), e))
+    write_table(
+        &dir.join("exceptions.parquet"),
+        vec![
+            ("test", Col::Str(exceptions.iter().map(|e| Some(e.test.clone())).collect())),
+            ("security", Col::Str(exceptions.iter().map(|e| Some(e.security.clone())).collect())),
+            ("date", Col::Time(exceptions.iter().map(|e| Some(e.t)).collect())),
+            ("reason", Col::Str(exceptions.iter().map(|e| Some(e.reason.clone())).collect())),
+        ],
+    )
+}
+
+/// The on-disk layout version: 2 stores the security table and the
+/// exceptions as Parquet (1 kept them as text files).
+pub const FORMAT: u32 = 2;
+
+fn format_one() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
+    /// The layout version (`FORMAT`); a bundle without it is version 1.
+    #[serde(default = "format_one")]
+    pub format: u32,
     /// The environment the bundle instantiates.
     pub name: String,
     pub version: String,
@@ -185,19 +191,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         return Err(format!("the program is written against `{}`, not `{}`", prog.environment, name));
     }
     fs::create_dir_all(dir.join("log")).map_err(|e| format!("{}: {}", dir.display(), e))?;
-    if !ds.securities.is_empty() {
-        let mut out = String::from("id,ticker,from,to\n");
-        for s in &ds.securities {
-            out.push_str(&format!(
-                "{},{},{},{}\n",
-                ds.symbols.name(s.id),
-                s.ticker,
-                format_timestamp(s.from),
-                s.to.map(format_timestamp).unwrap_or_default()
-            ));
-        }
-        fs::write(dir.join("securities.csv"), out).map_err(|e| e.to_string())?;
-    }
+    crate::data::write_securities(ds, &dir.join("securities.parquet"))?;
     let mut relations = Vec::new();
     for (rel, sig) in &prog.relations {
         if !matches!(sig.kind, Kind::Primitive { .. }) || rel == "ticker" {
@@ -256,6 +250,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         });
     }
     let manifest = Manifest {
+        format: FORMAT,
         name: name.to_string(),
         version: version.to_string(),
         as_of: ds.bundle_date().map(format_timestamp),
@@ -292,27 +287,18 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
 
 /// Read a bundle's facts into a dataset, regardless of its tests.
 fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, String> {
+    if m.format < FORMAT {
+        return Err(format!(
+            "bundle {} is layout version {} (text security table); this abt reads version {}: rebuild it with `abt bundle build`",
+            dir.display(),
+            m.format,
+            FORMAT
+        ));
+    }
     let mut ds = Dataset::new();
-    let table = dir.join("securities.csv");
+    let table = dir.join("securities.parquet");
     if table.exists() {
-        let text = fs::read_to_string(&table).map_err(|e| e.to_string())?;
-        for (ln, line) in text.lines().enumerate().skip(1).filter(|(_, l)| !l.trim().is_empty()) {
-            let f: Vec<&str> = line.split(',').map(|x| x.trim()).collect();
-            if f.len() < 4 {
-                return Err(format!("{}:{}: short row", table.display(), ln + 1));
-            }
-            let from = parse_timestamp(f[2]).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), ln + 1, f[2]))?;
-            let to = if f[3].is_empty() {
-                None
-            } else {
-                Some(parse_timestamp(f[3]).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), ln + 1, f[3]))?)
-            };
-            ds.add_security(f[0], f[1], from, to);
-        }
-        let problems = check_identities(&ds);
-        if !problems.is_empty() {
-            return Err(format!("{}: {}", table.display(), problems.join("; ")));
-        }
+        crate::data::read_securities(&mut ds, &table)?;
     }
     for entry in &m.relations {
         let Some(sig) = prog.relations.get(&entry.name) else { continue };
@@ -622,7 +608,7 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
 pub fn layout() -> Vec<PathBuf> {
     vec![
         PathBuf::from("manifest.json"),
-        PathBuf::from("securities.csv"),
+        PathBuf::from("securities.parquet"),
         PathBuf::from("log/<relation>/<YYYY-MM>.parquet"),
         PathBuf::from("snapshots/"),
     ]
