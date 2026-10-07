@@ -1,0 +1,14 @@
+1.dsl	PARSE: 1.dsl:38:7: parse error: relation `gate` must mark exactly one argument as the temporal key `@`	
+2.dsl	PARSE: 2.dsl:40:45: parse error: expected `,`, found `w`	
+3.dsl	PARSE: 3.dsl:56:33: parse error: expected `window`, `prior_window` or `rows`, found `eligible`	
+4.dsl	PARSE: 4.dsl:56:31: parse error: expected `window`, `prior_window` or `rows`, found `eligible`	
+5.dsl	1 strategies, 5 libraries checked: 10 error(s), 27 warning(s)	 6 error[M] mw; 2 error[T] mw; 2 error[U] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+6.dsl	1 strategies, 5 libraries checked: 9 error(s), 27 warning(s)	 5 error[M] mw; 4 error[T] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+7.dsl	1 strategies, 5 libraries checked: 5 error(s), 27 warning(s)	 5 error[M] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+8.dsl	PARSE: 8.dsl:62:7: parse error: relation `count_elig` must mark exactly one argument as the temporal key `@`	
+9.dsl	1 strategies, 5 libraries checked: 10 error(s), 27 warning(s)	 9 error[M] mw; 1 error[T] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+10.dsl	1 strategies, 5 libraries checked: 8 error(s), 27 warning(s)	 8 error[M] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+11.dsl	1 strategies, 5 libraries checked: 4 error(s), 26 warning(s)	 4 error[M] mw; 2 warning[W4] mw; 24 warning[W5] mw;
+12.dsl	1 strategies, 5 libraries checked: 6 error(s), 27 warning(s)	 6 error[M] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+13.dsl	1 strategies, 5 libraries checked: 1 error(s), 23 warning(s)	 1 error[M] mw; 2 warning[W4] mw; 21 warning[W5] mw;
+14.dsl	1 strategies, 5 libraries checked: 0 error(s), 23 warning(s)	 2 warning[W4] mw; 21 warning[W5] mw;

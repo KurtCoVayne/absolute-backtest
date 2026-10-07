@@ -1,7 +1,7 @@
 //! Vendor ingestion (data-bundle doc, sections 3, 8 and 10): adapters from
 //! a vendor's export layout to the catalog's relations, behind `abt bundle
 //! build --from-norgate DIR` and `--from-databento DIR`. Each adapter reads
-//! plain CSV files in the layout documented on its function, maps vendor
+//! Parquet files (`table`) in the layout documented on its function, maps vendor
 //! symbols to stable security identifiers through a symbol-history table,
 //! and records the schema decisions of section 10 in the manifest
 //! (consolidated bars; the @1d availability offset as a processing delay).
@@ -15,67 +15,43 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::check::Program;
-use crate::kernel::time::{format_timestamp, parse_timestamp};
+use crate::kernel::time::format_timestamp;
 use crate::kernel::{Dataset, Value};
+use crate::table::Table;
 
-/// A CSV file as rows of named fields (header lower-cased, fields trimmed).
-fn read_csv(path: &Path) -> Result<Vec<BTreeMap<String, String>>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let Some(header) = lines.next() else { return Ok(vec![]) };
-    let names: Vec<String> = header.split(',').map(|h| h.trim().to_lowercase()).collect();
-    let mut out = Vec::new();
-    for (i, line) in lines.enumerate() {
-        let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
-        if fields.len() < names.len() {
-            return Err(format!("{}:{}: {} fields, {} expected", path.display(), i + 2, fields.len(), names.len()));
-        }
-        out.push(names.iter().cloned().zip(fields.iter().map(|f| f.to_string())).collect());
-    }
-    Ok(out)
-}
-
-fn field<'a>(row: &'a BTreeMap<String, String>, name: &str, path: &Path) -> Result<&'a str, String> {
-    row.get(name).map(|s| s.as_str()).ok_or_else(|| format!("{}: header lacks column `{}`", path.display(), name))
-}
-
-fn number(row: &BTreeMap<String, String>, name: &str, path: &Path) -> Result<f64, String> {
-    let raw = field(row, name, path)?;
-    raw.parse().map_err(|_| format!("{}: `{}` is not a number in column `{}`", path.display(), raw, name))
-}
-
-fn date(row: &BTreeMap<String, String>, name: &str, path: &Path) -> Result<i64, String> {
-    let raw = field(row, name, path)?;
-    parse_timestamp(raw).ok_or_else(|| format!("{}: `{}` is not a timestamp in column `{}`", path.display(), raw, name))
+/// A table's file in `dir`: `<stem>.parquet`.
+fn file(dir: &Path, stem: &str) -> std::path::PathBuf {
+    dir.join(format!("{}.parquet", stem))
 }
 
 /// The symbol history of a vendor: which identifier carried a symbol over
-/// which dates. Read from `symbols.csv` (`id,symbol,from,to`, `to` empty
+/// which dates. Read from `symbols.parquet` (`id,symbol,from,to`, `to` null
 /// while current); without the file, the symbol is its own identifier.
 struct SymbolHistory {
     rows: Vec<(String, String, i64, Option<i64>)>,
+    /// The rows of each symbol, so a lookup scans one symbol's history.
+    by_symbol: BTreeMap<String, Vec<usize>>,
 }
 
 impl SymbolHistory {
     fn load(path: &Path) -> Result<SymbolHistory, String> {
         if !path.exists() {
-            return Ok(SymbolHistory { rows: vec![] });
+            return Ok(SymbolHistory {
+                rows: vec![],
+                by_symbol: BTreeMap::new(),
+            });
         }
-        let mut rows = Vec::new();
-        for row in read_csv(path)? {
-            let to = field(&row, "to", path)?;
-            rows.push((
-                field(&row, "id", path)?.to_string(),
-                field(&row, "symbol", path)?.to_string(),
-                date(&row, "from", path)?,
-                if to.is_empty() {
-                    None
-                } else {
-                    Some(parse_timestamp(to).ok_or_else(|| format!("{}: `{}` is not a timestamp", path.display(), to))?)
-                },
-            ));
+        let t = Table::read(path)?;
+        let (ci, cs, cf, ct) = (t.col("id")?, t.col("symbol")?, t.col("from")?, t.col("to")?);
+        let mut rows = Vec::with_capacity(t.len());
+        for r in 0..t.len() {
+            rows.push((t.string(ci, r)?, t.string(cs, r)?, t.time(cf, r)?, t.time_opt(ct, r)?));
         }
-        Ok(SymbolHistory { rows })
+        let mut by_symbol: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, row) in rows.iter().enumerate() {
+            by_symbol.entry(row.1.clone()).or_default().push(i);
+        }
+        Ok(SymbolHistory { rows, by_symbol })
     }
 
     /// The identifier carrying `symbol` at `t`.
@@ -83,11 +59,14 @@ impl SymbolHistory {
         if self.rows.is_empty() {
             return Ok(symbol.to_string());
         }
-        self.rows
-            .iter()
-            .find(|(_, s, from, to)| s == symbol && *from <= t && to.map(|x| t <= x).unwrap_or(true))
+        self.by_symbol
+            .get(symbol)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.rows[i])
+            .find(|(_, _, from, to)| *from <= t && to.map(|x| t <= x).unwrap_or(true))
             .map(|(id, ..)| id.clone())
-            .ok_or_else(|| format!("symbol `{}` is carried by no identifier at {} (symbols.csv)", symbol, format_timestamp(t)))
+            .ok_or_else(|| format!("symbol `{}` is carried by no identifier at {} (symbol history)", symbol, format_timestamp(t)))
     }
 
     fn install(&self, ds: &mut Dataset) {
@@ -103,20 +82,25 @@ pub struct Ingested {
     /// The schema decisions taken (section 10), for the manifest's `source`.
     pub source: String,
     pub notes: Vec<String>,
+    /// Reviewed bundle-test exceptions, keyed by identifier (`exceptions`).
+    pub exceptions: Vec<crate::bundle::Exception>,
 }
 
-/// The Norgate-style daily layout (catalog v1, `equities_1d_v2`), one file
-/// per table in `dir`, dates as `YYYY-MM-DD`:
+/// The Norgate-style daily layout (catalog v1, `equities_1d_v2`), one
+/// Parquet file per table in `dir`; dates are date or timestamp columns (or
+/// `YYYY-MM-DD` text):
 ///
-/// - `prices.csv`: `symbol,date,open,high,low,close,volume`, as traded
+/// - `prices`: `symbol,date,open,high,low,close,volume`, as traded
 ///   (never adjusted; the library adjusts causally).
-/// - `symbols.csv` (optional): `id,symbol,from,to`, the symbol history.
-/// - `splits.csv` (optional): `symbol,ex_date,factor` (new shares per old).
-/// - `dividends.csv` (optional): `symbol,announce_date,ex_date,pay_date,amount`.
-/// - `delistings.csv` (optional): `symbol,date,reason`.
-/// - `membership.csv` (optional): `symbol,index,from,to` (`to` empty while
+/// - `symbols` (optional): `id,symbol,from,to`, the symbol history.
+/// - `splits` (optional): `symbol,ex_date,factor` (new shares per old).
+/// - `dividends` (optional): `symbol,announce_date,ex_date,pay_date,amount`.
+/// - `delistings` (optional): `symbol,date,reason`.
+/// - `membership` (optional): `symbol,index,from,to` (`to` null while
 ///   current), expanded to every trading day of the price data.
-/// - `classification.csv` (optional): `symbol,scheme,code,from,to`.
+/// - `classification` (optional): `symbol,scheme,code,from,to`.
+/// - `exceptions` (optional): `test,symbol,date,reason`, problems a person
+///   reviewed and accepted; the bundle keeps them by identifier.
 ///
 /// `universe(A, T)` holds every security with a price on T that is not
 /// delisted by T; `delisted` holds from the delisting date through the
@@ -126,66 +110,72 @@ pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
         return Err(format!("the Norgate adapter produces `equities_1d_v2`; the program is written against `{}`", prog.environment));
     }
     let mut ds = Dataset::new();
-    let history = SymbolHistory::load(&dir.join("symbols.csv"))?;
+    let history = SymbolHistory::load(&file(dir, "symbols"))?;
     history.install(&mut ds);
-    let prices = dir.join("prices.csv");
-    let rows = read_csv(&prices)?;
-    if rows.is_empty() {
-        return Err(format!("{}: no price rows", prices.display()));
+    let prices = Table::read(&file(dir, "prices"))?;
+    if prices.is_empty() {
+        return Err(format!("{}: no price rows", prices.path().display()));
     }
+    let (cs, cd, cv) = (prices.col("symbol")?, prices.col("date")?, prices.col("volume")?);
+    let ohlc = [
+        ("open", prices.col("open")?),
+        ("high", prices.col("high")?),
+        ("low", prices.col("low")?),
+        ("close", prices.col("close")?),
+    ];
     let mut days: BTreeSet<i64> = BTreeSet::new();
     let mut priced: BTreeMap<i64, BTreeSet<u32>> = BTreeMap::new();
-    for row in &rows {
-        let t = date(row, "date", &prices)?;
-        let id = history.id_at(field(row, "symbol", &prices)?, t)?;
+    for r in 0..prices.len() {
+        let t = prices.time(cd, r)?;
+        let id = history.id_at(&prices.string(cs, r)?, t)?;
         let sym = ds.intern(&id);
-        for (col, rel) in [("open", "open"), ("high", "high"), ("low", "low"), ("close", "close")] {
-            let p = number(row, col, &prices)?;
+        for (rel, c) in ohlc {
+            let p = prices.number(c, r)?;
             if p <= 0.0 {
-                return Err(format!("{}: non-positive {} {} for {} at {}", prices.display(), col, p, id, format_timestamp(t)));
+                return Err(format!("{}: non-positive {} {} for {} at {}", prices.at(r), rel, p, id, format_timestamp(t)));
             }
             ds.add(rel, vec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
         }
-        ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(number(row, "volume", &prices)?)]);
+        ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(prices.number(cv, r)?)]);
         days.insert(t);
         priced.entry(t).or_default().insert(sym);
     }
-    let splits = dir.join("splits.csv");
-    if splits.exists() {
-        for row in read_csv(&splits)? {
-            let t = date(&row, "ex_date", &splits)?;
-            let sym = ds.intern(&history.id_at(field(&row, "symbol", &splits)?, t)?);
-            ds.add("split", vec![Value::Equity(sym), Value::Time(t), Value::Num(number(&row, "factor", &splits)?)]);
+    let n_prices = prices.len();
+    drop(prices);
+    if let Some(t) = optional(dir, "splits")? {
+        let (cs, ce, cf) = (t.col("symbol")?, t.col("ex_date")?, t.col("factor")?);
+        for r in 0..t.len() {
+            let ex = t.time(ce, r)?;
+            let sym = ds.intern(&history.id_at(&t.string(cs, r)?, ex)?);
+            ds.add("split", vec![Value::Equity(sym), Value::Time(ex), Value::Num(t.number(cf, r)?)]);
         }
     }
-    let dividends = dir.join("dividends.csv");
-    if dividends.exists() {
-        for row in read_csv(&dividends)? {
-            let announce = date(&row, "announce_date", &dividends)?;
-            let ex = date(&row, "ex_date", &dividends)?;
-            let pay = date(&row, "pay_date", &dividends)?;
-            let sym = ds.intern(&history.id_at(field(&row, "symbol", &dividends)?, ex)?);
+    if let Some(t) = optional(dir, "dividends")? {
+        let (cs, ca, ce, cp, cm) = (t.col("symbol")?, t.col("announce_date")?, t.col("ex_date")?, t.col("pay_date")?, t.col("amount")?);
+        for r in 0..t.len() {
+            let ex = t.time(ce, r)?;
+            let sym = ds.intern(&history.id_at(&t.string(cs, r)?, ex)?);
             ds.add(
                 "dividend",
                 vec![
                     Value::Equity(sym),
-                    Value::Time(announce),
+                    Value::Time(t.time(ca, r)?),
                     Value::Time(ex),
-                    Value::Time(pay),
-                    Value::Num(number(&row, "amount", &dividends)?),
+                    Value::Time(t.time(cp, r)?),
+                    Value::Num(t.number(cm, r)?),
                 ],
             );
         }
     }
     let mut gone: BTreeMap<u32, i64> = BTreeMap::new();
-    let delistings = dir.join("delistings.csv");
-    if delistings.exists() {
-        for row in read_csv(&delistings)? {
-            let t = date(&row, "date", &delistings)?;
-            let sym = ds.intern(&history.id_at(field(&row, "symbol", &delistings)?, t)?);
-            let reason = ds.labels.intern(field(&row, "reason", &delistings)?);
-            gone.insert(sym, t);
-            for &d in days.range(t..) {
+    if let Some(t) = optional(dir, "delistings")? {
+        let (cs, cd, cr) = (t.col("symbol")?, t.col("date")?, t.col("reason")?);
+        for r in 0..t.len() {
+            let d0 = t.time(cd, r)?;
+            let sym = ds.intern(&history.id_at(&t.string(cs, r)?, d0)?);
+            let reason = ds.labels.intern(&t.string(cr, r)?);
+            gone.insert(sym, d0);
+            for &d in days.range(d0..) {
                 ds.add("delisted", vec![Value::Equity(sym), Value::Time(d), Value::Label(reason)]);
             }
         }
@@ -198,18 +188,12 @@ pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
             ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
         }
     }
-    let membership = dir.join("membership.csv");
-    if membership.exists() {
-        for row in read_csv(&membership)? {
-            let from = date(&row, "from", &membership)?;
-            let to_raw = field(&row, "to", &membership)?;
-            let to = if to_raw.is_empty() {
-                i64::MAX
-            } else {
-                parse_timestamp(to_raw).ok_or_else(|| format!("{}: `{}` is not a timestamp", membership.display(), to_raw))?
-            };
-            let index = ds.labels.intern(field(&row, "index", &membership)?);
-            let symbol = field(&row, "symbol", &membership)?.to_string();
+    if let Some(t) = optional(dir, "membership")? {
+        let (cs, ci, cf, ct) = (t.col("symbol")?, t.col("index")?, t.col("from")?, t.col("to")?);
+        for r in 0..t.len() {
+            let (from, to) = (t.time(cf, r)?, t.time_opt(ct, r)?.unwrap_or(i64::MAX));
+            let index = ds.labels.intern(&t.string(ci, r)?);
+            let symbol = t.string(cs, r)?;
             for &d in days.range(from..=to) {
                 let Ok(id) = history.id_at(&symbol, d) else { continue };
                 let sym = ds.intern(&id);
@@ -217,19 +201,13 @@ pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
             }
         }
     }
-    let classification = dir.join("classification.csv");
-    if classification.exists() {
-        for row in read_csv(&classification)? {
-            let from = date(&row, "from", &classification)?;
-            let to_raw = field(&row, "to", &classification)?;
-            let to = if to_raw.is_empty() {
-                i64::MAX
-            } else {
-                parse_timestamp(to_raw).ok_or_else(|| format!("{}: `{}` is not a timestamp", classification.display(), to_raw))?
-            };
-            let scheme = ds.labels.intern(field(&row, "scheme", &classification)?);
-            let code = ds.labels.intern(field(&row, "code", &classification)?);
-            let symbol = field(&row, "symbol", &classification)?.to_string();
+    if let Some(t) = optional(dir, "classification")? {
+        let (cs, csc, cc, cf, ct) = (t.col("symbol")?, t.col("scheme")?, t.col("code")?, t.col("from")?, t.col("to")?);
+        for r in 0..t.len() {
+            let (from, to) = (t.time(cf, r)?, t.time_opt(ct, r)?.unwrap_or(i64::MAX));
+            let scheme = ds.labels.intern(&t.string(csc, r)?);
+            let code = ds.labels.intern(&t.string(cc, r)?);
+            let symbol = t.string(cs, r)?;
             for &d in days.range(from..=to) {
                 let Ok(id) = history.id_at(&symbol, d) else { continue };
                 let sym = ds.intern(&id);
@@ -237,23 +215,52 @@ pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
             }
         }
     }
+    let mut exceptions = Vec::new();
+    if let Some(t) = optional(dir, "exceptions")? {
+        let (ct, cs, cd, cr) = (t.col("test")?, t.col("symbol")?, t.col("date")?, t.col("reason")?);
+        for r in 0..t.len() {
+            let d = t.time(cd, r)?;
+            let reason = t.text(cr, r).ok_or_else(|| format!("{}: an exception needs a reason", t.at(r)))?;
+            exceptions.push(crate::bundle::Exception {
+                test: t.string(ct, r)?,
+                security: history.id_at(&t.string(cs, r)?, d)?,
+                t: d,
+                reason,
+            });
+        }
+    }
     ds.derive_tickers();
-    let notes = vec![format!("{} price rows over {} trading days; {} securities", rows.len(), days.len(), ds.symbols.len())];
+    let mut notes = vec![format!("{} price rows over {} trading days; {} securities", n_prices, days.len(), ds.symbols.len())];
+    if !exceptions.is_empty() {
+        notes.push(format!("{} reviewed bundle-test exceptions", exceptions.len()));
+    }
     Ok(Ingested {
         dataset: ds,
         source: "norgate daily export: OHLCV as traded, actions as events, membership and classification expanded to trading days; availability at bar close".into(),
         notes,
+        exceptions,
     })
 }
 
-/// The Databento-style minute layout (the catalog target, `equities_1m`):
+/// An optional table of `dir`: `None` without its file.
+fn optional(dir: &Path, stem: &str) -> Result<Option<Table>, String> {
+    let path = file(dir, stem);
+    if path.exists() {
+        Table::read(&path).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+/// The Databento-style minute layout (the catalog target, `equities_1m`),
+/// Parquet files in `dir`:
 ///
-/// - `ohlcv-1m.csv`: `ts_event,instrument_id,open,high,low,close,volume`
-///   with an optional `ts_recv`, timestamps as `YYYY-MM-DDTHH:MM:SS` (UTC)
-///   and prices as decimals (a raw fixed-point export is divided by 1e9
-///   by the operator's projection). `ts_event` is the bar's open; the
-///   bar's temporal key is its close, one minute later.
-/// - `symbology.csv` (optional): `id,symbol,from,to`, Databento's
+/// - `ohlcv-1m`: `ts_event,instrument_id,open,high,low,close,volume` with
+///   an optional `ts_recv`, timestamps as timestamp columns (UTC) or text
+///   `YYYY-MM-DDTHH:MM:SS`, and prices as decimals (a raw fixed-point
+///   export is divided by 1e9 by the operator's projection). `ts_event` is
+///   the bar's open; the bar's temporal key is its close, one minute later.
+/// - `symbology` (optional): `id,symbol,from,to`, Databento's
 ///   `instrument_id` history mapped onto the system's identifiers; without
 ///   it the instrument id is the identifier.
 ///
@@ -266,26 +273,29 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
         return Err(format!("the Databento adapter produces `equities_1m`; the program is written against `{}`", prog.environment));
     }
     let mut ds = Dataset::new();
-    let history = SymbolHistory::load(&dir.join("symbology.csv"))?;
+    let history = SymbolHistory::load(&file(dir, "symbology"))?;
     history.install(&mut ds);
-    let path = dir.join("ohlcv-1m.csv");
-    let rows = read_csv(&path)?;
-    if rows.is_empty() {
-        return Err(format!("{}: no bar rows", path.display()));
+    let bars = Table::read(&file(dir, "ohlcv-1m"))?;
+    if bars.is_empty() {
+        return Err(format!("{}: no bar rows", bars.path().display()));
     }
-    let recorded = rows[0].contains_key("ts_recv");
-    for row in &rows {
-        let open = date(row, "ts_event", &path)?;
-        let t = open + 60;
-        let id = history.id_at(field(row, "instrument_id", &path)?, t)?;
+    let (ce, ci, cc, cv) = (bars.col("ts_event")?, bars.col("instrument_id")?, bars.col("close")?, bars.col("volume")?);
+    let recv = bars.col("ts_recv").ok();
+    let recorded = recv.is_some();
+    for r in 0..bars.len() {
+        let t = bars.time(ce, r)? + 60;
+        let id = history.id_at(&bars.string(ci, r)?, t)?;
         let sym = ds.intern(&id);
-        let close = number(row, "close", &path)?;
+        let close = bars.number(cc, r)?;
         if close <= 0.0 {
-            return Err(format!("{}: non-positive close {} for {} at {}", path.display(), close, id, format_timestamp(t)));
+            return Err(format!("{}: non-positive close {} for {} at {}", bars.at(r), close, id, format_timestamp(t)));
         }
-        let avail = if recorded { date(row, "ts_recv", &path)?.max(t) + processing_delay } else { t + processing_delay };
+        let avail = match recv {
+            Some(c) => bars.time(c, r)?.max(t) + processing_delay,
+            None => t + processing_delay,
+        };
         let close_tuple = vec![Value::Equity(sym), Value::Time(t), Value::Num(close)];
-        let volume_tuple = vec![Value::Equity(sym), Value::Time(t), Value::Num(number(row, "volume", &path)?)];
+        let volume_tuple = vec![Value::Equity(sym), Value::Time(t), Value::Num(bars.number(cv, r)?)];
         let universe_tuple = vec![Value::Equity(sym), Value::Time(t)];
         if recorded || processing_delay > 0 {
             ds.add_available("close_m", close_tuple, avail);
@@ -300,7 +310,7 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
     ds.derive_tickers();
     let notes = vec![format!(
         "{} minute bars; {} securities; availability {}{}",
-        rows.len(),
+        bars.len(),
         ds.symbols.len(),
         if recorded { "from ts_recv" } else { "at bar close" },
         if processing_delay > 0 {
@@ -317,5 +327,6 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
             if processing_delay > 0 { format!(" plus {} s", processing_delay) } else { String::new() }
         ),
         notes,
+        exceptions: vec![],
     })
 }

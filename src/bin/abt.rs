@@ -2,17 +2,17 @@
 //!
 //!   abt check <files...>
 //!   abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
-//!           [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
+//!           [--cash X | --capital X] [--compounding on|off] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--commission-bps X] [--fee-bps X] [--frictionless]
 //!           [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
 //!           [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow]
 //!           [--cash-rate X] [--margin-rate X] [--short-rebate X]
-//!           [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...
+//!           [--price-relation REL] [--as-of DATE] [--start DATE] [--end DATE] [--haircut REASON=X]... [--delist-proceeds by-reason|last-price] [--dividends cash|reinvest] [--actions apply|in-prices] [--param NAME=VALUE]...
 //!           [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]
-//!           [--verify-causality] [--all] [--fills] [--nav] [--quiet] <files...>
+//!           [--verify-causality] [--all] [--fills] [--nav FILE] [--quiet] <files...>
 //!   abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]...
 //!           (--data DIR | --synthetic ...) [--price-relation REL] <files...>
 //!   abt synth --env equities_1d|equities_1m --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
-//!   abt bundle build (--from CSVDIR | --synthetic [--days N] [--symbols A,B,C] [--seed N]) --env NAME --version V --out DIR <files...>
+//!   abt bundle build (--from DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N]) --env NAME --version V --out DIR <files...>
 //!   abt bundle test DIR <files...>
 //!   abt run ... --bundle DIR [--untested]
 //!
@@ -41,12 +41,27 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "nav", "untested"];
+const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "untested", "timing"];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 57] = [
+const OPTIONS: [&str; 72] = [
     "strategy",
+    "window-sums",
+    "threads",
+    "report-calendar",
+    "actions",
+    "start",
+    "end",
+    "periods-per-year",
+    "report-by",
+    "returns",
     "dump",
+    "nav",
+    "compounding",
+    "capital",
+    "commission-bps",
+    "delist-proceeds",
+    "dividends",
     "briefs",
     "from-norgate",
     "from-databento",
@@ -142,11 +157,24 @@ fn parse_args() -> Args {
 }
 
 /// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
-type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError>;
+type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError> + Sync;
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav] [--dump DIR] [--quiet] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from CSVDIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)\n  --bundle DIR          run on a bundle (manifest.json, securities.csv, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav                 print the book at every bar as CSV: t,equity,cash,gross,net,leverage\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export (prices.csv, symbols.csv, splits.csv, dividends.csv, delistings.csv, membership.csv, classification.csv)\n  --from-databento DIR  build from a Databento-style minute export (ohlcv-1m.csv with optional ts_recv, symbology.csv); --processing-delay S adds S seconds to every tuple's availability\n  --frictionless        every cost and liquidity model off (the run is warned)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X | --capital X] [--compounding on|off] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--report-by bar|day] [--periods-per-year X] [--dump DIR] [--quiet] [--timing] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --commission-bps X    commission in basis points of traded notional on both sides (default 0), added to the per-share schedule
+  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)
+  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)
+  --delist-proceeds P   by-reason (default: last trade less the reason's haircut, with commission) or last-price (last trade, no haircut, no cost)
+  --dividends D         cash (default: credited at the pay date) or reinvest (fractional shares at the ex-date close, no cost)
+  --actions A           apply (default: splits and dividends adjust the book) or in-prices (the price relation is a total-return series that already carries them; delistings still apply)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --window-sums running|exact  rolling mean/sum/std/cov/corr/ols_beta over rows windows: running (default) from sliding sums, O(1) a bar, equal to rounding; exact, the two-pass formulas bit for bit (the parity runs use it)
+  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)
+  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage
+  --returns FILE        write the returns per reporting period to FILE as Parquet: t,ret,pnl
+  --report-calendar REL with --report-by day, report on the days of relation REL (zero for a day without activity, days outside it left out)
+  --report-by bar|day   the reporting period of the metrics and --returns: the decision bar (default) or the calendar day
+  --periods-per-year X  periods a year for annualising (default: by the resolution per bar, 252 per day; 52 for a weekly book)\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --capital X           the fixed base under --compounding off, the starting cash otherwise (an alias of --cash; default 1000000)
+  --compounding on|off  off (default): weights size against the fixed capital, leverage is judged against it and a bar's return is the NAV change over it; on: weights size against equity and returns compound
+  --frictionless        every cost and liquidity model off (the run is warned)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
     );
     exit(code)
 }
@@ -230,7 +258,7 @@ fn synthetic_for(prog: &absolute_backtest::check::Program, opts: &HashMap<String
     }
 }
 
-/// The dataset a run uses: synthetic, a bundle or loose CSV, as the options say.
+/// The dataset a run uses: synthetic, a bundle or a loose Parquet directory, as the options say.
 fn load_dataset(args: &Args, prog: &absolute_backtest::check::Program) -> (absolute_backtest::kernel::Dataset, Option<String>) {
     let mut bundle_label: Option<String> = None;
     let dataset = if args.flags.contains("synthetic") {
@@ -246,7 +274,7 @@ fn load_dataset(args: &Args, prog: &absolute_backtest::check::Program) -> (absol
         bundle_label = Some(format!("{}@{}", m.name, m.version));
         ds
     } else if let Some(dir) = args.opts.get("data") {
-        let (ds, notes) = data::load_csv_dir(prog, Path::new(dir)).unwrap_or_else(|e| {
+        let (ds, notes) = data::load_parquet_dir(prog, Path::new(dir)).unwrap_or_else(|e| {
             eprintln!("{}", e);
             exit(2)
         });
@@ -276,14 +304,30 @@ fn exec_config(args: &Args) -> ExecConfig {
     } else {
         base
     };
+    let compounding = match args.opts.get("compounding").map(|s| s.as_str()) {
+        None => base.compounding,
+        Some("on") => true,
+        Some("off") => false,
+        Some(other) => {
+            eprintln!("--compounding: `{}` is not one of on, off", other);
+            exit(2)
+        }
+    };
+    if args.opts.contains_key("cash") && args.opts.contains_key("capital") {
+        eprintln!("--cash and --capital name the same amount; pass one");
+        exit(2)
+    }
+    let cash_opt = if args.opts.contains_key("capital") { "capital" } else { "cash" };
     let cfg = ExecConfig {
-        initial_cash: option(&args.opts, "cash", "an amount", base.initial_cash),
+        initial_cash: option(&args.opts, cash_opt, "an amount", base.initial_cash),
+        compounding,
         slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", base.slippage_bps),
         slippage_vol_mult: option(&args.opts, "slippage-vol", "a multiple of realized volatility", base.slippage_vol_mult),
         vol_window: option(&args.opts, "vol-window", "a number of bars", base.vol_window),
         vol_min_obs: base.vol_min_obs,
         commission_per_share: option(&args.opts, "commission", "an amount per share", base.commission_per_share),
         commission_min_per_order: option(&args.opts, "commission-min", "an amount per order", base.commission_min_per_order),
+        commission_bps: option(&args.opts, "commission-bps", "a number of basis points", base.commission_bps),
         fee_bps_on_sells: option(&args.opts, "fee-bps", "a number of basis points", base.fee_bps_on_sells),
         participation_cap: option(&args.opts, "participation", "a fraction of bar volume", base.participation_cap),
         impact_coef: option(&args.opts, "impact", "an impact coefficient", base.impact_coef),
@@ -298,7 +342,40 @@ fn exec_config(args: &Args) -> ExecConfig {
         short_rebate: option(&args.opts, "short-rebate", "an annual rate", base.short_rebate),
         borrow: base.borrow.clone(),
         delisting_haircut_default: base.delisting_haircut_default,
+        delist_at_last_price: match args.opts.get("delist-proceeds").map(|s| s.as_str()) {
+            None | Some("by-reason") => base.delist_at_last_price,
+            Some("last-price") => true,
+            Some(other) => {
+                eprintln!("--delist-proceeds: `{}` is not one of by-reason, last-price", other);
+                exit(2)
+            }
+        },
+        actions_in_prices: match args.opts.get("actions").map(|s| s.as_str()) {
+            None | Some("apply") => base.actions_in_prices,
+            Some("in-prices") => true,
+            Some(other) => {
+                eprintln!("--actions: `{}` is not one of apply, in-prices", other);
+                exit(2)
+            }
+        },
+        reinvest_dividends: match args.opts.get("dividends").map(|s| s.as_str()) {
+            None | Some("cash") => base.reinvest_dividends,
+            Some("reinvest") => true,
+            Some(other) => {
+                eprintln!("--dividends: `{}` is not one of cash, reinvest", other);
+                exit(2)
+            }
+        },
         window_cache: base.window_cache,
+        running_sums: match args.opts.get("window-sums").map(|s| s.as_str()) {
+            None => base.running_sums,
+            Some("running") => true,
+            Some("exact") => false,
+            Some(other) => {
+                eprintln!("--window-sums: `{}` is not one of running, exact", other);
+                exit(2)
+            }
+        },
         delisting_haircuts: {
             let mut hs = base.delisting_haircuts.clone();
             for h in args.multi.get("haircut").cloned().unwrap_or_default() {
@@ -326,6 +403,18 @@ fn exec_config(args: &Args) -> ExecConfig {
         on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
         on_ruin: option(&args.opts, "on-ruin", "one of halt, continue", OnRuin::Halt),
         lot: option(&args.opts, "lot", "one of whole, fractional", Lot::Whole),
+        start: args.opts.get("start").map(|s| {
+            parse_timestamp(s).unwrap_or_else(|| {
+                eprintln!("--start: `{}` is not a timestamp (YYYY-MM-DD)", s);
+                exit(2)
+            })
+        }),
+        end: args.opts.get("end").map(|s| {
+            parse_timestamp(s).unwrap_or_else(|| {
+                eprintln!("--end: `{}` is not a timestamp (YYYY-MM-DD)", s);
+                exit(2)
+            })
+        }),
         param_overrides: args
             .multi
             .get("param")
@@ -428,8 +517,47 @@ fn make_runner(args: &Args) -> Box<Runner> {
     runner
 }
 
+/// The process's peak resident set in MB: `VmHWM` on Linux, `getrusage`'s
+/// `ru_maxrss` (bytes) on macOS, unavailable elsewhere.
+fn peak_rss_mb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb / 1024.0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // struct rusage: two timevals, then ru_maxrss as the first long.
+        #[repr(C)]
+        struct Rusage {
+            times: [i64; 4],
+            longs: [i64; 14],
+        }
+        extern "C" {
+            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+        }
+        let mut u = Rusage { times: [0; 4], longs: [0; 14] };
+        // SAFETY: getrusage writes one struct rusage, whose layout on 64-bit macOS this mirrors.
+        let rc = unsafe { getrusage(0, &mut u) };
+        (rc == 0).then(|| u.longs[0] as f64 / (1024.0 * 1024.0))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 fn main() {
     let args = parse_args();
+    if let Some(n) = args.opts.get("threads") {
+        let n: usize = n.parse().unwrap_or_else(|_| {
+            eprintln!("--threads: `{}` is not a count", n);
+            exit(2)
+        });
+        absolute_backtest::study::set_threads(n);
+    }
     match args.cmd.as_str() {
         "check" => {
             let ws = workspace(&args.files);
@@ -454,6 +582,7 @@ fn main() {
             exit(if errors > 0 { 1 } else { 0 })
         }
         "run" | "explain" => {
+            let started = std::time::Instant::now();
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
             let (prog, diags) = check_program(&ws, &name);
@@ -464,7 +593,9 @@ fn main() {
                 eprintln!("strategy `{}` does not check; fix the errors above", name);
                 exit(1)
             };
-            let (dataset, bundle_label) = load_dataset(&args, &prog);
+            let checked_at = started.elapsed().as_secs_f64();
+            let (mut dataset, bundle_label) = load_dataset(&args, &prog);
+            let loaded_at = started.elapsed().as_secs_f64();
             let cfg = exec_config(&args);
             if args.cmd == "explain" {
                 let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
@@ -542,14 +673,59 @@ fn main() {
                 return;
             }
             let verify = args.flags.contains("verify-causality");
+            // What the report needs from the data, read before a run may take it over.
+            let tuple_count: usize = dataset.facts.values().map(|tus| tus.len()).sum();
+            let calendar: Option<std::collections::BTreeSet<i64>> = args.opts.get("report-calendar").map(|rel| {
+                let Some(k) = prog.relations.get(rel).and_then(|s| s.key_pos()) else {
+                    eprintln!("--report-calendar: `{}` is not a relation of the program", rel);
+                    std::process::exit(2)
+                };
+                dataset
+                    .facts
+                    .get(rel)
+                    .map(|tus| tus.iter().filter_map(|tu| tu[k].as_time()).map(time_day).collect())
+                    .unwrap_or_default()
+            });
+            // The batch kernel takes the facts over when nothing reads the
+            // dataset after the run (one copy of the data in memory).
             let runner = make_runner(&args);
-            let result = runner(&prog, &dataset, cfg.clone()).unwrap_or_else(|e| {
+            let owned = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true) && !verify && !args.opts.contains_key("dump") && !args.opts.contains_key("study");
+            let outcome = if owned {
+                absolute_backtest::kernel::run_owned(&prog, std::mem::take(&mut dataset), cfg.clone())
+            } else {
+                runner(&prog, &dataset, cfg.clone())
+            };
+            let result = outcome.unwrap_or_else(|e| {
                 match e {
                     RunError::Request(m) => eprintln!("{}", m),
                     e => eprintln!("run halted: {}", e),
                 }
                 exit(1)
             });
+            if args.flags.contains("timing") {
+                let total = started.elapsed().as_secs_f64();
+                let run_s = total - loaded_at;
+                let s = &result.stats;
+                eprintln!(
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={}",
+                    loaded_at - checked_at,
+                    checked_at,
+                    run_s,
+                    total,
+                    result.bars.len(),
+                    result.symbols.len(),
+                    tuple_count,
+                    result.decisions.len(),
+                    if run_s > 0.0 { result.bars.len() as f64 / run_s } else { 0.0 },
+                    peak_rss_mb().map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into()),
+                    s.window_calls,
+                    s.window_bars_solved,
+                    s.window_groups,
+                    s.window_rows_cached,
+                    s.late_tuples,
+                    s.memo_entries
+                );
+            }
             println!(
                 "strategy {} over {} bars ({} to {}), {} symbols",
                 prog.strategy,
@@ -559,8 +735,54 @@ fn main() {
                 result.symbols.len()
             );
             println!("decisions: {}   fills: {}   dropped: {}", result.decisions.len(), result.fills.len(), result.dropped.len());
-            for (k, v) in data::summarize(&result.equity_curve) {
+            for (k, v) in data::summarize(&result.metric_curve()) {
                 println!("{:>14}: {:.4}", k, v);
+            }
+            let by_day = match args.opts.get("report-by").map(|s| s.as_str()) {
+                None | Some("bar") => false,
+                Some("day") => true,
+                Some(other) => {
+                    eprintln!("--report-by: `{}` is not one of bar, day", other);
+                    std::process::exit(2)
+                }
+            };
+            let default_ppy = if by_day { 252.0 } else { absolute_backtest::study::metrics::periods_per_year(prog.resolution) };
+            let ppy: f64 = option(&args.opts, "periods-per-year", "a number of periods", default_ppy);
+            let cm = absolute_backtest::study::metrics::convention_metrics_on(&result, ppy, by_day, calendar.as_ref());
+            match result.base_capital {
+                Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested)", b),
+                None => println!("accounting: compounding; a period's return is the NAV change over the previous NAV"),
+            }
+            println!(
+                "metrics per {} ({} a year, {} periods): cagr {:.6}   max_drawdown {:.6}   sharpe {:.4} (population {:.4})   volatility {:.4}",
+                if by_day { "day" } else { "bar" },
+                ppy,
+                cm.periods,
+                cm.cagr,
+                cm.max_drawdown,
+                cm.sharpe,
+                cm.sharpe_population,
+                cm.volatility_population
+            );
+            println!(
+                "additive: annual_return {:.6}   max_drawdown {:.6}   total_pnl {:.2}   profit_factor {:.3} per period, {:.3} per trade   trades {}   win_rate {:.3}",
+                cm.annual_return, cm.max_drawdown_additive, cm.total_pnl, cm.profit_factor, cm.profit_factor_trades, cm.trades, cm.win_rate
+            );
+            if let Some(path) = args.opts.get("returns") {
+                let rows = absolute_backtest::study::metrics::period_returns_on(&result, by_day, calendar.as_ref());
+                use absolute_backtest::table::{write_table, Col};
+                write_table(
+                    Path::new(path),
+                    vec![
+                        ("t", Col::Time(rows.iter().map(|r| Some(r.0)).collect())),
+                        ("ret", Col::Float(rows.iter().map(|r| Some(r.1)).collect())),
+                        ("pnl", Col::Float(rows.iter().map(|r| Some(r.2)).collect())),
+                    ],
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("error: --returns: {}", e);
+                    std::process::exit(1);
+                });
             }
             println!(
                 "costs: commissions {:.2}   fees {:.2}   slippage {:.2}   impact {:.2}   turnover {:.2}",
@@ -586,11 +808,11 @@ fn main() {
             let max_lev = result.exposure.iter().map(|e| e.leverage).fold(0.0, f64::max);
             let max_gross = result.exposure.iter().map(|e| e.gross).fold(0.0, f64::max);
             println!("exposure: max gross {:.2}   max leverage {:.3}", max_gross, max_lev);
-            if args.flags.contains("nav") {
-                println!("t,equity,cash,gross,net,leverage");
-                for e in &result.exposure {
-                    println!("{},{:.4},{:.4},{:.4},{:.4},{:.6}", format_timestamp(e.t), e.equity, e.cash, e.gross, e.net, e.leverage);
-                }
+            if let Some(path) = args.opts.get("nav") {
+                absolute_backtest::dump::write_nav(&result, Path::new(path)).unwrap_or_else(|e| {
+                    eprintln!("error: --nav: {}", e);
+                    std::process::exit(1);
+                });
             }
             for w in &result.warnings {
                 println!("warning ({}): {}", w.bias, w.message);
@@ -1010,7 +1232,7 @@ fn main() {
             }
         }
         "bundle" => {
-            // abt bundle build (--from CSVDIR | --synthetic ...) --env NAME --version V --out DIR <files...>
+            // abt bundle build (--from DIR | --synthetic ...) --env NAME --version V --out DIR <files...>
             // abt bundle test DIR <files...>
             let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
             let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
@@ -1029,6 +1251,7 @@ fn main() {
                             exit(1)
                         });
                     let mut source: Option<String> = None;
+                    let mut exceptions = Vec::new();
                     let processing_delay: i64 = option(&args.opts, "processing-delay", "a number of seconds", 0);
                     let ds = if args.flags.contains("synthetic") {
                         synthetic_for(&prog, &args.opts)
@@ -1041,6 +1264,7 @@ fn main() {
                             eprintln!("note: {}", n);
                         }
                         source = Some(ingested.source);
+                        exceptions = ingested.exceptions;
                         ingested.dataset
                     } else if let Some(from) = args.opts.get("from-databento") {
                         let ingested = absolute_backtest::ingest::databento_minute(Path::new(from), &prog, processing_delay).unwrap_or_else(|e| {
@@ -1053,7 +1277,7 @@ fn main() {
                         source = Some(ingested.source);
                         ingested.dataset
                     } else if let Some(from) = args.opts.get("from") {
-                        let (ds, notes) = data::load_csv_dir(&prog, Path::new(from)).unwrap_or_else(|e| {
+                        let (ds, notes) = data::load_parquet_dir(&prog, Path::new(from)).unwrap_or_else(|e| {
                             eprintln!("{}", e);
                             exit(2)
                         });
@@ -1065,6 +1289,10 @@ fn main() {
                         usage(1)
                     };
                     let m = absolute_backtest::bundle::write_bundle(&prog, &ds, Path::new(&out), &env, &version).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    absolute_backtest::bundle::write_exceptions(Path::new(&out), &exceptions).unwrap_or_else(|e| {
                         eprintln!("{}", e);
                         exit(2)
                     });
@@ -1139,7 +1367,7 @@ fn main() {
                     exit(1)
                 });
             let ds = synthetic_for(&prog, &args.opts);
-            data::write_csv_dir(&prog, &ds, Path::new(&out)).unwrap_or_else(|e| {
+            data::write_parquet_dir(&prog, &ds, Path::new(&out)).unwrap_or_else(|e| {
                 eprintln!("{}", e);
                 exit(2)
             });
@@ -1147,4 +1375,9 @@ fn main() {
         }
         _ => usage(1),
     }
+}
+
+/// The midnight of a timestamp's day.
+fn time_day(t: i64) -> i64 {
+    absolute_backtest::kernel::time::day_key(t) * absolute_backtest::kernel::time::DAY
 }

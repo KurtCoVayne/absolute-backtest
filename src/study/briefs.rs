@@ -173,7 +173,7 @@ fn attempt(ws: &Workspace, path: &Path) -> (AttemptRecord, Option<Verdict>) {
             verdict: format!("failed: {}", e),
         },
         Ok(r) => {
-            let m = return_metrics(&r.equity_curve, periods_per_year(prog.resolution));
+            let m = return_metrics(&r.metric_curve(), periods_per_year(prog.resolution));
             let verdict = if r.fills.is_empty() {
                 "does not trade"
             } else if m.cagr <= 0.0 {

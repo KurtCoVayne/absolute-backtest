@@ -191,6 +191,7 @@ judge these seven.
 | Assignment | `X = e` | X | e built from bound variables, params, literals, scalar functions |
 | Aggregation | `X = agg(e) over (conj)` | X | conj is a conjunction of positive atoms, temporal constraints, and comparisons and assignments over variables bound inside it; e uses variables bound inside conj; variables shared with the outer rule are inputs to the group |
 | Reduction | `top(N, R(...), by (k1 dir, ..., km dir))` | R's variables | Keeps at most N tuples per group of bound outer variables; the order must be total (WF-7) |
+| Rank | `rank(R(...), by (k1 dir, ...)[, ties average\|ordinal], as K)` | R's variables and K | Keeps every tuple and binds K (Scalar) to its 1-based rank in the group; `ordinal` (default) numbers by position and needs a total order (WF-7), `average` gives a run of equal keys the mean of its positions and needs none |
 | Resample | `resample(R(...) to @r as T, min K, X1 = agg1(e1), ...)` | R's entity variables, the bucket label T, each Xi | R strictly finer than and aligned to @r; aggregates in `first`, `last`, `max`, `min`, `sum`, `mean`, `count`; a group below K yields no bucket (WF-10) |
 | As-of join | `R(..., T0, ...) asof T` | R's output positions and T0 | T bound and derived from the head time; T0 a fresh variable or `_`, bound to the latest key at or before T with a matching tuple; R at any resolution; fails when no such tuple exists |
 
@@ -244,9 +245,11 @@ classification, the last known rating. The key it binds is provably <= T, so
 WF-6 treats T0 like a variable bound by `prev(T, ·)`: it may key further
 atoms and feed the builtins, but it may not key a head (the tuple's time
 would not be the time it became available). The join is the one read across
-resolutions (WF-10): a tuple keyed at or before T is available by T whatever
-its relation's resolution, so a minute rule may read a daily relation as of
-its own bar and a daily rule a sparse event relation. `decided` as of the
+resolutions (WF-10): a tuple is available at its bar's close, so a minute
+rule may read a daily relation as of its own bar and a daily rule a sparse
+event relation. A daily bar is labelled by its date, so read from a finer rule
+it counts only once its day has ended by T: a minute rule sees the previous
+session's daily bar, never the bar of the day it is in. `decided` as of the
 head time would let a decision see itself, so it is read as of a time
 strictly before T, as with a plain atom. A stored relation is served from
 its index; a derived one is evaluated at its own resolution's bars backwards
@@ -262,6 +265,7 @@ them are causal.
 | `lag(T, N, T1)` | T1 is the latest timestamp present at or before T − N, with N a calendar duration | T1 |
 | `T1 in window(T, N, min K)` | T − N ≤ T1 ≤ T over timestamps present; the group must hold at least K of them | T1 (inside an aggregation) |
 | `T1 in prior_window(T, N, min K)` | T − N ≤ T1 < T over timestamps present; at least K of them | T1 (inside an aggregation) |
+| `T1 in rows(T, N, min K)` | The N latest bars at or before T at which the conjunction's first atom holds for the group (the group's own rows, N a Count); the aggregate reads those where the whole conjunction holds, at least K of them | T1 (inside an aggregation) |
 | `month_start(T)` | T is the first timestamp present in its calendar month | nothing |
 | `day_start(T)` | T is the first timestamp present in its calendar day (meaningful below @1d) | nothing |
 
@@ -338,7 +342,11 @@ number of timestamps, so recursion terminates even when it creates values (an
 entry price carried forward is the corpus example). A cycle without such a
 step is rejected; there is no fixpoint iteration over value-creating rules.
 
-**WF-5 Completeness.** Define complete(R) as the least relation satisfying:
+**WF-5 Completeness.** Define complete(R) as the greatest relation satisfying
+the rules below (a derived relation is complete unless a rule of it reads an
+incomplete relation positively; a recursive relation over complete inputs is
+complete, its temporal recursion being well-founded by WF-4, so its
+evaluation is total and a missing tuple is false):
 
 - complete(R) if R is a primitive declared complete, or kernel state, or the output relation;
 - complete(R) if R is derived and, for every rule of R, every positive atom in the body is complete (negated atoms are complete by WF-5 itself; comparisons and assignments do not affect completeness). The atoms inside an aggregation's conjunction and the inner relation of a resample are positive atoms of the rule for this purpose: `N = count(P) over (close(A, T1, P), ...)` makes its rule incomplete even though `count` yields 0 on an empty group, because a missing `close` leaves the count unknown, not small;
@@ -494,6 +502,29 @@ computes the order as the difference between the target and position at the
 time of execution, using the bar's close for `target_weight`. Conflicting
 decisions for one instrument at one T halt the run with a diagnostic naming
 both rules.
+
+**Order types.** A decision in a decide head may name how it executes as a
+trailing term: `decide(T, target_weight(A, W, moc))`. `market` (the default)
+is the contract above, the next bar's close. `moo` fills at the open of the
+instrument's next bar. `moc` fills at the close of the last bar of the session
+(the calendar day) containing T, at the step of that bar; at @1d that is T's
+own close, the signal-close convention, so the signal must be computable at
+the close print. `moo_moc` is an intraday position: in at the next open, flat
+at that session's close. `limit(P[, TIF])` and `stop(P[, TIF])` fill when a
+bar trades through P (at P, or at the open of a bar that opens through it),
+working for `day` (the session of the first bar they could fill at), `gtc`,
+or `bars(N)`. A new decision on the instrument supersedes a working order; an
+expiry is reported with the dropped decisions. An order that executes away
+from the next bar's close is applied at the step after it executes, so the
+book relations keep their contract; its fill is dated where it executed.
+
+**Accounting.** With `compounding` off (the default) the book is a fixed base
+of the starting capital: `target_weight` is a fraction of it, leverage is
+gross exposure against it (cash may go negative to carry a loss), and a bar's
+return is the change in NAV over it. With `compounding` on, weights are
+fractions of the book's equity and returns compound. The metrics read the
+capital compounded by the fixed-base returns, and the run reports the
+additive figures of the fixed base beside them.
 
 **Executor policy (v1).** The model defines no margin, so three degenerate
 book states are configuration of the kernel, not of the program, and every

@@ -9,17 +9,17 @@ loop with a simulated executor. One Rust crate, no dependencies.
 ```
 abt check corpus/                                   # every strategy and library in the corpus
 abt run --strategy momentum_top_n --synthetic corpus/   # backtest on a synthetic market
-abt run --strategy sma_crossover --data ./csv corpus/ --verify-causality
+abt run --strategy sma_crossover --data ./market corpus/ --verify-causality
 abt run --strategy momentum_top_n --synthetic --all --fills corpus/  # every decision, and the fills
 abt run --strategy breakout_52w --synthetic --param hold=21d --param qty='50 shares' corpus/
 abt explain --strategy breakout_52w --rule 'decide#1' --at 2023-02-24 --synthetic corpus/
 abt explain --strategy breakout_52w --rule 'decide#2' --at 2023-02-24 --bind A=SPY --synthetic corpus/
 abt explain --strategy breakout_52w --rule 'features::sma#1' --at 2023-02-24 --inputs SPY,20d,10 --synthetic corpus/
-abt synth --env equities_1d --out ./csv corpus/     # write a synthetic market as CSV
+abt synth --env equities_1d --out ./market corpus/  # write a synthetic market as Parquet
 ```
 
-Data is one CSV per primitive relation (`close.csv`, `volume.csv`, ...), with
-a header row naming the signature's arguments. Timestamps are bar close
+Data is one Parquet file per primitive relation (`close.parquet`,
+`volume.parquet`, ...), with columns named after the signature's arguments. Timestamps are bar close
 instants: a 09:30 to 09:31 minute bar is labelled `09:31`, the last bar of a
 session `16:00`, and a daily bar by its date. `abt synth` writes this
 convention; minute data labelled by open time silently misaligns every
@@ -35,7 +35,8 @@ resampled bucket.
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
 | `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
 | `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver of section 7, `explain`, and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers (`docs/data-bundle.md`, section 2); `time.rs` is calendar arithmetic and resolution buckets. |
-| `src/data.rs` | CSV environment instances and a deterministic synthetic market. |
+| `src/data.rs` | Parquet environment instances and a deterministic synthetic market. |
+| `src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
 | `src/bin/abt.rs` | The command line. |
 | `corpus/env` | Four environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`, and `equities_1d_v2`, the catalog of `docs/data-bundle.md` section 3 (prices as traded, `split`, `dividend`, `delisted`, `member`, `classification`, `ticker`). |
 | `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d), `catalog` (total return and a point-in-time adjusted close over `equities_1d_v2`). |
@@ -44,7 +45,7 @@ resampled bucket.
 | `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
 | `tests/checker_messages.rs` | Diagnostics pinned exactly: one diagnostic per root cause, library diagnostics reported once, and the wording of the messages for builtins, wildcards and resolution mismatches. |
 | `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
-| `tests/data.rs`, `tests/cli.rs` | The CSV loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
+| `tests/data.rs`, `tests/cli.rs` | The Parquet loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
 
 ## The surface syntax in one page
 
@@ -214,7 +215,7 @@ symbols, are checked) and replays the events from the cursor on.
 checkpoint to equal the unbroken fold and the batch kernel to the bit.
 
 A tuple may carry its own availability time (`Dataset::add_available`, an
-`available_at` column in CSV or in a bundle's partitions, whose manifest
+`available_at` column in a loose Parquet file or in a bundle's partitions, whose manifest
 then says `recorded` rather than `bar_close`): the fold reads it from then
 on, so a tuple that arrived after its bar closed is late in the backtest
 too, exactly as section 2 of the data-bundle doc wants. The stream's
@@ -314,8 +315,8 @@ average-daily-volume bucket (below 100k shares: not shortable, the order is
 dropped with `not shortable: ADV ...`; below 1M: 300 bps; above: 25 bps, all
 a proxy and warned) and earns `short_rebate` (0). `RunResult.funding` sums
 the four; `RunResult.exposure` records cash, gross, net, equity and leverage
-at every bar's mark, printed as CSV by `--nav` for the study and the
-reference engine. Two distinct decisions for one instrument at one bar halt the
+at every bar's mark, written as Parquet by `--nav FILE` for the study and
+the reference engine. Two distinct decisions for one instrument at one bar halt the
 run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
 negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
 a constant series, a `quantile` level outside [0, 1], and a non-positive delta
@@ -417,34 +418,36 @@ strategy does not check, the run halted, or the usage is wrong; 2 an input
 could not be read or parsed (a source file, a data directory, an option
 value).
 
-## Environment instances as CSV
+## Environment instances as Parquet
 
-`abt run --data DIR` loads one `<relation>.csv` per primitive of the
-strategy's environment; `abt synth` writes the same layout. The header names
-the signature's arguments (case-insensitive), fields are comma-separated, and
-a timestamp is `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
-` HH:MM[:SS]`. The loader enforces what the signature promises:
+`abt run --data DIR` loads one `<relation>.parquet` per primitive of the
+strategy's environment; `abt synth` writes the same layout with typed
+columns. Column names are the signature's arguments (case-insensitive);
+a column may be typed (integer, float, date, timestamp) or text, a text
+timestamp being `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
+` HH:MM[:SS]` (`src/table.rs`). The loader enforces what the signature promises:
 
 - The temporal key is stored as the label of the bar containing it at the
   relation's resolution (spec section 3: at @1d the trading date), so
-  `2022-01-03T16:00:00` in `close.csv` and `2022-01-03` in `universe.csv`
+  `2022-01-03T16:00:00` in `close.parquet` and `2022-01-03` in `universe.parquet`
   are one bar and share one time domain.
 - A relation is a function of its identity columns (its inputs, its key and
   its entity-typed outputs; spec section 3): two rows for one identity with
-  different value outputs are an error naming both lines, such as
-  `close.csv:3: duplicate tuple for (AAA, 2022-01-03) with different outputs;
-  line 2 already binds them`. A row identical to an earlier one is dropped.
-- A field that does not parse as its type, a header lacking a column and a
-  short row are errors naming the file and line.
-- `securities.csv` (`id,ticker,from,to`, `to` empty while the ticker is
-  still carried) is the bundle's security table (`docs/data-bundle.md`,
+  different value outputs are an error naming both rows, such as
+  `close.parquet row 2: duplicate tuple for (AAA, 2022-01-03) with different
+  outputs; row 1 already binds them`. A row identical to an earlier one is dropped.
+- A cell that does not parse as its type and a missing column are errors
+  naming the file and row.
+- `securities.parquet` (`id,ticker,from,to`, `to` null while the ticker is
+  still carried, and optionally the contract columns `multiplier`,
+  `asset_class` and `commission_per_contract`) is the bundle's security table (`docs/data-bundle.md`,
   section 3): with it, every equity field is a security id (an unknown id is
-  an error naming the line), the identity bundle tests run at load (one id
+  an error naming the row), the identity bundle tests run at load (one id
   carries one ticker at a time, one ticker is carried by one id at a time,
   every interval ends after it starts), and the `ticker(A, @T, S)` relation
   is derived from the table over the bars of `universe` rather than read from
   a file. Without a table the ticker is the id and `ticker` is derived from
-  the symbols, so the old CSV layout still loads.
+  the symbols.
 - A ticker literal in a program (`param bench : Equity = "SPY"`), a
   `--param` value, a `--bind` or an `--inputs` name resolves through the
   table to the security carrying that ticker at the bundle date: the data's
@@ -567,7 +570,7 @@ small and easy to flip.
   forced fill; a zero haircut on an involuntary reason is warned. Every
   action is in `RunResult.actions`.
 - **Without a security table the ticker is the id.** A dataset that has no
-  `securities.csv` (the synthetic markets, the old CSV layout) is the v1
+  `securities.parquet` (the synthetic markets) is the v1
   world: equity fields are tickers, a ticker literal interns its own symbol,
   and `ticker(A, T, S)` is derived with every symbol as its own ticker, so
   `not ticker(...)` keeps its meaning. With a table, resolution is by bundle
@@ -580,7 +583,8 @@ small and easy to flip.
   and fills at the mark bar's close; it is the kernel's order, flagged
   `forced`, and never a decision of the strategy.
 - **A non-positive price is a data error**, rejected at load with the file
-  and line.
+  and row, except a future's (`asset_class = future`), whose back-adjusted
+  series may cross zero.
 
 ## Bundles
 
@@ -588,15 +592,17 @@ small and easy to flip.
 system ships. A bundle is a directory: `manifest.json` (the environment name,
 the version, the bundle date, every relation with its signature, resolution,
 availability convention, row count and partitions, and the bundle tests'
-report once they pass), `securities.csv` (the security table), and
+report once they pass, and the layout `format`, now 2), `securities.parquet`
+(the security table), and
 `log/<relation>/<YYYY-MM>.parquet`, append-only Parquet partitions of each
 primitive relation by the month of its temporal key (`snapshots/` is
 reserved for the fold kernel's checkpoints). The derived `ticker` relation is
-rebuilt from the table, never stored.
+rebuilt from the table, never stored. A bundle of layout 1 (text security
+table) is refused with a request to rebuild it.
 
 ```
 abt bundle build --synthetic --env equities_1d_v2 --version 2026.10 --out ./bundle corpus/
-abt bundle build --from ./csv --env equities_1d --version 2026.10 --out ./bundle corpus/
+abt bundle build --from ./market --env equities_1d --version 2026.10 --out ./bundle corpus/
 abt bundle test ./bundle corpus/
 abt run --strategy total_return_momentum --bundle ./bundle corpus/
 ```
@@ -616,16 +622,41 @@ crate depends on `serde`, `serde_json`, `arrow` and `parquet` for this.
 
 Vendor exports become bundles through adapters (`src/ingest.rs`): `abt
 bundle build --from-norgate DIR` reads a Norgate-style daily layout
-(`prices.csv` as traded, `symbols.csv` for the symbol history, `splits.csv`,
-`dividends.csv`, `delistings.csv`, `membership.csv` and
-`classification.csv`, the last two expanded over trading days) into
+of Parquet files (`prices` as traded, `symbols` for the symbol history,
+`splits`, `dividends`, `delistings`, `membership` and `classification`, the
+last two expanded over trading days, and `exceptions`, reviewed bundle-test
+exceptions; `scripts/ingest/norgate_lake_to_inputs.py` writes it from the
+NDLake lake) into
 `equities_1d_v2`; `--from-databento DIR [--processing-delay S]` reads a
-Databento-style minute layout (`ohlcv-1m.csv` keyed at the bar close with
-an optional `ts_recv`, `symbology.csv`) into `equities_1m` with every
+Databento-style minute layout (`ohlcv-1m.parquet` keyed at the bar close
+with an optional `ts_recv`, `symbology.parquet`) into `equities_1m` with every
 tuple's availability recorded as its receipt time plus the delay. The
 manifest records the source and the schema decisions of
 `docs/data-bundle.md` section 10 (consolidated bars, the availability
 offset as the processing delay).
+
+## Company books
+
+Two of the company's production strategies run in abt with their reference
+results reproduced: `corpus/company/mw14.dsl`, the weekly S&P 1500 momentum
+book (exact to its canonical weekly returns, 1991–2026), and
+`corpus/company/r8l.dsl`, the intraday futures opening-range book (exact to its
+legs and daily P&L, 2000–2026). How each maps onto the DSL, the run command,
+the comparison and the known differences: `docs/parity-mw14.md`,
+`docs/parity-r8l.md`; inputs and checksums: `docs/parity-inputs.md`. Their
+data comes from `scripts/ingest/ndlake_weekly.py` (env `equities_1w`) and
+`scripts/ingest/tradestation_sessions.py` (env `futures_sessions`), and
+`scripts/parity/` holds the comparisons.
+
+They use what the executor and the DSL gained for them: fixed-base
+accounting (the default; `--compounding on` compounds), order types with a
+time in force (`decide(T, target_weight(A, W, moc))`; `market`, `moo`,
+`moc`, `moo_moc`, `limit(P, tif)`, `stop(P, tif)`), futures contracts in the
+security table, `rows(T, N, min K)` windows over a group's own rows,
+`rank(R(...), by (...), as K)`, `--actions in-prices`, `--delist-proceeds`,
+`--dividends reinvest`, `--commission-bps`, `--start`/`--end`, and metrics in
+both conventions (`--report-by day --report-calendar REL`,
+`--periods-per-year`, `--returns FILE`).
 
 ## Studies
 
@@ -687,7 +718,7 @@ and the rows a warning touched marked.
 `reference/` is a second implementation of the execution contract in plain
 Python over pandas, written from `docs/semantic-model.md` section 6 and
 sharing nothing with the kernel (`docs/data-bundle.md`, section 8). `abt run
---dump DIR` writes what a run saw and did (the data as CSV, the
+--dump DIR` writes what a run saw and did (the data as Parquet, the
 configuration, decisions, fills, dropped decisions, actions, the book at
 every bar and the final state); `python3 reference/diff.py DIR` replays the
 decisions through the reference executor and requires fills identical in
@@ -695,9 +726,9 @@ quantity (exactly under whole lots) and in price to floating tolerance, the
 book identical at the end, the NAV within tolerance at every bar and the
 same dropped count. `tests/reference.rs` runs every daily corpus strategy,
 policy and model variants and the four action markets through it, skipping
-with a note where python3 with pandas is absent. `ci/github-workflow.yml`
+with a note where python3 with pandas is absent. `.github/workflows/ci.yml`
 is the GitHub Actions workflow (format, clippy, tests with pandas installed
-so the comparison runs); move it to `.github/workflows/ci.yml` to enable it.
+so the comparison runs).
 
 ## Stylized facts
 
@@ -730,10 +761,17 @@ not survive costs, halted), and across briefs the first-attempt pass rate,
 the distribution of diagnostics and the mean attempts to a valid program.
 Measured and stored, never asserted.
 
+`docs/llm-usability.md` reports the study of whether an LLM can write the
+company books from the docs alone: Haiku 4.5 and Sonnet 5.5 agents given only
+the language description, a plain-language spec, the checker and the data
+wrote MW14, R8L and two briefs. Sonnet's files land within rounding of both
+books; Haiku's check clean and never trade. Every attempt, the scores, the
+root causes and the ranked fixes are in `experiments/llm-usability/`.
+
 ## Development
 
 ```
-cargo test            # type algebra, time, corpus, checker, kernel, syntax, CSV loader, command line
+cargo test            # type algebra, time, corpus, checker, kernel, syntax, Parquet loader, command line
 cargo build --release
 ```
 

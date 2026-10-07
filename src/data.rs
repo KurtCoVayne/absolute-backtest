@@ -1,4 +1,4 @@
-//! Environment instances from CSV files, and a deterministic synthetic
+//! Environment instances from Parquet files, and a deterministic synthetic
 //! market for tests and demos.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -6,20 +6,22 @@ use std::path::Path;
 
 use crate::check::Program;
 use crate::ir::*;
-use crate::kernel::time::{bucket, days_from_civil, format_timestamp, parse_timestamp, weekday, DAY};
+use crate::kernel::time::{bucket, days_from_civil, format_timestamp, weekday, DAY};
 use crate::kernel::{Dataset, Security, Sym, Value};
+use crate::table::{write_table, Col, Table};
 
-/// Load one CSV per primitive relation of the program's environment from
-/// `dir` (`<relation>.csv`, header row naming the signature's arguments).
+/// Load one Parquet file per primitive relation of the program's environment
+/// from `dir` (`<relation>.parquet`, columns named after the signature's
+/// arguments; typed or text columns, see `table`).
 ///
 /// A row is identified by its inputs, its key and its entity-typed outputs
 /// (the identity columns of section 3; `universe(-A, @T)` enumerates A), and
 /// the value outputs are bound by the call: a second row for the same
-/// identity with different outputs is an error naming both lines, and an
+/// identity with different outputs is an error naming both rows, and an
 /// identical row is dropped. The temporal key is stored as the label of the
 /// bucket containing it at the relation's resolution (section 3
 /// "Resolution": at @1d the trading date), so `2022-01-03T16:00:00` and
-/// `2022-01-03` label one @1d bar. A missing or header-only file leaves the
+/// `2022-01-03` label one @1d bar. A missing or empty file leaves the
 /// relation empty and is reported in the returned notes.
 ///
 /// Timestamps are bar labels, and a label is the bar's close instant
@@ -27,57 +29,26 @@ use crate::kernel::{Dataset, Security, Sym, Value};
 /// `16:00`, a daily bar its date. The loader does not check the intraday
 /// convention; open-labelled minute data misaligns every resampled bucket by
 /// one bar.
-pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>), String> {
+pub fn load_parquet_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>), String> {
     if !dir.is_dir() {
         return Err(format!("{}: directory not found", dir.display()));
     }
     let mut ds = Dataset::new();
     let mut notes = Vec::new();
-    // The security table (data-bundle doc, section 3): `securities.csv` with
-    // `id,ticker,from,to` (`to` empty when the ticker is still carried). With
-    // it, every equity field is a security id; without it, the ticker is the id.
-    let table = dir.join("securities.csv");
+    // The security table (data-bundle doc, section 3): `securities.parquet`
+    // with `id,ticker,from,to` (`to` null while the ticker is still carried)
+    // and the optional contract columns. With it, every equity field is a
+    // security id; without it, the ticker is the id.
+    let table = dir.join("securities.parquet");
     if table.exists() {
-        let text = std::fs::read_to_string(&table).map_err(|e| format!("{}: {}", table.display(), e))?;
-        let mut lines = text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty());
-        let header: Vec<String> = lines
-            .next()
-            .ok_or_else(|| format!("{}: empty file", table.display()))?
-            .1
-            .split(',')
-            .map(|h| h.trim().to_lowercase())
-            .collect();
-        let col = |name: &str| header.iter().position(|h| h == name).ok_or_else(|| format!("{}: header lacks column `{}`", table.display(), name));
-        let (ci, ct, cf, cto) = (col("id")?, col("ticker")?, col("from")?, col("to")?);
-        for (ln, line) in lines {
-            let lineno = ln + 1;
-            let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
-            let get = |c: usize| fields.get(c).copied().ok_or_else(|| format!("{}:{}: short row", table.display(), lineno));
-            let (id, ticker) = (get(ci)?, get(ct)?);
-            if id.is_empty() || ticker.is_empty() {
-                return Err(format!("{}:{}: id and ticker must be non-empty", table.display(), lineno));
-            }
-            let from_raw = get(cf)?;
-            let from = parse_timestamp(from_raw).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), lineno, from_raw))?;
-            let to_raw = get(cto)?;
-            let to = if to_raw.is_empty() {
-                None
-            } else {
-                Some(parse_timestamp(to_raw).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), lineno, to_raw))?)
-            };
-            ds.add_security(id, ticker, from, to);
-        }
-        let problems = check_identities(&ds);
-        if !problems.is_empty() {
-            return Err(format!("{}: {}", table.display(), problems.join("; ")));
-        }
+        read_securities(&mut ds, &table)?;
     }
     let ids: HashSet<Sym> = ds.securities.iter().map(|s| s.id).collect();
     for (name, sig) in &prog.relations {
         if !matches!(sig.kind, Kind::Primitive { .. }) {
             continue;
         }
-        let path = dir.join(format!("{}.csv", name));
+        let path = dir.join(format!("{}.parquet", name));
         if !path.exists() {
             if name == "ticker" {
                 // Derived from the security table after the other relations load.
@@ -86,72 +57,48 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
             notes.push(format!("no file {}; relation left empty", path.display()));
             continue;
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        let mut lines = text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty());
-        let header: Vec<String> = lines
-            .next()
-            .ok_or_else(|| format!("{}: empty file", path.display()))?
-            .1
-            .split(',')
-            .map(|h| h.trim().to_lowercase())
-            .collect();
+        let t = Table::read(&path)?;
         let cols: Vec<usize> = sig
             .args
             .iter()
-            .map(|a| {
-                header
-                    .iter()
-                    .position(|h| *h == a.name.to_lowercase())
-                    .ok_or_else(|| format!("{}: header lacks column `{}`", path.display(), a.name))
-            })
+            .map(|a| t.col(&a.name.to_lowercase()).map_err(|_| format!("{}: no column `{}`", path.display(), a.name)))
             .collect::<Result<_, _>>()?;
         // An optional `available_at` column (data-bundle doc, section 2): when
         // the tuple could be acted on, at or after its own bar's close.
-        let avail_col = header.iter().position(|h| h == "available_at");
+        let avail_col = t.col("available_at").ok();
         let key_pos = sig.key_pos();
         // Inputs, the key and entity-typed outputs identify a row (section 3:
         // `universe(-A, @T)` enumerates A); the value outputs are a function of them.
         let identity: Vec<usize> = sig.args.iter().enumerate().filter(|(_, a)| a.mode != Mode::Out || a.ty.is_entity()).map(|(i, _)| i).collect();
-        // The identity columns of every row kept so far, with its line and tuple.
+        // The identity columns of every row kept so far, with its row and tuple.
         let mut seen: HashMap<Vec<Value>, (usize, Vec<Value>)> = HashMap::new();
-        let mut rows = 0usize;
-        for (ln, line) in lines {
-            let lineno = ln + 1;
-            let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
+        for row in 0..t.len() {
             let mut tuple = Vec::with_capacity(sig.args.len());
             for (i, (arg, &c)) in sig.args.iter().zip(cols.iter()).enumerate() {
-                let raw = fields.get(c).ok_or_else(|| format!("{}:{}: missing column `{}`", path.display(), lineno, arg.name))?;
-                let mut v = parse_value(&mut ds, &arg.ty, raw).ok_or_else(|| format!("{}:{}: `{}` is not a {}", path.display(), lineno, raw, arg.ty))?;
+                let mut v = cell_value(&mut ds, &arg.ty, &t, c, row)?;
                 if let (true, Value::Equity(s)) = (!ids.is_empty(), &v) {
                     if !ids.contains(s) {
-                        return Err(format!("{}:{}: `{}` is not a security id of securities.csv", path.display(), lineno, raw));
+                        return Err(format!("{}: `{}` is not a security id of securities.parquet", t.at(row), ds.symbols.name(*s)));
                     }
                 }
-                if let (Some(res), Value::Time(t)) = (sig.res.filter(|_| key_pos == Some(i)), &v) {
-                    v = Value::Time(bucket(res, *t));
+                if let (Some(res), Value::Time(tt)) = (sig.res.filter(|_| key_pos == Some(i)), &v) {
+                    v = Value::Time(bucket(res, *tt));
                 }
                 tuple.push(v);
             }
             // A price is positive (section 6, executor policy: a non-positive
-            // price is a data error, never a book state).
+            // price is a data error, never a book state), except a future's,
+            // whose back-adjusted series may cross zero.
             for (i, arg) in sig.args.iter().enumerate() {
                 if let (Ty::Quantity(d), Value::Num(x)) = (&arg.ty, &tuple[i]) {
-                    if d.c2 == 2 && d.s2 == -2 && d.t2 == 0 && *x <= 0.0 {
-                        return Err(format!("{}:{}: `{}` is not a positive price for `{}`", path.display(), lineno, x, arg.name));
+                    if d.c2 == 2 && d.s2 == -2 && d.t2 == 0 && *x <= 0.0 && !tuple.iter().any(|v| matches!(v, Value::Equity(s) if ds.is_future(*s))) {
+                        return Err(format!("{}: `{}` is not a positive price for `{}`", t.at(row), x, arg.name));
                     }
                 }
             }
-            rows += 1;
             let id: Vec<Value> = identity.iter().map(|&i| tuple[i].clone()).collect();
             let avail = match avail_col {
-                Some(c) => {
-                    let raw = fields.get(c).copied().unwrap_or("");
-                    if raw.is_empty() {
-                        None
-                    } else {
-                        Some(parse_timestamp(raw).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp (available_at)", path.display(), lineno, raw))?)
-                    }
-                }
+                Some(c) => t.time_opt(c, row)?,
                 None => None,
             };
             match seen.get(&id) {
@@ -159,16 +106,15 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
                 Some((first, _)) => {
                     let shown: Vec<String> = id.iter().map(|v| field(&ds, v)).collect();
                     return Err(format!(
-                        "{}:{}: duplicate tuple for ({}) with different outputs; line {} already binds them (`{}` is a function of its inputs and key)",
-                        path.display(),
-                        lineno,
+                        "{}: duplicate tuple for ({}) with different outputs; row {} already binds them (`{}` is a function of its inputs and key)",
+                        t.at(row),
                         shown.join(", "),
-                        first,
+                        first + 1,
                         name
                     ));
                 }
                 None => {
-                    seen.insert(id, (lineno, tuple.clone()));
+                    seen.insert(id, (row, tuple.clone()));
                     match avail {
                         Some(a) => ds.add_available(name, tuple, a),
                         None => ds.add(name, tuple),
@@ -176,14 +122,75 @@ pub fn load_csv_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<String>)
                 }
             }
         }
-        if rows == 0 {
+        if t.is_empty() {
             notes.push(format!("{} has no rows; relation left empty", path.display()));
         }
     }
-    if prog.relations.get("ticker").map(|s| matches!(s.kind, Kind::Primitive { .. })).unwrap_or(false) && !dir.join("ticker.csv").exists() {
+    if prog.relations.get("ticker").map(|s| matches!(s.kind, Kind::Primitive { .. })).unwrap_or(false) && !dir.join("ticker.parquet").exists() {
         ds.derive_tickers();
     }
     Ok((ds, notes))
+}
+
+/// Read a security table (`id,ticker,from,to` and optionally `multiplier`,
+/// `asset_class`, `commission_per_contract`) into the dataset and check its
+/// identities.
+pub fn read_securities(ds: &mut Dataset, path: &Path) -> Result<(), String> {
+    let t = Table::read(path)?;
+    let (ci, ct, cf, cto) = (t.col("id")?, t.col("ticker")?, t.col("from")?, t.col("to")?);
+    let (cm, ca, cc) = (t.col("multiplier").ok(), t.col("asset_class").ok(), t.col("commission_per_contract").ok());
+    for row in 0..t.len() {
+        let (Some(id), Some(ticker)) = (t.text(ci, row), t.text(ct, row)) else {
+            return Err(format!("{}: id and ticker must be non-empty", t.at(row)));
+        };
+        let from = t.time(cf, row)?;
+        let to = t.time_opt(cto, row)?;
+        ds.add_security(&id, &ticker, from, to);
+        let mut contract = crate::kernel::Contract::default();
+        if let Some(c) = cm {
+            contract.multiplier = t.number_opt(c, row)?.unwrap_or(1.0);
+        }
+        if let Some(c) = ca {
+            contract.future = t.text(c, row).map(|s| s == "future").unwrap_or(false);
+        }
+        if let Some(c) = cc {
+            contract.commission_per_contract = t.number_opt(c, row)?;
+        }
+        if contract != crate::kernel::Contract::default() {
+            let sym = ds.intern(&id);
+            ds.contracts.insert(sym, contract);
+        }
+    }
+    let problems = check_identities(ds);
+    if !problems.is_empty() {
+        return Err(format!("{}: {}", path.display(), problems.join("; ")));
+    }
+    Ok(())
+}
+
+/// Write the security table (the inverse of `read_securities`); nothing
+/// without securities.
+pub fn write_securities(ds: &Dataset, path: &Path) -> Result<(), String> {
+    if ds.securities.is_empty() {
+        return Ok(());
+    }
+    let ss = &ds.securities;
+    let contract = |s: &Security| ds.contracts.get(&s.id).cloned().unwrap_or_default();
+    let mut cols = vec![
+        ("id", Col::Str(ss.iter().map(|s| Some(ds.symbols.name(s.id).to_string())).collect())),
+        ("ticker", Col::Str(ss.iter().map(|s| Some(s.ticker.clone())).collect())),
+        ("from", Col::Time(ss.iter().map(|s| Some(s.from)).collect())),
+        ("to", Col::Time(ss.iter().map(|s| s.to).collect())),
+    ];
+    if !ds.contracts.is_empty() {
+        cols.push(("multiplier", Col::Float(ss.iter().map(|s| Some(contract(s).multiplier)).collect())));
+        cols.push((
+            "asset_class",
+            Col::Str(ss.iter().map(|s| Some(if contract(s).future { "future" } else { "equity" }.to_string())).collect()),
+        ));
+        cols.push(("commission_per_contract", Col::Float(ss.iter().map(|s| contract(s).commission_per_contract).collect())));
+    }
+    write_table(path, cols)
 }
 
 /// The identity bundle tests (data-bundle doc, section 3): every interval
@@ -226,7 +233,7 @@ pub fn check_identities(ds: &Dataset) -> Vec<String> {
     out
 }
 
-/// One CSV field for a value.
+/// A value as text, for messages.
 fn field(ds: &Dataset, v: &Value) -> String {
     match v {
         Value::Equity(s) => ds.symbols.name(*s).to_string(),
@@ -239,57 +246,44 @@ fn field(ds: &Dataset, v: &Value) -> String {
     }
 }
 
-fn parse_value(ds: &mut Dataset, ty: &Ty, raw: &str) -> Option<Value> {
-    Some(match ty {
-        Ty::Equity => Value::Equity(ds.intern(raw)),
-        Ty::Label => Value::Label(ds.intern_label(raw)),
-        Ty::Timestamp => Value::Time(parse_timestamp(raw)?),
-        Ty::Count => Value::Count(raw.parse().ok()?),
-        Ty::Quantity(_) => Value::Num(raw.parse().ok()?),
-        Ty::Duration => return None,
-        Ty::Decision => return None,
-        Ty::IntLit | Ty::StrLit => return None,
+/// A cell of a table as a value of the argument's type.
+fn cell_value(ds: &mut Dataset, ty: &Ty, t: &Table, c: usize, row: usize) -> Result<Value, String> {
+    Ok(match ty {
+        Ty::Equity => Value::Equity(ds.intern(&t.string(c, row)?)),
+        Ty::Label => Value::Label(ds.intern_label(&t.string(c, row)?)),
+        Ty::Timestamp => Value::Time(t.time(c, row)?),
+        Ty::Count => Value::Count(t.integer(c, row)?),
+        Ty::Quantity(_) => Value::Num(t.number(c, row)?),
+        other => return Err(format!("{}: a {} column cannot be read", t.at(row), other)),
     })
 }
 
-/// Write a dataset as one CSV per relation (the inverse of `load_csv_dir`).
-pub fn write_csv_dir(prog: &Program, ds: &Dataset, dir: &Path) -> Result<(), String> {
+/// Write a dataset as one Parquet file per relation (the inverse of
+/// `load_parquet_dir`), with typed columns.
+pub fn write_parquet_dir(prog: &Program, ds: &Dataset, dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    if !ds.securities.is_empty() {
-        let mut out = String::from("id,ticker,from,to\n");
-        for s in &ds.securities {
-            out.push_str(&format!(
-                "{},{},{},{}\n",
-                ds.symbols.name(s.id),
-                s.ticker,
-                format_timestamp(s.from),
-                s.to.map(format_timestamp).unwrap_or_default()
-            ));
-        }
-        std::fs::write(dir.join("securities.csv"), out).map_err(|e| e.to_string())?;
-    }
+    write_securities(ds, &dir.join("securities.parquet"))?;
     for (name, tuples) in &ds.facts {
         let Some(sig) = prog.relations.get(name) else { continue };
         if name == "ticker" {
             // Derived from the security table (or from the symbols) at load.
             continue;
         }
-        let mut out = String::new();
-        let avails = ds.availability_of(name);
-        out.push_str(&sig.args.iter().map(|a| a.name.clone()).collect::<Vec<_>>().join(","));
-        if avails.is_some() {
-            out.push_str(",available_at");
+        let mut cols: Vec<(&str, Col)> = Vec::new();
+        for (i, arg) in sig.args.iter().enumerate() {
+            let col = match &arg.ty {
+                Ty::Equity | Ty::Label => Col::Str(tuples.iter().map(|tu| Some(field(ds, &tu[i]))).collect()),
+                Ty::Timestamp => Col::Time(tuples.iter().map(|tu| tu[i].as_time()).collect()),
+                Ty::Count => Col::Int(tuples.iter().map(|tu| if let Value::Count(c) = tu[i] { Some(c) } else { None }).collect()),
+                Ty::Quantity(_) => Col::Float(tuples.iter().map(|tu| tu[i].as_f64()).collect()),
+                other => return Err(format!("`{}`: a {} column cannot be written", name, other)),
+            };
+            cols.push((arg.name.as_str(), col));
         }
-        out.push('\n');
-        for (i, tu) in tuples.iter().enumerate() {
-            let mut fields: Vec<String> = tu.iter().map(|v| field(ds, v)).collect();
-            if let Some(a) = avails {
-                fields.push(a.get(i).filter(|x| **x != i64::MIN).map(|x| format_timestamp(*x)).unwrap_or_default());
-            }
-            out.push_str(&fields.join(","));
-            out.push('\n');
+        if let Some(a) = ds.availability_of(name) {
+            cols.push(("available_at", Col::Time((0..tuples.len()).map(|i| a.get(i).copied().filter(|x| *x != i64::MIN)).collect())));
         }
-        std::fs::write(dir.join(format!("{}.csv", name)), out).map_err(|e| e.to_string())?;
+        write_table(&dir.join(format!("{}.parquet", name)), cols)?;
     }
     Ok(())
 }

@@ -34,7 +34,12 @@ fn the_canonical_strategies_trade_both_legs_on_the_synthetic_catalog_market() {
     let ds = synthetic_daily_v2(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 400, 11);
     for name in CANONICAL {
         let prog = program(name);
-        let r = run(&prog, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        // Compounding: the legs are re-sized to equity at each rebalance.
+        let cfg = ExecConfig {
+            compounding: true,
+            ..ExecConfig::default()
+        };
+        let r = run(&prog, &ds, cfg).unwrap_or_else(|e| panic!("{}: {}", name, e));
         assert!(!r.fills.is_empty(), "{} never filled", name);
         assert!(r.fills.iter().any(|f| f.quantity < 0.0) && r.fills.iter().any(|f| f.quantity > 0.0), "{} did not trade both legs", name);
         // Four tenths of equity a leg at each rebalance: the book is never

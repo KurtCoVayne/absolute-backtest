@@ -1,0 +1,3 @@
+1.dsl	1 strategies, 5 libraries checked: 5 error(s), 26 warning(s)	 5 error[M] mw; 2 warning[W4] mw; 24 warning[W5] mw;
+2.dsl	1 strategies, 5 libraries checked: 1 error(s), 24 warning(s)	 1 error[M] mw; 24 warning[W5] mw;
+3.dsl	1 strategies, 5 libraries checked: 0 error(s), 0 warning(s)	

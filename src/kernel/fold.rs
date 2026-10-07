@@ -188,6 +188,8 @@ impl<'p, 'e> Fold<'p, 'e> {
             warnings: kernel.cfg.warnings(),
             price_relation: kernel.price_rel.map(|id| kernel.rels[id].name.clone()),
             volume_relation: kernel.volume_rel.map(|id| kernel.rels[id].name.clone()),
+            base_capital: (!kernel.cfg.compounding).then_some(kernel.cfg.initial_cash),
+            multipliers: kernel.contracts.iter().map(|(s, c)| (*s, c.multiplier)).collect(),
             ..Default::default()
         };
         Fold {
@@ -264,6 +266,10 @@ impl<'p, 'e> Fold<'p, 'e> {
             return Err(RunError::Config("the checkpoint's relations do not match the program's".into()));
         }
         kernel.stores = cp.stores;
+        // A checkpoint's blocks may predate the index: re-sort on first use.
+        for (st, info) in kernel.stores.iter_mut().zip(kernel.rels.iter()) {
+            st.index_by(info.entity_positions.first().copied());
+        }
         kernel.domains = cp.domains.into_iter().map(|(r, v)| (r, v.into_iter().collect::<BTreeSet<i64>>())).collect();
         kernel.last_price = cp.last_price.into_iter().collect();
         kernel.windows = cp.windows.into_iter().map(|(key, rows)| (key, rows.into_iter().collect())).collect();
@@ -343,6 +349,10 @@ impl<'p, 'e> Fold<'p, 'e> {
         if res != self.kernel.prog.resolution {
             return Ok(());
         }
+        // Outside the run's window a bar is data only.
+        if self.kernel.cfg.start.map(|s| label < s).unwrap_or(false) || self.kernel.cfg.end.map(|e| label > e).unwrap_or(false) {
+            return Ok(());
+        }
         if self.decided_once {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
@@ -368,7 +378,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         if !self.decided_once {
             return Err(RunError::NoBars);
         }
-        self.exec.finish(&self.kernel, &mut self.result);
+        self.exec.finish(&mut self.kernel, &mut self.result);
         self.result.stats = self.kernel.stats();
         Ok((self.result, self.kernel))
     }

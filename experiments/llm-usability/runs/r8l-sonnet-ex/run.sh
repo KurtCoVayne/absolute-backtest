@@ -1,0 +1,2 @@
+#!/bin/sh
+bin/abt run --strategy r8l --price-relation close_m --bundle ~/data/abt/b_r8l_fb --capital 1000000 --compounding off --lot fractional --on-leverage allow --on-oversize allow --on-ruin continue --max-gross 1000 --on-margin-call allow --fee-bps 0 --margin-rate 0 --cash-rate 0 --report-by day --report-calendar calendar --periods-per-year 252 --returns out_returns.parquet --dump out_dump env lib final.dsl

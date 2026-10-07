@@ -1,0 +1,32 @@
+$REPO/scripts/parity/mw14_compare.py:29: RuntimeWarning: invalid value encountered in scalar divide
+  "sharpe": r.mean() / r.std() * np.sqrt(52),
+~/.venvs/abt/lib/python3.14/site-packages/numpy/lib/_function_base_impl.py:3036: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+~/.venvs/abt/lib/python3.14/site-packages/numpy/lib/_function_base_impl.py:3037: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+$REPO/scripts/parity/mw14_compare.py:29: RuntimeWarning: invalid value encountered in scalar divide
+  "sharpe": r.mean() / r.std() * np.sqrt(52),
+weeks compared: 1852 (abt 1852, canon 1852); abt weeks 1991-01-11 .. 2026-07-02
+                    canon            abt         diff
+cagr             0.208995       0.000000    -0.208995
+maxdd           -0.261782       0.000000     0.261782
+sharpe           1.019903            nan          nan
+vol              0.207434       0.000000    -0.207434
+pnl        7534876.544421       0.000000 -7534876.544421
+weekly correlation nan; |diff| mean 2.06e-02, max 1.63e-01; weeks equal to 1e-9: 10.2%, to 1e-4: 10.5%
+canon reference (RESULTS.md MW-126): cagr 0.2089947950, maxdd -0.2617817195, sharpe 1.0199, pnl 7,534,877
+largest weekly differences (decision week of the book = the bar before):
+  2000-01-14  canon  0.105187  abt  0.000000  diff -0.105187
+  2000-01-21  canon  0.144004  abt  0.000000  diff -0.144004
+  2000-06-02  canon  0.143244  abt  0.000000  diff -0.143244
+  2011-10-21  canon -0.113212  abt  0.000000  diff  0.113212
+  2020-02-28  canon -0.132796  abt  0.000000  diff  0.132796
+  2021-01-08  canon  0.123137  abt  0.000000  diff -0.123137
+  2021-01-29  canon  0.163401  abt  0.000000  diff -0.163401
+  2022-01-21  canon -0.115973  abt  0.000000  diff  0.115973
+  2022-05-27  canon  0.119871  abt  0.000000  diff -0.119871
+  2022-07-29  canon  0.118044  abt  0.000000  diff -0.118044
+  era 1990s: canon cagr 0.2554  abt 0.0000
+  era 2000s: canon cagr 0.1604  abt 0.0000
+  era 2010s: canon cagr 0.1230  abt 0.0000
+  era 2020-26: canon cagr 0.3688  abt 0.0000

@@ -1036,19 +1036,25 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+        // The greatest fixpoint: every derived relation with rules starts
+        // complete and leaves when a rule reads an incomplete relation
+        // positively. A recursive relation over complete inputs is complete,
+        // since temporal recursion is well-founded (WF-4): its evaluation is
+        // total, so a missing tuple is false.
+        for (name, sig) in &self.relations {
+            if matches!(sig.kind, Kind::Derived { .. }) && infos.iter().any(|(_, i)| i.head == *name) {
+                complete.insert(name.clone());
+            }
+        }
         loop {
             let mut changed = false;
             for (name, sig) in &self.relations {
-                if complete.contains(name) || !matches!(sig.kind, Kind::Derived { .. }) {
+                if !complete.contains(name) || !matches!(sig.kind, Kind::Derived { .. }) {
                     continue;
                 }
-                let rules: Vec<&RuleInfo> = infos.iter().filter(|(_, i)| i.head == *name).map(|(_, i)| i).collect();
-                if rules.is_empty() {
-                    continue;
-                }
-                let ok = rules.iter().all(|info| self.rule_complete(info, &complete));
-                if ok {
-                    complete.insert(name.clone());
+                let ok = infos.iter().filter(|(_, i)| i.head == *name).all(|(_, info)| self.rule_complete(info, &complete));
+                if !ok {
+                    complete.remove(name);
                     changed = true;
                 }
             }

@@ -9,9 +9,10 @@ mod corpus;
 use std::fs;
 
 use absolute_backtest::check::{check_program, Code, Diagnostic, Program, Severity, Workspace};
-use absolute_backtest::data::{load_csv_dir, write_csv_dir};
+use absolute_backtest::data::{load_parquet_dir, write_parquet_dir};
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
 use absolute_backtest::kernel::{run, Dataset, ExecConfig, Value};
+use absolute_backtest::table::to_text;
 use absolute_backtest::{Lit, Ty};
 
 const ENV: &str = r#"
@@ -199,15 +200,15 @@ fn labels_flow_through_the_kernel() {
 }
 
 #[test]
-fn a_label_column_loads_from_csv_and_round_trips() {
+fn a_label_column_loads_from_parquet_and_round_trips() {
     let p = program(EXIT_ON_BANKRUPTCY, "exit_on_bankruptcy");
     let dir = std::env::temp_dir().join(format!("abt-labels-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    write_csv_dir(&p, &market(), &dir).unwrap();
-    let delisted = fs::read_to_string(dir.join("delisted.csv")).unwrap();
+    write_parquet_dir(&p, &market(), &dir).unwrap();
+    let delisted = to_text(&dir.join("delisted.parquet")).unwrap();
     assert!(delisted.contains("BBB,2024-01-10,bankruptcy"), "{}", delisted);
-    let (ds, notes) = load_csv_dir(&p, &dir).unwrap();
+    let (ds, notes) = load_parquet_dir(&p, &dir).unwrap();
     assert!(notes.is_empty(), "{:?}", notes);
     let reasons: Vec<&Value> = ds.facts["delisted"].iter().map(|tu| &tu[2]).collect();
     assert_eq!(reasons.len(), 2);

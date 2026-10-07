@@ -122,6 +122,7 @@ strategy half {
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
+            compounding: true,
             ..ExecConfig::frictionless()
         },
     )
@@ -132,6 +133,24 @@ strategy half {
     let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
     assert_eq!(qty, vec![50.0, -13.0]);
     assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![37.0]);
+    // On a fixed base (the default) the weight is of the capital: 50 shares
+    // at 20 are 1000 = 0.5 * 2000, too much; the target is 25 shares.
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
+    let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
+    assert_eq!(qty, vec![50.0, -25.0]);
+    assert_eq!(r.base_capital, Some(1000.0));
+    // The bar returns (days 2 to 5) are the NAV changes over the capital:
+    // the 50 shares gain 500 on day 3, +500 / 1000; nothing moves after.
+    let rets: Vec<f64> = r.bar_returns().iter().map(|(_, x)| *x).collect();
+    assert_eq!(rets, vec![0.0, 0.5, 0.0, 0.0]);
 }
 
 #[test]
@@ -871,4 +890,38 @@ strategy lagz {
         Err(RunError::Request(m)) => assert!(m.contains("lag") && m.contains("zero") && !m.contains("internal"), "{}", m),
         other => panic!("expected the override to be refused, got {:?}", other.map(|r| r.decisions.len())),
     }
+}
+
+/// Data-bundle doc, section 7: the run's window. Bars before `start` are
+/// data only (a lag reaches them), the executor and the decisions start at
+/// `start`, and nothing runs after `end`; both drivers agree.
+#[test]
+fn a_run_window_warms_up_on_earlier_bars_and_trades_inside_it() {
+    let src = r#"
+strategy windowed {
+  env equities_1d
+  uses features
+  resolution @1d
+  mode target
+  rel up(-A: Equity, @T: Timestamp)
+  up(A, T) :- universe(A, T), close(A, T, P), prev(T, T0), close(A, T0, P0), P > P0.
+  decide(T, target_weight(A, 0.5)) :- up(A, T).
+}
+"#;
+    let (prog, _) = program(src, "windowed");
+    let ds = crafted_daily(&[10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
+    let days = absolute_backtest::data::business_days((2024, 1, 8), 6);
+    let cfg = ExecConfig {
+        start: Some(days[2]),
+        end: Some(days[4]),
+        ..ExecConfig::frictionless()
+    };
+    let r = run(&prog, &ds, cfg.clone()).unwrap();
+    assert_eq!(r.bars, days[2..=4].to_vec());
+    // The first decision bar sees day 2 through prev: it decides at once.
+    assert_eq!(r.decisions.first().map(|d| d.t), Some(days[2]));
+    assert_eq!(r.equity_curve.first().map(|(t, _)| *t), Some(days[2]));
+    let f = absolute_backtest::kernel::run_fold(&prog, &ds, cfg).unwrap();
+    assert_eq!(f.bars, r.bars);
+    assert_eq!(f.final_cash.to_bits(), r.final_cash.to_bits());
 }

@@ -10,7 +10,7 @@ mod corpus;
 use std::fs;
 
 use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{load_csv_dir, synthetic_daily, write_csv_dir};
+use absolute_backtest::data::{load_parquet_dir, synthetic_daily, write_parquet_dir};
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
 use absolute_backtest::kernel::{run, run_fold, verify_causality, Dataset, ExecConfig, Value};
 
@@ -148,7 +148,7 @@ strategy reads {
 }
 
 #[test]
-fn availability_loads_from_csv_and_truncation_follows_it() {
+fn availability_loads_from_parquet_and_truncation_follows_it() {
     let p = program(
         &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/sma_crossover.dsl")).unwrap(),
         "sma_crossover",
@@ -156,10 +156,10 @@ fn availability_loads_from_csv_and_truncation_follows_it() {
     let ds = delayed();
     let dir = std::env::temp_dir().join(format!("abt-avail-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    write_csv_dir(&p, &ds, &dir).unwrap();
-    let close = fs::read_to_string(dir.join("close.csv")).unwrap();
+    write_parquet_dir(&p, &ds, &dir).unwrap();
+    let close = absolute_backtest::table::to_text(&dir.join("close.parquet")).unwrap();
     assert!(close.lines().next().unwrap().ends_with(",available_at"), "{}", close.lines().next().unwrap());
-    let (loaded, _) = load_csv_dir(&p, &dir).unwrap();
+    let (loaded, _) = load_parquet_dir(&p, &dir).unwrap();
     assert!(loaded.has_availability());
     assert_eq!(loaded.availability_of("close").unwrap().len(), ds.facts["close"].len());
     let a = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();

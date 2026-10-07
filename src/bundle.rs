@@ -1,7 +1,7 @@
 //! The bundle format (data-bundle doc, section 2 "Storage", section 3
 //! "Bundle tests"): a versioned directory the system ships. `manifest.json`
 //! names the environment, the version, the bundle date and every relation
-//! with its availability convention and partitions; `securities.csv` is the
+//! with its availability convention and partitions; `securities.parquet` is the
 //! security table; `log/<relation>/<YYYY-MM>.parquet` are append-only
 //! partitions of the primitive facts by the month of their temporal key;
 //! `snapshots/` is reserved for the fold kernel's checkpoints. A bundle whose
@@ -24,6 +24,7 @@ use crate::data::check_identities;
 use crate::ir::*;
 use crate::kernel::time::{bucket, format_timestamp, parse_timestamp};
 use crate::kernel::{Dataset, Value};
+use crate::table::{write_table, Col, Table};
 
 /// One relation of the bundle.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -54,8 +55,69 @@ pub struct TestReport {
     pub results: Vec<TestResult>,
 }
 
+/// A problem a person reviewed and accepted (section 3, bundle tests): the
+/// test, the security id, the bar, and why the data is right and the test
+/// too strict there. Read from `exceptions.parquet` next to the manifest
+/// (`test,security,date,reason`); an accepted problem passes the test and
+/// is counted in its detail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exception {
+    pub test: String,
+    pub security: String,
+    pub t: i64,
+    pub reason: String,
+}
+
+/// The reviewed exceptions of a bundle; none without the file.
+pub fn read_exceptions(dir: &Path) -> Result<Vec<Exception>, String> {
+    let path = dir.join("exceptions.parquet");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let t = Table::read(&path)?;
+    let (ct, cs, cd, cr) = (t.col("test")?, t.col("security")?, t.col("date")?, t.col("reason")?);
+    let mut out = Vec::new();
+    for row in 0..t.len() {
+        let reason = t.text(cr, row).ok_or_else(|| format!("{}: an exception needs a reason", t.at(row)))?;
+        out.push(Exception {
+            test: t.string(ct, row)?,
+            security: t.string(cs, row)?,
+            t: t.time(cd, row)?,
+            reason,
+        });
+    }
+    Ok(out)
+}
+
+/// Write the reviewed exceptions next to the manifest (none: no file).
+pub fn write_exceptions(dir: &Path, exceptions: &[Exception]) -> Result<(), String> {
+    if exceptions.is_empty() {
+        return Ok(());
+    }
+    write_table(
+        &dir.join("exceptions.parquet"),
+        vec![
+            ("test", Col::Str(exceptions.iter().map(|e| Some(e.test.clone())).collect())),
+            ("security", Col::Str(exceptions.iter().map(|e| Some(e.security.clone())).collect())),
+            ("date", Col::Time(exceptions.iter().map(|e| Some(e.t)).collect())),
+            ("reason", Col::Str(exceptions.iter().map(|e| Some(e.reason.clone())).collect())),
+        ],
+    )
+}
+
+/// The on-disk layout version: 2 stores the security table and the
+/// exceptions as Parquet (1 kept them as text files).
+pub const FORMAT: u32 = 2;
+
+fn format_one() -> u32 {
+    1
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
+    /// The layout version (`FORMAT`); a bundle without it is version 1.
+    #[serde(default = "format_one")]
+    pub format: u32,
     /// The environment the bundle instantiates.
     pub name: String,
     pub version: String,
@@ -129,19 +191,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         return Err(format!("the program is written against `{}`, not `{}`", prog.environment, name));
     }
     fs::create_dir_all(dir.join("log")).map_err(|e| format!("{}: {}", dir.display(), e))?;
-    if !ds.securities.is_empty() {
-        let mut out = String::from("id,ticker,from,to\n");
-        for s in &ds.securities {
-            out.push_str(&format!(
-                "{},{},{},{}\n",
-                ds.symbols.name(s.id),
-                s.ticker,
-                format_timestamp(s.from),
-                s.to.map(format_timestamp).unwrap_or_default()
-            ));
-        }
-        fs::write(dir.join("securities.csv"), out).map_err(|e| e.to_string())?;
-    }
+    crate::data::write_securities(ds, &dir.join("securities.parquet"))?;
     let mut relations = Vec::new();
     for (rel, sig) in &prog.relations {
         if !matches!(sig.kind, Kind::Primitive { .. }) || rel == "ticker" {
@@ -200,6 +250,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         });
     }
     let manifest = Manifest {
+        format: FORMAT,
         name: name.to_string(),
         version: version.to_string(),
         as_of: ds.bundle_date().map(format_timestamp),
@@ -236,27 +287,18 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
 
 /// Read a bundle's facts into a dataset, regardless of its tests.
 fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, String> {
+    if m.format < FORMAT {
+        return Err(format!(
+            "bundle {} is layout version {} (text security table); this abt reads version {}: rebuild it with `abt bundle build`",
+            dir.display(),
+            m.format,
+            FORMAT
+        ));
+    }
     let mut ds = Dataset::new();
-    let table = dir.join("securities.csv");
+    let table = dir.join("securities.parquet");
     if table.exists() {
-        let text = fs::read_to_string(&table).map_err(|e| e.to_string())?;
-        for (ln, line) in text.lines().enumerate().skip(1).filter(|(_, l)| !l.trim().is_empty()) {
-            let f: Vec<&str> = line.split(',').map(|x| x.trim()).collect();
-            if f.len() < 4 {
-                return Err(format!("{}:{}: short row", table.display(), ln + 1));
-            }
-            let from = parse_timestamp(f[2]).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), ln + 1, f[2]))?;
-            let to = if f[3].is_empty() {
-                None
-            } else {
-                Some(parse_timestamp(f[3]).ok_or_else(|| format!("{}:{}: `{}` is not a timestamp", table.display(), ln + 1, f[3]))?)
-            };
-            ds.add_security(f[0], f[1], from, to);
-        }
-        let problems = check_identities(&ds);
-        if !problems.is_empty() {
-            return Err(format!("{}: {}", table.display(), problems.join("; ")));
-        }
+        crate::data::read_securities(&mut ds, &table)?;
     }
     for entry in &m.relations {
         let Some(sig) = prog.relations.get(&entry.name) else { continue };
@@ -375,7 +417,7 @@ pub fn test_bundle(prog: &Program, dir: &Path) -> Result<(Manifest, Vec<TestResu
         ));
     }
     let ds = read_facts(prog, dir, &m)?;
-    let results = run_tests(prog, &ds);
+    let results = run_tests_with(prog, &ds, &read_exceptions(dir)?);
     m.tests = if results.iter().all(|r| r.passed) {
         Some(TestReport {
             passed_at: today(),
@@ -390,12 +432,22 @@ pub fn test_bundle(prog: &Program, dir: &Path) -> Result<(Manifest, Vec<TestResu
 
 /// The bundle tests of the data-bundle doc, section 3, on a dataset.
 pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
+    run_tests_with(prog, ds, &[])
+}
+
+/// The bundle tests with a set of reviewed exceptions.
+pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) -> Vec<TestResult> {
     let mut out = Vec::new();
+    // Exceptions accepted by the test being pushed (set just before its push).
+    let accepted_here = std::cell::Cell::new(0usize);
     let mut push = |name: &str, problems: Vec<String>| {
+        let accepted = accepted_here.replace(0);
         out.push(TestResult {
             name: name.to_string(),
             passed: problems.is_empty(),
-            detail: if problems.is_empty() {
+            detail: if problems.is_empty() && accepted > 0 {
+                format!("ok ({} reviewed exception{} accepted)", accepted, if accepted == 1 { "" } else { "s" })
+            } else if problems.is_empty() {
                 "ok".into()
             } else {
                 let more = if problems.len() > 5 { format!(" (+{} more)", problems.len() - 5) } else { String::new() };
@@ -421,7 +473,7 @@ pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
         }
     }
     push("bar labels", problems);
-    // Positive prices.
+    // Positive prices (a future's excepted).
     let mut problems = Vec::new();
     for (rel, sig) in &prog.relations {
         let Some(tuples) = ds.facts.get(rel) else { continue };
@@ -429,7 +481,9 @@ pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
             if let Ty::Quantity(d) = &arg.ty {
                 if d.c2 == 2 && d.s2 == -2 {
                     for tu in tuples {
-                        if tu[i].as_f64().map(|x| x <= 0.0).unwrap_or(false) {
+                        // A future's back-adjusted price may cross zero.
+                        let future = tu.iter().any(|v| matches!(v, Value::Equity(s) if ds.is_future(*s)));
+                        if !future && tu[i].as_f64().map(|x| x <= 0.0).unwrap_or(false) {
                             problems.push(format!(
                                 "{}: {} at {} is not a positive price",
                                 rel,
@@ -443,9 +497,15 @@ pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
         }
     }
     push("positive prices", problems);
-    // Action reconciliation: a close ratio outside [0.6, 1.67] between
-    // consecutive bars of a name is explained by a split that day (ratio ×
-    // factor within 25% of one), and every split shows such a ratio.
+    // Action reconciliation: the total-return ratio between consecutive
+    // closes of a name, (close + that day's dividends) × split factor /
+    // previous close, is within 25% of one on a split's ex-date and within
+    // [0.6, 1.67] on any other bar; every split falls on a bar with a close.
+    // A dividend going ex is an action that explains a gap (a vendor that
+    // books a spin-off as a distribution of its value), quoted per share
+    // after a same-day split. A reviewed exception excuses one bar.
+    let excused: std::collections::BTreeSet<(&str, i64)> = exceptions.iter().filter(|e| e.test == "action reconciliation").map(|e| (e.security.as_str(), e.t)).collect();
+    let mut accepted = 0usize;
     let mut problems = Vec::new();
     if let Some(closes) = ds.facts.get("close") {
         let mut series: BTreeMap<Value, BTreeMap<i64, f64>> = BTreeMap::new();
@@ -459,27 +519,41 @@ pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
             .get("split")
             .map(|tus| tus.iter().filter_map(|tu| Some(((tu[0].clone(), tu[1].as_time()?), tu[2].as_f64()?))).collect())
             .unwrap_or_default();
+        let mut dividends: BTreeMap<(Value, i64), f64> = BTreeMap::new();
+        for tu in ds.facts.get("dividend").map(|v| v.as_slice()).unwrap_or(&[]) {
+            if let (Some(ex), Some(amount)) = (tu.get(2).and_then(|v| v.as_time()), tu.get(4).and_then(|v| v.as_f64())) {
+                *dividends.entry((tu[0].clone(), ex)).or_insert(0.0) += amount;
+            }
+        }
         for (sym, s) in &series {
+            let name = sym_name(sym);
             let mut prev: Option<f64> = None;
             for (&t, &p) in s {
                 if let Some(p0) = prev {
-                    let ratio = p / p0;
-                    match splits.get(&(sym.clone(), t)) {
-                        Some(f) => {
-                            if ((ratio * f) - 1.0).abs() > 0.25 {
-                                problems.push(format!("{} at {}: a {}:1 split but the close moved from {} to {}", sym_name(sym), format_timestamp(t), f, p0, p));
-                            }
-                        }
-                        None => {
-                            if !(0.6..=1.67).contains(&ratio) {
-                                problems.push(format!(
-                                    "{} at {}: the close moved from {} to {} with no action to explain it",
-                                    sym_name(sym),
-                                    format_timestamp(t),
-                                    p0,
-                                    p
-                                ));
-                            }
+                    let div = dividends.get(&(sym.clone(), t)).copied().unwrap_or(0.0);
+                    let split = splits.get(&(sym.clone(), t)).copied();
+                    let ratio = (p + div) * split.unwrap_or(1.0) / p0;
+                    let problem = match split {
+                        Some(f) if (ratio - 1.0).abs() > 0.25 => Some(format!("{} at {}: a {}:1 split but the close moved from {} to {}", name, format_timestamp(t), f, p0, p)),
+                        None if !(0.6..=1.67).contains(&ratio) => Some(if div > 0.0 {
+                            format!(
+                                "{} at {}: the close moved from {} to {} and a dividend of {} does not explain it",
+                                name,
+                                format_timestamp(t),
+                                p0,
+                                p,
+                                div
+                            )
+                        } else {
+                            format!("{} at {}: the close moved from {} to {} with no action to explain it", name, format_timestamp(t), p0, p)
+                        }),
+                        _ => None,
+                    };
+                    if let Some(problem) = problem {
+                        if excused.contains(&(name.as_str(), t)) {
+                            accepted += 1;
+                        } else {
+                            problems.push(problem);
                         }
                     }
                 }
@@ -492,6 +566,7 @@ pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
             }
         }
     }
+    accepted_here.set(accepted);
     push("action reconciliation", problems);
     // Delisting coverage: a name whose last universe bar is before the data's
     // last bar has a delisted tuple.
@@ -535,7 +610,7 @@ pub fn run_tests(prog: &Program, ds: &Dataset) -> Vec<TestResult> {
 pub fn layout() -> Vec<PathBuf> {
     vec![
         PathBuf::from("manifest.json"),
-        PathBuf::from("securities.csv"),
+        PathBuf::from("securities.parquet"),
         PathBuf::from("log/<relation>/<YYYY-MM>.parquet"),
         PathBuf::from("snapshots/"),
     ]

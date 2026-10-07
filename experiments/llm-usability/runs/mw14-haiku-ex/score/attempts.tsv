@@ -1,0 +1,9 @@
+1.dsl	PARSE: 1.dsl:126:39: parse error: expected identifier, found `(`	
+2.dsl	PARSE: 2.dsl:132:17: parse error: unexpected character `;`	
+3.dsl	1 strategies, 5 libraries checked: 3 error(s), 29 warning(s)	 1 error[B] mw; 1 error[M] mw; 1 error[U] mw; 1 warning[W2] mw; 2 warning[W4] mw; 26 warning[W5] mw;
+4.dsl	1 strategies, 5 libraries checked: 0 error(s), 28 warning(s)	 2 warning[W4] mw; 26 warning[W5] mw;
+5.dsl	1 strategies, 5 libraries checked: 5 error(s), 32 warning(s)	 5 error[B] mw; 2 warning[W4] mw; 30 warning[W5] mw;
+6.dsl	1 strategies, 5 libraries checked: 2 error(s), 32 warning(s)	 2 error[B] mw; 2 warning[W4] mw; 30 warning[W5] mw;
+7.dsl	1 strategies, 5 libraries checked: 9 error(s), 27 warning(s)	 5 error[B] mw; 1 error[F] mw; 2 error[M] mw; 1 error[T] mw; 2 warning[W4] mw; 25 warning[W5] mw;
+8.dsl	1 strategies, 5 libraries checked: 0 error(s), 27 warning(s)	 2 warning[W4] mw; 25 warning[W5] mw;
+9.dsl	1 strategies, 5 libraries checked: 0 error(s), 16 warning(s)	 1 warning[W4] mw; 15 warning[W5] mw;

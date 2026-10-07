@@ -406,7 +406,24 @@ pub fn effective_params(prog: &Program, cfg: &ExecConfig) -> BTreeMap<String, St
 }
 
 /// What runs a program on a dataset (the batch kernel, the fold, ...).
-pub type Runner<'a> = dyn Fn(&Program, &Dataset, ExecConfig) -> Result<RunResult, RunError> + 'a;
+pub type Runner<'a> = dyn Fn(&Program, &Dataset, ExecConfig) -> Result<RunResult, RunError> + Sync + 'a;
+
+/// Grid points evaluated at once by a study (each point is an independent
+/// run over the same data); `set_threads` changes it. A run holds its own
+/// kernel, so memory grows with the count: the default is the machine's
+/// cores, at most four.
+static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_threads(n: usize) {
+    THREADS.store(n.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn threads() -> usize {
+    match THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4),
+        n => n,
+    }
+}
 
 /// Where a run's data came from and how it was scheduled, for the log.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -515,10 +532,35 @@ struct Evaluated {
     trading: TradingMetrics,
 }
 
+/// `evaluate` for several configurations at once, on `threads()` workers,
+/// the results in the configurations' order (so a study logs its trials in
+/// grid order whatever finishes first).
+fn evaluate_all(prog: &Program, data: &Dataset, cfgs: &[ExecConfig], runner: &Runner, keep: &(dyn Fn(i64) -> bool + Sync)) -> Result<Vec<Evaluated>, String> {
+    let workers = threads().min(cfgs.len()).max(1);
+    if workers == 1 {
+        return cfgs.iter().map(|c| evaluate(prog, data, c.clone(), runner, keep)).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<Result<Evaluated, String>>>> = cfgs.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= cfgs.len() {
+                    break;
+                }
+                let out = evaluate(prog, data, cfgs[i].clone(), runner, keep);
+                *slots[i].lock().unwrap() = Some(out);
+            });
+        }
+    });
+    slots.into_iter().map(|m| m.into_inner().unwrap().unwrap_or_else(|| Err("a study worker stopped".into()))).collect()
+}
+
 fn evaluate(prog: &Program, data: &Dataset, cfg: ExecConfig, runner: &Runner, keep: &dyn Fn(i64) -> bool) -> Result<Evaluated, String> {
     let ppy = periods_per_year(prog.resolution);
     let result = runner(prog, data, cfg).map_err(|e| e.to_string())?;
-    let curve = masked_curve(&result.equity_curve, keep);
+    let curve = masked_curve(&result.metric_curve(), keep);
     let metrics = return_metrics(&curve, ppy);
     let trading = trading_metrics(&result, ppy);
     Ok(Evaluated { result, curve, metrics, trading })
@@ -603,10 +645,10 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
     } else {
         Some(format!("metrics exclude the embargoed blocks {}", embargo.describe()))
     };
-    for point in &grid.points {
-        let cfg = point_cfg(study, point);
-        let ev = evaluate(prog, &sample, cfg.clone(), runner, &keep)?;
-        let trial = record(&log, study, prog, &hash, &cfg, &ev, TrialKind::Trial, &from, masked_note.clone())?;
+    let cfgs: Vec<ExecConfig> = grid.points.iter().map(|p| point_cfg(study, p)).collect();
+    let evs = evaluate_all(prog, &sample, &cfgs, runner, &keep)?;
+    for (cfg, ev) in cfgs.iter().zip(evs) {
+        let trial = record(&log, study, prog, &hash, cfg, &ev, TrialKind::Trial, &from, masked_note.clone())?;
         curves.push(ev.curve);
         outcomes.push(Outcome {
             result: ev.result,
@@ -762,7 +804,7 @@ fn walk_forward(
     runner: &Runner,
     from: &Provenance,
     scheme: &WalkForward,
-    keep: &dyn Fn(i64) -> bool,
+    keep: &(dyn Fn(i64) -> bool + Sync),
 ) -> Result<WalkForwardReport, String> {
     let bars: Vec<i64> = sample.facts.values().flat_map(|tus| tus.iter()).filter_map(|tu| tu.iter().find_map(|v| v.as_time())).collect();
     let (Some(first), Some(last)) = (bars.iter().min().copied(), bars.iter().max().copied()) else {
@@ -784,16 +826,16 @@ fn walk_forward(
     for (k, &(train_from, train_to, test_from, test_to)) in folds.iter().enumerate() {
         let train_data = sample.truncated(prog, test_from - 1);
         let mut best: Option<(usize, f64, f64)> = None;
-        for (i, point) in grid.points.iter().enumerate() {
-            let cfg = point_cfg(study, point);
-            let in_train = |t: i64| keep(t) && train_from <= t && t < train_to;
-            let ev = evaluate(prog, &train_data, cfg.clone(), runner, &in_train)?;
+        let in_train = |t: i64| keep(t) && train_from <= t && t < train_to;
+        let cfgs: Vec<ExecConfig> = grid.points.iter().map(|p| point_cfg(study, p)).collect();
+        let evs = evaluate_all(prog, &train_data, &cfgs, runner, &in_train)?;
+        for (i, (cfg, ev)) in cfgs.iter().zip(evs).enumerate() {
             record(
                 log,
                 study,
                 prog,
                 hash,
-                &cfg,
+                cfg,
                 &ev,
                 TrialKind::Trial,
                 from,
@@ -959,7 +1001,7 @@ pub fn log_untracked(project: &Project, prog: &Program, result: &RunResult, cfg:
         objective: "sharpe".into(),
         scheme: None,
         holdout: "none".into(),
-        metrics: return_metrics(&result.equity_curve, ppy),
+        metrics: return_metrics(&result.metric_curve(), ppy),
         trading: trading_metrics(result, ppy),
         note: Some("untracked: run outside a study".into()),
         warnings: result

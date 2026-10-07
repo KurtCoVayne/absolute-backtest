@@ -1,0 +1,51 @@
+warning [W5] r8l at 49:40 in rule r8l::m_med#1: literal `250d` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 50:10 in rule r8l::m_med#1: literal `100` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 51:48 in rule r8l::m_med#1: literal `250d` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 94:15 in rule r8l::main_entry#1: literal `2` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 97:15 in rule r8l::main_entry#1: literal `3` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 105:15 in rule r8l::main_entry#2: literal `2` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 108:15 in rule r8l::main_entry#2: literal `3` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 129:9 in rule r8l::size_at_decision#1: literal `6493.912071090746 USD` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 118:14 in rule r8l::sidecar_entry#1: literal `2` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 120:11 in rule r8l::sidecar_entry#1: literal `0.75` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] r8l at 140:22 in rule r8l::decide#2: literal `-1` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+strategy r8l over 183175 bars (2000-01-03T08:31:00 to 2026-08-14T15:00:00), 26 symbols
+decisions: 0   fills: 0   dropped: 0
+    end_equity: 1000000.0000
+  max_drawdown: 0.0000
+  start_equity: 1000000.0000
+  total_return: 0.0000
+accounting: fixed base 1000000.00; a period's return is the NAV change over it (not reinvested)
+metrics per day (252 a year, 6850 periods): cagr 0.000000   max_drawdown 0.000000   sharpe 0.0000 (population 0.0000)   volatility 0.0000
+additive: annual_return 0.000000   max_drawdown 0.000000   total_pnl 0.00   profit_factor inf per period, inf per trade   trades 0   win_rate 0.000
+costs: commissions 0.00   fees 0.00   slippage 0.00   impact 0.00   turnover 0.00
+liquidity: fill ratio 1.000   participation avg 0.00%   max 0.00%
+funding: cash interest 0.00   margin interest 0.00   borrow fees 0.00   short rebate 0.00
+actions: 0 splits   0 dividends   0 delistings
+exposure: max gross 0.00   max leverage 0.000
+warning (cash-management): cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)
+warning (transaction-cost neglect): commissions and fees are zero; fills cost nothing but their price
+warning (slippage): slippage is zero; every order fills at the bar's close
+warning (liquidity): no participation cap; an order fills whole whatever the bar's volume
+warning (market-impact): impact is zero; a large order fills at the quoted price
+final cash 1000000.00; positions: 
+dump written to $STUDY/results/r8l-haiku-docs/dump
+warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it
+        1.63 real         1.28 user         0.23 sys
+           584335360  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               35897  page reclaims
+                 147  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                4162  voluntary context switches
+                 703  involuntary context switches
+         26673130139  instructions retired
+          5937521400  cycles elapsed
+           470057824  peak memory footprint

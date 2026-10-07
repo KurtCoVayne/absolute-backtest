@@ -450,7 +450,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         self.err(Code::T, *sp, format!("argument `{}` of `{}` is {}, not a decision", arg.name, atom.name, arg.ty));
                         continue;
                     }
-                    self.ctor(c, subs, *sp, ctx == AtomCtx::Negative || arg.mode == Mode::In, arg.mode == Mode::In);
+                    self.ctor(c, subs, *sp, ctx == AtomCtx::Negative || arg.mode == Mode::In, arg.mode == Mode::In, false);
                     // WF-9 (C): `decided` holds only this strategy's own
                     // decisions, so a pattern with the other mode's
                     // constructor can never match (adv-18). A library has no
@@ -556,7 +556,8 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     /// A decision constructor term, in a head, a `decided` pattern or an atom.
     /// `must_be_bound`: variables may not be fresh (head, input position,
     /// negation). `no_wild`: `_` is not a pattern here (head, input position).
-    fn ctor(&mut self, name: &str, subs: &[Term], span: Span, must_be_bound: bool, no_wild: bool) {
+    /// `order_ok`: a trailing order term is allowed (a `decide` head).
+    fn ctor(&mut self, name: &str, subs: &[Term], span: Span, must_be_bound: bool, no_wild: bool, order_ok: bool) {
         let Some(fields) = ctor_fields(name) else {
             self.err(
                 Code::C,
@@ -565,8 +566,11 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             );
             return;
         };
-        if subs.len() != fields.len() {
-            self.err(Code::T, span, format!("`{}` takes {} fields, {} given", name, fields.len(), subs.len()));
+        if order_ok && subs.len() == fields.len() + 1 {
+            self.order_term(name, &subs[fields.len()]);
+        } else if subs.len() != fields.len() {
+            let more = if order_ok { " (and an optional order)" } else { "" };
+            self.err(Code::T, span, format!("`{}` takes {} fields{}, {} given", name, fields.len(), more, subs.len()));
             return;
         }
         for (sub, fty) in subs.iter().zip(fields.iter()) {
@@ -600,6 +604,61 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 Term::Lit(l, sp) => self.check_lit_type(fty, l, *sp, &format!("field of `{}`", name)),
                 Term::Ctor(_, _, sp) => self.err(Code::T, *sp, "decision constructors do not nest"),
             }
+        }
+    }
+
+    /// The order term of a decision in a `decide` head (section 6, order
+    /// types): `market`, `moo`, `moc`, or `limit(P[, TIF])` / `stop(P[, TIF])`
+    /// with P a bound price and TIF one of `day`, `gtc`, `bars(N)`.
+    fn order_term(&mut self, ctor: &str, term: &Term) {
+        let shape = "an order is `market`, `moo`, `moc`, `moo_moc`, `limit(P)`, `stop(P)`, or `limit`/`stop` with a time in force (`day`, `gtc`, `bars(N)`)";
+        match term {
+            Term::Param(p, _) if matches!(p.as_str(), "market" | "moo" | "moc" | "moo_moc") => {}
+            Term::Ctor(c, subs, sp) if c == "limit" || c == "stop" => {
+                if subs.is_empty() || subs.len() > 2 {
+                    self.err(Code::T, *sp, format!("`{}` takes a price and an optional time in force; {}", c, shape));
+                    return;
+                }
+                let price = Ty::Quantity(Dim::price("USD"));
+                match &subs[0] {
+                    Term::Var(v, vsp) => match self.vars.get(v).cloned() {
+                        Some(st) => {
+                            if let Some(t) = &st.ty {
+                                if !compat(&price, t) {
+                                    self.err(Code::T, *vsp, format!("the price of `{}` in `{}(...)` is {}, not a Price", c, ctor, t));
+                                }
+                            }
+                        }
+                        None => self.err(Code::B, *vsp, format!("variable `{}` is unbound in `{}(...)`", v, c)),
+                    },
+                    Term::Param(p, psp) => {
+                        if let Some(pt) = self.param_ty(p, *psp) {
+                            if !compat(&price, &pt) {
+                                self.err(Code::T, *psp, format!("the price of `{}` is {} but parameter `{}` is {}", c, price, p, pt));
+                            }
+                        }
+                    }
+                    Term::Lit(l, lsp) => self.check_lit_type(&price, l, *lsp, &format!("the price of `{}`", c)),
+                    other => self.err(Code::T, other.span(), format!("the price of `{}` must be a variable, a parameter or a literal", c)),
+                }
+                match subs.get(1) {
+                    None => {}
+                    Some(Term::Param(t, _)) if t == "day" || t == "gtc" => {}
+                    Some(Term::Ctor(b, n, bsp)) if b == "bars" => match n.as_slice() {
+                        [Term::Lit(l, lsp)] => self.check_lit_type(&Ty::Count, l, *lsp, "the bars of a time in force"),
+                        [Term::Param(p, psp)] => {
+                            if let Some(pt) = self.param_ty(p, *psp) {
+                                if !compat(&Ty::Count, &pt) {
+                                    self.err(Code::T, *psp, format!("`bars({})` takes a Count, and `{}` is {}", p, p, pt));
+                                }
+                            }
+                        }
+                        _ => self.err(Code::T, *bsp, "`bars(N)` takes a Count literal or parameter"),
+                    },
+                    Some(other) => self.err(Code::T, other.span(), format!("`{}` is not a time in force (`day`, `gtc`, `bars(N)`)", other)),
+                }
+            }
+            other => self.err(Code::T, other.span(), format!("`{}` in `{}(...)`: {}", other, ctor, shape)),
         }
     }
 
@@ -811,7 +870,11 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     );
                 }
                 let b = self.time_var_bound(base, "the base of the window");
-                self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
+                if *kind == WindowKind::Rows {
+                    self.expect_expr(dur, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the number of rows)");
+                } else {
+                    self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
+                }
                 self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum observation count)");
                 let strict = *kind == WindowKind::Prior;
                 let prov = b.map(|b| Self::derived_prov(self.prov_of(&b), strict)).unwrap_or(TimeProv::Other);
@@ -934,11 +997,13 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 };
                 self.bind(var, rty, TimeProv::Other);
             }
-            Literal::Top { n, atom, by, span } => {
+            Literal::Top { n, atom, by, rank, span } => {
                 if in_agg {
                     self.err(Code::B, *span, "a reduction is not permitted inside an aggregation");
                 }
-                self.expect_expr(n, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count");
+                if let Some(n) = n {
+                    self.expect_expr(n, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count");
+                }
                 if let Some(sig) = self.cx.relations.get(&atom.name).cloned() {
                     if let Some(k) = sig.key_pos() {
                         if let Term::Var(v, sp) = &atom.terms[k] {
@@ -987,6 +1052,16 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         ),
                     );
                 }
+                if let Some((k, _, ksp)) = rank {
+                    if self.vars.contains_key(k) {
+                        self.err(Code::B, *ksp, format!("the rank `{}` must be a fresh variable", k));
+                    } else {
+                        self.bind(k, Some(Ty::scalar()), TimeProv::Other);
+                    }
+                }
+                // Averaged ties need no total order: the rank of a run of
+                // equal keys does not depend on how the run is ordered.
+                let identity = if matches!(rank, Some((_, Ties::Average, _))) { Vec::new() } else { identity };
                 for pos in identity {
                     let arg = &info.sig.args[pos];
                     match &atom.terms[pos] {
@@ -1159,7 +1234,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         self.err(Code::T, *sp, format!("head argument `{}` of `{}` is {}, not a decision", arg.name, head.name, arg.ty));
                         continue;
                     }
-                    self.ctor(c, subs, *sp, true, true);
+                    self.ctor(c, subs, *sp, true, true, head.name == "decide");
                 }
             }
         }

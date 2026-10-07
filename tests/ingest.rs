@@ -7,6 +7,8 @@
 mod corpus;
 
 use std::fs;
+
+use absolute_backtest::table::write_text_table;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -24,8 +26,12 @@ fn program(src: &str, name: &str) -> Program {
     p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
 }
 
+/// A fresh directory per call: tests run in parallel and several build the
+/// same fixture, so a tag and the process id alone would collide.
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("abt-ingest-{}-{}", tag, std::process::id()));
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("abt-ingest-{}-{}-{}", tag, std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -63,13 +69,17 @@ fn norgate_fixture() -> PathBuf {
         let y = if i < 4 { 40.0 } else { 20.0 };
         prices.push_str(&format!("Y,{},{y},{y},{y},{y},500000\n", d(i)));
     }
-    fs::write(dir.join("prices.csv"), prices).unwrap();
-    fs::write(dir.join("symbols.csv"), format!("id,symbol,from,to\nE1,X,2020-01-01,\nE2,Y,2020-01-01,{}\n", d(9))).unwrap();
-    fs::write(dir.join("splits.csv"), format!("symbol,ex_date,factor\nY,{},2\n", d(4))).unwrap();
-    fs::write(dir.join("dividends.csv"), format!("symbol,announce_date,ex_date,pay_date,amount\nX,{},{},{},0.5\n", d(1), d(3), d(6))).unwrap();
-    fs::write(dir.join("delistings.csv"), format!("symbol,date,reason\nY,{},acquisition\n", d(7))).unwrap();
-    fs::write(dir.join("membership.csv"), format!("symbol,index,from,to\nX,SPX,{},\nY,SPX,{},{}\n", d(0), d(0), d(6))).unwrap();
-    fs::write(dir.join("classification.csv"), format!("symbol,scheme,code,from,to\nX,sector,tech,{},\n", d(0))).unwrap();
+    write_text_table(&dir.join("prices.parquet"), &prices).unwrap();
+    write_text_table(&dir.join("symbols.parquet"), &format!("id,symbol,from,to\nE1,X,2020-01-01,\nE2,Y,2020-01-01,{}\n", d(9))).unwrap();
+    write_text_table(&dir.join("splits.parquet"), &format!("symbol,ex_date,factor\nY,{},2\n", d(4))).unwrap();
+    write_text_table(
+        &dir.join("dividends.parquet"),
+        &format!("symbol,announce_date,ex_date,pay_date,amount\nX,{},{},{},0.5\n", d(1), d(3), d(6)),
+    )
+    .unwrap();
+    write_text_table(&dir.join("delistings.parquet"), &format!("symbol,date,reason\nY,{},acquisition\n", d(7))).unwrap();
+    write_text_table(&dir.join("membership.parquet"), &format!("symbol,index,from,to\nX,SPX,{},\nY,SPX,{},{}\n", d(0), d(0), d(6))).unwrap();
+    write_text_table(&dir.join("classification.parquet"), &format!("symbol,scheme,code,from,to\nX,sector,tech,{},\n", d(0))).unwrap();
     dir
 }
 
@@ -102,12 +112,12 @@ fn a_norgate_export_becomes_the_catalog_with_identities_membership_and_status() 
     let (loaded, _) = load_bundle(&prog, &out, true).unwrap();
     assert_eq!(loaded.facts["member"].len(), 17);
     // A symbol no identifier carries is an error, not a silent new equity.
-    fs::write(
-        dir.join("prices.csv"),
-        format!("symbol,date,open,high,low,close,volume\nZ,{},1,1,1,1,1\n", format_timestamp(parse_timestamp("2024-01-08").unwrap())),
+    write_text_table(
+        &dir.join("prices.parquet"),
+        &format!("symbol,date,open,high,low,close,volume\nZ,{},1,1,1,1,1\n", format_timestamp(parse_timestamp("2024-01-08").unwrap())),
     )
     .unwrap();
-    assert!(norgate_daily(&dir, &prog).err().unwrap().contains("symbols.csv"));
+    assert!(norgate_daily(&dir, &prog).err().unwrap().contains("symbol history"));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -180,8 +190,8 @@ fn databento_fixture(with_recv: bool) -> PathBuf {
             }
         }
     }
-    fs::write(dir.join("ohlcv-1m.csv"), rows).unwrap();
-    fs::write(dir.join("symbology.csv"), "id,symbol,from,to\nE1,1001,2020-01-01,\nE2,1002,2020-01-01,\n").unwrap();
+    write_text_table(&dir.join("ohlcv-1m.parquet"), &rows).unwrap();
+    write_text_table(&dir.join("symbology.parquet"), "id,symbol,from,to\nE1,1001,2020-01-01,\nE2,1002,2020-01-01,\n").unwrap();
     dir
 }
 
@@ -288,5 +298,47 @@ fn an_adapter_refuses_a_program_of_another_environment() {
     let prog = program(HOLD, "hold_v2");
     let dir = databento_fixture(false);
     assert!(databento_minute(&dir, &prog, 0).err().unwrap().contains("equities_1m"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reviewed_exceptions_travel_from_the_export_into_the_bundle_by_identifier() {
+    let dir = norgate_fixture();
+    let days = absolute_backtest::data::business_days((2024, 1, 8), 10);
+    write_text_table(
+        &dir.join("exceptions.parquet"),
+        &format!("test,symbol,date,reason\naction reconciliation,Y,{},real move: reviewed\n", format_timestamp(days[2])),
+    )
+    .unwrap();
+    let prog = program(HOLD, "hold_v2");
+    let ingested = norgate_daily(&dir, &prog).unwrap();
+    assert_eq!(ingested.exceptions.len(), 1);
+    assert_eq!(ingested.exceptions[0].security, "E2", "the ticker maps to its identifier on the date");
+    let out = dir.join("bundle");
+    let o = out.to_string_lossy().into_owned();
+    let from = dir.to_string_lossy().into_owned();
+    let files = [
+        format!("{}/corpus/env", env!("CARGO_MANIFEST_DIR")),
+        format!("{}/corpus/lib", env!("CARGO_MANIFEST_DIR")),
+        format!("{}/corpus/strategies/total_return_momentum.dsl", env!("CARGO_MANIFEST_DIR")),
+    ];
+    let (code, stdout, stderr) = abt(&[
+        "bundle",
+        "build",
+        "--from-norgate",
+        &from,
+        "--env",
+        "equities_1d_v2",
+        "--version",
+        "2026.10",
+        "--out",
+        &o,
+        &files[0],
+        &files[1],
+        &files[2],
+    ]);
+    assert_eq!(code, 0, "{}\n{}", stdout, stderr);
+    let written = absolute_backtest::bundle::read_exceptions(&out).unwrap();
+    assert_eq!(written, ingested.exceptions);
     let _ = fs::remove_dir_all(&dir);
 }

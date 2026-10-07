@@ -1,0 +1,17 @@
+briefs: 2 (2 with attempts)
+  intraday_open_gap: An opening-gap strategy on minute bars: if the first minute's close of the
+    attempt 1 (1.dsl): invalid; B M F U W5 W5
+    attempt 2 (2.dsl): invalid; U
+    attempt 3 (3.dsl): valid
+    attempt 4 (4.dsl): valid
+    verdict: does not survive costs (7372 decisions, 38 fills, sharpe -12.713, cagr -0.0422, max drawdown 0.0051; degrees of freedom: 2 params, 0 literals, 4 rules (+ 1 library literal))
+  momentum_liquid_monthly: A cross-sectional momentum strategy on liquid US equities: at each month
+    attempt 1 (1.dsl): invalid; D D D B W5 W5 W5
+    attempt 2 (2.dsl): invalid; parse error: 25:7: relation `month_bar` must mark exactly one argument as the temporal key `@`
+    attempt 3 (3.dsl): valid
+    verdict: does not survive costs (72 decisions, 53 fills, sharpe -0.792, cagr -0.0801, max drawdown 0.1230; degrees of freedom: 5 params, 0 literals, 6 rules (+ 3 library literals))
+first-attempt pass rate: 0%
+attempts to a valid program: 3.00 on average; briefs without one: 0
+diagnostics: B x2, D x3, F x1, M x1, U x2, W5 x5, parse x1
+verdicts: does not survive costs x2
+report written to $STUDY/results/briefs-haiku.json

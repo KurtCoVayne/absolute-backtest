@@ -252,6 +252,7 @@ fn a_ruined_book_halts_by_default_and_targets_flat_on_request() {
         &ds,
         ExecConfig {
             on_ruin: OnRuin::Continue,
+            compounding: true,
             ..cfg(1000.0)
         },
     )

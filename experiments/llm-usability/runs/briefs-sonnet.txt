@@ -1,0 +1,17 @@
+briefs: 2 (2 with attempts)
+  intraday_open_gap: An opening-gap strategy on minute bars: if the first minute's close of the
+    attempt 1 (1.dsl): valid
+    attempt 2 (2.dsl): valid
+    attempt 3 (3.dsl): valid
+    verdict: does not survive costs (38 decisions, 38 fills, sharpe -12.982, cagr -0.0418, max drawdown 0.0051; degrees of freedom: 2 params, 0 literals, 3 rules (+ 1 library literal))
+  momentum_liquid_monthly: A cross-sectional momentum strategy on liquid US equities: at each month
+    attempt 1 (1.dsl): valid; W5 W5 W5
+    attempt 2 (2.dsl): valid
+    attempt 3 (3.dsl): valid; W2
+    attempt 4 (4.dsl): valid
+    verdict: does not trade (0 decisions, 0 fills, sharpe 0.000, cagr 0.0000, max drawdown 0.0000; degrees of freedom: 5 params, 3 literals, 6 rules (+ 3 library literals))
+first-attempt pass rate: 100%
+attempts to a valid program: 1.00 on average; briefs without one: 0
+diagnostics: W2 x1, W5 x3
+verdicts: does not survive costs x1, does not trade x1
+report written to $STUDY/results/briefs-sonnet.json

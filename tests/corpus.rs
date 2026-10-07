@@ -76,6 +76,24 @@ fn every_strategy_checks_clean() {
     }
 }
 
+/// The company books (docs/parity-mw14.md, docs/parity-r8l.md) check clean
+/// against their environments, like the corpus strategies.
+#[test]
+fn every_company_strategy_checks_clean() {
+    let files = dsl_files("company");
+    assert!(files.len() >= 2, "{:?}", files);
+    for f in files {
+        let src = fs::read_to_string(&f).unwrap();
+        let mut ws = base_workspace();
+        ws.add_source(&src).unwrap_or_else(|e| panic!("{}: {}", f.display(), e));
+        let name = strategy_name(&src);
+        let (program, diags) = check_program(&ws, &name);
+        let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
+        assert!(diags.is_empty(), "{} should check clean, got:\n{}", f.display(), text.join("\n"));
+        assert!(program.is_some(), "{} should produce a program", f.display());
+    }
+}
+
 #[test]
 fn allow_headers_name_warning_codes_only() {
     assert_eq!(allowed_warnings("# allow: W6  (a snapshot)\nstrategy x {}"), vec![Code::W6]);

@@ -111,7 +111,7 @@ fn explain_binds_a_body_variable() {
     assert!(!out.status.success() && stderr.contains("ZZZ"), "stderr: {}", stderr);
 }
 
-/// A CSV market for `equities_1d` with one symbol over five weekdays, with
+/// A Parquet market for `equities_1d` with one symbol over five weekdays, with
 /// no close on 2024-01-10, next to a strategy that buys on an up day and
 /// sells the day after; written under a fresh temporary directory.
 fn delisted_market(tag: &str) -> PathBuf {
@@ -129,9 +129,9 @@ fn delisted_market(tag: &str) -> PathBuf {
         volume.push_str(&format!("X,{},1000\n", d));
         universe.push_str(&format!("X,{}\n", d));
     }
-    std::fs::write(dir.join("close.csv"), close).unwrap();
-    std::fs::write(dir.join("volume.csv"), volume).unwrap();
-    std::fs::write(dir.join("universe.csv"), universe).unwrap();
+    absolute_backtest::table::write_text_table(&dir.join("close.parquet"), &close).unwrap();
+    absolute_backtest::table::write_text_table(&dir.join("volume.parquet"), &volume).unwrap();
+    absolute_backtest::table::write_text_table(&dir.join("universe.parquet"), &universe).unwrap();
     std::fs::write(
         dir.join("up_down.dsl"),
         r#"
@@ -313,20 +313,25 @@ fn check_prints_degrees_of_freedom_per_strategy() {
     assert!(stdout.contains("relative_strength: degrees of freedom:"), "{}", stdout);
 }
 
-/// Data-bundle doc, section 5: `--nav` prints the book at every bar for the
-/// study and the reference engine to consume; `--margin reg-t` is a preset.
+/// Data-bundle doc, section 5: `--nav FILE` writes the book at every bar
+/// as Parquet for the study and the reference engine to consume;
+/// `--margin reg-t` is a preset.
 #[test]
-fn nav_prints_the_book_per_bar_and_reg_t_is_a_preset() {
+fn nav_writes_the_book_per_bar_and_reg_t_is_a_preset() {
     let files = strategy_files("momentum_top_n");
-    let mut args = vec!["run", "--strategy", "momentum_top_n", "--synthetic", "--days", "120", "--quiet", "--nav", "--margin", "reg-t"];
+    let nav = std::env::temp_dir().join(format!("abt-cli-nav-{}.parquet", std::process::id()));
+    let nav_s = nav.to_string_lossy().into_owned();
+    let mut args = vec!["run", "--strategy", "momentum_top_n", "--synthetic", "--days", "120", "--quiet", "--nav", &nav_s, "--margin", "reg-t"];
     args.extend(files.iter().map(|s| s.as_str()));
     let out = abt(&args);
     let (stdout, stderr) = text(&out);
     assert_eq!(out.status.code(), Some(0), "{}\n{}", stdout, stderr);
-    assert!(stdout.contains("t,equity,cash,gross,net,leverage\n2022-01-03,"), "{}", stdout);
+    let book = absolute_backtest::table::to_text(&nav).unwrap();
+    assert!(book.starts_with("t,equity,cash,gross,net,leverage\n2022-01-03,"), "{}", book);
     assert!(stdout.contains("funding: cash interest") && stdout.contains("exposure: max gross"), "{}", stdout);
-    let rows = stdout.lines().filter(|l| l.starts_with("2022-") || l.starts_with("2023-")).count();
+    let rows = book.lines().filter(|l| l.starts_with("2022-") || l.starts_with("2023-")).count();
     assert!(rows > 100, "{} rows", rows);
+    let _ = std::fs::remove_file(&nav);
     let mut args = vec!["run", "--strategy", "momentum_top_n", "--synthetic", "--days", "120", "--quiet", "--margin", "portfolio"];
     args.extend(files.iter().map(|s| s.as_str()));
     let out = abt(&args);

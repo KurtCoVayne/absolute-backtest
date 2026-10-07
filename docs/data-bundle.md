@@ -62,19 +62,25 @@ warnings) has a single exception that is argued in section 9.
 > --checkpoint-every month --checkpoint-dir`, `--resume`): a run resumed
 > from one equals the unbroken fold to the bit, which is also the warm-up a
 > live run starts from. Per-tuple availability is in: a relation may record
-> when each tuple could be acted on (CSV and Parquet `available_at`, the
+> when each tuple could be acted on (an `available_at` column, the
 > manifest's `recorded` convention), the event log orders by it, a late
 > tuple is read from its availability on with the derived values after it
 > recomputed, truncation and the empirical causality check are judged on
 > availability, and the batch kernel, blind to it, is shown to differ.
-> The as-of join `R(..., T0, ...) asof T` reads the latest tuple keyed at or
-> before T (any resolution; T0 bound causally), served from the store's
+> The as-of join `R(..., T0, ...) asof T` reads the latest tuple available
+> by T (any resolution; T0 bound causally; a daily bar read from a finer rule
+> once its day has closed), served from the store's
 > index for a stored relation and by a memoised walk back over its own bars
 > for a derived one; the fold serves it from what was available at T
 > (`tests/asof.rs`). The storage paragraph is implemented in M2
-> (`src/bundle.rs`: `manifest.json`, `securities.csv`, append-only Parquet
-> partitions under `log/<relation>/<YYYY-MM>.parquet`, `snapshots/`
-> reserved; `abt bundle build|test`, `abt run --bundle`). Today's kernel
+> (`src/bundle.rs`: `manifest.json` with the layout `format` (2),
+> `securities.parquet`, `exceptions.parquet`, append-only Parquet partitions
+> under `log/<relation>/<YYYY-MM>.parquet`, `snapshots/` reserved; `abt
+> bundle build|test`, `abt run --bundle`; a layout-1 bundle, whose tables were
+> text, is refused with a request to rebuild). Every other file abt reads or
+> writes is Parquet too (`src/table.rs`): vendor inputs, loose data
+> directories (`--data`, `--from`, `abt synth`), `--dump`, `--nav FILE` and
+> `--returns FILE`. Today's kernel
 > (`src/kernel/`) evaluates top-down with memoisation and already runs the
 > executor as a fold over bars; the plan keeps it as the batch reference and
 > adds the fold beside it.
@@ -140,7 +146,11 @@ component that differs between the two is the executor attached to the fold.
 
 > Status: M2. Implemented: the `Label` type (a string literal resolves to
 > `Equity` or `Label` from its context); stable identifiers through the
-> security table `securities.csv` (`id,ticker,from,to`), with `ticker(A, @T,
+> security table `securities.parquet` (`id,ticker,from,to`, and the contract
+> columns `multiplier`, `asset_class`, `commission_per_contract` for futures:
+> P&L is quantity x price change x multiplier, a future's commission is per
+> contract per side, its back-adjusted price may cross zero, and it is sold
+> short without a borrow fee or a locate), with `ticker(A, @T,
 > S)` derived from it, a ticker literal or command-line name resolving to
 > the security carrying it at the bundle date (the data's last bar or
 > `--as-of`), the identity bundle tests at load, and the old layout kept as
@@ -286,6 +296,17 @@ write `AAPL`, and the bundle date fixes what that means.
 > and oversize policies of PR #48 (halt by default). The
 > leverage default stays at 1x gross by the owner's ruling; Reg T (50 %
 > initial, 25 % maintenance) is a configuration preset, not the default.
+> Added for the MW14 and R8L parity work (`docs/parity-mw14.md`,
+> `docs/parity-r8l.md`): fixed-base accounting as the default
+> (`--compounding off`, weights of the starting capital, returns over it;
+> `on` compounds), order types (`market`, `moo`, `moc`, `moo_moc`,
+> `limit`/`stop` with `day`/`gtc`/`bars(N)`), a commission in basis points on
+> both sides (`--commission-bps`), delisting at the last price with no cost
+> (`--delist-proceeds last-price`), dividends reinvested at the ex-date close
+> (`--dividends reinvest`), actions already in a total-return price relation
+> (`--actions in-prices`), a run window (`--start`, `--end`) and the metrics
+> of both conventions per bar or per day on a reporting calendar
+> (`--report-by day --report-calendar REL`, `--periods-per-year`).
 
 Seventeen biases live in the gap between a decision and a fill; the executor
 models fourteen with conservative defaults and warns when a study turns a

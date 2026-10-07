@@ -49,14 +49,91 @@ impl Ctor {
     }
 }
 
-/// A decision value (section 4): a constructor, an equity and an amount
+/// How an order executes (section 6, order types): at the next bar's
+/// close (`Market`, the v1 contract), at the open of the instrument's next
+/// bar (`Moo`), at the close of the last bar of the session containing the
+/// decision (`Moc`), at the next open and back to flat at the close of that
+/// session (`MooMoc`, an intraday position), or when a bar trades through a
+/// price (`Limit`, `Stop`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum OrderKind {
+    #[default]
+    Market,
+    Moo,
+    Moc,
+    MooMoc,
+    Limit(f64),
+    Stop(f64),
+}
+
+/// How long a resting order works: the session of the first bar it could
+/// fill at (`Day`), until filled or superseded (`Gtc`), or a number of
+/// decision bars (`Bars`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Tif {
+    #[default]
+    Day,
+    Gtc,
+    Bars(u32),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Order {
+    pub kind: OrderKind,
+    pub tif: Tif,
+}
+
+impl Order {
+    /// A total key for equality, hashing and ordering.
+    fn key(&self) -> (u8, u64, u8, u32) {
+        let (k, p) = match self.kind {
+            OrderKind::Market => (0, 0),
+            OrderKind::Moo => (1, 0),
+            OrderKind::Moc => (2, 0),
+            OrderKind::MooMoc => (5, 0),
+            OrderKind::Limit(p) => (3, bits(p)),
+            OrderKind::Stop(p) => (4, bits(p)),
+        };
+        let (t, n) = match self.tif {
+            Tif::Day => (0, 0),
+            Tif::Gtc => (1, 0),
+            Tif::Bars(n) => (2, n),
+        };
+        (k, p, t, n)
+    }
+    pub fn is_market(&self) -> bool {
+        self.kind == OrderKind::Market
+    }
+}
+
+impl std::fmt::Display for Order {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tif = match self.tif {
+            Tif::Day => "day".to_string(),
+            Tif::Gtc => "gtc".to_string(),
+            Tif::Bars(n) => format!("bars({})", n),
+        };
+        match self.kind {
+            OrderKind::Market => f.write_str("market"),
+            OrderKind::Moo => f.write_str("moo"),
+            OrderKind::Moc => f.write_str("moc"),
+            OrderKind::MooMoc => f.write_str("moo_moc"),
+            OrderKind::Limit(p) => write!(f, "limit({}, {})", p, tif),
+            OrderKind::Stop(p) => write!(f, "stop({}, {})", p, tif),
+        }
+    }
+}
+
+/// A decision value (section 4): a constructor, an equity, an amount
 /// (shares for delta constructors and `target_quantity`, a weight for
-/// `target_weight`).
+/// `target_weight`) and how the order executes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Decision {
     pub ctor: Ctor,
     pub equity: Sym,
     pub amount: f64,
+    #[serde(default)]
+    pub order: Order,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -65,12 +142,18 @@ pub enum Value {
     Time(i64),
     Num(f64),
     Count(i64),
-    Dur(Duration),
-    Decision(Decision),
+    /// Boxed, as is `Decision`: both are rare as values, and keeping every
+    /// variant's payload to 8 bytes makes a `Value` 16 bytes.
+    Dur(Box<Duration>),
+    Decision(Box<Decision>),
     /// A name from the bundle's vocabulary (`Ty::Label`), interned in the
     /// dataset's label table, distinct from an equity of the same spelling.
     Label(Sym),
 }
+
+// Every variant's payload is at most 8 bytes: a value is 16 (the stores hold
+// tens of millions of them).
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
 
 fn bits(x: f64) -> u64 {
     // Fold -0.0 into 0.0 so that equal numbers hash equally.
@@ -89,7 +172,7 @@ impl PartialEq for Value {
             (Value::Num(a), Value::Num(b)) => bits(*a) == bits(*b),
             (Value::Count(a), Value::Count(b)) => a == b,
             (Value::Dur(a), Value::Dur(b)) => a == b,
-            (Value::Decision(a), Value::Decision(b)) => a.ctor == b.ctor && a.equity == b.equity && bits(a.amount) == bits(b.amount),
+            (Value::Decision(a), Value::Decision(b)) => a.ctor == b.ctor && a.equity == b.equity && bits(a.amount) == bits(b.amount) && a.order.key() == b.order.key(),
             (Value::Label(a), Value::Label(b)) => a == b,
             _ => false,
         }
@@ -124,7 +207,8 @@ impl Hash for Value {
                 5u8.hash(h);
                 d.ctor.hash(h);
                 d.equity.hash(h);
-                bits(d.amount).hash(h)
+                bits(d.amount).hash(h);
+                d.order.key().hash(h)
             }
             Value::Label(a) => {
                 6u8.hash(h);
@@ -154,7 +238,12 @@ impl Ord for Value {
             (Value::Num(a), Value::Num(b)) => a.total_cmp(b),
             (Value::Count(a), Value::Count(b)) => a.cmp(b),
             (Value::Dur(a), Value::Dur(b)) => a.approx_days().total_cmp(&b.approx_days()).then(a.cmp(b)),
-            (Value::Decision(a), Value::Decision(b)) => a.ctor.cmp(&b.ctor).then(a.equity.cmp(&b.equity)).then(a.amount.total_cmp(&b.amount)),
+            (Value::Decision(a), Value::Decision(b)) => a
+                .ctor
+                .cmp(&b.ctor)
+                .then(a.equity.cmp(&b.equity))
+                .then(a.amount.total_cmp(&b.amount))
+                .then(a.order.key().cmp(&b.order.key())),
             (Value::Label(a), Value::Label(b)) => a.cmp(b),
             _ => rank(self).cmp(&rank(o)),
         }

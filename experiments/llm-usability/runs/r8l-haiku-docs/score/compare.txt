@@ -1,0 +1,41 @@
+$REPO/scripts/parity/r8l_compare.py:65: RuntimeWarning: Mean of empty slice
+  print(f"matched leg P&L equal to 1e-6: {pe.mean():.4%}; P&L sum python {both['pnl'].sum():,.2f} abt {both['pnl_abt'].sum():,.2f}")
+~/.venvs/abt/lib/python3.14/site-packages/numpy/_core/_methods.py:142: RuntimeWarning: invalid value encountered in scalar divide
+  ret = ret.dtype.type(ret / rcount)
+$REPO/scripts/parity/r8l_compare.py:23: RuntimeWarning: invalid value encountered in scalar divide
+  "sharpe": v.mean() / v.std() * np.sqrt(252),
+~/.venvs/abt/lib/python3.14/site-packages/numpy/lib/_function_base_impl.py:3036: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[:, None]
+~/.venvs/abt/lib/python3.14/site-packages/numpy/lib/_function_base_impl.py:3037: RuntimeWarning: invalid value encountered in divide
+  c /= stddev[None, :]
+legs: python 21892, abt 0; matched 0, python only 21892, abt only 0
+matched direction equal: nan%
+matched leg P&L equal to 1e-6: nan%; P&L sum python 0.00 abt 0.00
+  of the unequal: fallback-fill legs 0 of 0
+python-only legs (first 10):
+  mkt        day     kind  dir_py         m         g     m_med          pnl
+0  6J 2002-03-08  sidecar    -1.0 -0.175020 -0.922832  0.108108  3574.827818
+1  6J 2002-03-13  sidecar    -1.0  0.015898 -0.763116  0.108108  -351.203980
+2  6J 2002-03-18  sidecar    -1.0  0.048741 -2.063363  0.103704  1329.193547
+3  6J 2002-04-01  sidecar    -1.0  0.086894 -0.926865  0.102977 -1260.388864
+4  6J 2002-04-18     main     1.0  0.350493  0.284775  0.102977  3072.444062
+5  6J 2002-05-07  sidecar    -1.0  0.082816 -1.221532  0.108794 -1667.410745
+6  6J 2002-05-23  sidecar    -1.0  0.068376 -1.025641  0.103704 -1265.675673
+7  6J 2002-05-31  sidecar    -1.0  0.000000 -0.988526  0.101376  1673.427837
+8  6J 2002-06-04     main    -1.0 -0.915371  0.431779  0.100503 -2063.893116
+9  6J 2002-06-07     main     1.0  0.234899 -0.067114  0.100503 -1133.357631
+abt-only legs (first 10):
+Empty DataFrame
+Columns: [mkt, day, dir_abt, pnl_abt]
+Index: []
+
+calendar days 6850 (2000-01-03 .. 2026-08-14)
+                 python          abt       diff
+ann_ret        0.189460     0.000000  -0.189460
+vol            0.148278     0.000000  -0.148278
+sharpe         1.277734          nan        nan
+maxDD          0.196680     0.000000  -0.196680
+total_$M       5.150002     0.000000  -5.150002
+pf             1.311314     0.000000  -1.311314
+reference (results/r42 scorecard): ann 0.1895, sharpe 1.2777, maxDD 0.1967, total 5.15, pf 1.3113, legs 21,892
+daily correlation nan; days equal to 1e-9 21.43%

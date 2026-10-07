@@ -50,12 +50,19 @@ fn render_literal(l: &Literal) -> String {
             let c: Vec<String> = conj.iter().map(render_literal).collect();
             format!("{} = {}({}) over ({})", var, agg, a.join(", "), c.join(", "))
         }
-        Literal::Top { n, atom, by, .. } => {
+        Literal::Top { n, atom, by, rank, .. } => {
             let order = by
                 .as_ref()
                 .map(|b| b.iter().map(|(k, d, _)| format!("{} {:?}", k, d).to_lowercase()).collect::<Vec<_>>().join(", "))
                 .unwrap_or_default();
-            format!("top({}, {}, by ({}))", n, atom, order)
+            match (n, rank) {
+                (Some(n), _) => format!("top({}, {}, by ({}))", n, atom, order),
+                (None, Some((k, ties, _))) => {
+                    let ties = if *ties == crate::ir::Ties::Average { "average" } else { "ordinal" };
+                    format!("rank({}, by ({}), ties {}, as {})", atom, order, ties, k)
+                }
+                (None, None) => format!("top(?, {}, by ({}))", atom, order),
+            }
         }
         Literal::Resample { inner, to, as_var, min, aggs, .. } => {
             let a: Vec<String> = aggs.iter().map(|(x, f, e)| format!("{} = {}({})", x, f, e)).collect();

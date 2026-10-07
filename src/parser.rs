@@ -519,6 +519,7 @@ impl Parser {
                 Ok(Literal::Neg(a))
             }
             Tok::Ident(s) if s == "top" && *self.peek_at(1) == Tok::LParen => self.top(),
+            Tok::Ident(s) if s == "rank" && *self.peek_at(1) == Tok::LParen => self.rank(),
             Tok::Ident(s) if s == "resample" && *self.peek_at(1) == Tok::LParen => self.resample(),
             Tok::Ident(s) if TEMPORAL_BUILTINS.contains(&s.as_str()) && *self.peek_at(1) == Tok::LParen => self.builtin(),
             Tok::Ident(s) if is_var(&s) && matches!(self.peek_at(1), Tok::Ident(k) if k == "in") => self.window(),
@@ -617,10 +618,11 @@ impl Parser {
         let kind = match k.as_str() {
             "window" => WindowKind::Window,
             "prior_window" => WindowKind::Prior,
+            "rows" => WindowKind::Rows,
             _ => {
                 return Err(ParseError {
                     span: ks,
-                    message: format!("expected `window` or `prior_window`, found `{}`", k),
+                    message: format!("expected `window`, `prior_window` or `rows`, found `{}`", k),
                 })
             }
         };
@@ -640,6 +642,70 @@ impl Parser {
             min,
             span,
         })
+    }
+
+    /// `rank(R(...), by (k1 dir, ...)[, ties average|ordinal], as K)`.
+    fn rank(&mut self) -> PResult<Literal> {
+        let span = self.span();
+        self.expect_kw("rank")?;
+        self.expect(Tok::LParen)?;
+        let atom = self.atom()?;
+        self.expect(Tok::Comma)?;
+        let by = Some(self.order_keys()?);
+        self.expect(Tok::Comma)?;
+        let mut ties = Ties::Ordinal;
+        if matches!(self.peek(), Tok::Ident(k) if k == "ties") {
+            self.bump();
+            let (t, ts) = self.ident()?;
+            ties = match t.as_str() {
+                "average" => Ties::Average,
+                "ordinal" => Ties::Ordinal,
+                _ => {
+                    return Err(ParseError {
+                        span: ts,
+                        message: format!("expected `average` or `ordinal`, found `{}`", t),
+                    })
+                }
+            };
+            self.expect(Tok::Comma)?;
+        }
+        self.expect_kw("as")?;
+        let (k, ks) = self.var()?;
+        self.expect(Tok::RParen)?;
+        Ok(Literal::Top {
+            n: None,
+            atom,
+            by,
+            rank: Some((k, ties, ks)),
+            span,
+        })
+    }
+
+    /// `by (k1 asc|desc, ...)`.
+    fn order_keys(&mut self) -> PResult<Vec<(String, Dir, Span)>> {
+        self.expect_kw("by")?;
+        self.expect(Tok::LParen)?;
+        let mut keys = Vec::new();
+        loop {
+            let (v, vs) = self.var()?;
+            let (d, ds) = self.ident()?;
+            let dir = match d.as_str() {
+                "asc" => Dir::Asc,
+                "desc" => Dir::Desc,
+                _ => {
+                    return Err(ParseError {
+                        span: ds,
+                        message: format!("expected `asc` or `desc`, found `{}`", d),
+                    })
+                }
+            };
+            keys.push((v, dir, vs));
+            if !self.comma() {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        Ok(keys)
     }
 
     fn top(&mut self) -> PResult<Literal> {
@@ -677,7 +743,13 @@ impl Parser {
             None
         };
         self.expect(Tok::RParen)?;
-        Ok(Literal::Top { n, atom, by, span })
+        Ok(Literal::Top {
+            n: Some(n),
+            atom,
+            by,
+            rank: None,
+            span,
+        })
     }
 
     fn resample(&mut self) -> PResult<Literal> {

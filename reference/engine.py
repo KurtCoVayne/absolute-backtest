@@ -92,6 +92,10 @@ class Config:
             raise AttributeError(name) from e
 
     @property
+    def compounding(self) -> bool:
+        return bool(self.raw.get("compounding", False))
+
+    @property
     def lot_whole(self) -> bool:
         return str(self.raw.get("lot", "Whole")).lower() == "whole"
 
@@ -116,10 +120,33 @@ class Config:
         return last
 
 
-def _rows(path: str) -> pd.DataFrame:
+def _stamp(t) -> str:
+    """A timestamp as the kernel writes one in text: the date, with the time
+    of day when it is not midnight."""
+    if t.hour == 0 and t.minute == 0 and t.second == 0:
+        return t.strftime("%Y-%m-%d")
+    return t.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def read_rows(path: str) -> pd.DataFrame:
+    """A Parquet table of the dump as text cells: timestamps formatted as the
+    kernel formats them, booleans as `true`/`false`, nulls as empty."""
     if not os.path.exists(path):
         return pd.DataFrame()
-    return pd.read_csv(path, dtype=str, keep_default_na=False)
+    frame = pd.read_parquet(path)
+    out = pd.DataFrame(index=frame.index)
+    for col in frame.columns:
+        series = frame[col]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            out[col] = [("" if pd.isna(v) else _stamp(v)) for v in series]
+        elif pd.api.types.is_bool_dtype(series):
+            out[col] = ["true" if v else "false" for v in series]
+        else:
+            out[col] = ["" if (v is None or (isinstance(v, float) and math.isnan(v))) else repr(v) if isinstance(v, float) else str(v) for v in series]
+    return out
+
+
+_rows = read_rows
 
 
 @dataclass
@@ -143,25 +170,25 @@ class Data:
             return frame.columns[-1]
 
         if cfg.price_relation:
-            frame = _rows(os.path.join(data_dir, f"{cfg.price_relation}.csv"))
+            frame = _rows(os.path.join(data_dir, f"{cfg.price_relation}.parquet"))
             if not frame.empty:
                 col = numeric_last(frame)
                 for _, r in frame.iterrows():
                     d.price[(r.iloc[0], epoch(r.iloc[1]))] = float(r[col])
         if cfg.volume_relation:
-            frame = _rows(os.path.join(data_dir, f"{cfg.volume_relation}.csv"))
+            frame = _rows(os.path.join(data_dir, f"{cfg.volume_relation}.parquet"))
             if not frame.empty:
                 col = numeric_last(frame)
                 for _, r in frame.iterrows():
                     d.volume[(r.iloc[0], epoch(r.iloc[1]))] = float(r[col])
-        frame = _rows(os.path.join(data_dir, "split.csv"))
+        frame = _rows(os.path.join(data_dir, "split.parquet"))
         for _, r in frame.iterrows():
             d.splits.setdefault(epoch(r.iloc[1]), []).append((r.iloc[0], float(r.iloc[-1])))
-        frame = _rows(os.path.join(data_dir, "dividend.csv"))
+        frame = _rows(os.path.join(data_dir, "dividend.parquet"))
         for _, r in frame.iterrows():
             # dividend(+A, @T, -Ex, -Pay, -Amount)
             d.dividends.append((epoch(r.iloc[1]), r.iloc[0], epoch(r.iloc[2]), epoch(r.iloc[3]), float(r.iloc[4])))
-        frame = _rows(os.path.join(data_dir, "delisted.csv"))
+        frame = _rows(os.path.join(data_dir, "delisted.parquet"))
         for _, r in frame.iterrows():
             d.delisted.setdefault(epoch(r.iloc[1]), []).append((r.iloc[0], r.iloc[2] if len(r) > 2 else ""))
         return d
@@ -180,9 +207,11 @@ class Reference:
         self.order = {s: i for i, s in enumerate(self.symbols)}
         self.bars: list[int] = [epoch(b) for b in config["bars"]]
         self.data = Data.load(directory, self.cfg)
-        decisions = _rows(os.path.join(directory, "decisions.csv"))
+        decisions = _rows(os.path.join(directory, "decisions.parquet"))
         self.decisions: dict[int, list[tuple]] = {}
         for _, r in decisions.iterrows():
+            if r.get("order", "market") not in ("", "market"):
+                raise Halt(f"the reference executes market orders only; {r['order']} at {r['t']} is not replayed")
             self.decisions.setdefault(epoch(r["t"]), []).append((r["equity"], r["ctor"], float(r["amount"]), r["rule"]))
         # The book.
         self.cash = float(self.cfg.initial_cash)
@@ -418,12 +447,15 @@ class Reference:
             if ctor == "target_quantity":
                 return pos != 0.0 and abs(amount) < abs(pos) and amount * pos >= 0.0
             # target_weight
-            return pos != 0.0 and (amount == 0.0 or amount * pos < 0.0 or abs(amount) * max(equity_next, 0.0) < abs(pos) * marks.get(sym, 0.0))
+            base = max(equity_next, 0.0) if cfg.compounding else float(cfg.initial_cash)
+            return pos != 0.0 and (amount == 0.0 or amount * pos < 0.0 or abs(amount) * base < abs(pos) * marks.get(sym, 0.0))
 
         pending.sort(key=lambda d: not reducing(d))
         if pending and equity_next <= 0.0 and cfg.policy("on_ruin") == "halt":
             raise Halt(f"ruin at {stamp(tn)}: equity {equity_next:.2f}")
-        sizing_equity = max(equity_next, 0.0)
+        # What a weight is a fraction of: equity, or the fixed capital when
+        # profits are not reinvested (`compounding` off, the default).
+        sizing_equity = max(equity_next, 0.0) if cfg.compounding else float(cfg.initial_cash)
         bar_costs = 0.0
         for sym, ctor, amount, rule, reissued in pending:
             is_target = ctor in ("target_weight", "target_quantity")
@@ -519,7 +551,12 @@ class Reference:
                     net += qty * p
                 tol = 1e-9 * (1.0 + abs(net)) + allowance
                 max_gross = max(float(cfg.max_gross), 1.0)
-                if new_cash < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol:
+                if cfg.compounding:
+                    breach = new_cash < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol
+                else:
+                    # On a fixed base leverage is gross against the capital; cash may go negative.
+                    breach = gross > max_gross * float(cfg.initial_cash) + tol
+                if breach:
                     policy = cfg.policy("on_leverage")
                     if policy == "halt":
                         raise Halt(f"leverage at {stamp(tn)}: cash {new_cash:.2f} gross {gross:.2f} equity {net:.2f}")

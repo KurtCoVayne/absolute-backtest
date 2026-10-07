@@ -16,7 +16,7 @@ import sys
 
 import pandas as pd
 
-from engine import Halt, Reference
+from engine import Halt, Reference, read_rows
 
 
 def close(a: float, b: float, tol: float) -> bool:
@@ -30,13 +30,13 @@ def compare(directory: str, tol: float = 1e-9) -> list[str]:
     except Halt as h:
         return [f"the reference halted: {h}"]
     fills, nav, final = ref.frames()
-    k_fills = pd.read_csv(os.path.join(directory, "fills.csv"), dtype={"t": str, "equity": str})
+    k_fills = read_rows(os.path.join(directory, "fills.parquet"))
     # A whole-lot quantity is an integer and must be identical; a fractional
     # one is a real number sized from the book and is held to tolerance.
     whole = ref.cfg.lot_whole
-    k_nav = pd.read_csv(os.path.join(directory, "nav.csv"), dtype={"t": str})
-    k_final = pd.read_csv(os.path.join(directory, "final.csv"), dtype={"key": str})
-    k_dropped = pd.read_csv(os.path.join(directory, "dropped.csv"), dtype=str, keep_default_na=False)
+    k_nav = read_rows(os.path.join(directory, "nav.parquet"))
+    k_final = read_rows(os.path.join(directory, "final.parquet"))
+    k_dropped = read_rows(os.path.join(directory, "dropped.parquet"))
     if len(fills) != len(k_fills):
         problems.append(f"fills: kernel {len(k_fills)}, reference {len(fills)}")
     for i in range(min(len(fills), len(k_fills))):

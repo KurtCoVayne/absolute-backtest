@@ -1,0 +1,63 @@
+warning [W5] mw14 at 29:82 in rule mw14::eligible#1: literal `3 USD/share` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 30:39 in rule mw14::eligible#1: literal `4` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 30:46 in rule mw14::eligible#1: literal `4` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 31:12 in rule mw14::eligible#1: literal `2000000 USD` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 72:39 in rule mw14::close_ma40#1: literal `40` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 72:47 in rule mw14::close_ma40#1: literal `40` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 36:46 in rule mw14::score#1: literal `18` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 36:54 in rule mw14::score#1: literal `18` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 37:42 in rule mw14::score#1: literal `18` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 37:50 in rule mw14::score#1: literal `18` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 38:16 in rule mw14::score#1: literal `52` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W4] mw14 at 43:7 in rule mw14::ranked#1: `top` over `score` keeps every tuple: all of its identity columns are bound by the outer rule (the head `ranked` declares its entity `+`, or an earlier literal binds it), so N and `by` have no effect; declare the entity `-` in the head or bind fewer columns before the reduction (degenerate reduction)
+warning [W5] mw14 at 76:43 in rule mw14::may_stay#1: literal `28` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 48:42 in rule mw14::gate#1: literal `364d` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 48:51 in rule mw14::gate#1: literal `52` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 54:39 in rule mw14::dvol_4w#1: literal `4` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 54:46 in rule mw14::dvol_4w#1: literal `4` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W4] mw14 at 59:7 in rule mw14::liq_rank#1: `top` over `dvol_4w` keeps every tuple: all of its identity columns are bound by the outer rule (the head `liq_rank` declares its entity `+`, or an earlier literal binds it), so N and `by` have no effect; declare the entity `-` in the head or bind fewer columns before the reduction (degenerate reduction)
+warning [W5] mw14 at 63:49 in rule mw14::liquid#1: literal `60` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 67:42 in rule mw14::entered#1: literal `7` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 104:20 in rule mw14::decide#1: literal `50` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 105:22 in rule mw14::decide#1: literal `0.15` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+warning [W5] mw14 at 106:12 in rule mw14::decide#1: literal `0.000001` inside a rule is a degree of freedom the study counts; lift it into a `param` so it is declared, typed and sweepable (degrees of freedom)
+note: bundle `equities_1w@mw14-2026.06` has not passed its tests; its decisions are not causality-certified
+strategy mw14 over 1853 bars (1991-01-04 to 2026-07-02), 4240 symbols
+decisions: 0   fills: 0   dropped: 0
+    end_equity: 1000000.0000
+  max_drawdown: 0.0000
+  start_equity: 1000000.0000
+  total_return: 0.0000
+accounting: fixed base 1000000.00; a period's return is the NAV change over it (not reinvested)
+metrics per bar (52 a year, 1852 periods): cagr 0.000000   max_drawdown 0.000000   sharpe 0.0000 (population 0.0000)   volatility 0.0000
+additive: annual_return 0.000000   max_drawdown 0.000000   total_pnl 0.00   profit_factor inf per period, inf per trade   trades 0   win_rate 0.000
+costs: commissions 0.00   fees 0.00   slippage 0.00   impact 0.00   turnover 0.00
+liquidity: fill ratio 1.000   participation avg 0.00%   max 0.00%
+funding: cash interest 0.00   margin interest 0.00   borrow fees 0.00   short rebate 0.00
+actions: 0 splits   0 dividends   0 delistings
+exposure: max gross 0.00   max leverage 0.000
+warning (cash-management): cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)
+warning (transaction-cost neglect): commissions and fees are zero; fills cost nothing but their price
+warning (slippage): slippage is zero; every order fills at the bar's close
+warning (liquidity): no participation cap; an order fills whole whatever the bar's volume
+warning (market-impact): impact is zero; a large order fills at the quoted price
+final cash 1000000.00; positions: 
+warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it
+      129.06 real       128.20 user         0.40 sys
+          2152005632  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              133565  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               10087  voluntary context switches
+                6182  involuntary context switches
+       2786005342172  instructions retired
+        505508858752  cycles elapsed
+          2145863888  peak memory footprint
