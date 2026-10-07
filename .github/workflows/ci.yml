@@ -16,8 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install the reference engine's dependency
-        run: python3 -m pip install pandas
+      - name: Install the reference engine's dependencies (Parquet needs pyarrow)
+        run: python3 -m pip install pandas pyarrow
       - name: Format
         run: cargo fmt --check
       - name: Clippy
