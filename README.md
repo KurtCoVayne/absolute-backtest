@@ -31,6 +31,8 @@ resampled bucket.
 | --- | --- |
 | `docs/semantic-model.md` | The v1 semantic model: domains, types, signatures, the seven literal forms, WF-1 to WF-10, the kernel contract, the causality theorem. The code cites it by section. |
 | `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API, with the status of each section in this crate and the milestone that implements it. |
+| `docs/formal-foundations.md` | The formal foundations (Oct 8, 2026): the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results, what is new, and the seven changes the theory asks of the semantic model. |
+| `docs/language-v2.md` | The second formulation (Oct 8, 2026): a review of the MW14 and R8L changes against the foundations, and the proposal that follows: one data store per instrument class with every resolution derived, programs as typed blocks with no run-time flags, order-independent rule bodies with sound short-circuiting, a library of formal operators, and a query facility; MW14 and R8L rewritten in it. Not implemented; section 11 is the order. |
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
 | `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
