@@ -1,0 +1,12 @@
+00:14:24 
+00:17:57 check env lib attempts/1.dsl
+00:18:01 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/1.dsl
+00:18:54 check env lib attempts/2.dsl
+00:18:54 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/2.dsl
+00:19:14 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --dump dump-attempt2 --quiet env lib attempts/2.dsl
+00:21:07 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --param max_names=2 --dump dump-attempt2-mn2 --quiet env lib attempts/2.dsl
+00:21:51 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --param max_names=2 --on-leverage allow --dump dump-attempt2-mn2 --quiet env lib attempts/2.dsl
+00:23:03 check env lib final.dsl
+00:23:03 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib final.dsl
+00:27:11 check env lib final.dsl
+00:27:11 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib final.dsl

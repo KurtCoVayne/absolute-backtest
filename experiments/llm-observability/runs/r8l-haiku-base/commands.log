@@ -1,0 +1,17 @@
+00:15:42 
+00:21:05 check env lib attempts/1.dsl
+00:21:14 check env lib attempts/2.dsl
+00:21:19 run --strategy r8l --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow --report-by day --report-calendar calendar --periods-per-year 252 --dump runs/dump2 env lib attempts/2.dsl
+00:22:22 run --strategy r8l --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation open_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow --report-by day --report-calendar calendar --periods-per-year 252 --dump runs/dump2_open env lib attempts/2.dsl
+00:23:44 explain --strategy r8l --rule decide#2 --at 2023-06-21T09:00:00 --bind A=ES --data data/sessions --price-relation close_m env lib attempts/2.dsl
+00:25:02 check env lib attempts/3.dsl
+00:25:07 run --strategy r8l --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow --report-by day --report-calendar calendar --periods-per-year 252 --verify-causality --dump runs/dump3 env lib attempts/3.dsl
+00:26:18 check env lib attempts/4.dsl
+00:26:18 run --strategy r8l_probe --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow env lib attempts/4.dsl
+00:28:47 run --strategy r8l --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow --report-by day --report-calendar calendar --periods-per-year 252 env lib final.dsl
+00:29:25 check env lib attempts/5.dsl
+00:29:25 run --strategy r8l_probe_ctl --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow env lib attempts/5.dsl
+00:29:27 run --strategy r8l_probe_ctl --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow env lib attempts/5.dsl
+00:29:35 check env lib attempts/6.dsl
+00:29:35 run --strategy r8l_probe_ctl --data data/sessions --capital 1000000 --compounding off --lot fractional --price-relation close_m --frictionless --margin-rate 0 --on-leverage allow --on-margin-call allow env lib attempts/6.dsl
+00:30:46 check env lib final.dsl

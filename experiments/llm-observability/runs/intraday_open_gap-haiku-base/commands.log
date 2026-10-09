@@ -1,0 +1,17 @@
+00:15:34 
+00:16:04 check env lib attempts/1.dsl
+00:16:11 run --strategy intraday_open_gap --synthetic --days 40 --fills env lib attempts/1.dsl
+00:18:11 check env lib attempts/2.dsl
+00:18:15 run --strategy intraday_open_gap --synthetic --days 40 --fills env lib attempts/2.dsl
+00:18:23 explain --strategy intraday_open_gap --rule decide#1 --at 2024-01-03T09:31:00 --bind A=DDD --synthetic --days 40 env lib attempts/2.dsl
+00:18:26 explain --strategy intraday_open_gap --rule gap_open#1 --at 2024-01-03T09:31:00 --bind A=DDD --synthetic --days 40 env lib attempts/2.dsl
+00:18:36 run --strategy intraday_open_gap --synthetic --days 40 --frictionless env lib attempts/2.dsl
+00:19:03 explain --strategy intraday_open_gap --rule decide#1 --at 2024-01-03T09:31:00 --bind A=AAA --synthetic --days 40 env lib attempts/2.dsl
+00:19:08 run --strategy intraday_open_gap --synthetic --days 40 --report-by day env lib attempts/2.dsl
+00:19:35 run --strategy intraday_open_gap --synthetic --days 40 env lib final.dsl
+00:19:35 check env lib final.dsl
+00:19:42 run --strategy intraday_open_gap --synthetic --days 40 --verify-causality env lib final.dsl
+00:20:21 check env lib attempts/3.dsl
+00:20:24 run --strategy intraday_open_gap --synthetic --days 40 --fills env lib attempts/3.dsl
+00:21:07 check env lib attempts/4.dsl
+00:21:07 run --strategy intraday_open_gap --synthetic --days 40 env lib final.dsl

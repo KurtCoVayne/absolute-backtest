@@ -31,6 +31,13 @@ resampled bucket.
 | --- | --- |
 | `docs/semantic-model.md` | The v1 semantic model: domains, types, signatures, the seven literal forms, WF-1 to WF-10, the kernel contract, the causality theorem. The code cites it by section. |
 | `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API, with the status of each section in this crate and the milestone that implements it. |
+| `docs/formal-foundations.md` | The formal foundations (Oct 8, 2026): the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results, what is new, and the seven changes the theory asks of the semantic model. |
+| `docs/language-v2.md` | The second formulation (Oct 8–9, 2026): a review of the MW14 and R8L changes against the foundations, and the proposal that follows: one data store per instrument class with every resolution derived, a data block that is a query over the catalog, explicit universes, programs as typed blocks with no run-time flags, order-independent rule bodies with sound short-circuiting, a library of formal operators, and a query facility with its state tables and algorithms; MW14 and R8L rewritten in it. Section 11 is the implementation order; section 15 the prototype and the Haiku study. |
+| `docs/observability.md` | The observability commands of this crate: `abt show` (the program graph), the coverage report every run prints (what every relation derived; the first empty relation when nothing was decided), `abt query --explain` (any relation at any bar, and why each rule did or did not fire), `--ledger` (a relation's tuples at every bar as Parquet). |
+| `docs/llm-observability.md` | The observability study (Oct 9, 2026): twelve Haiku agents writing the two company books on synthetic data and four briefs, with and without the observability commands; what they found, and the defects they surfaced with their status. |
+| `src/observe.rs` | The program graph and the coverage report behind `abt show` and the run's coverage lines. |
+| `scripts/synth/` | Synthetic markets in the layouts of `equities_1w` and `futures_sessions`, on which the two company books run (`docs/llm-observability.md`). |
+| `experiments/llm-observability/` | The observability study: Haiku agents writing six strategies with and without the observability commands; prompts, tasks, sandboxes, scorer, and every run. |
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
 | `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
@@ -110,14 +117,36 @@ strategy sma_crossover {
   `R(A, T0, X) asof T` (R's latest tuple keyed at or before T, at any
   resolution; T0 is bound causally), and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
-  plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
+  plus `T1 in window(T, N, min K)` / `prior_window` (calendar durations) and
+  `T1 in rows(T, N, min K)` (the group's own last N bars, N a Count: "the
+  last 20 sessions", "the stock's last 18 rows") inside an aggregation.
   A builtin is not a relation, so `not month_start(T)` does not resolve; the
   idiom is `mstart(T) :- bar(T), month_start(T).` and then `not mstart(T)`.
+- Scalar functions in expressions: `abs`, `least`, `greatest` (any number of
+  arguments of one dimension; an integer literal takes the others'
+  dimension), `log` and `exp` (Scalar only: `log(P / P0)`, never `log(P)`),
+  `sqrt`. Aggregates: `sum`, `mean`, `std`, `median`, `quantile`, `max`,
+  `min`, `count` (a Count, convertible to Scalar by division only), `corr`,
+  `cov`, `ols_beta`, and `first`/`last` in a resample.
+- `rank(R(...), by (K desc, A asc)[, ties average], as N)` numbers the
+  tuples of R within the group of the variables bound before it, so bind the
+  bar first: `ranked(A, T, N) :- bar(T), rank(scored(A, T, S), by (S desc,
+  A asc), as N).`; with A bound before the rank every group has one tuple
+  and every rank is 1 (W4 says so).
 - Decisions: `decide(T, buy(A, Q))`, `sell`, `short`, `cover` in delta mode;
-  `target_weight(A, W)`, `target_quantity(A, Q)` in target mode. The kernel
-  supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)`,
-  `nav(T, N)` (the book marked at T, before T's decisions) and
-  `fill(A, T, Q, P)` at the decision resolution.
+  `target_weight(A, W)`, `target_quantity(A, Q)` in target mode; any
+  constructor takes a trailing order (`buy(A, Q, moo_moc)`,
+  `target_weight(A, W, moc)`; `market` when omitted). In target mode an
+  instrument with no decision keeps its position; an exit is an explicit
+  zero target. The kernel supplies `decided(T0, D)`, `position(A, T, Q)`,
+  `cash(T, C)`, `nav(T, N)` (the book marked at T, before T's decisions) and
+  `fill(A, T, Q, P)` at the decision resolution; `universe`, `position` and
+  `fill` are enumerable (`-A`), so a rule can range over the book.
+- Sizing and accounting: a `target_weight` is a fraction of the fixed
+  starting capital by default and of equity under `--compounding on`; a
+  strategy whose weights are meant as fractions of equity ("equally
+  weighted", "capped at one") runs with `--compounding on`. Fractional
+  quantities need `--lot fractional`; the default truncates to whole shares.
 
 `abt check` also prints each strategy's degrees of freedom (`docs/data-bundle.md`,
 section 6), the counts the study report will use:
@@ -276,10 +305,15 @@ fixed part only). Each fill records its commission, fee and slippage;
 `RunResult.costs` sums them with the turnover, and `abt run` prints the line.
 A bar's transaction costs are never leverage: a fully invested book stays
 fully invested after paying them, carrying a debit of at most the bar's
-costs, which the next sizing sees. `ExecConfig::frictionless()` (or
-`--frictionless`) turns every model off, and the run then carries a warning
-per model naming the bias it leaves unmodeled (`RunResult.warnings`, printed
-as `warning (slippage): ...`).
+costs, which the next sizing sees. `ExecConfig::frictionless()` turns every
+model off; the command line's `--frictionless` turns off slippage, impact,
+the participation cap, the per-share commission and the fees, while a
+security table's per-contract commission, `--commission-bps` and the funding
+rates stay (the parity runs rely on this: a futures book under
+`--frictionless` still pays its commission per contract). The run then
+carries a warning per model it leaves unmodeled (`RunResult.warnings`,
+printed as `warning (slippage): ...`); the commission warning is withheld
+when commissions were in fact charged.
 
 The liquidity model (same section) caps a fill at 0.1 of the bar's volume
 (from the `volume`-like primitive at the decision resolution, or
@@ -397,8 +431,15 @@ abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [
         [--verify-causality] [--quiet] <files...>
 abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
         [--price-relation REL] <files...>
+abt show --strategy NAME <files...>
+abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain]
+        (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>
+abt run ... [--ledger R1,R2,... --ledger-out DIR]
 abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 ```
+
+`show`, the coverage report every `run` prints, `query` and `--ledger` are
+described in `docs/observability.md`.
 
 `<files...>` are `.dsl` files or directories searched recursively. The
 synthetic market is seeded (`--seed`, default 7) and deterministic.

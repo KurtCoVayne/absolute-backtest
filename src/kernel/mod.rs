@@ -529,6 +529,21 @@ pub struct KernelStats {
     pub memo_entries: usize,
 }
 
+/// What the evaluator derived for one relation over a run: how many times
+/// it was asked for (one call per bar and input tuple that some rule or the
+/// decision needed), how many of those calls derived at least one tuple, and
+/// the tuples derived in all. A derived relation with calls and no tuples was
+/// demanded and never held: the empty link the never-fired report names.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RelationCoverage {
+    pub name: String,
+    /// `true` for a relation defined by rules; a primitive's counts are of lookups.
+    pub derived: bool,
+    pub calls: usize,
+    pub nonempty: usize,
+    pub tuples: usize,
+}
+
 /// Serde for an `f64` that may be infinite (JSON has no infinity): null
 /// stands for +∞.
 mod infinite_as_null {
@@ -1059,6 +1074,9 @@ pub struct RunResult {
     /// The primitives the executor filled at and read volume from.
     pub price_relation: Option<String>,
     pub volume_relation: Option<String>,
+    /// What every relation derived over the run (the coverage report).
+    #[serde(default)]
+    pub coverage: Vec<RelationCoverage>,
 }
 
 impl RunResult {
@@ -1120,6 +1138,13 @@ pub struct Store {
 }
 
 impl Store {
+    /// Tuples held, over every key.
+    pub fn len(&self) -> usize {
+        self.by_time.values().map(|v| v.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.by_time.values().all(|v| v.is_empty())
+    }
     pub fn insert(&mut self, key: i64, tuple: Tuple) {
         self.by_time.entry(key).or_default().push(tuple);
         if self.entity_pos.is_some() {
@@ -1186,6 +1211,9 @@ pub struct Explanation {
     pub solutions: usize,
     /// Index and text of the first body literal with no solution, if any.
     pub failed_at: Option<(usize, String)>,
+    /// The variables of the first solution with their values, by name, when
+    /// the rule fired: the instance a reader can check against the data.
+    pub solution: Vec<(String, String)>,
 }
 
 impl std::fmt::Display for Explanation {
@@ -1205,7 +1233,13 @@ impl std::fmt::Display for Explanation {
                 i + 1,
                 text
             ),
-            None => write!(f, "rule {} fired at {}{} with {} solution(s)", self.rule, time::format_timestamp(self.t), with, self.solutions),
+            None => {
+                write!(f, "rule {} fired at {}{} with {} solution(s)", self.rule, time::format_timestamp(self.t), with, self.solutions)?;
+                if !self.solution.is_empty() {
+                    write!(f, "; first solution: {}", self.solution.iter().map(|(v, x)| format!("{} = {}", v, x)).collect::<Vec<_>>().join(", "))?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1282,6 +1316,12 @@ pub struct Kernel<'p> {
     pub(crate) literal_equities: HashMap<String, Sym>,
     /// Contract terms by kernel symbol (futures); a symbol absent is a share.
     pub(crate) contracts: FxHashMap<Sym, Contract>,
+    /// Per relation: calls computed (memo misses), calls that derived a
+    /// tuple, tuples derived; the coverage report of a run.
+    pub(crate) coverage: Vec<(usize, usize, usize)>,
+    /// What the build noticed about the program against this data (a label
+    /// the data never carries); reported with the run's warnings.
+    pub(crate) run_warnings: Vec<RunWarning>,
 }
 
 impl<'p> Kernel<'p> {
@@ -1325,6 +1365,14 @@ impl<'p> Kernel<'p> {
         let mut labels = dataset.labels.clone();
         let mut literal_equities: HashMap<String, Sym> = HashMap::new();
         let mut unresolved: Vec<String> = Vec::new();
+        // A label the data never carries makes every literal naming it false
+        // (the Oct 9 study: `member(A, T, "SP500")` on data whose index is
+        // `SPX` decided nothing, silently); the run warns, naming the labels
+        // the data holds. A warning and not a refusal: a vocabulary member
+        // the data happens not to carry (`"acquisition"` on data whose
+        // delistings are all bankruptcies) is a legitimate literal that is
+        // simply false here.
+        let mut unknown_labels: Vec<String> = Vec::new();
         let mut intern = |l: &Lit| match l {
             Lit::Equity(s) => {
                 if literal_equities.contains_key(s) {
@@ -1343,6 +1391,9 @@ impl<'p> Kernel<'p> {
                 }
             }
             Lit::Label(s) => {
+                if dataset.labels.get(s).is_none() {
+                    unknown_labels.push(s.clone());
+                }
                 labels.intern(s);
             }
             _ => {}
@@ -1360,6 +1411,32 @@ impl<'p> Kernel<'p> {
         }
         if let Some(m) = unresolved.first() {
             return Err(RunError::Config(m.clone()));
+        }
+        let mut run_warnings: Vec<RunWarning> = Vec::new();
+        if !unknown_labels.is_empty() {
+            unknown_labels.sort();
+            unknown_labels.dedup();
+            let mut present: Vec<&str> = dataset.labels.names().iter().map(|x| x.as_str()).collect();
+            present.sort_unstable();
+            let shown = if present.is_empty() {
+                "none".to_string()
+            } else if present.len() > 24 {
+                format!("{}, ... ({} labels in all)", present[..24].join(", "), present.len())
+            } else {
+                present.join(", ")
+            };
+            let named: Vec<String> = unknown_labels.iter().map(|l| format!("`{}`", l)).collect();
+            run_warnings.push(RunWarning {
+                bias: "vocabulary".into(),
+                message: format!(
+                    "the label{} {} occur{} in no relation of the data, so every literal naming {} is false; the labels the data holds are: {}",
+                    if named.len() > 1 { "s" } else { "" },
+                    named.join(", "),
+                    if named.len() > 1 { "" } else { "s" },
+                    if named.len() > 1 { "them" } else { "it" },
+                    shown
+                ),
+            });
         }
         let (symbols, remap) = symbols.sorted();
         let (labels, remap_labels) = labels.sorted();
@@ -1591,6 +1668,43 @@ impl<'p> Kernel<'p> {
             Some((*rel_ids.get(&name)?, price_column(sig)?))
         };
         let (open_rel, high_rel, low_rel) = (companion("open"), companion("high"), companion("low"));
+        // An order that executes away from the close needs the price
+        // relation's companions (section 6, order types): without them every
+        // such order waits for a print that never comes and is dropped, which
+        // the Oct 9 study found silent. Refused before the run instead.
+        for (ri, rule) in prog.rules.iter().enumerate().filter(|(_, r)| r.head.name == "decide") {
+            let Some(Term::Ctor(_, subs, _)) = rule.head.terms.get(1) else { continue };
+            let Some(order) = subs.get(2) else { continue };
+            let (kind, needs): (&str, Vec<(&str, bool)>) = match order {
+                Term::Param(p, _) if p == "moo" || p == "moo_moc" => (p.as_str(), vec![("open", open_rel.is_some())]),
+                Term::Ctor(c, _, _) if c == "limit" || c == "stop" => (c.as_str(), vec![("open", open_rel.is_some()), ("high", high_rel.is_some()), ("low", low_rel.is_some())]),
+                _ => continue,
+            };
+            let missing: Vec<&str> = needs.iter().filter(|(_, have)| !have).map(|(n, _)| *n).collect();
+            if missing.is_empty() {
+                continue;
+            }
+            let price_name = price_rel.map(|id| rels[id].name.clone()).unwrap_or_else(|| "(none)".to_string());
+            let expected: Vec<String> = missing
+                .iter()
+                .map(|m| {
+                    if price_name.contains("close") {
+                        format!("`{}`", price_name.replace("close", m))
+                    } else {
+                        format!("a `{}` relation named like the price relation", m)
+                    }
+                })
+                .collect();
+            return Err(RunError::Config(format!(
+                "rule {} places a `{}` order, but the price relation `{}` has no {} companion in environment `{}` ({}): every such order would wait for a print that never comes and be dropped; add the relation to the data, name a --price-relation that has it, or use `market` or `moc`",
+                crate::check::rule_label(&prog.rules, ri),
+                kind,
+                price_name,
+                missing.join(", "),
+                prog.environment,
+                expected.join(", ")
+            )));
+        }
         // The catalog's actions, by name (data-bundle doc, section 3).
         let primitive = |name: &str| -> Option<usize> {
             let id = *rel_ids.get(name)?;
@@ -1660,6 +1774,7 @@ impl<'p> Kernel<'p> {
         }
         // A week of slack covers `prev` across weekends and holidays at any resolution.
         let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
+        let n_rels = rels.len();
         Ok(Kernel {
             prog,
             symbols,
@@ -1703,7 +1818,31 @@ impl<'p> Kernel<'p> {
             asof_memo_next: 200_000,
             memo_min: 200_000,
             stats: KernelStats::default(),
+            coverage: vec![(0, 0, 0); n_rels],
+            run_warnings,
         })
+    }
+
+    /// What every relation derived so far (section 7, diagnostics): the
+    /// counts behind the coverage report, in relation id order.
+    pub fn coverage(&self) -> Vec<RelationCoverage> {
+        self.rels
+            .iter()
+            .enumerate()
+            .zip(&self.coverage)
+            .map(|((rel, info), &(calls, nonempty, tuples))| {
+                // A stored relation's tuples are what the data (or the
+                // executor) holds, whichever way the rules read them.
+                let tuples = if info.stored { self.stores[rel].len() } else { tuples };
+                RelationCoverage {
+                    name: info.name.clone(),
+                    derived: !info.stored,
+                    calls,
+                    nonempty,
+                    tuples,
+                }
+            })
+            .collect()
     }
 
     /// The evaluator's counters, with the cache's current size.
@@ -1854,7 +1993,7 @@ impl<'p> Kernel<'p> {
         }
         let mut result = RunResult {
             symbols: self.symbols.names().to_vec(),
-            warnings: self.cfg.warnings(),
+            warnings: self.cfg.warnings().into_iter().chain(self.run_warnings.iter().cloned()).collect(),
             price_relation: self.price_rel.map(|id| self.rels[id].name.clone()),
             volume_relation: self.volume_rel.map(|id| self.rels[id].name.clone()),
             base_capital: (!self.cfg.compounding).then_some(self.cfg.initial_cash),
@@ -1873,7 +2012,31 @@ impl<'p> Kernel<'p> {
         }
         exec.finish(self, &mut result);
         result.stats = self.stats();
+        result.coverage = self.coverage();
         Ok(result)
+    }
+
+    /// The bars of the time domain at `res` (section 6): what a relation at
+    /// that resolution can be queried at.
+    pub fn bars_at(&self, res: Resolution) -> Vec<i64> {
+        self.domains.get(&res).map(|d| d.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// `t` is a bar of the time domain at `res`, or the error naming the
+    /// nearest bars (what `explain` and `query` refuse: a label between two
+    /// bars would read a phantom bucket).
+    pub fn check_bar(&self, res: Resolution, t: i64) -> Result<(), RunError> {
+        let domain = self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))?;
+        if domain.contains(&t) {
+            Ok(())
+        } else {
+            Err(RunError::NotABar {
+                t,
+                res,
+                before: domain.range(..t).next_back().copied(),
+                after: domain.range(t..).next().copied(),
+            })
+        }
     }
 
     /// The id of a kernel relation that every program has.
@@ -2011,11 +2174,43 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    /// Average daily volume of `sym` at `bars[end]`: the mean bar volume over
-    /// the `adv_window` bars ending there (inclusive); `None` without any.
+    /// Average daily volume of `sym` at `bars[end]`: at a daily resolution the
+    /// mean bar volume over the `adv_window` bars ending there (inclusive);
+    /// at a finer resolution the mean over the `adv_window` days before the
+    /// bar's day of each day's summed volume (the current, partial day is
+    /// left out; on the first day its volume so far stands in). `None`
+    /// without any volume.
     pub fn adv(&self, sym: Sym, bars: &[i64], end: usize) -> Option<f64> {
-        let lo = end.saturating_sub(self.cfg.adv_window.max(1) - 1);
-        let vols: Vec<f64> = bars[lo..=end.min(bars.len() - 1)].iter().filter_map(|&t| self.bar_volume(sym, t)).collect();
+        let end = end.min(bars.len().saturating_sub(1));
+        let n = self.cfg.adv_window.max(1);
+        if self.prog.resolution.seconds().is_some() {
+            let today = time::day_key(bars[end]);
+            let mut days: Vec<(i64, Option<f64>)> = Vec::new();
+            for &t in bars[..=end].iter().rev() {
+                let d = time::day_key(t);
+                if d == today {
+                    continue;
+                }
+                if days.last().map(|(k, _)| *k != d).unwrap_or(true) {
+                    if days.iter().filter(|(_, v)| v.is_some()).count() == n {
+                        break;
+                    }
+                    days.push((d, None));
+                }
+                if let Some(v) = self.bar_volume(sym, t) {
+                    let last = days.last_mut().unwrap();
+                    last.1 = Some(last.1.unwrap_or(0.0) + v);
+                }
+            }
+            let sums: Vec<f64> = days.iter().filter_map(|(_, v)| *v).collect();
+            if sums.is_empty() {
+                let so_far: f64 = bars[..=end].iter().rev().take_while(|&&t| time::day_key(t) == today).filter_map(|&t| self.bar_volume(sym, t)).sum();
+                return (so_far > 0.0).then_some(so_far);
+            }
+            return Some(sums.iter().sum::<f64>() / sums.len() as f64);
+        }
+        let lo = end.saturating_sub(n - 1);
+        let vols: Vec<f64> = bars[lo..=end].iter().filter_map(|&t| self.bar_volume(sym, t)).collect();
         if vols.is_empty() {
             None
         } else {
@@ -2231,16 +2426,20 @@ impl<'p> Kernel<'p> {
                     bindings: shown,
                     solutions: 0,
                     failed_at: Some((i, lit.describe())),
+                    solution: Vec::new(),
                 });
             }
             envs = next;
         }
+        let mut solution: Vec<(String, String)> = cr.slots.iter().filter_map(|(name, &slot)| envs[0][slot].as_ref().map(|v| (name.clone(), self.show(v)))).collect();
+        solution.sort();
         Ok(Explanation {
             rule: cr.label.clone(),
             t,
             bindings: shown,
             solutions: envs.len(),
             failed_at: None,
+            solution,
         })
     }
 }

@@ -1,0 +1,22 @@
+00:17:31 
+00:17:31 check env lib attempts/1.dsl
+00:17:40 check env lib attempts/2.dsl
+00:17:47 show --strategy breakout_with_stop env lib attempts/2.dsl
+00:17:51 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/2.dsl
+00:18:49 check env lib attempts/3.dsl
+00:18:53 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/3.dsl
+00:19:15 query --strategy breakout_with_stop --rel breakout --at 2023-01-25 --symbol K --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/3.dsl
+00:19:17 query --strategy breakout_with_stop --rel decide --at 2023-02-02 --symbol K --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/3.dsl
+00:19:35 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --ledger close,volume,highest,vol_avg,breakout,held,trail_hi,pick --ledger-out verify/ledger3 env lib attempts/3.dsl
+00:19:41 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --ledger close,volume,highest,vol_avg,breakout,held,trail_hi,pick --ledger-out verify/ledger3 env lib attempts/3.dsl
+00:19:48 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --ledger breakout,vol_avg,held,trail_hi,pick --ledger-out verify/ledger3 --dump verify/dump3 env lib attempts/3.dsl
+00:19:57 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --dump verify/dump3 env lib attempts/3.dsl
+00:20:53 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --param max_names=2 --dump verify/dump_cap2 env lib attempts/3.dsl
+00:21:20 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --param max_names=2 --on-leverage allow --dump verify/dump_cap2 env lib attempts/3.dsl
+00:21:59 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L --seed 2 --param max_names=2 --on-leverage allow --dump verify/dump_seed2 env lib attempts/3.dsl
+00:22:33 query --strategy breakout_with_stop --rel decide --at 2023-01-25 --symbol K --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/3.dsl
+00:22:35 query --strategy breakout_with_stop --rel pick --at 2025-03-26 --symbol L --explain --param max_names=2 --on-leverage allow --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/3.dsl
+00:22:58 query --strategy breakout_with_stop --rel decide --at 2023-01-25 --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib attempts/3.dsl
+00:23:33 check env lib final.dsl
+00:23:33 run --strategy breakout_with_stop --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L env lib final.dsl
+00:23:40 show --strategy breakout_with_stop env lib final.dsl

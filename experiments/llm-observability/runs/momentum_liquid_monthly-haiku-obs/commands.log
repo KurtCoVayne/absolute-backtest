@@ -1,0 +1,18 @@
+00:15:50 
+00:17:47 check env lib attempts/1.dsl
+00:17:51 show --strategy momentum_liquid_monthly env lib attempts/1.dsl
+00:17:57 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/1.dsl
+00:19:59 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --ledger universe,mstart,cand,sel,held,position,bar --ledger-out ledger1 --quiet env lib attempts/1.dsl
+00:21:30 query --strategy momentum_liquid_monthly --rel decide --at 2023-02-01 --symbol E15 --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/1.dsl
+00:21:32 query --strategy momentum_liquid_monthly --rel mom --at 2023-02-01 --symbol E15 --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/1.dsl
+00:21:45 query --strategy momentum_liquid_monthly --rel adv --at 2023-02-01 --inputs E15,20d,10 --explain --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/1.dsl
+00:21:47 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on env lib attempts/1.dsl
+00:22:18 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --param min_adv=2_000_000_000 USD env lib attempts/1.dsl
+00:22:35 check env lib attempts/2.dsl
+00:22:35 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/2.dsl
+00:23:14 check env lib final.dsl
+00:23:23 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --fills env lib final.dsl
+00:23:55 query --strategy momentum_liquid_monthly --rel delisted --at 2025-01-24 --symbol E15 --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib final.dsl
+00:23:57 query --strategy momentum_liquid_monthly --rel close --at 2025-01-24 --inputs E15 --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib final.dsl
+00:24:06 query --strategy momentum_liquid_monthly --rel delisted --at 2025-01-27 --symbol E15 --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib final.dsl
+00:25:05 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib final.dsl

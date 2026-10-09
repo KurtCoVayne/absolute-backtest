@@ -1,0 +1,19 @@
+00:16:07 
+00:16:26 check env lib attempts/1.dsl
+00:16:36 check env lib attempts/2.dsl
+00:16:42 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --ledger ma,ann_vol,trend_up,trend_dn,decide --ledger-out runs/a2/ledger env lib attempts/2.dsl
+00:16:47 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --ledger trend_up,trend_dn,decide --ledger-out runs/a2/ledger env lib attempts/2.dsl
+00:18:19 show --strategy vol_targeted_trend env lib attempts/2.dsl
+00:18:23 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --dump runs/a2/dump --quiet env lib attempts/2.dsl
+00:19:17 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --param target_vol=0.20 --dump runs/cap/dump --quiet env lib attempts/2.dsl
+00:20:25 check env lib attempts/3.dsl
+00:20:31 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --param target_vol=0.20 --on-leverage allow --dump runs/cap3/dump env lib attempts/3.dsl
+00:21:09 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY env lib final.dsl
+00:21:17 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --dump runs/final/dump --quiet env lib final.dsl
+00:21:23 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --compounding on --quiet env lib final.dsl
+00:21:23 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --frictionless --quiet env lib final.dsl
+00:21:33 query --strategy vol_targeted_trend --rel decide --at 2023-02-24 --explain --synthetic --days 1000 --symbols SPY env lib final.dsl
+00:21:33 query --strategy vol_targeted_trend --rel decide --at 2022-10-07 --explain --synthetic --days 1000 --symbols SPY env lib final.dsl
+00:21:41 query --strategy vol_targeted_trend --rel trend_up --at 2023-02-24 --explain --synthetic --days 1000 --symbols SPY env lib final.dsl
+00:21:41 query --strategy vol_targeted_trend --rel vol_weight --at 2023-02-24 --inputs SPY --explain --synthetic --days 1000 --symbols SPY env lib final.dsl
+00:24:30 check env lib final.dsl
