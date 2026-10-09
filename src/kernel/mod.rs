@@ -1319,6 +1319,9 @@ pub struct Kernel<'p> {
     /// Per relation: calls computed (memo misses), calls that derived a
     /// tuple, tuples derived; the coverage report of a run.
     pub(crate) coverage: Vec<(usize, usize, usize)>,
+    /// What the build noticed about the program against this data (a label
+    /// the data never carries); reported with the run's warnings.
+    pub(crate) run_warnings: Vec<RunWarning>,
 }
 
 impl<'p> Kernel<'p> {
@@ -1364,7 +1367,11 @@ impl<'p> Kernel<'p> {
         let mut unresolved: Vec<String> = Vec::new();
         // A label the data never carries makes every literal naming it false
         // (the Oct 9 study: `member(A, T, "SP500")` on data whose index is
-        // `SPX` decided nothing, silently); it is refused before the run.
+        // `SPX` decided nothing, silently); the run warns, naming the labels
+        // the data holds. A warning and not a refusal: a vocabulary member
+        // the data happens not to carry (`"acquisition"` on data whose
+        // delistings are all bankruptcies) is a legitimate literal that is
+        // simply false here.
         let mut unknown_labels: Vec<String> = Vec::new();
         let mut intern = |l: &Lit| match l {
             Lit::Equity(s) => {
@@ -1405,6 +1412,7 @@ impl<'p> Kernel<'p> {
         if let Some(m) = unresolved.first() {
             return Err(RunError::Config(m.clone()));
         }
+        let mut run_warnings: Vec<RunWarning> = Vec::new();
         if !unknown_labels.is_empty() {
             unknown_labels.sort();
             unknown_labels.dedup();
@@ -1418,14 +1426,17 @@ impl<'p> Kernel<'p> {
                 present.join(", ")
             };
             let named: Vec<String> = unknown_labels.iter().map(|l| format!("`{}`", l)).collect();
-            return Err(RunError::Config(format!(
-                "the label{} {} occur{} in no relation of the data, so every literal naming {} would be false; the labels the data holds are: {}",
-                if named.len() > 1 { "s" } else { "" },
-                named.join(", "),
-                if named.len() > 1 { "" } else { "s" },
-                if named.len() > 1 { "them" } else { "it" },
-                shown
-            )));
+            run_warnings.push(RunWarning {
+                bias: "vocabulary".into(),
+                message: format!(
+                    "the label{} {} occur{} in no relation of the data, so every literal naming {} is false; the labels the data holds are: {}",
+                    if named.len() > 1 { "s" } else { "" },
+                    named.join(", "),
+                    if named.len() > 1 { "" } else { "s" },
+                    if named.len() > 1 { "them" } else { "it" },
+                    shown
+                ),
+            });
         }
         let (symbols, remap) = symbols.sorted();
         let (labels, remap_labels) = labels.sorted();
@@ -1808,6 +1819,7 @@ impl<'p> Kernel<'p> {
             memo_min: 200_000,
             stats: KernelStats::default(),
             coverage: vec![(0, 0, 0); n_rels],
+            run_warnings,
         })
     }
 
@@ -1981,7 +1993,7 @@ impl<'p> Kernel<'p> {
         }
         let mut result = RunResult {
             symbols: self.symbols.names().to_vec(),
-            warnings: self.cfg.warnings(),
+            warnings: self.cfg.warnings().into_iter().chain(self.run_warnings.iter().cloned()).collect(),
             price_relation: self.price_rel.map(|id| self.rels[id].name.clone()),
             volume_relation: self.volume_rel.map(|id| self.rels[id].name.clone()),
             base_capital: (!self.cfg.compounding).then_some(self.cfg.initial_cash),

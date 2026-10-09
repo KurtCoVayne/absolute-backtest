@@ -111,7 +111,7 @@ membership) that the base agents, with the same decisions, could not see.
 | `query --symbol` on `decide` prints zero tuples while the rule lines show it fired | MW14, R8L, momentum, open gap (obs) | fixed (`e5bed9b`) |
 | `--ledger` refuses a relation whose only input is its entity | MW14, R8L, breakout, open gap, vol (obs) | fixed (`73c5c69`): written per symbol |
 | `--ledger` cannot be combined with `--dump` | R8L, breakout, open gap (obs) | fixed: the kept kernel copies the data when something reads it after the run |
-| a label the data never carries (`"SP500"` for an index labelled `SPX`) decides nothing, silently | momentum, both conditions | fixed: refused before the run, naming the labels the data holds |
+| a label the data never carries (`"SP500"` for an index labelled `SPX`) decides nothing, silently | momentum, both conditions | fixed: the run warns at its start, naming the label and the labels the data holds (a warning, since a vocabulary member the data happens not to carry is a legitimate literal that is simply false on it) |
 | the run warns "commissions and fees are zero" while charging a per-notional or per-contract commission | MW14, R8L, both conditions | fixed (`73c5c69`): the warning is dropped when commissions were charged; `--frictionless` is described as what it is |
 | the never-fired path summary reads as a contradiction when the failing literal is a bound read (a label none of the tuples carries) | momentum (obs) | fixed (`73c5c69`): reworded |
 | `explain` reports no bindings | base condition | the obs binary reports the first solution's bindings |

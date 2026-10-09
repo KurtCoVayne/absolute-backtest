@@ -1,7 +1,7 @@
-//! What the kernel refuses before a run starts, found by the Oct 9 study: an
-//! order that needs a print the data has no relation for, and a label the
-//! data never carries; and the daily reading of the average daily volume at
-//! a sub-daily resolution.
+//! What the kernel settles before a run starts, found by the Oct 9 study: an
+//! order that needs a print the data has no relation for is refused, a label
+//! the data never carries is warned; and the daily reading of the average
+//! daily volume at a sub-daily resolution.
 
 mod corpus;
 
@@ -54,17 +54,24 @@ strategy wrong_label {
 "#;
 
 /// The synthetic catalog's index is labelled `SPX`; a program naming `NDX`
-/// would decide nothing, so it is refused naming the labels the data holds.
+/// decides nothing, and the run says so, naming the labels the data holds.
+/// A warning and not a refusal: a vocabulary member the data happens not to
+/// carry is a legitimate literal that is simply false on it.
 #[test]
-fn an_unknown_label_is_refused_at_run_start() {
+fn an_unknown_label_is_warned_at_run_start() {
     let (prog, _) = program(WRONG_LABEL, "wrong_label");
     let ds = synthetic_daily_v2(&["AAA", "BBB"], (2022, 1, 3), 40, 7);
-    let err = Kernel::new(&prog, &ds, ExecConfig::frictionless()).err().expect("refused").to_string();
-    assert!(err.contains("`NDX`") && err.contains("no relation of the data"), "{}", err);
-    assert!(err.contains("SPX"), "{}", err);
-    // The same program with the data's label runs.
+    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
+    let result = k.run().unwrap();
+    assert!(result.decisions.is_empty());
+    let w = result.warnings.iter().find(|w| w.bias == "vocabulary").expect("a vocabulary warning");
+    assert!(w.message.contains("`NDX`") && w.message.contains("no relation of the data"), "{}", w.message);
+    assert!(w.message.contains("SPX"), "{}", w.message);
+    // The same program with the data's label runs without the warning.
     let (prog, _) = program(&WRONG_LABEL.replace("NDX", "SPX").replace("wrong_label", "right_label"), "right_label");
-    assert!(Kernel::new(&prog, &ds, ExecConfig::frictionless()).is_ok());
+    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
+    let result = k.run().unwrap();
+    assert!(result.warnings.iter().all(|w| w.bias != "vocabulary"));
 }
 
 const NEVER_MIN: &str = r#"
