@@ -1586,12 +1586,39 @@ impl<'p> Kernel<'p> {
                         v => Ok(Value::Num(num(v).ok_or_else(|| self.arith(cr, env, e, "abs of a non-numeric value"))?.abs())),
                     },
                     "least" | "greatest" => {
+                        // An integer literal is a Count and a Scalar is a Num; the
+                        // checker admits the mix (`least(1, W)`), so the comparison
+                        // is numeric across the two, never the enum's variant order.
+                        let num = |v: &Value| match v {
+                            Value::Num(x) => Some(*x),
+                            Value::Count(c) => Some(*c as f64),
+                            _ => None,
+                        };
                         let mut best = vals[0].clone();
                         for v in &vals[1..] {
-                            let better = if f == "least" { v < &best } else { v > &best };
+                            let better = match (num(v), num(&best)) {
+                                (Some(a), Some(b)) => {
+                                    if f == "least" {
+                                        a < b
+                                    } else {
+                                        a > b
+                                    }
+                                }
+                                _ => {
+                                    if f == "least" {
+                                        v < &best
+                                    } else {
+                                        v > &best
+                                    }
+                                }
+                            };
                             if better {
                                 best = v.clone();
                             }
+                        }
+                        // The result has the checker's type: a Scalar when any argument is one.
+                        if let (Value::Count(c), true) = (&best, vals.iter().any(|v| matches!(v, Value::Num(_)))) {
+                            best = Value::Num(*c as f64);
                         }
                         Ok(best)
                     }

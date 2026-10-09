@@ -799,7 +799,13 @@ fn main() {
                         None => None,
                     };
                     let tuples = k.query(&rel, t, &inputs)?;
-                    let shown: Vec<&Vec<Value>> = tuples.iter().filter(|tu| sym.as_ref().map(|s| tu.iter().any(|v| v == s)).unwrap_or(true)).collect();
+                    // A tuple is the symbol's when a field is the symbol, or a
+                    // decision on it (`decide(T, buy(A, Q))` holds A inside D).
+                    let is_sym = |v: &Value, s: &Value| match (v, s) {
+                        (Value::Decision(d), Value::Equity(e)) => d.equity == *e,
+                        _ => v == s,
+                    };
+                    let shown: Vec<&Vec<Value>> = tuples.iter().filter(|tu| sym.as_ref().map(|s| tu.iter().any(|v| is_sym(v, s))).unwrap_or(true)).collect();
                     let mut text = format!(
                         "{} at {} ({}): {} tuple(s){}\n",
                         rel,
