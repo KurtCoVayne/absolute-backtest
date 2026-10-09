@@ -165,7 +165,7 @@ fn parse_args() -> Args {
 /// reads it after the run, borrowed (copied into the kernel) when `--dump`,
 /// `--study` or `--verify-causality` will.
 enum Data<'a> {
-    Owned(absolute_backtest::kernel::Dataset),
+    Owned(Box<absolute_backtest::kernel::Dataset>),
     Borrowed(&'a absolute_backtest::kernel::Dataset),
 }
 
@@ -179,7 +179,7 @@ fn run_keeping(prog: &absolute_backtest::check::Program, data: Data<'_>, cfg: Ex
             .stack_size(512 << 20)
             .spawn_scoped(s, || {
                 let mut k = match data {
-                    Data::Owned(ds) => Kernel::from_dataset(prog, ds, cfg)?,
+                    Data::Owned(ds) => Kernel::from_dataset(prog, *ds, cfg)?,
                     Data::Borrowed(ds) => Kernel::new(prog, ds, cfg)?,
                 };
                 let result = k.run()?;
@@ -797,7 +797,7 @@ fn main() {
                     let last = *result.bars.last().unwrap();
                     let t = match at {
                         Some(t) => t,
-                        None => k.bars_at(res).into_iter().filter(|&b| b <= last).last().unwrap_or(last),
+                        None => k.bars_at(res).into_iter().rfind(|&b| b <= last).unwrap_or(last),
                     };
                     k.check_bar(res, t)?;
                     let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect();
@@ -1014,7 +1014,7 @@ fn main() {
             // explanations and the ledger; it takes the facts over when
             // nothing reads the dataset afterwards, and copies them otherwise.
             let outcome = if batch {
-                let data = if owned { Data::Owned(std::mem::take(&mut dataset)) } else { Data::Borrowed(&dataset) };
+                let data = if owned { Data::Owned(Box::new(std::mem::take(&mut dataset))) } else { Data::Borrowed(&dataset) };
                 run_keeping(&prog, data, cfg.clone(), &ledger, ledger_out.as_deref()).map(|(r, n)| {
                     notes = n;
                     r
