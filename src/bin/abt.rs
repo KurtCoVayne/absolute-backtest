@@ -30,7 +30,8 @@ use std::str::FromStr;
 use absolute_backtest::check::{check_program, check_workspace, Severity, Workspace};
 use absolute_backtest::data;
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{ExecConfig, Kernel, Lot, OnOversize, OnRuin, RunError, Value};
+use absolute_backtest::kernel::{ExecConfig, Kernel, Lot, OnOversize, OnRuin, RunError, RunResult, Value};
+use absolute_backtest::{observe, Mode, Term, Ty};
 
 struct Args {
     cmd: String,
@@ -41,11 +42,15 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 8] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "untested", "timing"];
+const FLAGS: [&str; 9] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "untested", "timing", "explain"];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 72] = [
+const OPTIONS: [&str; 76] = [
     "strategy",
+    "rel",
+    "symbol",
+    "ledger",
+    "ledger-out",
     "window-sums",
     "threads",
     "report-calendar",
@@ -156,12 +161,139 @@ fn parse_args() -> Args {
     Args { cmd, files, opts, multi, flags }
 }
 
+/// Run on the batch kernel and keep the kernel afterwards for what reads the
+/// model after the run: the explanations of the coverage report's root
+/// causes, and the ledger. The dataset moves into the kernel (one copy) and
+/// the kernel is not freed tuple by tuple at the end, as in `run_owned`.
+fn run_keeping(
+    prog: &absolute_backtest::check::Program,
+    dataset: absolute_backtest::kernel::Dataset,
+    cfg: ExecConfig,
+    ledger: &[String],
+    ledger_out: Option<&Path>,
+) -> Result<(RunResult, Vec<String>), RunError> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(s, || {
+                let mut k = Kernel::from_dataset(prog, dataset, cfg)?;
+                let result = k.run()?;
+                let mut notes = Vec::new();
+                let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
+                for c in &causes {
+                    for ri in prog.rules_for(&c.relation) {
+                        let label = prog.rule_label(ri);
+                        if !k.rule_inputs(ri).is_empty() {
+                            notes.push(format!("rule {} takes inputs; explain it at a bar with abt query --rel {} --inputs ... --explain", label, c.relation));
+                            continue;
+                        }
+                        let res = prog.relations.get(&c.relation).and_then(|s| s.res).unwrap_or(prog.resolution);
+                        let first = result.bars[0];
+                        let last = *result.bars.last().unwrap();
+                        let bars: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
+                        let Some(&t) = bars.get(bars.len() / 2) else {
+                            notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, res));
+                            continue;
+                        };
+                        match k.explain(ri, t, &[]) {
+                            Ok(ex) => notes.push(format!("{} (a sample bar; abt query --rel {} --at BAR --explain for another)", ex, c.relation)),
+                            Err(e) => notes.push(format!("rule {} at {}: {}", label, format_timestamp(t), e)),
+                        }
+                    }
+                }
+                if let Some(dir) = ledger_out {
+                    write_ledger(&mut k, prog, &result, ledger, dir)?;
+                }
+                std::mem::forget(k);
+                Ok((result, notes))
+            })
+            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+            .join()
+            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
+/// Write every tuple of the named relations at every bar of the run (of the
+/// relation's own time domain inside the run's window) as DIR/<relation>.parquet,
+/// one column per argument of the signature, and the coverage as
+/// DIR/coverage.parquet.
+fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result: &RunResult, ledger: &[String], dir: &Path) -> Result<(), RunError> {
+    use absolute_backtest::table::{write_table, Col};
+    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("--ledger-out {}: {}", dir.display(), e)))?;
+    let first = result.bars[0];
+    let last = *result.bars.last().unwrap();
+    for rel in ledger {
+        let Some(sig) = prog.relations.get(rel) else {
+            let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
+            return Err(RunError::Request(format!("--ledger: `{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
+        };
+        let inputs: Vec<&str> = sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| a.name.as_str()).collect();
+        if !inputs.is_empty() {
+            return Err(RunError::Request(format!(
+                "--ledger: `{}` takes the inputs {}; a ledger is written for relations without `+` arguments (query it at a bar with --inputs instead)",
+                rel,
+                inputs.join(", ")
+            )));
+        }
+        let res = sig.res.unwrap_or(prog.resolution);
+        let bars: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
+        let width = sig.args.len();
+        let mut times: Vec<Option<i64>> = Vec::new();
+        let mut cols: Vec<Col> = sig
+            .args
+            .iter()
+            .map(|a| match a.ty {
+                Ty::Timestamp => Col::Time(Vec::new()),
+                Ty::Count => Col::Int(Vec::new()),
+                Ty::Quantity(_) => Col::Float(Vec::new()),
+                _ => Col::Str(Vec::new()),
+            })
+            .collect();
+        for t in bars {
+            for tu in k.query(rel, t, &[])? {
+                times.push(Some(t));
+                for j in 0..width {
+                    match (&mut cols[j], &tu[j]) {
+                        (Col::Time(v), Value::Time(x)) => v.push(Some(*x)),
+                        (Col::Time(v), _) => v.push(None),
+                        (Col::Int(v), Value::Count(x)) => v.push(Some(*x)),
+                        (Col::Int(v), _) => v.push(None),
+                        (Col::Float(v), Value::Num(x)) => v.push(Some(*x)),
+                        (Col::Float(v), Value::Count(x)) => v.push(Some(*x as f64)),
+                        (Col::Float(v), _) => v.push(None),
+                        (Col::Str(v), x) => v.push(Some(k.show(x))),
+                        (Col::Bool(v), _) => v.push(None),
+                    }
+                }
+            }
+        }
+        let mut table: Vec<(&str, Col)> = vec![("bar", Col::Time(times))];
+        for (a, c) in sig.args.iter().zip(cols) {
+            table.push((a.name.as_str(), c));
+        }
+        write_table(&dir.join(format!("{}.parquet", rel)), table).map_err(RunError::Request)?;
+    }
+    let cov = &result.coverage;
+    write_table(
+        &dir.join("coverage.parquet"),
+        vec![
+            ("relation", Col::Str(cov.iter().map(|c| Some(c.name.clone())).collect())),
+            ("derived", Col::Bool(cov.iter().map(|c| Some(c.derived)).collect())),
+            ("calls", Col::Int(cov.iter().map(|c| Some(c.calls as i64)).collect())),
+            ("nonempty", Col::Int(cov.iter().map(|c| Some(c.nonempty as i64)).collect())),
+            ("tuples", Col::Int(cov.iter().map(|c| Some(c.tuples as i64)).collect())),
+        ],
+    )
+    .map_err(RunError::Request)?;
+    Ok(())
+}
+
 /// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
 type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::kernel::Dataset, ExecConfig) -> Result<absolute_backtest::kernel::RunResult, RunError> + Sync;
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X | --capital X] [--compounding on|off] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--report-by bar|day] [--periods-per-year X] [--dump DIR] [--quiet] [--timing] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's `+` arguments for explain, in signature order\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --commission-bps X    commission in basis points of traded notional on both sides (default 0), added to the per-share schedule
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X | --capital X] [--compounding on|off] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--report-by bar|day] [--periods-per-year X] [--dump DIR] [--quiet] [--timing] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, resolution, completeness, stratum, loop, depth, reads and rules)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt run ... [--ledger R1,R2,... --ledger-out DIR]   (write every tuple of the named relations at every bar of the run as DIR/<relation>.parquet, and the coverage as DIR/coverage.parquet)\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's (or, for query, the relation's) `+` arguments, in signature order\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --commission-bps X    commission in basis points of traded notional on both sides (default 0), added to the per-share schedule
   --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)
   --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)
   --delist-proceeds P   by-reason (default: last trade less the reason's haircut, with commission) or last-price (last trade, no haircut, no cost)
@@ -581,6 +713,143 @@ fn main() {
             println!("{} strategies, {} libraries checked: {} error(s), {} warning(s)", strategies, ws.libraries().count(), errors, warnings);
             exit(if errors > 0 { 1 } else { 0 })
         }
+        "show" => {
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            print!("{}", observe::show_program(&prog));
+        }
+        "query" => {
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let (dataset, _) = load_dataset(&args, &prog);
+            let cfg = exec_config(&args);
+            let rel = args.opts.get("rel").cloned().unwrap_or_else(|| {
+                eprintln!("query needs --rel RELATION");
+                usage(1)
+            });
+            let at: Option<i64> = args.opts.get("at").map(|s| {
+                parse_timestamp(s).unwrap_or_else(|| {
+                    eprintln!("--at: `{}` is not a timestamp (YYYY-MM-DD, optionally THH:MM[:SS])", s);
+                    exit(2)
+                })
+            });
+            let raw_inputs: Vec<String> = args
+                .opts
+                .get("inputs")
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or_default();
+            let symbol = args.opts.get("symbol").cloned();
+            let explain = args.flags.contains("explain");
+            let out = std::thread::Builder::new()
+                .stack_size(512 << 20)
+                .spawn(move || -> Result<String, RunError> {
+                    let mut k = Kernel::new(&prog, &dataset, cfg)?;
+                    let result = k.run()?;
+                    let Some(sig) = prog.relations.get(&rel) else {
+                        let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
+                        return Err(RunError::Request(format!("`{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
+                    };
+                    let res = sig.res.unwrap_or(prog.resolution);
+                    let last = *result.bars.last().unwrap();
+                    let t = match at {
+                        Some(t) => t,
+                        None => k.bars_at(res).into_iter().filter(|&b| b <= last).last().unwrap_or(last),
+                    };
+                    k.check_bar(res, t)?;
+                    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect();
+                    // A relation whose only input is its entity (`close(+A, @T, -P)`)
+                    // is queried for the symbol when --inputs is not given.
+                    let raw_inputs: Vec<String> = match (&symbol, raw_inputs.is_empty(), need.as_slice()) {
+                        (Some(s), true, [(_, Ty::Equity)]) => vec![s.clone()],
+                        _ => raw_inputs,
+                    };
+                    if need.len() != raw_inputs.len() {
+                        let shown: Vec<String> = need.iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
+                        return Err(RunError::Request(format!(
+                            "`{}` takes {} input(s) ({}), {} given; pass them in signature order with --inputs V1,V2,...",
+                            rel,
+                            need.len(),
+                            shown.join(", "),
+                            raw_inputs.len()
+                        )));
+                    }
+                    let inputs: Vec<Value> = need
+                        .iter()
+                        .zip(&raw_inputs)
+                        .map(|((n, ty), raw)| k.parse_input(ty, raw).map_err(|m| RunError::Request(format!("input `{}`: {}", n, m))))
+                        .collect::<Result<_, _>>()?;
+                    let sym: Option<Value> = match &symbol {
+                        Some(s) => Some(k.parse_binding(s).map_err(|m| RunError::Request(format!("--symbol {}: {}", s, m)))?),
+                        None => None,
+                    };
+                    let tuples = k.query(&rel, t, &inputs)?;
+                    let shown: Vec<&Vec<Value>> = tuples.iter().filter(|tu| sym.as_ref().map(|s| tu.iter().any(|v| v == s)).unwrap_or(true)).collect();
+                    let mut text = format!(
+                        "{} at {} ({}): {} tuple(s){}\n",
+                        rel,
+                        format_timestamp(t),
+                        res,
+                        shown.len(),
+                        match &symbol {
+                            Some(s) => format!(" for {}", s),
+                            None => String::new(),
+                        }
+                    );
+                    for tu in shown.iter().take(200) {
+                        text.push_str(&format!("  {}({})\n", rel, tu.iter().map(|v| k.show(v)).collect::<Vec<_>>().join(", ")));
+                    }
+                    if shown.len() > 200 {
+                        text.push_str("  ... (the first 200 shown)\n");
+                    }
+                    if explain {
+                        let rules = prog.rules_for(&rel);
+                        if rules.is_empty() {
+                            text.push_str(&format!("{} has no rules: it is supplied, not derived\n", rel));
+                        }
+                        for ri in rules {
+                            let mut bindings: Vec<(String, Value)> = Vec::new();
+                            if let Some(s) = &sym {
+                                if let Some(pos) = sig.args.iter().position(|a| a.ty.is_entity()) {
+                                    if let Term::Var(v, _) = &prog.rules[ri].head.terms[pos] {
+                                        bindings.push((v.clone(), s.clone()));
+                                    }
+                                }
+                            }
+                            match k.explain_with(ri, t, &inputs, &bindings) {
+                                Ok(ex) => text.push_str(&format!("{}\n", ex)),
+                                Err(e) => text.push_str(&format!("{}\n", e)),
+                            }
+                        }
+                    }
+                    Ok(text)
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            match out {
+                Ok(text) => print!("{}", text),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    exit(1)
+                }
+            }
+        }
         "run" | "explain" => {
             let started = std::time::Instant::now();
             let ws = workspace(&args.files);
@@ -689,9 +958,27 @@ fn main() {
             // The batch kernel takes the facts over when nothing reads the
             // dataset after the run (one copy of the data in memory).
             let runner = make_runner(&args);
+            let ledger: Vec<String> = args
+                .opts
+                .get("ledger")
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or_default();
+            let ledger_out = args.opts.get("ledger-out").map(PathBuf::from);
+            if !ledger.is_empty() && ledger_out.is_none() {
+                eprintln!("--ledger needs --ledger-out DIR");
+                exit(2)
+            }
             let owned = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true) && !verify && !args.opts.contains_key("dump") && !args.opts.contains_key("study");
+            if !ledger.is_empty() && !owned {
+                eprintln!("--ledger runs on the batch kernel and cannot be combined with --dump, --study or --verify-causality");
+                exit(2)
+            }
+            let mut notes: Vec<String> = Vec::new();
             let outcome = if owned {
-                absolute_backtest::kernel::run_owned(&prog, std::mem::take(&mut dataset), cfg.clone())
+                run_keeping(&prog, std::mem::take(&mut dataset), cfg.clone(), &ledger, ledger_out.as_deref()).map(|(r, n)| {
+                    notes = n;
+                    r
+                })
             } else {
                 runner(&prog, &dataset, cfg.clone())
             };
@@ -808,6 +1095,17 @@ fn main() {
             let max_lev = result.exposure.iter().map(|e| e.leverage).fold(0.0, f64::max);
             let max_gross = result.exposure.iter().map(|e| e.gross).fold(0.0, f64::max);
             println!("exposure: max gross {:.2}   max leverage {:.3}", max_gross, max_lev);
+            let (coverage_text, causes) = observe::coverage_report(&prog, &result.coverage, result.bars.len());
+            print!("{}", coverage_text);
+            for n in &notes {
+                println!("  {}", n);
+            }
+            if !causes.is_empty() && notes.is_empty() {
+                println!("  (abt query --rel RELATION --at BAR --explain names the first literal with no solution)");
+            }
+            if let Some(dir) = &ledger_out {
+                println!("ledger written to {}", dir.display());
+            }
             if let Some(path) = args.opts.get("nav") {
                 absolute_backtest::dump::write_nav(&result, Path::new(path)).unwrap_or_else(|e| {
                     eprintln!("error: --nav: {}", e);

@@ -529,6 +529,21 @@ pub struct KernelStats {
     pub memo_entries: usize,
 }
 
+/// What the evaluator derived for one relation over a run: how many times
+/// it was asked for (one call per bar and input tuple that some rule or the
+/// decision needed), how many of those calls derived at least one tuple, and
+/// the tuples derived in all. A derived relation with calls and no tuples was
+/// demanded and never held: the empty link the never-fired report names.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RelationCoverage {
+    pub name: String,
+    /// `true` for a relation defined by rules; a primitive's counts are of lookups.
+    pub derived: bool,
+    pub calls: usize,
+    pub nonempty: usize,
+    pub tuples: usize,
+}
+
 /// Serde for an `f64` that may be infinite (JSON has no infinity): null
 /// stands for +∞.
 mod infinite_as_null {
@@ -1059,6 +1074,9 @@ pub struct RunResult {
     /// The primitives the executor filled at and read volume from.
     pub price_relation: Option<String>,
     pub volume_relation: Option<String>,
+    /// What every relation derived over the run (the coverage report).
+    #[serde(default)]
+    pub coverage: Vec<RelationCoverage>,
 }
 
 impl RunResult {
@@ -1120,6 +1138,13 @@ pub struct Store {
 }
 
 impl Store {
+    /// Tuples held, over every key.
+    pub fn len(&self) -> usize {
+        self.by_time.values().map(|v| v.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.by_time.values().all(|v| v.is_empty())
+    }
     pub fn insert(&mut self, key: i64, tuple: Tuple) {
         self.by_time.entry(key).or_default().push(tuple);
         if self.entity_pos.is_some() {
@@ -1186,6 +1211,9 @@ pub struct Explanation {
     pub solutions: usize,
     /// Index and text of the first body literal with no solution, if any.
     pub failed_at: Option<(usize, String)>,
+    /// The variables of the first solution with their values, by name, when
+    /// the rule fired: the instance a reader can check against the data.
+    pub solution: Vec<(String, String)>,
 }
 
 impl std::fmt::Display for Explanation {
@@ -1205,7 +1233,13 @@ impl std::fmt::Display for Explanation {
                 i + 1,
                 text
             ),
-            None => write!(f, "rule {} fired at {}{} with {} solution(s)", self.rule, time::format_timestamp(self.t), with, self.solutions),
+            None => {
+                write!(f, "rule {} fired at {}{} with {} solution(s)", self.rule, time::format_timestamp(self.t), with, self.solutions)?;
+                if !self.solution.is_empty() {
+                    write!(f, "; first solution: {}", self.solution.iter().map(|(v, x)| format!("{} = {}", v, x)).collect::<Vec<_>>().join(", "))?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1282,6 +1316,9 @@ pub struct Kernel<'p> {
     pub(crate) literal_equities: HashMap<String, Sym>,
     /// Contract terms by kernel symbol (futures); a symbol absent is a share.
     pub(crate) contracts: FxHashMap<Sym, Contract>,
+    /// Per relation: calls computed (memo misses), calls that derived a
+    /// tuple, tuples derived; the coverage report of a run.
+    pub(crate) coverage: Vec<(usize, usize, usize)>,
 }
 
 impl<'p> Kernel<'p> {
@@ -1660,6 +1697,7 @@ impl<'p> Kernel<'p> {
         }
         // A week of slack covers `prev` across weekends and holidays at any resolution.
         let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
+        let n_rels = rels.len();
         Ok(Kernel {
             prog,
             symbols,
@@ -1703,7 +1741,24 @@ impl<'p> Kernel<'p> {
             asof_memo_next: 200_000,
             memo_min: 200_000,
             stats: KernelStats::default(),
+            coverage: vec![(0, 0, 0); n_rels],
         })
+    }
+
+    /// What every relation derived so far (section 7, diagnostics): the
+    /// counts behind the coverage report, in relation id order.
+    pub fn coverage(&self) -> Vec<RelationCoverage> {
+        self.rels
+            .iter()
+            .enumerate()
+            .zip(&self.coverage)
+            .map(|((rel, info), &(calls, nonempty, tuples))| {
+                // A stored relation's tuples are what the data (or the
+                // executor) holds, whichever way the rules read them.
+                let tuples = if info.stored { self.stores[rel].len() } else { tuples };
+                RelationCoverage { name: info.name.clone(), derived: !info.stored, calls, nonempty, tuples }
+            })
+            .collect()
     }
 
     /// The evaluator's counters, with the cache's current size.
@@ -1873,7 +1928,26 @@ impl<'p> Kernel<'p> {
         }
         exec.finish(self, &mut result);
         result.stats = self.stats();
+        result.coverage = self.coverage();
         Ok(result)
+    }
+
+    /// The bars of the time domain at `res` (section 6): what a relation at
+    /// that resolution can be queried at.
+    pub fn bars_at(&self, res: Resolution) -> Vec<i64> {
+        self.domains.get(&res).map(|d| d.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// `t` is a bar of the time domain at `res`, or the error naming the
+    /// nearest bars (what `explain` and `query` refuse: a label between two
+    /// bars would read a phantom bucket).
+    pub fn check_bar(&self, res: Resolution, t: i64) -> Result<(), RunError> {
+        let domain = self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))?;
+        if domain.contains(&t) {
+            Ok(())
+        } else {
+            Err(RunError::NotABar { t, res, before: domain.range(..t).next_back().copied(), after: domain.range(t..).next().copied() })
+        }
     }
 
     /// The id of a kernel relation that every program has.
@@ -2231,16 +2305,24 @@ impl<'p> Kernel<'p> {
                     bindings: shown,
                     solutions: 0,
                     failed_at: Some((i, lit.describe())),
+                    solution: Vec::new(),
                 });
             }
             envs = next;
         }
+        let mut solution: Vec<(String, String)> = cr
+            .slots
+            .iter()
+            .filter_map(|(name, &slot)| envs[0][slot].as_ref().map(|v| (name.clone(), self.show(v))))
+            .collect();
+        solution.sort();
         Ok(Explanation {
             rule: cr.label.clone(),
             t,
             bindings: shown,
             solutions: envs.len(),
             failed_at: None,
+            solution,
         })
     }
 }

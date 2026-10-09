@@ -235,6 +235,10 @@ impl<'p> Kernel<'p> {
         if info.stored {
             let entity = info.entity_positions.first().and_then(|&e| pattern[e].as_ref());
             let tuples: Vec<(Tuple, usize)> = self.stores[rel].lookup(key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)).collect();
+            let cov = &mut self.coverage[rel];
+            cov.0 += 1;
+            cov.1 += usize::from(!tuples.is_empty());
+            cov.2 += tuples.len();
             return Ok(Rc::new(tuples));
         }
         let mut mkey: Vec<Value> = vec![Value::Time(key)];
@@ -331,6 +335,10 @@ impl<'p> Kernel<'p> {
         if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
             results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
         }
+        let cov = &mut self.coverage[rel];
+        cov.0 += 1;
+        cov.1 += usize::from(!results.is_empty());
+        cov.2 += results.len();
         let rc = Rc::new(results);
         self.memo.insert(memo_key, rc.clone());
         Ok(narrow(&rc))

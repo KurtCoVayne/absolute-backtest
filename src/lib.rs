@@ -15,11 +15,12 @@ pub mod ingest;
 pub mod ir;
 pub mod kernel;
 pub mod lexer;
+pub mod observe;
 pub mod parser;
 pub mod study;
 pub mod table;
 
 pub use check::{check_program, check_workspace, Code, Diagnostic, Program, Severity, Workspace};
 pub use ir::*;
-pub use kernel::{run, verify_causality, Dataset, ExecConfig, RunError, RunResult};
+pub use kernel::{run, verify_causality, Dataset, ExecConfig, RelationCoverage, RunError, RunResult};
 pub use parser::{parse_units, ParseError};
