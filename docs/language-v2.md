@@ -8,11 +8,16 @@ request 69, merged as `0d9bc2b`) against the standard set by
 configuration and the surface form of the two programs fall short of it in
 ways that are structural rather than cosmetic, and proposes the second
 formulation of the language: one data store per instrument class with every
-resolution derived from it, programs that carry their whole configuration as
-typed blocks, an evaluation semantics under which the order of a rule's
-literals is irrelevant and a false guard stops work soundly, a standard
-library of formal operators on data rather than trading ideas, and a query
-facility over every relation at every step. MW14 and R8L are rewritten in the
+resolution derived from it, a data block that is a query over the catalog
+which the kernel resolves rather than a bundle the author names, programs
+that carry their whole configuration and their whole universe as typed
+blocks, an evaluation semantics under which the order of a rule's literals
+is irrelevant and a false guard stops work soundly, a standard library of
+formal operators on data rather than trading ideas, and a query facility
+over every relation at every step whose state tables and algorithms are
+given, with the proof that observing a run never changes it. Section 15
+records the prototype of that facility on the v1 kernel and the study in
+which Haiku agents used it. MW14 and R8L are rewritten in the
 proposed form (section 9) so that the gain is visible on the two programs
 that matter.
 
@@ -45,7 +50,7 @@ being the program.
 | --- | --- | --- | --- |
 | R1 | **The data's time structure is encoded in environment names and comments.** `equities_1w` declares every relation `@1d` and says in a comment that the domain is week ends "so prev and rows step a week". `futures_sessions` declares `@1d` relations labelled by session date and `@1m` relations whose keying is stated only in prose. A third book at three weeks or one month would need a third environment and a third ingest script. | `corpus/env/equities_1w.dsl` lines 1 to 8; `corpus/env/futures_sessions.dsl` lines 1 to 5; every MW14 usability run wrote `resolution @1d` for a weekly book and then `window(T, 52w, ...)`, `364d`, or the parse error on `52 w` | section 3 |
 | R2 | **Strategy rules were moved into the ingest scripts and shipped as data.** `dvol` is the week's mean of close × volume; `trclose` is a total-return index; `series(T, "VIX_MA4", ·)` is a four-week mean; `open0_m`, `close20_m`, `close30_m`, `open_m`, `close_m` are session-offset aggregates of the minute bars; `clock` is the decision time and the session's eligibility; `calendar` is the reporting calendar. Each is a rule of the book written in Python. The DSL program is therefore not the program: its meaning depends on 650 lines of ingest code the checker never sees. | `scripts/ingest/ndlake_weekly.py` lines 20 to 33; `scripts/ingest/tradestation_sessions.py` lines 18 to 36; `docs/parity-r8l.md` "the prints are real bars of the grid, not computed values" | sections 3.4, 3.5, 7 |
-| R3 | **The selection is invisible.** R8L trades 26 roots chosen by `HOME26_EXCLUDED` and starts each root at `DEV_USABLE_FROM`, both constants of the ingest script; the program says `env futures_sessions` and nothing else. MW14 excludes SPY and QQQ in the script, and names its index as a label whose vocabulary lives in a comment. | `tradestation_sessions.py` lines 64 to 70, 173, 238 to 249; `ndlake_weekly.py` line 37; the usability runs' `member(A, T, "SP500")` giving zero decisions silently | section 3.6 |
+| R3 | **The selection is invisible.** R8L trades 26 roots chosen by `HOME26_EXCLUDED` and starts each root at `DEV_USABLE_FROM`, both constants of the ingest script; the program says `env futures_sessions` and nothing else. MW14 excludes SPY and QQQ in the script, and names its index as a label whose vocabulary lives in a comment. | `tradestation_sessions.py` lines 64 to 70, 173, 238 to 249; `ndlake_weekly.py` line 37; the usability runs' `member(A, T, "SP500")` giving zero decisions silently | sections 3.6, 3.7 |
 | R4 | **The run's semantics live in flags.** MW14 needs 16 flags and R8L 12, recorded in a comment at the head of each file. The study hashes the executor configuration but the program hash does not, so two lineages with different cost models are one lineage. `--frictionless` on the command line still charges a 5 % debit rate; `--data` on a bundle directory loads empty relations; the study annualises a weekly book at 252 while the command line is told 52. | `src/bin/abt.rs` lines 162 to 177 (72 value options); `src/kernel/mod.rs` 809 to 821; `src/study/mod.rs` 561, 632; the usability review, "3 of the 6 abt calls in r8l-sonnet-docs went on flags" | section 4 |
 | R5 | **A declared `mode` and an undocumented silence.** Both books declare `mode target`; that silence keeps the position is stated nowhere and was inferred by one model and never by the other. The 2.5 % band is four decide rules whose difference is which side of the band they test. | `corpus/company/mw14.dsl` lines 164 to 167; usability review item 11 | section 4.4 |
 | R6 | **Literal order and binding modes decide the meaning of a reduction silently.** With `+A` in the head, `rank(dvol(A, T, D), by (D asc), as K)` groups by {A, T}, so every rank is 1 and the liquidity decile never holds; the checker's W4 names `top`, not `rank`, and the model ignored it. Nine of fourteen Haiku attempts on MW14 were spent on mode errors whose message does not name the fix. | usability review items 1 and 2; `experiments/llm-usability/runs/mw14-haiku-ex/NOTES.md` | sections 4.2, 5.2 |
@@ -54,7 +59,7 @@ being the program.
 | R9 | **The minute prints are keyed at different minutes and the program has to know.** `open0_m` sits at 09:31, `close30_m` and `clock` at 10:00, `open_m` at 10:01 and at the close. The reference program reads them with `asof T, T0 > S`; both Haiku runs joined them on one `T` and derived nothing. | `corpus/company/r8l.dsl` lines 74 to 82; usability review item 6 | section 3.5 |
 | R10 | **Structure is written as parameters to silence W5.** `one`, `three`, `short = -1`, `full = 1`, `one_price = 1 USD/share`, `no_price = 0 USD/share`, `deciles = 10`, `liq_cut = 4` are not degrees of freedom; they are the absence of `sign`, of a typed zero, of a decile operator and of a dimensionless `log` of a price ratio. | `corpus/company/r8l.dsl` lines 38 to 48; `mw14.dsl` lines 41 to 52 | sections 7.3, 10 |
 | R11 | **Partial arithmetic forces guards into the wrong rule.** The halt-on-undefined contract is right; evaluating literals left to right makes the guard's position matter, so authors guard too early (a shared `sig` with `V > no_price`) or too broadly (167 sidecar legs lost to `abs(D) > 0`). | `r8l.dsl` lines 64 and 80; usability review item 9 | section 5.1 |
-| R12 | **A program can check clean and decide nothing, silently.** All four Haiku books did. `run` names no empty relation; `explain` takes no bundle and asks for a rule label and a bar. | `experiments/llm-usability/review/REVIEW.md` section 2.12; `tests/explain.rs` | section 8 |
+| R12 | **A program can check clean and decide nothing, silently.** All four Haiku books did. `run` names no empty relation; `explain` takes no bundle and asks for a rule label and a bar. | `experiments/llm-usability/review/REVIEW.md` section 2.12; `tests/explain.rs` | sections 8, 8.1 to 8.3, 15 |
 | R13 | **The floating-point contract is a flag.** `--window-sums exact` is needed for R8L's last leg; the default is "equal to rounding". A run's bit-identity depends on a flag the program does not record. | `docs/parity-r8l.md`, "`--window-sums exact` is needed for the exact match" | section 4.3 |
 | R14 | **Register.** Relation names (`lp`, `cur`, `tgt`, `w`, `sig`), comments addressed to the translator ("the book's", "a halt"), and a weekly book declared daily all read as a transcription, not as a definition a reader could check against the book's docstring. | `corpus/company/*.dsl` | section 9 |
 
@@ -255,32 +260,143 @@ base bar whose label is Open + 30 minutes, or the first traded bar after it;
 which of the two is a declared choice of the `clock` block, not a property of
 the ingest.
 
-### 3.6 Universe, lists and vocabularies
+### 3.6 The catalog is a database and the data block is a query
 
-**Definition 3.9 (universe).** A strategy's universe is a derived relation
-`universe(A, @T)` on the decision calendar, defined by rules in the
-strategy's `universe` block. It is the entity domain of the program: the
-complete relation that range-restricts negation (S-6) and the domain over
-which `rows` counts an entity's own rows (section 7.1).
+**Definition 3.10 (catalog).** The catalog 𝒦 is a relational database that
+describes what the system holds, with the schema
 
-A list is a bundle relation `member(A, @T, +List)` with a vocabulary declared
-in the manifest. A program names the lists and the series it reads in its
-`data` block; a name outside the vocabulary is a checker error (section 10),
-not an empty relation. R8L's selection is then four lines a reader can see:
+| Relation | Meaning |
+| --- | --- |
+| `class(κ, r_base)` | an instrument class and the finest resolution any bundle holds for it |
+| `bundle(b, version, built_at, tested)` | a bundle, its version, when it was built, whether its tests passed |
+| `provides(b, κ, R, C, from, to, availability, rows)` | bundle b holds relation R of class κ on calendar C over [from, to], with its availability convention and row count |
+| `instrument(b, κ, A, from, to, attr, value)` | an instrument of b with its listing span and its attributes (asset class, point value, currency, exchange, a classification snapshot) |
+| `list(b, L, A, from, to, reviewed)` | a named point-in-time list (an index's constituents, a research universe) with the date it was reviewed |
+| `label(b, R, col, ℓ)` | a label a column of R holds (the vocabulary) |
+| `series(b, N, C, from, to)` | a named series on its native calendar |
+| `test(b, name, passed_at, exceptions)` | a bundle test's result |
+
+𝒦 is a relational database over finite domains, so it is read with the
+language's own query form (section 8): `? provides(B, equity, close, C, F,
+T)` lists every bundle that holds a close of equities, on which calendar and
+over which span; `? instrument(B, future, A, F, T, point_value, V)` lists the
+contracts. A bundle is the view of 𝒦 restricted to one b, and the manifest
+of `src/bundle.rs` is one row of `bundle` with its `provides` rows.
+
+**Definition 3.11 (demand).** The `data` block of a strategy is a conjunctive
+query D over 𝒦 whose answers are bindings β: for every primitive relation,
+series and list the program reads, a concrete (bundle, relation, calendar)
+the program reads it from.
 
 ```
-universe {
-  universe(A, T) :- session_of(A, T, _), member(A, T, "HOME-26"), usable(A, T).
+data {
+  class    equity
+  need     bars @1d from 1990-01-01          # open, high, low, close, volume at @1d or finer, from the date on
+  need     actions, listing                  # split, dividend, delisted; listed
+  need     lists "SP500", "SP400", "SP600"
+  need     series "SPXTR" @1d, "VIX" @1w
+  require  tested                            # or: allow untested (warned on every run)
+  prefer   latest                            # or: version 2026.10; or: base finest
 }
 ```
 
-and MW14's exclusion of SPY and QQQ, if wanted, is `not member(A, T,
-"ETF")`, written where it is read.
+Each `need` is a conjunct provides(b, κ, R, C, f, t, …) ∧ C ≼ C_need ∧ f ≤
+from ∧ t ≥ to: a bundle satisfies a need on a finer calendar, from which the
+needed one is a derived view (3.3), and over a span that covers the one
+asked for. `require` adds predicates on `bundle` and `test`; `prefer` is a
+total preorder on the answers (tested before untested, a pinned version, the
+latest version, the finest base, the fewest bundles). The demand is closed
+under the catalog's vocabulary: every label literal and series name a rule
+uses must occur in a `need`, and WF-15 checks it against the binding.
 
-[D] Lists are data, not literals: a list literal in a program would be an
-asset list with hindsight (B-4), and B-9 keeps it out. A research universe
-such as HOME-26 is a reviewed bundle artefact with a date, which is what a
-point-in-time list should be.
+**Proposition 3.12 [E] (resolution).** Answering D over 𝒦 is conjunctive-query
+evaluation: polynomial in |𝒦| for a fixed D (its data complexity is in
+AC⁰), and the preferred answer is a sort of the answers. Reference: Chandra
+and Merlin 1977; Vardi 1982; Abiteboul, Hull and Vianu 1995, ch. 6. The
+kernel resolves D when a run starts, records β with the run, and refuses to
+run when D has no answer, naming the `need` no bundle satisfies and the
+nearest bundles with the span and calendar each holds.
+
+**Proposition 3.13 [N] (identity of a run, restated).** With D in the
+program, M(P, 𝒦) = M(P, β(D, 𝒦)), and two runs with equal H(P) and equal β
+produce identical decisions. The program hash covers D and not β: a strategy
+that must reproduce bit for bit pins `version` in D, which makes β a
+function of D alone; a strategy that floats records β per trial, and the
+study treats a change of β as a change of data and never as a change of
+program. *Proof.* Proposition 2.2 with B = β(D, 𝒦). ∎
+
+What this replaces. `env equities_1w` named a shape of data built for one
+book (R1, R2); `bundle ndlake@2026.10`, the first draft of this document,
+named one build of data. The demand names what the strategy needs and lets
+the kernel find it: MW14 runs on any bundle that holds daily equity bars,
+actions, listing and the three index lists from 1990, whatever its base
+resolution, and a bundle that arrives later (a minute feed) satisfies the
+same demand through the views of 3.3 while the program reads unchanged.
+
+**Expressibility.** `need` admits the catalog's whole vocabulary: an
+instrument predicate (`need instruments where asset_class = future and
+exchange in {CME, CBOT}`), an availability convention (`need bars @1m
+available recorded`, so a strategy that reasons about arrival refuses data
+stamped at bar close), a minimum history (`from`), a resolution bound. What
+it does not admit is data that is not in 𝒦: a value typed into a program is a
+parameter (W5), and a table of values is inadmissible (B-9, item 4).
+
+**The developer's side.** The same `?` form reads a bundle's contents
+without a strategy: `abt data query "? close(A, T, P) at 2020-03-06 for A =
+AAPL" --bundle B` reads the store; `abt data resolve` prints the binding a
+`data` block would get and why each other answer ranked below it. The
+storage is laid out for the kernel (section 8.2: columnar, blocked by bar,
+sorted by identity, partitioned by month), and that layout is what the
+queries read, so there is no second copy for analysis.
+
+[D] A per-strategy environment file was the v1 design and is R1 and R2 of
+the review; a strategy naming one bundle was this document's first draft.
+Both are rejected because they tie a program to a build of data rather
+than to a description of what it needs.
+
+### 3.7 The universe is explicit
+
+Definition 3.9 stands: `universe(A, @T)` is the entity domain, defined by
+rules in the program's `universe` block, the complete relation that
+range-restricts negation (S-6) and whose rows are an entity's own rows
+(7.1). Two forms of rule are admitted, both written out in the program:
+
+- a catalog predicate, reading a list or an attribute the `data` block
+  needed: `universe(A, T) :- listed(A, T), member(A, T, "SP500").`;
+- an instrument table, written in the block itself, each instrument with the
+  first bar it may be traded from:
+
+```
+universe {
+  instruments {
+    ES from 2000-01-01;  NQ from 2000-01-01;  KC from 2001-01-01;  6J from 2001-01-01
+    ZB from 2001-01-01;  ZF from 2001-01-01;  ZN from 2001-01-01;  RTY from 2002-01-01
+    ZT from 2003-01-01;  CL from 2007-01-01;  GC from 2007-01-01;  HE from 2007-01-01
+    HO from 2007-01-01;  LE from 2007-01-01;  NG from 2007-01-01;  PL from 2007-01-01
+    RB from 2007-01-01;  SI from 2007-01-01;  ZC from 2007-01-01;  ZL from 2007-01-01
+    ZM from 2007-01-01;  ZS from 2007-01-01;  ZW from 2007-01-01;  GF from 2008-01-01
+    SB from 2008-01-01;  ETH
+  }
+  universe(A, T) :- instruments(A, From), session_of(A, T, _), T >= From.
+}
+```
+
+`instruments` is a relation of the program (identity A, one value `From`, a
+Timestamp; an instrument without a date is tradable from its first bar),
+checked against the `instrument` rows of the resolved binding: a name the
+data does not hold is an error naming it. The checker counts the table as
+degrees of freedom (here 26 names and 25 dates) and warns W-list (B-4: an
+asset list is a hindsight constant), which is the honest status of HOME-26,
+a research-defined universe with start years chosen after the fact. The
+first draft of this document put the same 26 names and dates in a bundle
+list, `member(A, T, "HOME-26")`, where no reader of the program would see
+them; a hindsight constant written out and warned is better than one that is
+not.
+
+[D] A list literal inside a rule body stays inadmissible (B-9): the
+`instruments` table is a declaration of the `universe` block and not an
+expression, so it cannot carry the result of a run made elsewhere, and it
+is hashed, counted and warned.
 
 ## 4. The program as blocks
 
@@ -293,12 +409,12 @@ conventions are written once, and the program still shows every field in
 
 ```
 strategy NAME {
-  data       { bundle NAME@VERSION  class CLASS  base @r  lists "..."  series "..." }
+  data       { class CLASS  need ...  require ...  prefer ... }        # the demand of 3.11
   calendars  { NAME = CONSTRUCTOR ... }
   clock      { decide on CALENDAR [at OFFSET] }
-  universe   { rules for universe(A, @T) }
+  universe   { [instruments { ... }]  rules for universe(A, @T) }
   params     { NAME : TYPE = LITERAL [in LO..HI] ... }
-  rules      { rel ... ; rules ... }
+  rules      { rel ... ; rules ... ; observe ... }
   decisions  { silence hold|flat   orders DEFAULT   decide rules }
   execution  { ... section 4.3 }
   report     { ... section 4.5 }
@@ -307,10 +423,11 @@ strategy NAME {
 
 ### 4.1 `data`, `calendars`, `clock`
 
-`data` names the bundle and the instrument class it trades, states the base
-resolution the program assumes (checked against the manifest), and lists the labels and series the
-program reads. `calendars` declares the calendars the program uses, from
-section 3.1's constructors. `clock` names the decision calendar and, for a
+`data` is the demand of Definition 3.11: the instrument class the program
+trades, the relations, lists and series it needs with the calendar and the
+history each must reach, and the predicates and preference the kernel
+resolves them by. It names no bundle unless it pins a version. `calendars`
+declares the calendars the program uses, from section 3.1's constructors. `clock` names the decision calendar and, for a
 sub-daily base, the offset in the session at which decisions are taken; `@T`
 in a signature with no calendar is the decision calendar, and `@T: weekly`
 names another.
@@ -732,6 +849,164 @@ any bar the memo still holds and `ledger` writes the record out for the rest.
 through a socket; a live run answers `? decide(T, D) at now` and `why`
 exactly as a replay would, which is Corollary F-7.3 made inspectable.
 
+### 8.1 Observation is demand
+
+**Definition 8.3 (observation).** An `observe` declaration in the `rules`
+block, `observe R [where ...] [trace relations | instances]`, adds to the
+goals of every bar t the atoms R(·, t, ·), restricted by `where` to bound
+identity arguments, so that the demand of Definition 5.3 becomes D_t ∪ O_t.
+
+**Proposition 8.4 [N] (observation changes nothing that is decided).** For
+every program, catalog and set of observations O, the decide tuples of the
+run with O equal those of the run without it. *Proof.* Observations add
+goals, not rules; M(P, B) is the perfect model of P and does not depend on
+goals (F-3); by Propositions 5.5 and 5.6 the plan for D ∪ O computes the same
+fired instances for every goal in D; the executor reads `decide` only. ∎
+
+**Proposition 8.5 [N] (the cost of observing).** cost(D_t ∪ O_t) − cost(D_t)
+is at most the cost of evaluating every rule of each observed R at t over
+its identity domain, which for keyed R is O(|Ent|^a · c(w)) by F-4.7.
+*Proof.* Memoisation shares every instance D and O have in common; what
+remains is O's own instances, bounded by F-4.7. ∎
+
+This is the researcher's case. A rule the plan reaches at few bars, because
+an earlier literal excluded most instances (R8L's `aligned` is reached only
+where `signal` holds, and `signal` only where the morning qualified), still
+has a definite extension at every bar, and observing it materialises that
+extension without touching the plan for `decide`: the optimiser elides what
+nobody demands, and an observation is a demand. The ledger of section 8 is
+the observation of a relation over a run; `tests/observe.rs`
+(`query_every_bar_is_the_ledger`) pins, on the v1 prototype, that the ledger
+equals what the run derived.
+
+**Stuck instances under observation.** Definition 5.4 restricts halting to
+the instances a decision demands. An observed instance that is stuck is not a
+halt, since no decision needed it: it is a row of the ledger flagged `stuck`
+with the literal and the expression, so a feature that divides by zero
+where no decision looks is visible without stopping a run that does not
+depend on it.
+
+**Trace levels.** `trace relations`, the default of every run, keeps the
+counters C of 8.2; `trace instances` keeps, per rule and bar, the first
+excluding literal of every instance attempted (the failure table F of 8.2),
+at a cost linear in the instances attempted, which F-4.7 bounds. The coverage
+report of the prototype is `trace relations`; `trace instances` is what `why
+not` reads without re-evaluating.
+
+### 8.2 The state tables
+
+**Definition 8.6 (kernel state).** The state Σ_t of a run after bar t is the
+family of tables below. Every query of section 8 is a read of Σ_t, and every
+step of the fold is a function Σ_{t−1} × events_t → Σ_t (B-2). Columns are
+typed by the signatures (F-9); `id` identifies a tuple within a relation and
+a run.
+
+| Table | Key | Columns | Written by | Retained |
+| --- | --- | --- | --- | --- |
+| E[R], the extension of R | (bar, identity) | id, the signature's arguments | the bundle (primitives), the executor (the book), the evaluator (derived relations) | primitives: the bundle; derived: the memo's retention horizon (the program's longest lookback plus slack), and the ledger when observed |
+| W[g], window state | (rule, literal, group key) | the summary of F-8 for the aggregate (sum and count; Welford moments; the six sums; a monotone deque; an order-statistics tree), and for `rows[N]` the last N rows | the evaluator | the window's length |
+| K[R], the carried value | (R, identity) | the previous bar's tuple of a keyed recursive relation | the evaluator | one bar |
+| Δ[R], derivations | id | the rule and the ids of the body tuples the fired instance read: how-provenance, one derivation per tuple since the plan is fixed | the evaluator | as E[R] |
+| F[ρ], failures | (rule, bar, instance) | the first literal with value f or ⊥ and the bindings at that point | the evaluator at `trace instances` | as E |
+| C[R], coverage | (R, bar) | calls, calls with tuples, tuples | the evaluator | the run |
+| Π[ρ], plans | rule | the literal order, each literal's class and estimated cost; after the run, the observed calls and tuples from C | the planner, then the evaluator | the run |
+| X, the book | bar | positions, cash, nav, fills, working orders, actions | the executor | the run |
+| β, the binding | — | the resolved demand (3.11), H(P), the `report` block | the resolver | the run |
+
+**Layout.** E[R] is columnar: one block per bar, blocks sorted by identity
+(the v1 `Store` is this with a `Vec<Value>` per tuple; A2 of
+`docs/assessment.md` makes the columns typed), so a lookup by (bar, entity)
+is a binary search in a block (the indexed stores of the performance work),
+a lookup by bar is a block, and a scan over bars is sequential. A derived
+E[R] is the memo bucketed by bar, which is what makes eviction linear in what
+is dropped. Δ is an append-only array of (rule, ids) parallel to E[R]'s ids,
+so a tuple's derivation is an index, not a search. W and K are per group and
+per entity, so the per-entity folds between barriers (F-5.3) touch disjoint
+rows and need no locks. The bundle's partitions (`log/<relation>/<month>`)
+are E[R] for the primitives at rest, so the query layer and the kernel read
+one layout.
+
+**Proposition 8.7 [N] (bounded state).** Under WF-4, WF-6, WF-10 and the
+retention horizon h (in bars), |Σ_t| without the primitives and the book is
+O(|P| · |Ent|^a · (w + h)), w the longest window in bars, independent of t.
+*Proof.* A derived E[R] holds at most h bars of at most |Ent|^a tuples each
+(keyed, F-4.7), Δ the same, W is bounded by F-7.4, K by one tuple per
+identity, C and Π by |P| per bar and per rule. ∎ A checkpoint (B-2) is Σ_t
+serialised, and this is its size.
+
+### 8.3 The query algorithms
+
+Each form of section 8 with what it reads and what it costs; n is the number
+of tuples of the relation at the bar and d the program depth of 5.11.
+
+| Form | Algorithm | Cost |
+| --- | --- | --- |
+| `? R(ū) at t` | if E[R] holds bar t, an index lookup; otherwise evaluate R's rules at t under Π (the memo path, magic sets with lazy demand, F-11) and insert into E[R] | O(log n + k) on a hit; the per-bar bound of F-4.7 on a miss |
+| `? R(ū) for A over [t₁, t₂]` | the lookup per bar, or the observation of R over the range (8.1) | bars times the above |
+| `why R(ā, t)` | from the tuple's id, a depth-first walk of Δ: each node a fired instance (its rule, its bindings reconstructed from the body tuples), its children the body tuples' derivations, a primitive tuple a leaf, a negated atom's child the `why not` of the positive atom | O(size of the proof DAG) ≤ O(d · body length · w) by 5.13; a bar beyond the retention horizon is first replayed from the nearest checkpoint at or before it |
+| `why not R(ā, t)` | for each rule of R: bind the head to ā, evaluate the body in Π's order with a recorder; the first literal with value f (or ⊥) is the answer; when that literal is an atom S(…) whose instance is bound, recurse into `why not S(…, t′)`; at `trace instances` the recorder's result is read from F instead | O(cost of R's instances at t) per level, at most d levels; the recursion is finite since each step descends the dependency DAG or, through a temporal builtin, strictly in time (WF-4) |
+| `trace decide at t` | evaluate every decide rule at t with the instance recorder: for each instance the first generator produces, the literal that excluded it or the decision it yielded | O(instances attempted at t) |
+| `coverage over [t₁, t₂]` | read C; a relation with calls > 0 and tuples = 0 is empty; the root causes are the leaves of the empty subgraph reached from `decide` (the prototype's `coverage_report`) | O(\|P\| · bars) |
+| `show program`, `show plan ρ`, `show schedule`, `show calendars` | static, from the IR, Π and the calendars | O(\|P\|) |
+| `ledger R into FILE` | the observation of R over the run (8.1), written from E[R] as it is derived, so nothing need be retained | O(\|𝒯\| · \|Ent\|^a · c(w)) |
+
+**Proposition 8.8 [N] (queries do not interfere).** A query never changes a
+decision of the run it reads, in replay or live. *Proof.* A `?` on a miss
+inserts into E[R] what the evaluator would have derived (the model is
+unique); by Proposition 8.4 the added demand changes no decide tuple; `why`,
+`why not`, `trace` and `coverage` read Σ_t only. Live, a query runs between
+barriers over the Σ_t the barrier closed (F-5.2), which is the state the
+replay reaches at t by F-7.3. ∎
+
+**`why not` and the plan.** `why not` reports the first excluding literal in
+Π's order. By Proposition 5.5 the set of excluded instances does not depend
+on the order, but which literal is reported does; the report therefore names
+the plan's order, which `show plan` prints, so a reader is never shown a
+literal the run did not evaluate first. `why not ... in written order`
+answers in the terms of the text when the plan moved a guard ahead of a
+generator.
+
+### 8.4 Program representations
+
+A program exists in five forms, each a function of the one before it, each
+readable with one command.
+
+| Form | What it is | Command | Invariant |
+| --- | --- | --- | --- |
+| 1. text | the blocks of section 4 | the file | — |
+| 2. typed IR | the units, signatures, parameters, blocks and rules with their literals and spans, as JSON | `abt ir` | round-trips to text up to whitespace and comments |
+| 3. normal form | the IR with variable names canonicalised by first occurrence in a fixed traversal, each body's literals in a canonical order (a sort key of literal kind, relation and argument shape, not the written order, which 5.5 makes semantically void), and the `report` block removed | `abt hash` | H(P) is its hash; equal normal forms are one program for the lineage (F-13 conjecture 3 in its decidable, under-approximating form) |
+| 4. program graph | the annotated DAG of 5.11, as the text of `abt show` and as two tables | `abt show`; `abt show --tables DIR` writes `program.parquet` (relation, kind, calendar, identity, complete, stratum, recursive, loop, depth, rules, aggregate class) and `edges.parquet` (from, to, sign, rule) | acyclic after contracting the SCCs; depth as in 5.13 |
+| 5. plan | per rule, Π: the order, each literal's class (generator, test, computation) and estimated cost, and after a run the observed calls and tuples | `abt show plan`; `plans.parquet` | every order is well-moded; estimates are monotone in the statistics β carries |
+
+A reader sees a program through form 4; a model is given form 1 to write and
+form 4 to check its writing against; the lineage is form 3; the optimiser's
+work is form 5; the kernel runs form 2. The prototype on the v1 kernel has
+forms 1, 2 (the checker's `Program`) and 4 (`abt show`, `src/observe.rs`);
+form 3 is the normalisation of `src/study/lineage.rs` and form 5 the
+written order until the planner of 5.2 exists.
+
+### 8.5 The study
+
+The study API (B-7) keeps its calls and extends what every trial records and
+what the record answers.
+
+Recorded per trial: H(P) (form 3), the binding β (3.11), the `report` block,
+the parameter point, the metrics, the coverage table C summarised over the
+run (a relation demanded and never derived is a trial warning in the bias
+checklist: a rule that never fires is a degree of freedom that did nothing),
+and, when the study declares `observe`, the ledgers of the observed relations
+under the trial's directory. The hold-out embargo applies to ledgers as to
+metrics: an observed relation is written over the bars the trial may see.
+
+Asked of the record, in the same `?` form over the study's own tables:
+`? trial(Id, Lineage, Param, Value, Metric, X)` for the grid; `? coverage(Trial,
+R, Tuples)` for which relations held across trials; `? binding(Trial, R, Bundle,
+Version)` for which data each trial read, so a lineage whose trials ran on
+different bundles is visible as such. The study directory is thereby a
+database with the query language of the catalog and of the kernel, and a
+report (B-7, `study.report`) is a query over it rather than a format.
+
 ## 9. The two books in the second formulation
 
 The programs below are the proposed surface syntax applied to the two books;
@@ -746,11 +1021,13 @@ Both are written to be read against the books' own rule lists.
 # canon re-frozen 2026-08-14). Rules R1 to R7 are the book's numbering.
 strategy mw14 {
   data {
-    bundle   ndlake@2026.10
     class    equity
-    base     @1d
-    lists    "SP1500", "ETF"
-    series   "SPXTR", "VIX"
+    need     bars @1d from 1990-01-01
+    need     actions, listing
+    need     lists "SP500", "SP400", "SP600", "ETF"
+    need     series "SPXTR" @1d, "VIX" @1w
+    require  tested
+    prefer   latest
   }
   calendars { weekly = weeks(1) }
   clock     { decide on weekly }
@@ -793,9 +1070,15 @@ strategy mw14 {
         R = ols_r(log(P / P0), K)     over (T1 in rows[clenow_rows], adj_close@weekly(A, T1, P), row_number(A, T1, K)),
         S = (exp(B * rows_a_year) - 1) * R * R.
 
+    # The S&P 1500 is the union of the three indices.
+    rel sp1500(A: Equity, @T)
+    sp1500(A, T) :- member(A, T, "SP500").
+    sp1500(A, T) :- member(A, T, "SP400").
+    sp1500(A, T) :- member(A, T, "SP600").
+
     # The universe of the book: members above the price floor and the dollar-volume floor.
     rel eligible(A: Equity, @T, D: Notional<USD>)
-    eligible(A, T, D) :- universe(A, T), member(A, T, "SP1500"),
+    eligible(A, T, D) :- universe(A, T), sp1500(A, T),
         close@weekly(A, T, P), P >= price_floor,
         D = mean(X) over (T1 in rows[dvol_rows], dvol(A, T1, X)), D >= dvol_floor.
 
@@ -882,13 +1165,16 @@ strategy mw14 {
 }
 ```
 
-What changed and why it is the same book: the weekly facts are the daily
-facts bucketed (3.3), the total-return price is the catalog's `tr_index`
-derived from close, dividend and split at the week's last bar (B-3), the VIX
-four-week mean is a rule, the latch is the library's `latch`, the decile is a
-function, the scale is one case form, and the sixteen flags are the
-`execution` and `report` blocks. The book's "a stock's own rows" is the
-universe, declared.
+What changed and why it is the same book: the data block asks for daily
+equity bars, actions, listing, three index lists and two series from 1990
+and lets the kernel find them (3.6); the weekly facts are the daily facts
+bucketed (3.3); the total-return price is the catalog's `tr_index` derived
+from close, dividend and split at the week's last bar (B-3); the S&P 1500 is
+written as the union of its three indices rather than a label built in an
+ingest script; the VIX four-week mean is a rule; the latch is the library's
+`latch`; the decile is a function; the scale is one case form; and the
+sixteen flags are the `execution` and `report` blocks. The book's "a stock's
+own rows" is the universe, declared.
 
 ### 9.2 R8L
 
@@ -897,10 +1183,11 @@ universe, declared.
 # 2026-09-02 amendment). One leg per root and session at most.
 strategy r8l {
   data {
-    bundle  tradestation@2026.10
-    class   future
-    base    @1m
-    lists   "HOME-26"
+    class    future
+    need     bars @1m from 2000-01-01
+    need     sessions, point_value, commission
+    require  tested
+    prefer   latest
   }
   calendars {
     session = sessions                 # each root's own primary sessions
@@ -909,7 +1196,17 @@ strategy r8l {
   clock { decide on base at session + 30min }   # the bar labelled open + 30 minutes, or the first traded bar after it
 
   universe {
-    universe(A, T) :- session_of(A, T, _), member(A, T, "HOME-26"), usable(A, T).
+    # The HOME-26 roots, each from the first year the book trades it (W-list: a hindsight constant, counted).
+    instruments {
+      ES from 2000-01-01;  NQ from 2000-01-01;  KC from 2001-01-01;  6J from 2001-01-01
+      ZB from 2001-01-01;  ZF from 2001-01-01;  ZN from 2001-01-01;  RTY from 2002-01-01
+      ZT from 2003-01-01;  CL from 2007-01-01;  GC from 2007-01-01;  HE from 2007-01-01
+      HO from 2007-01-01;  LE from 2007-01-01;  NG from 2007-01-01;  PL from 2007-01-01
+      RB from 2007-01-01;  SI from 2007-01-01;  ZC from 2007-01-01;  ZL from 2007-01-01
+      ZM from 2007-01-01;  ZS from 2007-01-01;  ZW from 2007-01-01;  GF from 2008-01-01
+      SB from 2008-01-01;  ETH
+    }
+    universe(A, T) :- instruments(A, From), session_of(A, T, _), T >= From.
   }
 
   params {
@@ -995,7 +1292,9 @@ strategy r8l {
 
 The six precomputed print relations and the `clock` relation are gone; what
 replaces them is `open0`, `close_before[M]` and the `clock` block, each one
-line, and the selection and the usable years are in `universe`. The entry at
+line, and the selection and the usable years are the `instruments` table of
+`universe`, where a reader sees the 26 roots and their dates and the checker
+counts them. The entry at
 "the first traded minute from minute 30" and the exit at "the session's last
 traded minute" are what `moo_moc` on the session calendar means (S-6, order
 types), stated in the execution block instead of in two data relations.
@@ -1012,7 +1311,10 @@ Judgments added or changed, each one rule with one code as S-8 requires.
 | WF-12 open-loop partition | L | reported, never an error | F-12 item 7 |
 | WF-13 explicit grouping | G | `rank`, `top` and cross-sectional library calls name `within`; variables outside it are fresh | W4 and the silent grouping of R6 |
 | WF-14 closed configuration | P | every block present and every required field set; a field's value admissible; a library block expanded | the 72 options |
-| WF-15 vocabulary | V | every label and series name in `data` exists in the manifest; every label literal in a rule is in `data` | the silent `"SP500"` |
+| WF-15 vocabulary | V | every label and series name a rule uses occurs in a `need` of `data`, and exists in the resolved binding; every `instruments` name is an instrument of the binding | the silent `"SP500"` |
+| WF-17 demand | Q | the `data` block is a conjunctive query of 3.11 with at least one `need`; with a catalog at hand (`abt check --catalog`) it has an answer, else resolution is deferred to the run and the check says so | the environment name |
+| W-list | W9 | an `instruments` table is counted as degrees of freedom and warned as a hindsight constant (B-4) | — |
+| Observation | O | every `observe` names a relation of the program; a `where` binds identity arguments only | — |
 | WF-16 calendars | X (extended) | every calendar named is declared or a class property; bucket aggregates go coarser; `@T: C` on a head is a declared calendar; a series is read in the direction its calendar allows | WF-10 |
 | Well-modedness | B, M (extended) | a well-moded order exists (Prop. 4.2); the diagnostic names the variable that no literal can bind and the literal that needs it | bind-before-use in written order |
 | Window sanity | W7 | a calendar window's `min K` exceeds what its duration can hold on the rule's calendar | — |
@@ -1030,12 +1332,13 @@ temporal stratification (F-12 item 1), W5 and W6.
 Each step is a change to the crate that leaves the two parity runs equal to
 their references; step 7 is the proof that the formulation lost nothing.
 
-1. **Blocks and closed configuration.** Parser and IR for the nine blocks; `ExecConfig` built from `execution`; the study reads the block; `abt run` takes a program and a bundle only, with `--param` kept for studies. The current corpus is migrated mechanically (a strategy's header lines become its `data`, `clock` and `decisions` blocks; a default execution library holds today's defaults, expanded in every file). WF-14.
+1. **Blocks and closed configuration.** Parser and IR for the nine blocks; `ExecConfig` built from `execution`; the study reads the block; `abt run` takes a program and a catalog (or one bundle, the degenerate catalog) and nothing else, with `--param` kept for studies. The current corpus is migrated mechanically (a strategy's header lines become its `data`, `clock` and `decisions` blocks; a default execution library holds today's defaults, expanded in every file). WF-14, WF-17.
+1a. **The catalog and the resolver.** The manifest's rows become the catalog relations of 3.10 over every bundle a directory holds; `abt data` lists and queries them; the `data` block resolves to a binding recorded with every run and trial; `abt data resolve` explains the choice.
 2. **Calendars and bar views.** `Resolution` becomes a calendar handle; the manifest declares classes and base resolutions; the `calendar` module and the bar-view cache; WF-16; `abt bundle env` generates the environment. MW14's bundle is rebuilt from the daily lake with no weekly step in the ingest.
 3. **Sessions and the decision clock.** `session` as a class property, `session(X, [a, b))` as a temporal constraint, `clock { decide on base at session + OFFSET }`. R8L's bundle is rebuilt from the minute bars with no print relations; the memory question of `docs/assessment.md` A2 (columnar stores) is a prerequisite for the 47M-bar bundle and is done here.
 4. **Universes, lists and vocabularies.** The `universe` block as the entity domain; `member`, `usable` and the manifest vocabulary; WF-15.
 5. **Order-independent bodies, explicit groups, case forms.** Definition 5.2 in the evaluator; the plan chooser of 5.2 (tests first, then by estimated cost); `within`; `case`; keyedness guard; WF-11, WF-13; the `+`/`-` annotations become optional, then removed.
-6. **Queries and provenance.** The `?`, `why`, `why not`, `trace`, `coverage`, `show` and `ledger` forms; per-tuple derivation records in the memo; the socket on the fold. `abt explain` is retired into `why not`.
+6. **Queries and provenance.** Done on the v1 kernel (section 15): `show`, the coverage report with its root causes and sample-bar explanations, `query --explain` (the `?` and `why not` forms at one level, with the fired instance's bindings), `--ledger` (observation over a run). To do: Δ and F (8.2), `why` over Δ, the recursive `why not`, `trace`, `observe` in the program, `show --tables`, `abt ir` and `abt hash`, and the socket on the fold. `abt explain` is retired into `query --explain`.
 7. **Library and the books.** The modules of section 7 replace `corpus/lib`; `corpus/company/*.dsl` are replaced by section 9's programs; the parity scripts are rerun and must match (1,852 of 1,852 weeks; 21,892 of 21,892 legs). The usability experiment is rerun on the same tasks with the same models and its first-attempt pass rate and attempts-to-clean are recorded beside the old ones.
 
 Steps 1, 4 and 5 are parser, checker and evaluator work inside the crate's
@@ -1072,14 +1375,15 @@ a comment, a flag or an ingest script.
 
 ## 13. What is established, new and conjectured in this document
 
-- [E] The partition lattice (3.3); Kleene's strong three-valued logic (5.2); magic sets as demand (5.3); Selinger's cost model (5.2); how-provenance (8); the laws of F-8 reused in section 6.
-- [N] Closed programs and the identity of a run (2.2); the clock calculus over declared calendars (3.4); the cost of derived resolutions (3.6); the causality of session constraints (3.8); well-modedness without modes (4.2); the executor configuration in the hash (4.3); order independence, sound short-circuiting, tests-first, case forms (5.5, 5.6, 5.8, 5.10); the size of the two trees (5.13); query soundness (8.2).
+- [E] The partition lattice (3.3); the data complexity of conjunctive queries (3.12); Kleene's strong three-valued logic (5.2); magic sets as demand (5.3); Selinger's cost model (5.2); how-provenance (8, 8.2); the laws of F-8 reused in section 6.
+- [N] Closed programs and the identity of a run (2.2, 3.13); the clock calculus over declared calendars (3.4); the cost of derived resolutions (3.6); the causality of session constraints (3.8); well-modedness without modes (4.2); the executor configuration in the hash (4.3); order independence, sound short-circuiting, tests-first, case forms (5.5, 5.6, 5.8, 5.10); the size of the two trees (5.13); query soundness (8.2); observation changes nothing decided and its cost (8.4, 8.5); bounded state (8.7); queries do not interfere (8.8).
 - [C] Calendar polymorphism for library relations keeps the checker polynomial (F-13 conjecture 4), assumed by section 7 and settled by writing the rules in step 7. Whether the plan chooser's selectivity estimates need data statistics beyond the bundle manifest's row counts to beat the author's order on the corpus is an empirical question for step 5.
 
 ## 14. References added to the foundations' list
 
 Kleene, Introduction to Metamathematics, 1952, §64. Fitting, A Kripke–Kleene
-semantics for logic programs, JLP 1985. Selinger, Astrahan, Chamberlin, Lorie
+semantics for logic programs, JLP 1985. Abiteboul, Hull and Vianu,
+Foundations of Databases, 1995, ch. 6 (conjunctive queries). Selinger, Astrahan, Chamberlin, Lorie
 and Price, Access path selection in a relational database management system,
 SIGMOD 1979. Green, Karvounarakis and Tannen, Provenance semirings, PODS
 2007. Stanley, Enumerative Combinatorics, vol. 1, 2nd ed., 2011, ch. 3.

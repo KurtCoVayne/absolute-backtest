@@ -32,7 +32,11 @@ resampled bucket.
 | `docs/semantic-model.md` | The v1 semantic model: domains, types, signatures, the seven literal forms, WF-1 to WF-10, the kernel contract, the causality theorem. The code cites it by section. |
 | `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API, with the status of each section in this crate and the milestone that implements it. |
 | `docs/formal-foundations.md` | The formal foundations (Oct 8, 2026): the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results, what is new, and the seven changes the theory asks of the semantic model. |
-| `docs/language-v2.md` | The second formulation (Oct 8, 2026): a review of the MW14 and R8L changes against the foundations, and the proposal that follows: one data store per instrument class with every resolution derived, programs as typed blocks with no run-time flags, order-independent rule bodies with sound short-circuiting, a library of formal operators, and a query facility; MW14 and R8L rewritten in it. Not implemented; section 11 is the order. |
+| `docs/language-v2.md` | The second formulation (Oct 8–9, 2026): a review of the MW14 and R8L changes against the foundations, and the proposal that follows: one data store per instrument class with every resolution derived, a data block that is a query over the catalog, explicit universes, programs as typed blocks with no run-time flags, order-independent rule bodies with sound short-circuiting, a library of formal operators, and a query facility with its state tables and algorithms; MW14 and R8L rewritten in it. Section 11 is the implementation order; section 15 the prototype and the Haiku study. |
+| `docs/observability.md` | The observability commands of this crate: `abt show` (the program graph), the coverage report every run prints (what every relation derived; the first empty relation when nothing was decided), `abt query --explain` (any relation at any bar, and why each rule did or did not fire), `--ledger` (a relation's tuples at every bar as Parquet). |
+| `src/observe.rs` | The program graph and the coverage report behind `abt show` and the run's coverage lines. |
+| `scripts/synth/` | Synthetic markets in the layouts of `equities_1w` and `futures_sessions`, on which the two company books run (`docs/llm-observability.md`). |
+| `experiments/llm-observability/` | The observability study: Haiku agents writing six strategies with and without the observability commands; prompts, tasks, sandboxes, scorer, and every run. |
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
 | `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
@@ -399,8 +403,15 @@ abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [
         [--verify-causality] [--quiet] <files...>
 abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
         [--price-relation REL] <files...>
+abt show --strategy NAME <files...>
+abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain]
+        (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>
+abt run ... [--ledger R1,R2,... --ledger-out DIR]
 abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 ```
+
+`show`, the coverage report every `run` prints, `query` and `--ledger` are
+described in `docs/observability.md`.
 
 `<files...>` are `.dsl` files or directories searched recursively. The
 synthetic market is seeded (`--seed`, default 7) and deterministic.
