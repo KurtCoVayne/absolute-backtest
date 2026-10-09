@@ -1387,3 +1387,28 @@ Foundations of Databases, 1995, ch. 6 (conjunctive queries). Selinger, Astrahan,
 and Price, Access path selection in a relational database management system,
 SIGMOD 1979. Green, Karvounarakis and Tannen, Provenance semirings, PODS
 2007. Stanley, Enumerative Combinatorics, vol. 1, 2nd ed., 2011, ch. 3.
+
+## 15. The prototype and the Haiku study
+
+Sections 8.1 to 8.3 were prototyped on the v1 kernel before this document
+was finished, so that the claim that observability serves a small model
+could be tested rather than argued: `abt show` (the program graph, form 4),
+the coverage report on every run (`trace relations`, with the never-fired
+root causes and a sample-bar explanation), `abt query --explain` (the `?`
+form and a one-level `why not`, with the fired instance's bindings) and
+`--ledger` (the observation of a relation over a run). `docs/observability.md`
+describes them; `src/observe.rs` and `tests/observe.rs` hold them.
+
+Twelve Haiku agents then wrote the two company books on synthetic data in
+their environments' layouts and four briefs, six with the commands and six
+without (`docs/llm-observability.md`). All twelve programs trade, and the
+four company-book programs make exactly the reference decisions, so the
+outcome measures did not separate the conditions. What separated them is
+what the agents could establish: with the commands, every agent stated with
+bindings why each branch of its decision fired or did not, one found and
+quantified a defect in the synthetic total-return index that the identical
+decisions of its counterpart concealed, one showed its membership literal
+inert on the data, and the coverage report caught a partial window and a
+dormant branch. The agents also found four defects of the tools and the
+kernel, each fixed in the same tree. The implementation order of section
+11 is updated accordingly: step 6's first half is done.

@@ -1,0 +1,2 @@
+momentum_liquid_monthly: degrees of freedom: 4 params, 0 literals, 8 rules (+ 3 library literals)
+1 strategies, 5 libraries checked: 0 error(s), 0 warning(s)

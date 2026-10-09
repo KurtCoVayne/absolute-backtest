@@ -1,0 +1,18 @@
+00:15:42 
+00:16:45 check env lib attempts/1.dsl
+00:16:49 show --strategy intraday_open_gap env lib attempts/1.dsl
+00:16:54 run --strategy intraday_open_gap --synthetic --days 40 env lib attempts/1.dsl
+00:17:36 run --strategy intraday_open_gap --synthetic --days 40 --fills --all --ledger close_m,gap_up,second_after_gap,first_bar,position --ledger-out ledger-1 env lib attempts/1.dsl
+00:17:41 run --strategy intraday_open_gap --synthetic --days 40 --fills --all --ledger gap_up,second_after_gap,first_bar,position --ledger-out ledger-1 --dump dump-1 env lib attempts/1.dsl
+00:17:46 run --strategy intraday_open_gap --synthetic --days 40 --fills --all --ledger gap_up,second_after_gap,first_bar,position --ledger-out ledger-1 env lib attempts/1.dsl
+00:18:03 run --strategy intraday_open_gap --synthetic --days 40 --dump dump-1 --quiet env lib attempts/1.dsl
+00:18:57 run --strategy intraday_open_gap --synthetic --days 40 --frictionless --dump dump-frictionless --quiet env lib attempts/1.dsl
+00:19:04 query --strategy intraday_open_gap --rel gap_up --at 2024-02-21T09:31:00 --symbol AAA --explain --synthetic --days 40 env lib attempts/1.dsl
+00:19:05 query --strategy intraday_open_gap --rel gap_up --at 2024-01-19T09:31:00 --symbol AAA --explain --synthetic --days 40 env lib attempts/1.dsl
+00:19:10 query --strategy intraday_open_gap --rel decide --at 2024-02-21T09:32:00 --symbol AAA --explain --synthetic --days 40 env lib attempts/1.dsl
+00:19:11 query --strategy intraday_open_gap --rel decide --at 2024-02-21T09:31:00 --symbol AAA --explain --synthetic --days 40 env lib attempts/1.dsl
+00:19:11 query --strategy intraday_open_gap --rel gap_up --at 2024-01-02T09:31:00 --symbol AAA --explain --synthetic --days 40 env lib attempts/1.dsl
+00:19:19 query --strategy intraday_open_gap --rel decide --at 2024-02-21T09:32:00 --synthetic --days 40 env lib attempts/1.dsl
+00:20:32 check env lib final.dsl
+00:20:35 run --strategy intraday_open_gap --synthetic --days 40 env lib final.dsl
+00:20:38 run --strategy intraday_open_gap --synthetic --days 40 --report-by day --periods-per-year 252 --quiet env lib final.dsl

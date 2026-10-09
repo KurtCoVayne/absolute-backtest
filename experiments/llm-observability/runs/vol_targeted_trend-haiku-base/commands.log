@@ -1,0 +1,16 @@
+00:15:22 
+00:15:51 check env lib attempts/1.dsl
+00:16:00 check env lib attempts/2.dsl
+00:16:05 check env lib attempts/3.dsl
+00:16:15 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY env lib attempts/3.dsl
+00:17:07 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --dump runs/dump_default env lib attempts/3.dsl
+00:17:48 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --param target_vol=0.2 --dump runs/dump_capcheck env lib attempts/3.dsl
+00:17:48 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --compounding on --dump runs/dump_compound env lib attempts/3.dsl
+00:18:43 check env lib attempts/4.dsl
+00:18:43 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --param target_vol=0.2 --dump runs/dump_cap4 env lib attempts/4.dsl
+00:19:49 check env lib attempts/5.dsl
+00:19:54 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --dump runs/dump_final env lib attempts/5.dsl
+00:19:59 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --compounding on --dump runs/final_compound env lib attempts/5.dsl
+00:19:59 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --frictionless env lib attempts/5.dsl
+00:19:59 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY --param target_vol=0.2 --dump runs/final_capcheck env lib attempts/5.dsl
+00:22:36 run --strategy vol_targeted_trend --synthetic --days 1000 --symbols SPY env lib final.dsl

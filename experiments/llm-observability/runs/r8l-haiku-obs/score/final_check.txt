@@ -1,0 +1,2 @@
+r8l: degrees of freedom: 4 params, 0 literals, 6 rules (+ 6 library literals)
+1 strategies, 6 libraries checked: 0 error(s), 0 warning(s)

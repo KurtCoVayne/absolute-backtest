@@ -1,0 +1,14 @@
+00:15:43 
+00:17:12 check env lib attempts/1.dsl
+00:17:16 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/1.dsl
+00:18:12 check env lib attempts/2.dsl
+00:18:14 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --param index=SPX env lib attempts/2.dsl
+00:19:01 check env lib attempts/3.dsl
+00:19:03 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O env lib attempts/3.dsl
+00:20:10 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on --all --verify-causality env lib attempts/3.dsl
+00:21:46 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on --all --fills env lib attempts/3.dsl
+00:23:12 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on --all --fills --participation 0 env lib attempts/3.dsl
+00:24:13 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on env lib final.dsl
+00:24:22 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on --delist-proceeds last-price env lib final.dsl
+00:25:13 check env lib attempts/4.dsl
+00:25:17 run --strategy momentum_liquid_monthly --synthetic --days 1000 --symbols A,B,C,D,E,F,G,H,I,J,K,L,M,N,O --compounding on env lib final.dsl

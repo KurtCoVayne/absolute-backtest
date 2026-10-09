@@ -1,0 +1,92 @@
+/tmp/claude-0/-home-user-absolute-backtest/b335a275-a6f7-5817-b1cb-f79502b8cddd/scratchpad/obs-study/intraday_open_gap-haiku-obs/bin/abt.real run --strategy intraday_open_gap --synthetic --days 40 --all env lib /tmp/claude-0/-home-user-absolute-backtest/b335a275-a6f7-5817-b1cb-f79502b8cddd/scratchpad/obs-study/intraday_open_gap-haiku-obs/final.dsl
+
+strategy intraday_open_gap over 15600 bars (2024-01-02T09:31:00 to 2024-02-26T16:00:00), 5 symbols
+decisions: 64   fills: 64   dropped: 0
+    end_equity: 992246.6430
+  max_drawdown: 0.0078
+  start_equity: 1000000.0000
+  total_return: -0.0078
+accounting: fixed base 1000000.00; a period's return is the NAV change over it (not reinvested)
+metrics per bar (98280 a year, 15599 periods): cagr -0.047857   max_drawdown 0.007769   sharpe -14.8657 (population -14.8662)   volatility 0.0033
+additive: annual_return -0.049034   max_drawdown 0.007799   total_pnl -7782.71   profit_factor 0.672 per period, 0.000 per trade   trades 32   win_rate 0.000
+costs: commissions 64.00   fees 5.71   slippage 80.80   impact 7478.20   turnover 418183.66
+liquidity: fill ratio 1.000   participation avg 3.59%   max 6.50%
+funding: cash interest 0.00   margin interest 0.00   borrow fees 0.00   short rebate 0.00
+actions: 0 splits   0 dividends   0 delistings
+exposure: max gross 20782.00   max leverage 0.021
+coverage over 15600 decision bars (calls: bars and inputs the relation was demanded at; tuples: what it derived):
+  decide               15600 calls        46 with tuples          64 tuples
+  gap_up               15600 calls        23 with tuples          32 tuples
+  second_after_gap     15600 calls        23 with tuples          32 tuples
+  first_bar            15600 calls        40 with tuples         200 tuples
+  position               12416 tuples from the executor (executor)
+  close_m                78000 tuples in the data (primitive)
+  universe_m             78000 tuples in the data (primitive)
+warning (cash-management): cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)
+warning (market-impact): 6 fills above 5% of bar volume (max 6.5%); impact is modeled, capacity is limited
+  2024-01-03T09:31:00 buy(DDD, 100) (rule intraday_open_gap::decide#1)
+  2024-01-03T09:32:00 sell(DDD, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-05T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-01-05T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-08T09:31:00 buy(BBB, 100) (rule intraday_open_gap::decide#1)
+  2024-01-08T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-01-08T09:32:00 sell(BBB, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-08T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-09T09:31:00 buy(BBB, 100) (rule intraday_open_gap::decide#1)
+  2024-01-09T09:31:00 buy(DDD, 100) (rule intraday_open_gap::decide#1)
+  2024-01-09T09:32:00 sell(BBB, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-09T09:32:00 sell(DDD, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-10T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-01-10T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-01-10T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-10T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-11T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-01-11T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-01-11T09:31:00 buy(SPY, 100) (rule intraday_open_gap::decide#1)
+  2024-01-11T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-11T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-11T09:32:00 sell(SPY, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-15T09:31:00 buy(DDD, 100) (rule intraday_open_gap::decide#1)
+  2024-01-15T09:31:00 buy(SPY, 100) (rule intraday_open_gap::decide#1)
+  2024-01-15T09:32:00 sell(DDD, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-15T09:32:00 sell(SPY, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-16T09:31:00 buy(BBB, 100) (rule intraday_open_gap::decide#1)
+  2024-01-16T09:32:00 sell(BBB, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-23T09:31:00 buy(BBB, 100) (rule intraday_open_gap::decide#1)
+  2024-01-23T09:32:00 sell(BBB, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-25T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-01-25T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-26T09:31:00 buy(DDD, 100) (rule intraday_open_gap::decide#1)
+  2024-01-26T09:32:00 sell(DDD, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-30T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-01-30T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-01-31T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-01-31T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-02T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-02-02T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-07T09:31:00 buy(BBB, 100) (rule intraday_open_gap::decide#1)
+  2024-02-07T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-02-07T09:32:00 sell(BBB, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-07T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-13T09:31:00 buy(SPY, 100) (rule intraday_open_gap::decide#1)
+  2024-02-13T09:32:00 sell(SPY, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-14T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-02-14T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-15T09:31:00 buy(BBB, 100) (rule intraday_open_gap::decide#1)
+  2024-02-15T09:32:00 sell(BBB, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-16T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-02-16T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-02-16T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-16T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-19T09:31:00 buy(DDD, 100) (rule intraday_open_gap::decide#1)
+  2024-02-19T09:31:00 buy(SPY, 100) (rule intraday_open_gap::decide#1)
+  2024-02-19T09:32:00 sell(DDD, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-19T09:32:00 sell(SPY, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-21T09:31:00 buy(AAA, 100) (rule intraday_open_gap::decide#1)
+  2024-02-21T09:32:00 sell(AAA, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-23T09:31:00 buy(CCC, 100) (rule intraday_open_gap::decide#1)
+  2024-02-23T09:32:00 sell(CCC, 100, moc) (rule intraday_open_gap::decide#2)
+  2024-02-26T09:31:00 buy(DDD, 100) (rule intraday_open_gap::decide#1)
+  2024-02-26T09:32:00 sell(DDD, 100, moc) (rule intraday_open_gap::decide#2)
+final cash 992217.29; positions: 
+warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it

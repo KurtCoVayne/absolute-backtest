@@ -8,8 +8,10 @@ experiment without the company's data. Nothing here is real; the shapes are:
   close      a lognormal random walk with a per-name drift that switches
              regime every ~40 weeks (so momentum ranks mean something) and a
              split now and then (the raw close halves, `split` records 2)
-  trclose    the running total-return index: close x cumulative split, with a
-             small dividend every 13 weeks folded in
+  trclose    the running total-return index, continuous across splits, with a
+             small dividend every 13 weeks folded in (the data of the Oct 9
+             study was generated before a fix here and doubled the index at a
+             split; `docs/llm-observability.md` records it)
   dvol       the week's mean daily dollar volume, lognormal around a per-name
              level (a few names sit below $2M)
   member     SP1500 for most names, in spells
@@ -60,8 +62,11 @@ def main() -> int:
             factor = 1.0
             if rng.random() < 0.004 and new_price > 60:
                 factor = 2.0
-            tri = tri * (new_price * factor + div) / price if k > first else tri
-            price = new_price / factor
+            # The total-return index is continuous across a split: the
+            # post-split close times the factor is the pre-split price.
+            post = new_price / factor
+            tri = tri * (post * factor + div) / price if k > first else tri
+            price = post
             cum_split *= factor
             dvol = float(np.exp(rng.normal(np.log(level), 0.35)))
             rows.append((name, weeks[k], price, tri, dvol))

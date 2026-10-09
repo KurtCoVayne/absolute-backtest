@@ -1,0 +1,2 @@
+reference decisions 243; agent decisions 243; in both (bar, symbol, side, magnitude) 243
+precision 1.000  recall 1.000

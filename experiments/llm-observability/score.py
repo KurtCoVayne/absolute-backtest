@@ -49,12 +49,17 @@ def strategy_name(path: Path):
 
 
 def decisions_of(text: str):
-    """(timestamp, symbol, constructor) of every decision line a run printed with --all."""
+    """(bar, symbol, side, magnitude) of every decision line a run printed with
+    --all: a delta `short(ES, 1.79, moo_moc)` and a target
+    `target_quantity(ES, -1.79, moo_moc)` are the same decision, so the side
+    is the sign and the magnitude is rounded to six places."""
     out = set()
     for line in text.splitlines():
-        m = re.match(r"\s+(\S+) ([a-z_]+)\(([^,]+),", line)
+        m = re.match(r"\s+(\S+) ([a-z_]+)\(([^,]+), ([-0-9.e]+)", line)
         if m and not line.lstrip().startswith(("fill", "dropped")):
-            out.add((m.group(1), m.group(3), m.group(2)))
+            ctor, amount = m.group(2), float(m.group(4))
+            side = -1 if ctor in ("sell", "short") or amount < 0 else 1
+            out.add((m.group(1), m.group(3), side, round(abs(amount), 6)))
     return out
 
 
@@ -108,7 +113,7 @@ def score(d: Path, out: Path):
                 mine, theirs = decisions_of(o), decisions_of(ro)
                 inter = len(mine & theirs)
                 (out / "compare.txt").write_text(
-                    f"reference decisions {len(theirs)}; agent decisions {len(mine)}; in both (bar, symbol, constructor) {inter}\n"
+                    f"reference decisions {len(theirs)}; agent decisions {len(mine)}; in both (bar, symbol, side, magnitude) {inter}\n"
                     f"precision {inter / len(mine) if mine else 0:.3f}  recall {inter / len(theirs) if theirs else 0:.3f}\n"
                 )
                 result["ref_decisions"] = len(theirs)
