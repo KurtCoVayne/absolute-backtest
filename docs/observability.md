@@ -85,7 +85,8 @@ be queried: a primitive (`close`), an executor relation (`position`), a
 feature, a signal, `decide`. A relation with `+` arguments needs them in
 `--inputs`, in signature order (`sma` as `--inputs AAA,20d,12`); when the
 only input is the entity, `--symbol` supplies it. `--symbol` also keeps one
-instrument's tuples.
+instrument's tuples, including the decisions on it (`decide` carries the
+instrument inside the decision value).
 
 `--explain` adds, for every rule of the relation at that bar, whether it
 fired and with how many solutions, with the first solution's variables and
@@ -115,8 +116,10 @@ abt run ... --ledger R1,R2,... --ledger-out DIR
 writes, for each named relation, every tuple it held at every bar of the run
 (of the relation's own resolution, inside the run's window) as
 `DIR/<relation>.parquet`, one column per argument of the signature plus
-`bar`, and the coverage counts as `DIR/coverage.parquet`. A relation with
-`+` arguments is queried at a bar with `--inputs` instead. The ledger is what
+`bar`, and the coverage counts as `DIR/coverage.parquet`. A relation whose
+only `+` argument is its entity (`close`, `sma`'s cousins without other
+inputs) is written for every symbol; a relation with other `+` arguments is
+queried at a bar with `--inputs` instead. The ledger is what
 to read when a feature's values over time, not one bar, are in question; a
 feature the evaluator would have skipped at some bars (because an earlier
 literal excluded the instance) is computed for the ledger, so the ledger is

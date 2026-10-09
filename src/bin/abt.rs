@@ -227,14 +227,19 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
             let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
             return Err(RunError::Request(format!("--ledger: `{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
         };
-        let inputs: Vec<&str> = sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| a.name.as_str()).collect();
-        if !inputs.is_empty() {
+        // A relation whose only input is its entity is written for every
+        // symbol; any other input must be given at a bar with `query --inputs`.
+        let inputs: Vec<&absolute_backtest::Arg> = sig.args.iter().filter(|a| a.mode == Mode::In).collect();
+        let per_symbol = matches!(inputs.as_slice(), [a] if a.ty.is_entity());
+        if !inputs.is_empty() && !per_symbol {
+            let names: Vec<&str> = inputs.iter().map(|a| a.name.as_str()).collect();
             return Err(RunError::Request(format!(
-                "--ledger: `{}` takes the inputs {}; a ledger is written for relations without `+` arguments (query it at a bar with --inputs instead)",
+                "--ledger: `{}` takes the inputs {}; a ledger is written for relations whose inputs are at most their entity (query it at a bar with --inputs instead)",
                 rel,
-                inputs.join(", ")
+                names.join(", ")
             )));
         }
+        let symbols: Vec<Value> = if per_symbol { (0..k.symbol_names().len()).map(|i| Value::Equity(i as u32)).collect() } else { vec![] };
         let res = sig.res.unwrap_or(prog.resolution);
         let bars: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
         let width = sig.args.len();
@@ -250,7 +255,16 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
             })
             .collect();
         for t in bars {
-            for tu in k.query(rel, t, &[])? {
+            let found: Vec<Vec<Value>> = if per_symbol {
+                let mut all = Vec::new();
+                for s in &symbols {
+                    all.extend(k.query(rel, t, std::slice::from_ref(s))?);
+                }
+                all
+            } else {
+                k.query(rel, t, &[])?
+            };
+            for tu in found {
                 times.push(Some(t));
                 for j in 0..width {
                     match (&mut cols[j], &tu[j]) {
@@ -1119,6 +1133,11 @@ fn main() {
                 });
             }
             for w in &result.warnings {
+                // The configuration's "commissions are zero" is false when a
+                // per-notional or per-contract commission was charged.
+                if w.bias == "transaction-cost neglect" && result.costs.commissions > 0.0 {
+                    continue;
+                }
                 println!("warning ({}): {}", w.bias, w.message);
             }
             if !args.flags.contains("quiet") {

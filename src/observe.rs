@@ -354,10 +354,10 @@ pub fn coverage_report(prog: &Program, coverage: &[RelationCoverage], bars: usiz
                 })
                 .collect();
             out.push_str(&format!(
-                "  {}: `{}` is the first empty relation on this path; what it reads is not empty: {}\n",
+                "  {}: `{}` is the first empty relation on this path; the relations it reads hold tuples ({}), so its rules fail on a test, a bound read (a label or a value none of them carries) or a window that never fills\n",
                 c.path.join(" <- "),
                 c.relation,
-                if reads.is_empty() { "nothing".to_string() } else { reads.join(", ") }
+                if reads.is_empty() { "none".to_string() } else { reads.join(", ") }
             ));
         }
     } else {
