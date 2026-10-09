@@ -110,9 +110,7 @@ pub fn program_graph(prog: &Program) -> ProgramGraph {
     let n = order.len();
     let adj: Vec<Vec<usize>> = order
         .iter()
-        .map(|name| {
-            reads.get(name.as_str()).map(|rs| rs.iter().filter_map(|(d, _)| by_name.get(d).copied()).collect()).unwrap_or_default()
-        })
+        .map(|name| reads.get(name.as_str()).map(|rs| rs.iter().filter_map(|(d, _)| by_name.get(d).copied()).collect()).unwrap_or_default())
         .collect();
     let sccs = tarjan(n, &adj);
     let mut scc_size: HashMap<usize, usize> = HashMap::new();
@@ -148,10 +146,7 @@ pub fn program_graph(prog: &Program) -> ProgramGraph {
         depth_of(i, &adj, &sccs, prog, &order, &mut depth);
     }
     // Closed loop: reaches an executor or kernel-state relation.
-    let mut closed: Vec<bool> = order
-        .iter()
-        .map(|name| matches!(prog.relations[name].kind, Kind::Executor | Kind::KernelState))
-        .collect();
+    let mut closed: Vec<bool> = order.iter().map(|name| matches!(prog.relations[name].kind, Kind::Executor | Kind::KernelState)).collect();
     // Fixpoint over the reads (the graph is small).
     loop {
         let mut changed = false;
@@ -265,7 +260,16 @@ pub fn show_program(prog: &Program) -> String {
     if !prims.is_empty() {
         out.push_str("\nprimitives read (from the environment):\n");
         for p in prims {
-            out.push_str(&format!("  {}  [{}{}]\n", p.signature, p.resolution, if p.complete { ", complete: a missing tuple is false" } else { ", not complete: a missing tuple is unknown" }));
+            out.push_str(&format!(
+                "  {}  [{}{}]\n",
+                p.signature,
+                p.resolution,
+                if p.complete {
+                    ", complete: a missing tuple is false"
+                } else {
+                    ", not complete: a missing tuple is unknown"
+                }
+            ));
         }
     }
     out.push_str("\nlegend: a read's sign is + positive, - negated, ~ inside an aggregation or reduction; depth is the longest path from a primitive; a closed-loop relation is evaluated after the previous bar's fills, an open-loop one could be computed ahead of any decision\n");
@@ -288,7 +292,10 @@ pub fn coverage_report(prog: &Program, coverage: &[RelationCoverage], bars: usiz
     let g = program_graph(prog);
     let by_name: HashMap<&str, &RelationCoverage> = coverage.iter().map(|c| (c.name.as_str(), c)).collect();
     let mut out = String::new();
-    out.push_str(&format!("coverage over {} decision bars (calls: bars and inputs the relation was demanded at; tuples: what it derived):\n", bars));
+    out.push_str(&format!(
+        "coverage over {} decision bars (calls: bars and inputs the relation was demanded at; tuples: what it derived):\n",
+        bars
+    ));
     let width = g.nodes.iter().map(|n| n.name.len()).max().unwrap_or(8).max(8);
     let is_empty = |name: &str| -> bool {
         match (g.node(name), by_name.get(name)) {
@@ -307,7 +314,15 @@ pub fn coverage_report(prog: &Program, coverage: &[RelationCoverage], bars: usiz
         } else {
             ""
         };
-        out.push_str(&format!("  {:<width$}  {:>8} calls  {:>8} with tuples  {:>10} tuples{}\n", node.name, calls, nonempty, tuples, mark, width = width));
+        out.push_str(&format!(
+            "  {:<width$}  {:>8} calls  {:>8} with tuples  {:>10} tuples{}\n",
+            node.name,
+            calls,
+            nonempty,
+            tuples,
+            mark,
+            width = width
+        ));
     }
     for node in g.nodes.iter().filter(|n| n.kind == "primitive" || n.kind == "executor" || n.kind == "kernel") {
         if let Some(c) = by_name.get(node.name.as_str()) {
@@ -332,7 +347,10 @@ pub fn coverage_report(prog: &Program, coverage: &[RelationCoverage], bars: usiz
             let node = g.node(name).unwrap();
             let empty_reads: Vec<&str> = node.reads.iter().map(|(r, _)| r.as_str()).filter(|r| is_empty(r)).collect();
             if empty_reads.is_empty() {
-                causes.push(RootCause { relation: name.to_string(), path: path.clone() });
+                causes.push(RootCause {
+                    relation: name.to_string(),
+                    path: path.clone(),
+                });
             } else {
                 for r in empty_reads {
                     if !visited.contains(r) {
@@ -363,7 +381,10 @@ pub fn coverage_report(prog: &Program, coverage: &[RelationCoverage], bars: usiz
     } else {
         let empties: Vec<&str> = g.nodes.iter().filter(|n| n.kind == "derived" && is_empty(&n.name)).map(|n| n.name.as_str()).collect();
         if !empties.is_empty() {
-            out.push_str(&format!("empty relations (demanded, never derived; a rule reading one positively never fires): {}\n", empties.join(", ")));
+            out.push_str(&format!(
+                "empty relations (demanded, never derived; a rule reading one positively never fires): {}\n",
+                empties.join(", ")
+            ));
         }
     }
     (out, causes)

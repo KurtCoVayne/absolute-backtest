@@ -1409,6 +1409,14 @@ bindings why each branch of its decision fired or did not, one found and
 quantified a defect in the synthetic total-return index that the identical
 decisions of its counterpart concealed, one showed its membership literal
 inert on the data, and the coverage report caught a partial window and a
-dormant branch. The agents also found four defects of the tools and the
-kernel, each fixed in the same tree. The implementation order of section
-11 is updated accordingly: step 6's first half is done.
+dormant branch. The agents also surfaced defects of the tools, the kernel
+and the documentation; `docs/llm-observability.md` records each with its
+status, and every one is closed in this tree: `least` across an integer
+literal and a Scalar, the symbol filter on decisions, the ledger of
+entity-input relations and its combination with `--dump`, a run refused
+before it starts when an order needs a print the data has no relation for
+or a label the data never carries, the daily reading of the average daily
+volume at a sub-daily resolution, the false zero-commission warning, the
+executor relations' modes in the semantic model, and the builtins the
+README's one page lacked. The implementation order of section 11 is
+updated accordingly: step 6's first half is done.

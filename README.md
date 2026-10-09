@@ -117,14 +117,36 @@ strategy sma_crossover {
   `R(A, T0, X) asof T` (R's latest tuple keyed at or before T, at any
   resolution; T0 is bound causally), and the temporal
   builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
-  plus `T1 in window(T, N, min K)` / `prior_window` inside an aggregation.
+  plus `T1 in window(T, N, min K)` / `prior_window` (calendar durations) and
+  `T1 in rows(T, N, min K)` (the group's own last N bars, N a Count: "the
+  last 20 sessions", "the stock's last 18 rows") inside an aggregation.
   A builtin is not a relation, so `not month_start(T)` does not resolve; the
   idiom is `mstart(T) :- bar(T), month_start(T).` and then `not mstart(T)`.
+- Scalar functions in expressions: `abs`, `least`, `greatest` (any number of
+  arguments of one dimension; an integer literal takes the others'
+  dimension), `log` and `exp` (Scalar only: `log(P / P0)`, never `log(P)`),
+  `sqrt`. Aggregates: `sum`, `mean`, `std`, `median`, `quantile`, `max`,
+  `min`, `count` (a Count, convertible to Scalar by division only), `corr`,
+  `cov`, `ols_beta`, and `first`/`last` in a resample.
+- `rank(R(...), by (K desc, A asc)[, ties average], as N)` numbers the
+  tuples of R within the group of the variables bound before it, so bind the
+  bar first: `ranked(A, T, N) :- bar(T), rank(scored(A, T, S), by (S desc,
+  A asc), as N).`; with A bound before the rank every group has one tuple
+  and every rank is 1 (W4 says so).
 - Decisions: `decide(T, buy(A, Q))`, `sell`, `short`, `cover` in delta mode;
-  `target_weight(A, W)`, `target_quantity(A, Q)` in target mode. The kernel
-  supplies `decided(T0, D)`, `position(A, T, Q)`, `cash(T, C)`,
-  `nav(T, N)` (the book marked at T, before T's decisions) and
-  `fill(A, T, Q, P)` at the decision resolution.
+  `target_weight(A, W)`, `target_quantity(A, Q)` in target mode; any
+  constructor takes a trailing order (`buy(A, Q, moo_moc)`,
+  `target_weight(A, W, moc)`; `market` when omitted). In target mode an
+  instrument with no decision keeps its position; an exit is an explicit
+  zero target. The kernel supplies `decided(T0, D)`, `position(A, T, Q)`,
+  `cash(T, C)`, `nav(T, N)` (the book marked at T, before T's decisions) and
+  `fill(A, T, Q, P)` at the decision resolution; `universe`, `position` and
+  `fill` are enumerable (`-A`), so a rule can range over the book.
+- Sizing and accounting: a `target_weight` is a fraction of the fixed
+  starting capital by default and of equity under `--compounding on`; a
+  strategy whose weights are meant as fractions of equity ("equally
+  weighted", "capped at one") runs with `--compounding on`. Fractional
+  quantities need `--lot fractional`; the default truncates to whole shares.
 
 `abt check` also prints each strategy's degrees of freedom (`docs/data-bundle.md`,
 section 6), the counts the study report will use:
@@ -283,10 +305,15 @@ fixed part only). Each fill records its commission, fee and slippage;
 `RunResult.costs` sums them with the turnover, and `abt run` prints the line.
 A bar's transaction costs are never leverage: a fully invested book stays
 fully invested after paying them, carrying a debit of at most the bar's
-costs, which the next sizing sees. `ExecConfig::frictionless()` (or
-`--frictionless`) turns every model off, and the run then carries a warning
-per model naming the bias it leaves unmodeled (`RunResult.warnings`, printed
-as `warning (slippage): ...`).
+costs, which the next sizing sees. `ExecConfig::frictionless()` turns every
+model off; the command line's `--frictionless` turns off slippage, impact,
+the participation cap, the per-share commission and the fees, while a
+security table's per-contract commission, `--commission-bps` and the funding
+rates stay (the parity runs rely on this: a futures book under
+`--frictionless` still pays its commission per contract). The run then
+carries a warning per model it leaves unmodeled (`RunResult.warnings`,
+printed as `warning (slippage): ...`); the commission warning is withheld
+when commissions were in fact charged.
 
 The liquidity model (same section) caps a fill at 0.1 of the bar's volume
 (from the `volume`-like primitive at the decision resolution, or

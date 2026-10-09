@@ -363,8 +363,9 @@ benchmark close cannot liquidate the book.
 temporal key position. For a rule with head time T, every body atom's time
 term must be provably <= T, where provability is syntactic: T itself, or a
 variable bound by `prev(T, ·)`, `lag(T, ·, ·)`, `window(T, ·)`,
-`prior_window(T, ·)`, the key an as-of join binds (`R(..., T0, ...) asof T`
-gives T0 <= T), or transitively from such a variable. For `decided`, the
+`prior_window(T, ·)`, `rows(T, ·)`, the key an as-of join binds
+(`R(..., T0, ...) asof T` gives T0 <= T), or transitively from such a
+variable. For `decided`, the
 bound must be strict (< T). No construct produces a later timestamp, so the
 only way to violate WF-6 is to bind a time variable in a body atom's key
 position to something not derived from T; that is rejected. Timestamp-typed
@@ -440,13 +441,13 @@ interface.
 | --- | --- | --- | --- |
 | `close` | `(+A: Equity, @T, -P: Price<USD>)` | no | market data |
 | `volume` | `(+A: Equity, @T, -V: Quantity<Shares>)` | no | market data |
-| `universe` | `(+A: Equity, @T)` | yes | market data (membership as of T) |
+| `universe` | `(-A: Equity, @T)` | yes | market data (membership as of T); enumerable, so a rule can range over it |
 | `ticker` | `(+A: Equity, @T, -S: Label)` | yes | the bundle's security table (data-bundle doc, section 3): the ticker `A` carried over bar T; derived, never a file |
 | `split`, `dividend`, `delisted`, `member`, `classification` | catalog relations of `equities_1d_v2` (data-bundle doc, section 3) | yes | corporate actions as events at their ex-date or announcement, delisting as a status, point-in-time membership and classification; the executor applies splits, dividends and delistings to the book (section 4 of that doc), the `catalog` library derives `ret` and `close_adj` from them causally |
-| `position` | `(+A: Equity, @T, -Q: Quantity<Shares>)` | yes | executor |
+| `position` | `(-A: Equity, @T, -Q: Quantity<Shares>)` | yes | executor; enumerable, so a rule can range over what the book holds (`held(A, T, Q) :- position(A, T, Q), Q > 0 shares`) |
 | `cash` | `(@T, -C: Notional<USD>)` | yes | executor |
 | `nav` | `(@T, -N: Notional<USD>)` | yes | executor: cash plus positions marked at T, before T's decisions (what the metrics library reads) |
-| `fill` | `(+A: Equity, @T, -Q: Quantity<Shares>, -P: Price<USD>)` | yes | executor |
+| `fill` | `(-A: Equity, @T, -Q: Quantity<Shares>, -P: Price<USD>)` | yes | executor; enumerable |
 | `decided` | `(@T0, -D: Decision)` | yes | kernel, from the strategy's own output |
 
 Each market-data primitive comes at the native resolution of its source,
@@ -506,7 +507,12 @@ both rules.
 **Order types.** A decision in a decide head may name how it executes as a
 trailing term: `decide(T, target_weight(A, W, moc))`. `market` (the default)
 is the contract above, the next bar's close. `moo` fills at the open of the
-instrument's next bar. `moc` fills at the close of the last bar of the session
+instrument's next bar, read from the price relation's open companion (`open`
+beside `close`, `open_m` beside `close_m`); `limit` and `stop` read its
+high and low companions as well. A program that places such an order on
+data without the companion is refused before the run, naming the relation
+expected, since every such order would otherwise wait for a print that
+never comes and be dropped. `moc` fills at the close of the last bar of the session
 (the calendar day) containing T, at the step of that bar; at @1d that is T's
 own close, the signal-close convention, so the signal must be computable at
 the close print. `moo_moc` is an intraday position: in at the next open, flat

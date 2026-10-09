@@ -161,22 +161,27 @@ fn parse_args() -> Args {
     Args { cmd, files, opts, multi, flags }
 }
 
+/// The dataset a kept-kernel run reads: moved into the kernel when nothing
+/// reads it after the run, borrowed (copied into the kernel) when `--dump`,
+/// `--study` or `--verify-causality` will.
+enum Data<'a> {
+    Owned(absolute_backtest::kernel::Dataset),
+    Borrowed(&'a absolute_backtest::kernel::Dataset),
+}
+
 /// Run on the batch kernel and keep the kernel afterwards for what reads the
 /// model after the run: the explanations of the coverage report's root
-/// causes, and the ledger. The dataset moves into the kernel (one copy) and
-/// the kernel is not freed tuple by tuple at the end, as in `run_owned`.
-fn run_keeping(
-    prog: &absolute_backtest::check::Program,
-    dataset: absolute_backtest::kernel::Dataset,
-    cfg: ExecConfig,
-    ledger: &[String],
-    ledger_out: Option<&Path>,
-) -> Result<(RunResult, Vec<String>), RunError> {
+/// causes, and the ledger. The kernel is not freed tuple by tuple at the
+/// end, as in `run_owned`.
+fn run_keeping(prog: &absolute_backtest::check::Program, data: Data<'_>, cfg: ExecConfig, ledger: &[String], ledger_out: Option<&Path>) -> Result<(RunResult, Vec<String>), RunError> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(512 << 20)
             .spawn_scoped(s, || {
-                let mut k = Kernel::from_dataset(prog, dataset, cfg)?;
+                let mut k = match data {
+                    Data::Owned(ds) => Kernel::from_dataset(prog, ds, cfg)?,
+                    Data::Borrowed(ds) => Kernel::new(prog, ds, cfg)?,
+                };
                 let result = k.run()?;
                 let mut notes = Vec::new();
                 let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
@@ -225,7 +230,12 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
     for rel in ledger {
         let Some(sig) = prog.relations.get(rel) else {
             let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
-            return Err(RunError::Request(format!("--ledger: `{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
+            return Err(RunError::Request(format!(
+                "--ledger: `{}` is not a relation of {}; its relations are {}",
+                rel,
+                prog.strategy,
+                names.join(", ")
+            )));
         };
         // A relation whose only input is its entity is written for every
         // symbol; any other input must be given at a bar with `query --inputs`.
@@ -239,7 +249,11 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
                 names.join(", ")
             )));
         }
-        let symbols: Vec<Value> = if per_symbol { (0..k.symbol_names().len()).map(|i| Value::Equity(i as u32)).collect() } else { vec![] };
+        let symbols: Vec<Value> = if per_symbol {
+            (0..k.symbol_names().len()).map(|i| Value::Equity(i as u32)).collect()
+        } else {
+            vec![]
+        };
         let res = sig.res.unwrap_or(prog.resolution);
         let bars: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
         let width = sig.args.len();
@@ -308,7 +322,7 @@ type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::ker
 fn usage(code: i32) -> ! {
     eprintln!(
         "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X | --capital X] [--compounding on|off] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--report-by bar|day] [--periods-per-year X] [--dump DIR] [--quiet] [--timing] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, resolution, completeness, stratum, loop, depth, reads and rules)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt run ... [--ledger R1,R2,... --ledger-out DIR]   (write every tuple of the named relations at every bar of the run as DIR/<relation>.parquet, and the coverage as DIR/coverage.parquet)\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's (or, for query, the relation's) `+` arguments, in signature order\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --commission-bps X    commission in basis points of traded notional on both sides (default 0), added to the per-share schedule
-  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N bars behind ADV (default 20)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)
+  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N days behind ADV (default 20; bars at a daily resolution, whole days of summed volume at a finer one)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)
   --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)
   --delist-proceeds P   by-reason (default: last trade less the reason's haircut, with commission) or last-price (last trade, no haircut, no cost)
   --dividends D         cash (default: credited at the pay date) or reinvest (fractional shares at the ex-date close, no cost)
@@ -320,7 +334,7 @@ fn usage(code: i32) -> ! {
   --report-by bar|day   the reporting period of the metrics and --returns: the decision bar (default) or the calendar day
   --periods-per-year X  periods a year for annualising (default: by the resolution per bar, 252 per day; 52 for a weekly book)\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --capital X           the fixed base under --compounding off, the starting cash otherwise (an alias of --cash; default 1000000)
   --compounding on|off  off (default): weights size against the fixed capital, leverage is judged against it and a bar's return is the NAV change over it; on: weights size against equity and returns compound
-  --frictionless        every cost and liquidity model off (the run is warned)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
+  --frictionless        slippage, impact, the participation cap, the per-share commission and the fees off; a security table's per-contract commission, --commission-bps and the funding rates stay (the run is warned)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
     );
     exit(code)
 }
@@ -988,14 +1002,20 @@ fn main() {
                 eprintln!("--ledger needs --ledger-out DIR");
                 exit(2)
             }
-            let owned = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true) && !verify && !args.opts.contains_key("dump") && !args.opts.contains_key("study");
-            if !ledger.is_empty() && !owned {
-                eprintln!("--ledger runs on the batch kernel and cannot be combined with --dump, --study or --verify-causality");
+            let batch = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true);
+            let reads_after = verify || args.opts.contains_key("dump") || args.opts.contains_key("study");
+            let owned = batch && !reads_after;
+            if !ledger.is_empty() && !batch {
+                eprintln!("--ledger runs on the batch kernel, not --kernel fold");
                 exit(2)
             }
             let mut notes: Vec<String> = Vec::new();
-            let outcome = if owned {
-                run_keeping(&prog, std::mem::take(&mut dataset), cfg.clone(), &ledger, ledger_out.as_deref()).map(|(r, n)| {
+            // The batch kernel is kept after the run for the coverage report's
+            // explanations and the ledger; it takes the facts over when
+            // nothing reads the dataset afterwards, and copies them otherwise.
+            let outcome = if batch {
+                let data = if owned { Data::Owned(std::mem::take(&mut dataset)) } else { Data::Borrowed(&dataset) };
+                run_keeping(&prog, data, cfg.clone(), &ledger, ledger_out.as_deref()).map(|(r, n)| {
                     notes = n;
                     r
                 })
@@ -1057,7 +1077,7 @@ fn main() {
             let ppy: f64 = option(&args.opts, "periods-per-year", "a number of periods", default_ppy);
             let cm = absolute_backtest::study::metrics::convention_metrics_on(&result, ppy, by_day, calendar.as_ref());
             match result.base_capital {
-                Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested)", b),
+                Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested); end_equity and total_return above compound those period returns, total_pnl below is additive on the base", b),
                 None => println!("accounting: compounding; a period's return is the NAV change over the previous NAV"),
             }
             println!(

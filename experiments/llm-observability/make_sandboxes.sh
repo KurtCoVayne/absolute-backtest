@@ -23,7 +23,7 @@ mkdir -p "$STUDY/common/docs" "$STUDY/common/data"
     sed 's/^They use what the executor and the DSL gained for them: fixed-base/The language and executor also provide: fixed-base/'
   echo; echo; echo 'Run `bin/abt` with no arguments for the full command-line usage.'
 } > "$STUDY/common/docs/README.md"
-cp "$REPO/docs/semantic-model.md" "$STUDY/common/docs/"
+cp "$REPO/docs/semantic-model.md" "$REPO/docs/data-bundle.md" "$STUDY/common/docs/"
 python3 "$REPO/scripts/synth/weekly_synth.py" --out "$STUDY/common/data/weekly" > /dev/null
 python3 "$REPO/scripts/synth/sessions_synth.py" --out "$STUDY/common/data/sessions" > /dev/null
 mk() { # task condition

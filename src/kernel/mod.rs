@@ -1362,6 +1362,10 @@ impl<'p> Kernel<'p> {
         let mut labels = dataset.labels.clone();
         let mut literal_equities: HashMap<String, Sym> = HashMap::new();
         let mut unresolved: Vec<String> = Vec::new();
+        // A label the data never carries makes every literal naming it false
+        // (the Oct 9 study: `member(A, T, "SP500")` on data whose index is
+        // `SPX` decided nothing, silently); it is refused before the run.
+        let mut unknown_labels: Vec<String> = Vec::new();
         let mut intern = |l: &Lit| match l {
             Lit::Equity(s) => {
                 if literal_equities.contains_key(s) {
@@ -1380,6 +1384,9 @@ impl<'p> Kernel<'p> {
                 }
             }
             Lit::Label(s) => {
+                if dataset.labels.get(s).is_none() {
+                    unknown_labels.push(s.clone());
+                }
                 labels.intern(s);
             }
             _ => {}
@@ -1397,6 +1404,28 @@ impl<'p> Kernel<'p> {
         }
         if let Some(m) = unresolved.first() {
             return Err(RunError::Config(m.clone()));
+        }
+        if !unknown_labels.is_empty() {
+            unknown_labels.sort();
+            unknown_labels.dedup();
+            let mut present: Vec<&str> = dataset.labels.names().iter().map(|x| x.as_str()).collect();
+            present.sort_unstable();
+            let shown = if present.is_empty() {
+                "none".to_string()
+            } else if present.len() > 24 {
+                format!("{}, ... ({} labels in all)", present[..24].join(", "), present.len())
+            } else {
+                present.join(", ")
+            };
+            let named: Vec<String> = unknown_labels.iter().map(|l| format!("`{}`", l)).collect();
+            return Err(RunError::Config(format!(
+                "the label{} {} occur{} in no relation of the data, so every literal naming {} would be false; the labels the data holds are: {}",
+                if named.len() > 1 { "s" } else { "" },
+                named.join(", "),
+                if named.len() > 1 { "" } else { "s" },
+                if named.len() > 1 { "them" } else { "it" },
+                shown
+            )));
         }
         let (symbols, remap) = symbols.sorted();
         let (labels, remap_labels) = labels.sorted();
@@ -1628,6 +1657,43 @@ impl<'p> Kernel<'p> {
             Some((*rel_ids.get(&name)?, price_column(sig)?))
         };
         let (open_rel, high_rel, low_rel) = (companion("open"), companion("high"), companion("low"));
+        // An order that executes away from the close needs the price
+        // relation's companions (section 6, order types): without them every
+        // such order waits for a print that never comes and is dropped, which
+        // the Oct 9 study found silent. Refused before the run instead.
+        for (ri, rule) in prog.rules.iter().enumerate().filter(|(_, r)| r.head.name == "decide") {
+            let Some(Term::Ctor(_, subs, _)) = rule.head.terms.get(1) else { continue };
+            let Some(order) = subs.get(2) else { continue };
+            let (kind, needs): (&str, Vec<(&str, bool)>) = match order {
+                Term::Param(p, _) if p == "moo" || p == "moo_moc" => (p.as_str(), vec![("open", open_rel.is_some())]),
+                Term::Ctor(c, _, _) if c == "limit" || c == "stop" => (c.as_str(), vec![("open", open_rel.is_some()), ("high", high_rel.is_some()), ("low", low_rel.is_some())]),
+                _ => continue,
+            };
+            let missing: Vec<&str> = needs.iter().filter(|(_, have)| !have).map(|(n, _)| *n).collect();
+            if missing.is_empty() {
+                continue;
+            }
+            let price_name = price_rel.map(|id| rels[id].name.clone()).unwrap_or_else(|| "(none)".to_string());
+            let expected: Vec<String> = missing
+                .iter()
+                .map(|m| {
+                    if price_name.contains("close") {
+                        format!("`{}`", price_name.replace("close", m))
+                    } else {
+                        format!("a `{}` relation named like the price relation", m)
+                    }
+                })
+                .collect();
+            return Err(RunError::Config(format!(
+                "rule {} places a `{}` order, but the price relation `{}` has no {} companion in environment `{}` ({}): every such order would wait for a print that never comes and be dropped; add the relation to the data, name a --price-relation that has it, or use `market` or `moc`",
+                crate::check::rule_label(&prog.rules, ri),
+                kind,
+                price_name,
+                missing.join(", "),
+                prog.environment,
+                expected.join(", ")
+            )));
+        }
         // The catalog's actions, by name (data-bundle doc, section 3).
         let primitive = |name: &str| -> Option<usize> {
             let id = *rel_ids.get(name)?;
@@ -1756,7 +1822,13 @@ impl<'p> Kernel<'p> {
                 // A stored relation's tuples are what the data (or the
                 // executor) holds, whichever way the rules read them.
                 let tuples = if info.stored { self.stores[rel].len() } else { tuples };
-                RelationCoverage { name: info.name.clone(), derived: !info.stored, calls, nonempty, tuples }
+                RelationCoverage {
+                    name: info.name.clone(),
+                    derived: !info.stored,
+                    calls,
+                    nonempty,
+                    tuples,
+                }
             })
             .collect()
     }
@@ -1946,7 +2018,12 @@ impl<'p> Kernel<'p> {
         if domain.contains(&t) {
             Ok(())
         } else {
-            Err(RunError::NotABar { t, res, before: domain.range(..t).next_back().copied(), after: domain.range(t..).next().copied() })
+            Err(RunError::NotABar {
+                t,
+                res,
+                before: domain.range(..t).next_back().copied(),
+                after: domain.range(t..).next().copied(),
+            })
         }
     }
 
@@ -2085,11 +2162,43 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    /// Average daily volume of `sym` at `bars[end]`: the mean bar volume over
-    /// the `adv_window` bars ending there (inclusive); `None` without any.
+    /// Average daily volume of `sym` at `bars[end]`: at a daily resolution the
+    /// mean bar volume over the `adv_window` bars ending there (inclusive);
+    /// at a finer resolution the mean over the `adv_window` days before the
+    /// bar's day of each day's summed volume (the current, partial day is
+    /// left out; on the first day its volume so far stands in). `None`
+    /// without any volume.
     pub fn adv(&self, sym: Sym, bars: &[i64], end: usize) -> Option<f64> {
-        let lo = end.saturating_sub(self.cfg.adv_window.max(1) - 1);
-        let vols: Vec<f64> = bars[lo..=end.min(bars.len() - 1)].iter().filter_map(|&t| self.bar_volume(sym, t)).collect();
+        let end = end.min(bars.len().saturating_sub(1));
+        let n = self.cfg.adv_window.max(1);
+        if self.prog.resolution.seconds().is_some() {
+            let today = time::day_key(bars[end]);
+            let mut days: Vec<(i64, Option<f64>)> = Vec::new();
+            for &t in bars[..=end].iter().rev() {
+                let d = time::day_key(t);
+                if d == today {
+                    continue;
+                }
+                if days.last().map(|(k, _)| *k != d).unwrap_or(true) {
+                    if days.iter().filter(|(_, v)| v.is_some()).count() == n {
+                        break;
+                    }
+                    days.push((d, None));
+                }
+                if let Some(v) = self.bar_volume(sym, t) {
+                    let last = days.last_mut().unwrap();
+                    last.1 = Some(last.1.unwrap_or(0.0) + v);
+                }
+            }
+            let sums: Vec<f64> = days.iter().filter_map(|(_, v)| *v).collect();
+            if sums.is_empty() {
+                let so_far: f64 = bars[..=end].iter().rev().take_while(|&&t| time::day_key(t) == today).filter_map(|&t| self.bar_volume(sym, t)).sum();
+                return (so_far > 0.0).then_some(so_far);
+            }
+            return Some(sums.iter().sum::<f64>() / sums.len() as f64);
+        }
+        let lo = end.saturating_sub(n - 1);
+        let vols: Vec<f64> = bars[lo..=end].iter().filter_map(|&t| self.bar_volume(sym, t)).collect();
         if vols.is_empty() {
             None
         } else {
@@ -2310,11 +2419,7 @@ impl<'p> Kernel<'p> {
             }
             envs = next;
         }
-        let mut solution: Vec<(String, String)> = cr
-            .slots
-            .iter()
-            .filter_map(|(name, &slot)| envs[0][slot].as_ref().map(|v| (name.clone(), self.show(v))))
-            .collect();
+        let mut solution: Vec<(String, String)> = cr.slots.iter().filter_map(|(name, &slot)| envs[0][slot].as_ref().map(|v| (name.clone(), self.show(v)))).collect();
         solution.sort();
         Ok(Explanation {
             rule: cr.label.clone(),

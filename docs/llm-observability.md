@@ -109,18 +109,20 @@ membership) that the base agents, with the same decisions, could not see.
 | --- | --- | --- |
 | `least(1, W)` passes the checker and does not cap (Count against Num by variant order) | vol_targeted_trend, both conditions | fixed (`e5bed9b`), `tests/functions.rs` |
 | `query --symbol` on `decide` prints zero tuples while the rule lines show it fired | MW14, R8L, momentum, open gap (obs) | fixed (`e5bed9b`) |
-| `--ledger` refuses a relation whose only input is its entity | MW14, R8L, breakout, open gap, vol (obs) | relaxed: written per symbol |
-| the run warns "commissions and fees are zero" while charging a per-notional or per-contract commission | MW14, R8L, both conditions | the warning is dropped when commissions were charged |
-| the never-fired path summary reads as a contradiction when the failing literal is a bound read (a label none of the tuples carries) | momentum (obs) | reworded |
+| `--ledger` refuses a relation whose only input is its entity | MW14, R8L, breakout, open gap, vol (obs) | fixed (`73c5c69`): written per symbol |
+| `--ledger` cannot be combined with `--dump` | R8L, breakout, open gap (obs) | fixed: the kept kernel copies the data when something reads it after the run |
+| a label the data never carries (`"SP500"` for an index labelled `SPX`) decides nothing, silently | momentum, both conditions | fixed: refused before the run, naming the labels the data holds |
+| the run warns "commissions and fees are zero" while charging a per-notional or per-contract commission | MW14, R8L, both conditions | fixed (`73c5c69`): the warning is dropped when commissions were charged; `--frictionless` is described as what it is |
+| the never-fired path summary reads as a contradiction when the failing literal is a bound read (a label none of the tuples carries) | momentum (obs) | fixed (`73c5c69`): reworded |
 | `explain` reports no bindings | base condition | the obs binary reports the first solution's bindings |
-| `rows`, `least`, `greatest`, `abs`, `median` absent from the README's one page; no function list | all | open (docs) |
-| the semantic model's table gives `position(+A, ...)`, the checker `-A` | MW14, open gap | open (docs) |
+| `rows`, `least`, `greatest`, `abs`, `median` absent from the README's one page; no function list; no `rank` example; order terms on delta constructors undocumented | all | fixed (README, the one-page syntax) |
+| the semantic model's table gives `position(+A, ...)`, the checker `-A`; WF-6 omits `rows` | MW14, open gap, R8L, breakout | fixed (semantic model, sections 5 and 6) |
 | `asof` carries an older value silently; a daily read from a minute rule needs a key-equality test | R8L, both conditions | by design; `prev(S, S1)` on the session calendar in the second formulation (`language-v2.md` 3.5) |
 | no per-entity previous bar; no product aggregate; Count cannot multiply a Scalar | MW14, R8L, both conditions | `prev_row`, `cumprod` and `decile` in the second formulation (7.1, 7.3) |
-| fixed-base accounting sizes weights against starting capital, so "equal weight" and "capped at one" need `--compounding on` | momentum, vol, breakout, both conditions | the `execution` block's `capital ... fixed | compounding` makes the choice visible (4.3) |
-| `moo` and `moo_moc` drop every order on an environment with no open series, and the checker is silent | open gap, both conditions | open; a WF-16 check in the second formulation (the class holds `open`) |
-| the per-bar annualisation of a minute strategy (98,280 periods) | open gap (base) | the `report` block (4.5) |
-| impact at minute resolution uses a 20-bar ADV | open gap, both conditions | open |
+| fixed-base accounting sizes weights against starting capital, so "equal weight" and "capped at one" need `--compounding on` | momentum, vol, breakout, both conditions | documented (README, sizing and accounting); the run's accounting line says which figures compound; the `execution` block's `capital ... fixed | compounding` makes the choice visible in the second formulation (4.3) |
+| `moo` and `moo_moc` drop every order on an environment with no open series, and the checker is silent | open gap, both conditions | fixed: a run with such an order and no open (or high and low, for `limit` and `stop`) companion is refused before it starts, naming the relation expected |
+| the per-bar annualisation of a minute strategy (98,280 periods) | open gap (base) | the `report` block (4.5); `--report-by day` today |
+| impact at minute resolution uses a 20-bar ADV | open gap, both conditions | fixed: at a sub-daily resolution the ADV is the mean over the previous `--adv-window` days of each day's summed volume |
 
 The data defect of the weekly generator is fixed in `scripts/synth/weekly_synth.py`;
 `experiments/llm-observability/runs/` holds what the agents saw and wrote.
