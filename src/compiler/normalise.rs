@@ -285,6 +285,27 @@ fn expr_vars(e: &Expr) -> Vec<String> {
     vs.into_iter().map(|(v, _)| v).collect()
 }
 
+/// The reads and binds of a surface literal (what the rewriter's hoisting
+/// needs), under the binding model of `deps`.
+pub fn literal_reads_binds(prog: &Program, rule: &Rule, lit: &Literal, bound_before: &HashSet<String>) -> (Vec<String>, Vec<String>) {
+    let head_key = prog.relations.get(&rule.head.name).and_then(|s| s.key_pos()).and_then(|k| rule.head.terms.get(k)).and_then(var_of);
+    deps(prog, head_key.as_deref(), lit, bound_before)
+}
+
+/// The variables bound on entry to a rule's body (the head's inputs).
+pub fn initially_bound(prog: &Program, rule: &Rule) -> HashSet<String> {
+    bound_before_written(prog, rule).1
+}
+
+/// The core forms of one surface literal, with fresh internal names drawn
+/// from `counter` (what the rewriter re-reduces a changed literal with).
+pub fn core_of(prog: &Program, lit: &Literal, bound_before: &HashSet<String>, counter: &mut usize) -> (Literal, Vec<NirLit>) {
+    let mut fresh = Fresh(*counter);
+    let out = reduce(prog, lit, bound_before, &mut fresh);
+    *counter = fresh.0;
+    out
+}
+
 /// The reads and binds of a surface literal for the canonical order: a
 /// plain atom reads its inputs and its key (unless the key is the head's,
 /// which the first atom to mention it binds) and may bind its outputs; a

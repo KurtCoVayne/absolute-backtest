@@ -33,6 +33,10 @@ pub struct Statistics {
     pub entities_mean: f64,
     pub entities_max: f64,
     pub relations: BTreeMap<String, RelationStats>,
+    /// Decision bars before the run's first (`--start`): what windows can
+    /// warm up on; unknown without a start.
+    #[serde(default)]
+    pub warmup_bars: Option<f64>,
 }
 
 impl Default for Statistics {
@@ -43,6 +47,7 @@ impl Default for Statistics {
             entities_mean: 100.0,
             entities_max: 100.0,
             relations: BTreeMap::new(),
+            warmup_bars: None,
         }
     }
 }
@@ -137,7 +142,27 @@ impl Statistics {
             entities_mean,
             entities_max,
             relations,
+            warmup_bars: None,
         }
+    }
+
+    /// With the warm-up known: the decision bars of the dataset before `start`.
+    pub fn with_start(mut self, prog: &Program, ds: &Dataset, start: Option<i64>) -> Statistics {
+        if let Some(start) = start {
+            use crate::kernel::time;
+            let mut bars: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+            for (name, tuples) in &ds.facts {
+                let Some(sig) = prog.relations.get(name) else { continue };
+                let (Some(k), Some(res)) = (sig.key_pos(), sig.res) else { continue };
+                for tu in tuples {
+                    if let Some(t) = tu[k].as_time() {
+                        bars.insert(if res == prog.resolution { t } else { time::bucket(prog.resolution, t) });
+                    }
+                }
+            }
+            self.warmup_bars = Some(bars.range(..start).count() as f64);
+        }
+        self
     }
 
     pub fn relation(&self, name: &str) -> RelationStats {
@@ -231,8 +256,11 @@ pub fn literal_costs(
                 }
             }
             Literal::Neg(a) => {
-                let rs = stats.relation(&a.name);
-                (1.0, (1.0 - rs.fill_ratio).clamp(1e-6, 1.0), "negation".to_string())
+                // Without data the fill ratio is a guess: a negation then
+                // excludes half; with data it excludes what the data says.
+                let known = stats.source != "defaults" && stats.relations.contains_key(&a.name);
+                let sel = if known { (1.0 - stats.relation(&a.name).fill_ratio).clamp(0.01, 0.99) } else { 0.5 };
+                (1.0, sel, "negation".to_string())
             }
             Literal::Builtin(b, _) => match b {
                 Builtin::Prev { .. } => (1.0, 1.0 - 1.0 / stats.bars.max(2.0), "time".to_string()),
@@ -253,10 +281,14 @@ pub fn literal_costs(
                 let window = conj.iter().find_map(|l| if let Literal::Window { kind, .. } = l { Some(*kind) } else { None });
                 let w = w_max(i).unwrap_or(20.0);
                 let class = aggregate_class(agg);
+                // A windowed aggregation costs the cache's lookup and its
+                // arguments' evaluation, plus the recomputation over the
+                // window where the kernel has no running state; a group
+                // without a window is solved whole at every call.
                 let cost = match (window, class) {
-                    (Some(_), "holistic") => w.log2().max(1.0),
-                    (Some(_), _) => 1.0 + w / 20.0,
-                    (None, _) => stats.entities_mean.max(1.0),
+                    (Some(_), "holistic") => 4.0 + w.log2().max(1.0),
+                    (Some(_), _) => 4.0 + w / 4.0,
+                    (None, _) => 4.0 + stats.entities_mean.max(1.0),
                 };
                 (cost, 0.95, "aggregation".to_string())
             }

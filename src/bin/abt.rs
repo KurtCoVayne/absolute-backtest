@@ -192,14 +192,23 @@ enum Data<'a> {
 /// model after the run: the explanations of the coverage report's root
 /// causes, and the ledger. The kernel is not freed tuple by tuple at the
 /// end, as in `run_owned`.
-fn run_keeping(prog: &absolute_backtest::check::Program, data: Data<'_>, cfg: ExecConfig, ledger: &[String], ledger_out: Option<&Path>) -> Result<(RunResult, Vec<String>), RunError> {
+fn run_keeping(
+    prog: &absolute_backtest::check::Program,
+    lowered: Option<&absolute_backtest::lower::Lowered>,
+    data: Data<'_>,
+    cfg: ExecConfig,
+    ledger: &[String],
+    ledger_out: Option<&Path>,
+) -> Result<(RunResult, Vec<String>), RunError> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(512 << 20)
             .spawn_scoped(s, || {
-                let mut k = match data {
-                    Data::Owned(ds) => Kernel::from_dataset(prog, *ds, cfg)?,
-                    Data::Borrowed(ds) => Kernel::new(prog, ds, cfg)?,
+                let mut k = match (data, lowered) {
+                    (Data::Owned(ds), Some(l)) => Kernel::from_dataset_planned(prog, l, *ds, cfg)?,
+                    (Data::Borrowed(ds), Some(l)) => Kernel::new_planned(prog, l, ds, cfg)?,
+                    (Data::Owned(ds), None) => Kernel::from_dataset(prog, *ds, cfg)?,
+                    (Data::Borrowed(ds), None) => Kernel::new(prog, ds, cfg)?,
                 };
                 let result = k.run()?;
                 let mut notes = Vec::new();
@@ -625,6 +634,11 @@ fn exec_config(args: &Args) -> ExecConfig {
 
 /// What runs the program: the batch kernel, the fold, or the fold with checkpoints.
 fn make_runner(args: &Args) -> Box<Runner> {
+    make_runner_with(args, None)
+}
+
+/// `make_runner` under a plan: the kernel applies it on both drivers.
+fn make_runner_with(args: &Args, lowered: Option<absolute_backtest::lower::Lowered>) -> Box<Runner> {
     let kernel_kind = args.opts.get("kernel").map(|s| s.as_str()).unwrap_or("batch");
     let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
         "month" => absolute_backtest::kernel::CheckpointEvery::Month,
@@ -640,15 +654,24 @@ fn make_runner(args: &Args) -> Box<Runner> {
         exit(2)
     }
     let runner: Box<Runner> = match kernel_kind {
-        "batch" => Box::new(absolute_backtest::kernel::run),
-        "fold" if checkpoint_every.is_none() && resume.is_none() => Box::new(absolute_backtest::kernel::run_fold),
+        "batch" => match lowered {
+            Some(l) => Box::new(move |prog, dataset, cfg| absolute_backtest::kernel::run_planned(prog, &l, dataset, cfg)),
+            None => Box::new(absolute_backtest::kernel::run),
+        },
+        "fold" if checkpoint_every.is_none() && resume.is_none() => match lowered {
+            Some(l) => Box::new(move |prog, dataset, cfg| absolute_backtest::kernel::run_fold_planned(prog, &l, dataset, cfg)),
+            None => Box::new(absolute_backtest::kernel::run_fold),
+        },
         "fold" => Box::new(move |prog, dataset, cfg| {
             use absolute_backtest::kernel::{Checkpoint, Event, EventLog, Fold, Kernel, SimExecutor};
             std::thread::scope(|s| {
                 std::thread::Builder::new()
                     .stack_size(512 << 20)
                     .spawn_scoped(s, || {
-                        let kernel = Kernel::new_streaming(prog, dataset, cfg.clone())?;
+                        let kernel = match &lowered {
+                            Some(l) => Kernel::new_streaming_planned(prog, l, dataset, cfg.clone())?,
+                            None => Kernel::new_streaming(prog, dataset, cfg.clone())?,
+                        };
                         let log = EventLog::from_dataset(&kernel, dataset)?;
                         let mut exec = SimExecutor::new(cfg.clone());
                         let (mut fold, cursor) = match &resume {
@@ -787,6 +810,72 @@ fn main() {
                 exit(2)
             });
             print!("{}", text);
+        }
+        "plan" => {
+            // abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+            let observed = args.flags.contains("observed");
+            if observed && !has_data {
+                eprintln!("--observed runs the strategy: name --data DIR, --bundle DIR or --synthetic");
+                exit(2)
+            }
+            let loaded = if has_data { Some(load_dataset(&args, &prog)) } else { None };
+            let opts = match &loaded {
+                Some((ds, label)) => compile_options_with(
+                    &args,
+                    &prog,
+                    Some((ds, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+                ),
+                None => compile_options(&args, &prog),
+            };
+            let compiled = absolute_backtest::compiler::compile(&prog, &opts);
+            let mut plan = compiled.plan.clone();
+            if observed {
+                let (ds, _) = loaded.as_ref().unwrap();
+                let cfg = exec_config(&args);
+                match absolute_backtest::kernel::run_planned(&prog, &compiled.lowered, ds, cfg) {
+                    Ok(r) => plan = plan.with_observed(&r.literal_counts),
+                    Err(e) => {
+                        eprintln!("run halted: {}", e);
+                        exit(1)
+                    }
+                }
+            }
+            if args.flags.contains("json") {
+                println!("{}", serde_json::to_string_pretty(&plan.json()).unwrap_or_default());
+            } else {
+                print!("{}", plan.text());
+            }
+        }
+        "rewrite-log" => {
+            // abt rewrite-log --strategy NAME [--json] <files...>
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let opts = compile_options(&args, &prog);
+            let compiled = absolute_backtest::compiler::compile(&prog, &opts);
+            if args.flags.contains("json") {
+                print!("{}", compiled.rewritten.log.json_lines());
+            } else {
+                print!("{}", compiled.rewritten.log.table());
+            }
         }
         "show" => {
             let ws = workspace(&args.files);
@@ -1036,9 +1125,18 @@ fn main() {
                     .map(|tus| tus.iter().filter_map(|tu| tu[k].as_time()).map(time_day).collect())
                     .unwrap_or_default()
             });
+            // The plan (compiler design, "Lower"): the optimised one unless
+            // `--plan written` asks for the written order and no rewrite.
+            let opts = compile_options_with(
+                &args,
+                &prog,
+                Some((&dataset, bundle_label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+            );
+            let compiled = absolute_backtest::compiler::compile(&prog, &opts);
+            let lowered = compiled.lowered.clone();
             // The batch kernel takes the facts over when nothing reads the
             // dataset after the run (one copy of the data in memory).
-            let runner = make_runner(&args);
+            let runner = make_runner_with(&args, Some(lowered.clone()));
             let ledger: Vec<String> = args
                 .opts
                 .get("ledger")
@@ -1062,7 +1160,7 @@ fn main() {
             // nothing reads the dataset afterwards, and copies them otherwise.
             let outcome = if batch {
                 let data = if owned { Data::Owned(Box::new(std::mem::take(&mut dataset))) } else { Data::Borrowed(&dataset) };
-                run_keeping(&prog, data, cfg.clone(), &ledger, ledger_out.as_deref()).map(|(r, n)| {
+                run_keeping(&prog, Some(&lowered), data, cfg.clone(), &ledger, ledger_out.as_deref()).map(|(r, n)| {
                     notes = n;
                     r
                 })
@@ -1109,6 +1207,18 @@ fn main() {
                 result.symbols.len()
             );
             println!("decisions: {}   fills: {}   dropped: {}", result.decisions.len(), result.fills.len(), result.dropped.len());
+            println!(
+                "plan: {} ({} of {} rules reordered, {} infeasible, {} elided, {} rewrites; abt plan --observed prints the estimates against this run)",
+                lowered.label,
+                compiled.plan.totals.reordered,
+                compiled.plan.totals.rules,
+                compiled.plan.totals.infeasible,
+                compiled.plan.totals.elided,
+                compiled.rewritten.log.entries.len()
+            );
+            for n in &lowered.notes {
+                println!("plan note: {}", n);
+            }
             for (k, v) in data::summarize(&result.metric_curve()) {
                 println!("{:>14}: {:.4}", k, v);
             }
@@ -1787,10 +1897,76 @@ fn stage_text(args: &Args, prog: &absolute_backtest::check::Program, stage: &str
             let nir = absolute_backtest::compiler::normalise(prog);
             Ok(render(&absolute_backtest::compiler::normalise::NirStage { nir: &nir, prog }))
         }
-        other => {
-            let _ = args;
-            Err(format!("--stage: `{}` is not one of parsed, checked, normalised", other))
+        "analysed" | "analyzed" => {
+            let opts = compile_options(args, prog);
+            let compiled = absolute_backtest::compiler::compile(prog, &opts);
+            Ok(render(&compiled.analysis))
         }
+        "rewritten" => {
+            let opts = compile_options(args, prog);
+            let compiled = absolute_backtest::compiler::compile(prog, &opts);
+            Ok(render(&absolute_backtest::rewrite::RewrittenStage { rewritten: &compiled.rewritten, prog }))
+        }
+        "planned" => {
+            let opts = compile_options(args, prog);
+            let compiled = absolute_backtest::compiler::compile(prog, &opts);
+            Ok(if json {
+                format!("{}\n", serde_json::to_string_pretty(&compiled.plan.json()).unwrap_or_default())
+            } else {
+                compiled.plan.text()
+            })
+        }
+        other => Err(format!("--stage: `{}` is not one of parsed, checked, normalised, analysed, rewritten, planned", other)),
+    }
+}
+
+/// The compiler's options from the command line: the numerics setting
+/// (`--numerics`, or `--window-sums`), whether to optimise (`--plan
+/// written|optimised`), the statistics of the data when one is named, the
+/// solver and its budgets.
+fn compile_options(args: &Args, prog: &absolute_backtest::check::Program) -> absolute_backtest::compiler::CompileOptions {
+    compile_options_with(args, prog, None)
+}
+
+/// `compile_options` with a dataset already loaded (its statistics feed the
+/// planner and the bundle-relative verdicts).
+fn compile_options_with(args: &Args, prog: &absolute_backtest::check::Program, loaded: Option<(&absolute_backtest::kernel::Dataset, &str)>) -> absolute_backtest::compiler::CompileOptions {
+    use absolute_backtest::compiler::CompileOptions;
+    let numerics = match args.opts.get("numerics") {
+        Some(n) => n.parse().unwrap_or_else(|e: String| {
+            eprintln!("--numerics: {}", e);
+            exit(2)
+        }),
+        None => absolute_backtest::lower::Numerics::from_running_sums(exec_config(args).running_sums),
+    };
+    let optimise = match args.opts.get("plan").map(|s| s.as_str()) {
+        None | Some("optimised") | Some("optimized") => true,
+        Some("written") => false,
+        Some(other) => {
+            eprintln!("--plan: `{}` is not one of written, optimised", other);
+            exit(2)
+        }
+    };
+    let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+    let stats = match loaded {
+        Some((ds, label)) => Some(absolute_backtest::plan::cost::Statistics::from_dataset(prog, ds, label).with_start(prog, ds, exec_config(args).start)),
+        None if has_data => {
+            let (ds, label) = load_dataset(args, prog);
+            let cfg = exec_config(args);
+            Some(
+                absolute_backtest::plan::cost::Statistics::from_dataset(prog, &ds, &label.unwrap_or_else(|| if args.flags.contains("synthetic") { "synthetic".into() } else { "data".into() }))
+                    .with_start(prog, &ds, cfg.start),
+            )
+        }
+        None => None,
+    };
+    CompileOptions {
+        numerics,
+        optimise,
+        stats,
+        solver: args.opts.get("solver").cloned(),
+        replay_dir: args.opts.get("replay-dir").map(PathBuf::from),
+        ..CompileOptions::default()
     }
 }
 

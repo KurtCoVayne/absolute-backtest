@@ -7,6 +7,7 @@
 // size on the error path does not matter.
 #![allow(clippy::result_large_err)]
 
+pub mod analysis;
 pub mod bundle;
 pub mod check;
 pub mod compiler;
@@ -20,6 +21,7 @@ pub mod lower;
 pub mod observe;
 pub mod parser;
 pub mod plan;
+pub mod rewrite;
 pub mod study;
 pub mod table;
 

@@ -64,16 +64,50 @@ pub fn normalised(prog: &Program) -> Nir {
 /// Every stage's result for a program.
 pub struct Compiled {
     pub nir: Nir,
+    pub analysis: crate::analysis::Analysis,
+    pub rewritten: crate::rewrite::Rewritten,
     pub plan: crate::plan::Plan,
     pub lowered: crate::lower::Lowered,
 }
 
-/// Run the pipeline: Normalise, Analyse, Rewrite, Plan, Lower.
-pub fn compile(prog: &Program, opts: &CompileOptions) -> Compiled {
+/// Run the pipeline: Normalise, Analyse, Rewrite, Plan, Lower. With
+/// `optimise` off the rewrites are not applied and the plan is the written
+/// order (the unoptimised path of section 6.6). `dead` carries the
+/// verdicts of the verification tiers that license R2 beyond Analyse.
+pub fn compile_with(prog: &Program, opts: &CompileOptions, dead: &[crate::rewrite::DeadVerdict]) -> Compiled {
     let nir = normalise(prog);
+    let analysis = crate::analysis::analyse(prog, &nir, opts.stats.as_ref(), opts.margin_log2);
     let stats = opts.stats.clone().unwrap_or_default();
-    let inputs = crate::plan::PlanInputs::default();
+    let rewritten = if opts.optimise {
+        crate::rewrite::rewrite(prog, &nir, &analysis, dead, opts.numerics, opts.margin_log2)
+    } else {
+        crate::rewrite::Rewritten {
+            nir: nir.clone(),
+            log: Default::default(),
+            infeasible: Default::default(),
+            elided: Default::default(),
+            shared: Vec::new(),
+            folded: None,
+            fusion_disabled: Vec::new(),
+            passes: 0,
+        }
+    };
+    let mut inputs = analysis.plan_inputs();
+    inputs.infeasible = rewritten.infeasible.clone();
+    inputs.elided = rewritten.elided.clone();
+    inputs.shared = rewritten.shared.clone();
     let plan = crate::plan::plan_program(prog, &inputs, &stats, opts.numerics, opts.optimise);
-    let lowered = crate::lower::order::lower(prog, &plan, None, opts.numerics);
-    Compiled { nir, plan, lowered }
+    let lowered = crate::lower::order::lower(prog, &plan, rewritten.folded.clone(), opts.numerics);
+    Compiled {
+        nir,
+        analysis,
+        rewritten,
+        plan,
+        lowered,
+    }
+}
+
+/// `compile_with` and no verdicts beyond Analyse.
+pub fn compile(prog: &Program, opts: &CompileOptions) -> Compiled {
+    compile_with(prog, opts, &[])
 }

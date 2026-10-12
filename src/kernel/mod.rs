@@ -1373,6 +1373,14 @@ impl<'p> Kernel<'p> {
         Ok(k)
     }
 
+    /// `from_dataset` under a plan (see `new_planned`).
+    pub fn from_dataset_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, mut dataset: Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        let facts = std::mem::take(&mut dataset.facts);
+        let mut k = Kernel::build(lowered.program_for(prog), &dataset, cfg, true, Some(facts))?;
+        k.apply_plan(prog, lowered);
+        Ok(k)
+    }
+
     fn apply_plan(&mut self, source: &'p Program, lowered: &'p crate::lower::Lowered) {
         self.source = source;
         self.plan_label = lowered.label.clone();

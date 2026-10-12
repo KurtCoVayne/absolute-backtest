@@ -195,9 +195,12 @@ fn the_written_plan_equals_the_plain_kernel() {
     }
 }
 
+/// A run's digest and ledgers, or its halt.
+type Outcome = Result<(Vec<String>, BTreeMap<String, Vec<String>>), String>;
+
 /// A run under a plan: the digest and the ledgers (through the kernel kept
 /// after the run), or the halt.
-fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfig) -> Result<(Vec<String>, BTreeMap<String, Vec<String>>), String> {
+fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfig) -> Outcome {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(512 << 20)
