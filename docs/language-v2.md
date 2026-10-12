@@ -744,13 +744,18 @@ returns and dollar volumes at any calendar.
 
 | Module | Relations | Treatment |
 | --- | --- | --- |
-| `calendar` | `bar@C`, `traded@C`, `prev_row`, `row_number`, `lag_rows`, `since(E)`, `month_start`, `day_start`, `session_offset` | the calendars of section 3 and an entity's own rows (7.1) |
-| `catalog` | `split_factor`, `cum_split`, `adj_close`, `total_return`, `tr_index`, `dollar_volume`, `listed_before`, `delisted_before` | corporate actions applied causally (B-3); `tr_index` replaces the `trclose` data of R2 |
-| `stat` | `mean`, `var`, `std`, `cov`, `corr`, `ols_slope`, `ols_r`, `median`, `quantile`, `zscore`, `ewm[λ]`, `cumsum`, `cumprod`, `rolling_max`, `rolling_min`, each over `rows[N]` or `window[δ]` | rolling and recursive moments and order statistics; the aggregate classes of F-8 decide their cost |
-| `bars` | `true_range`, `range`, `gap`, `log_return`, `simple_return`, `vwap@C` | bar-level identities |
-| `xsec` | `rank`, `rank_average`, `decile[d]`, `quantile_bucket[q]`, `zscore_xs`, `top[k]` | cross-sectional operators, each `within` an explicit group |
-| `state` | `latch[enter, stay]`, `carry[R]`, `count_since[E]`, `bars_held`, `entry_price` | keyed temporal recursions (F-4.6) written once |
-| `book` | `held`, `flat`, `weight_now`, `exposure`, `drawdown`, `nav_return`, `nav_vol[N]` | views of the executor relations; `weight_now` reads the `execution` block's price and capital |
+| `calendar` | `bar`, `prev_row`, `first_row`, `row_number` | the decision calendar's bars and an entity's own rows (7.1); `prev`, `lag`, `month_start`, `day_start`, `session_of` and the bar views `close@C`, `traded@C` are builtins |
+| `catalog` | `split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `total_return`, `log_return`, `tr_index` | corporate actions applied causally (B-3); `tr_index` replaces the `trclose` data of R2 |
+| `stat` | `mean_rows[N, R]`, `sum_rows`, `std_rows`, `max_rows`, `min_rows`, `median_rows[N, K, R]`, `mean_window[δ, K, R]`, `sum_window`, `std_window`, `max_window`, `min_window`, `max_prior_window`, `mean_prior_window`, `zscore_rows`, `zscore_window`, `cumsum[R]`, `cumprod[R]`, `ewm[λ, R]` | rolling and recursive moments and order statistics over any relation of the shape (entity, key, value) and any dimension; the aggregate classes of F-8 decide their cost |
+| `bars` | `true_range`, `range`, `gap_points`, `gap`, `price_return`, `log_price_return`, `dollar_volume`, `adv[N]`, `liquid[Floor]` | bar-level identities and the liquidity floor |
+| `xsec` | `decile[R]`, `zscore_xs[R]`, `share_above[R, Th]` | cross-sectional operators, each `within` an explicit group; `rank`, `rank_average` and `top[k]` are forms of the language |
+| `state` | `latch[enter, stay]`, `bars_held`, `entry_price`, `high_since_entry` | keyed temporal recursions (F-4.6) written once |
+| `book` | `held`, `short`, `in_book`, `flat`, `weight_now`, `exposure`, `nav_return`, `peak_nav`, `drawdown`, `nav_vol[N]`, `bought_within[δ]` | views of the executor relations; `weight_now` reads the `execution` block's price and capital; `bought_within` reads the strategy's own decisions |
+| `execution` | the presets `equity_default`, `book_fixed_base`, `futures_fixed_base` | named execution blocks a strategy names and may override field by field (4.3) |
+
+The modules are written out in `corpus-v2/lib/`, one file each, with the
+class catalogs they are written against in `corpus-v2/catalog/`; the table
+is their index, and `corpus-v2/README.md` fixes the grammar they assume.
 
 A bracketed parameter may be a relation (`latch[enter, stay]`): the library
 relation is a module template instantiated by substitution at link time
@@ -1009,31 +1014,64 @@ report (B-7, `study.report`) is a query over it rather than a format.
 
 ## 9. The two books in the second formulation
 
-The programs below are the proposed surface syntax applied to the two books;
-they are the acceptance test of the formulation, since a run of each must
-equal the Python reference as the current programs do (section 11, step 7).
-Both are written to be read against the books' own rule lists.
+The programs below are the surface syntax applied to the two books; they
+are the acceptance test of the formulation, since a run of each must equal
+the Python reference as the current programs do (section 11, step 7). They
+are `corpus-v2/company/mw14.dsl` and `corpus-v2/company/r8l.dsl`, reproduced
+verbatim, and the libraries they use are `corpus-v2/lib/`. Both are written
+to be read against the books' own rule lists.
 
 ### 9.1 MW14
 
 ```
-# MW14: the weekly long-only S&P 1500 momentum book (stageanalyst book.py,
-# canon re-frozen 2026-08-14). Rules R1 to R7 are the book's numbering.
+# MW14: the weekly long-only S&P 1500 momentum book (stageanalyst
+# strategy/ivmom/book.py, canon re-frozen 2026-08-14; engine_weighted.py,
+# run_mw1_core.py, run_mw3_iv.py, data.py). Rules R1 to R7 are the book's
+# numbering; `docs/language-v2.md` section 9.1 reads this file against them.
+# The run is the program: the execution and report blocks replace the
+# sixteen flags of the first formulation's command line, and the weekly
+# facts are the daily facts bucketed, so the demand is daily bars.
+#
+# Rules (book.py docstring numbering):
+#   universe  member of the S&P 500/400/600 at the week end, raw close >= $3,
+#             4-week mean of weekly mean daily dollar volume >= $2M
+#   R1 rank   Clenow: (exp(52 b) - 1) R^2 of the 18-row OLS of log adjusted close
+#             on time; ordinal rank, best first, ties by asset id; no score, no rank
+#   R2 enter  rank <= 7, $SPXTR above its 52-week mean, dollar-volume decile >= 5
+#   R3 stay   rank <= 28, or adjusted close above its 40-row mean
+#   latch     in book = stay and (enter or in book at the name's previous row)
+#   R5 panic  scale 0 unless the gate holds or VIX is at or below its 4-week mean
+#   R7 dial   scale x 0.70 when more than 25% of latched names (with a 40-row
+#             mean) trade more than 50% above it
+#   R4 weight min(scale / N, 0.15) over the N latched eligible names
+#   R6 trade  at the week's close; a name's change fires when it is at least the
+#             2.5% band (1e-12 tolerance); exits always fire
+#
+# Assumptions and known differences from the Python book, each small:
+#   - A held name with no bar in a week (a halt) is kept and marked at its last
+#     price; the book drops it at no cost and may re-buy it. 74 member
+#     name-weeks in 1990-2026 lack a bar.
+#   - A held name's weight drifts as quantity x price / base here and as
+#     w (1 + r) there: equal up to rounding, which can flip a trade at the edge
+#     of the band.
+#   - Decisions on the data's last week have no next bar to settle at; the book
+#     books that week's cost with no return.
 strategy mw14 {
   data {
     class    equity
-    need     bars @1d from 1990-01-01
+    need     bars @1d from 1990-01-01 complete      # a reviewed store: a missing bar means the name did not trade
     need     actions, listing
     need     lists "SP500", "SP400", "SP600", "ETF"
-    need     series "SPXTR" @1d, "VIX" @1w
+    need     series "SPXTR" @1d, "VIX" @1w complete
     require  tested
     prefer   latest
   }
+  uses      calendar, catalog, bars, state, book
   calendars { weekly = weeks(1) }
   clock     { decide on weekly }
 
   universe {
-    # A name's rows are the weeks it traded; SPY and QQQ are not in the book.
+    # A name's rows are the weeks it traded; the ETFs the bundle carries (SPY, QQQ) are not in the book.
     universe(A, T) :- traded@weekly(A, T), not member(A, T, "ETF").
   }
 
@@ -1059,11 +1097,11 @@ strategy mw14 {
   }
 
   rules {
-    # Weekly inputs, as views of the daily bars (catalog and calendar modules).
+    # Weekly inputs, as views of the daily bars: the week's mean daily dollar volume.
     rel dvol(A: Equity, @T, D: Notional<USD>)
-    dvol(A, T, D) :- D = mean(X) over (T1 in bucket(weekly, T), dollar_volume(A, T1, X)).
+    dvol(A, T, D) :- universe(A, T), D = mean(X) over (T1 in bucket(weekly, T), dollar_volume(A, T1, X)).
 
-    # R1: the Clenow score over the name's last 18 rows.
+    # R1: the Clenow score over the name's last 18 rows (a price ratio is a Scalar, F-9).
     rel clenow(A: Equity, @T, S: Scalar)
     clenow(A, T, S) :- universe(A, T), P0 = 1 USD/share,
         B = ols_slope(log(P / P0), K) over (T1 in rows[clenow_rows], adj_close@weekly(A, T1, P), row_number(A, T1, K)),
@@ -1087,13 +1125,13 @@ strategy mw14 {
     rel ranked(A: Equity, @T, K: Count)
     ranked(A, T, K) :- K = rank(scored(A, T, S) by (S desc, A asc)) within (T).
 
-    # The dollar-volume decile, ties averaged.
+    # The dollar-volume decile, ties averaged: ceil(rank / n x 10) >= 5.
     rel liquid(A: Equity, @T)
     liquid(A, T) :- K = rank_average(eligible(A, T, D) by (D asc)) within (T),
         N = count(A1) over (eligible(A1, T, _)) within (T),
         decile(K, N) >= liq_decile.
 
-    # The gate and the calm test on the market series.
+    # The gate and the calm test on the market series (the daily SPXTR is read as its weekly bar view).
     rel gate(@T)
     gate(T) :- value("SPXTR", T, V), M = mean(X) over (T1 in rows[gate_rows], value("SPXTR", T1, X)), V > M.
     rel calm(@T)
@@ -1101,7 +1139,7 @@ strategy mw14 {
 
     # R2, R3 and the latch.
     rel ma(A: Equity, @T, M: Price<USD>)
-    ma(A, T, M) :- M = mean(P) over (T1 in rows[ma_rows], adj_close@weekly(A, T1, P)).
+    ma(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[ma_rows], adj_close@weekly(A, T1, P)).
     rel enter(A: Equity, @T)
     enter(A, T) :- ranked(A, T, K), K <= n_enter, gate(T), liquid(A, T).
     rel stay(A: Equity, @T)
@@ -1110,13 +1148,14 @@ strategy mw14 {
     rel latched(A: Equity, @T)
     latched(A, T) :- latch[enter, stay](A, T).
 
-    # R5 and R7: the scale.
+    # R5 and R7: the scale, one case form.
     rel extension(A: Equity, @T, E: Scalar)
     extension(A, T, E) :- adj_close@weekly(A, T, P), ma(A, T, M), E = P / M - 1.
     rel crowded(@T)
-    crowded(T) :- N = count(A) over (latched(A, T), extension(A, T, _)) within (T), N > 0,
-                  C = count(A) over (latched(A, T), extension(A, T, E), E > crowd_ext) within (T),
-                  C / N > crowd_share.
+    crowded(T) :- bar(T),
+        N = count(A) over (latched(A, T), extension(A, T, _)) within (T), N > 0,
+        C = count(A) over (latched(A, T), extension(A, T, E), E > crowd_ext) within (T),
+        C / N > crowd_share.
     rel scale(@T, S: Scalar)
     scale(T, S) :- bar(T), S = case { not gate(T), not calm(T) -> 0 ;
                                      crowded(T)                -> crowd_dial ;
@@ -1128,6 +1167,12 @@ strategy mw14 {
     rel target(A: Equity, @T, W: Scalar)
     target(A, T, W) :- in_book(A, T), N = count(A1) over (in_book(A1, T)) within (T),
         scale(T, S), W = least(S / N, name_cap), W > min_weight.
+
+    # Observed for the researcher (8.1): the scale at every week and the latch
+    # with the literal that excluded each name, in the ledger, without
+    # changing a decision (Prop. 8.4).
+    observe scale
+    observe latched trace instances
   }
 
   decisions {
@@ -1135,27 +1180,12 @@ strategy mw14 {
     orders  moc
     # R6: trade at the week's close when the change clears the band; exits always.
     decide(T, hold(A, W)) :- target(A, T, W), weight_now(A, T, C), abs(W - C) >= band - band_tol.
-    decide(T, hold(A, W)) :- target(A, T, W), not held(A, T), W >= band - band_tol.
-    decide(T, hold(A, 0)) :- held(A, T), not target(A, T, _).
+    decide(T, hold(A, W)) :- target(A, T, W), not held(A, T, _), W >= band - band_tol.
+    decide(T, hold(A, 0)) :- held(A, T, _), not target(A, T, _).
   }
 
-  execution {
-    price         tr_index@weekly
-    orders        moc
-    lot           fractional
-    capital       1_000_000 USD fixed
-    commission    10 bps per side
-    slippage      none
-    impact        none
-    participation none
-    financing     none
-    leverage      unconstrained
-    actions       in_price
-    delisting     last_price
-    oversize      halt
-    ruin          halt
-    numerics      two_pass
-  }
+  # Fixed $1M, trades at the signal close at the total-return price, 10 bps a side.
+  execution book_fixed_base
 
   report {
     calendar weekly
@@ -1174,21 +1204,52 @@ written as the union of its three indices rather than a label built in an
 ingest script; the VIX four-week mean is a rule; the latch is the library's
 `latch`; the decile is a function; the scale is one case form; and the
 sixteen flags are the `execution` and `report` blocks. The book's "a stock's
-own rows" is the universe, declared.
+own rows" is the universe, declared. The execution block is the
+`book_fixed_base` preset of `corpus-v2/lib/execution.dsl`, which `abt show`
+prints expanded; the demand's `complete` says the store is reviewed, so that
+a missing bar is a week the name did not trade and WF-5 admits `not enter`
+and `not target` (the first formulation declared the same on the
+environment); the two `observe` lines are the researcher's demand of 8.1 and
+change no decision (Prop. 8.4).
 
 ### 9.2 R8L
 
 ```
-# MORNIGHT-R8L: the intraday futures opening-range book (d20-research PB-5,
-# 2026-09-02 amendment). One leg per root and session at most.
+# MORNIGHT-R8L: the intraday futures opening-range book (d20-research PB-5
+# amendment 2026-09-02, ledger row 150; scripts/r31_return.py `load`,
+# scripts/r37_book.py `build_basic` with latefrac_max 1/3, no_stop, no_late;
+# scripts/r39_fixed.py). One leg per root and session at most.
+# `docs/language-v2.md` section 9.2 reads this file against the book's rules.
+#
+# Rules, per root and session (minute k = the k-th minute of the primary session):
+#   ATR      the mean true range of the root's last 20 sessions, as of the
+#            previous session
+#   m        (close before minute 30 - open of minute 0) / ATR
+#   g        (open of minute 0 - previous session's close) / ATR
+#   m_med    the median |m| over the root's last 250 sessions (at least 100
+#            with a value), as of the previous session
+#   main     |m| >= 2 m_med, the gap agrees (|g| < 1 or g and m share a sign)
+#            and the morning is settled ((close before 30 - close before 20)
+#            over m ATR <= 1/3): with m's sign
+#   sidecar  |m| < 2 m_med and g <= -0.75: short
+#   leg      decided 30 minutes after the open, entered at the next print's
+#            open and closed at the session's last print (moo_moc), for
+#            dollars / (ATR x point value) contracts, fractional
+#
+# Known difference from the Python book: where minute 30 did not trade, the
+# entry is the next traded minute's open, where the book fills at the close
+# before minute 30 (231 of 21,892 legs); a session with no print after minute
+# 29 makes no leg here, a commission-only leg there.
+# allow: W9  (the instruments table is the book's HOME-26 list with its start years: a hindsight constant, counted)
 strategy r8l {
   data {
     class    future
-    need     bars @1m from 2000-01-01
+    need     bars @1m from 2000-01-01 complete
     need     sessions, point_value, commission
     require  tested
     prefer   latest
   }
+  uses      calendar, bars
   calendars {
     session = sessions                 # each root's own primary sessions
     es_days = sessions of "ES"         # the reporting calendar
@@ -1196,7 +1257,7 @@ strategy r8l {
   clock { decide on base at session + 30min }   # the bar labelled open + 30 minutes, or the first traded bar after it
 
   universe {
-    # The HOME-26 roots, each from the first year the book trades it (W-list: a hindsight constant, counted).
+    # The HOME-26 roots, each from the first year the book trades it.
     instruments {
       ES from 2000-01-01;  NQ from 2000-01-01;  KC from 2001-01-01;  6J from 2001-01-01
       ZB from 2001-01-01;  ZF from 2001-01-01;  ZN from 2001-01-01;  RTY from 2002-01-01
@@ -1223,7 +1284,7 @@ strategy r8l {
   rules {
     # Session features, on the session calendar, from the minute bars.
     rel atr(A: Future, @S: session, V: Price<USD>)
-    atr(A, S, V) :- V = mean(R) over (S1 in rows[atr_rows], true_range@session(A, S1, R)).
+    atr(A, S, V) :- session(A, S, _), V = mean(R) over (S1 in rows[atr_rows], true_range@session(A, S1, R)).
 
     # The opening prints, read at a decision bar (the session so far) or at a
     # session's close (the whole session): the same rule on either calendar.
@@ -1237,25 +1298,38 @@ strategy r8l {
     session_m(A, S, M) :- open0(A, S, O), close_before[30min](A, S, C), prev(S, S1), atr(A, S1, V),
         V > 0 USD/contract, M = (C - O) / V.
     rel m_median(A: Future, @S: session, Q: Scalar)
-    m_median(A, S, Q) :- Q = median(abs(M)) over (S1 in rows[med_rows] min med_min, session_m(A, S1, M)).
+    m_median(A, S, Q) :- session(A, S, _), Q = median(abs(M)) over (S1 in rows[med_rows] min med_min, session_m(A, S1, M)).
 
     # At the decision bar: today's prints and the previous session's features
     # (a feature the previous session lacks is missing, not carried).
-    rel signal(A: Future, @T, M: Scalar, G: Scalar, V: Price<USD>, Q: Scalar, Late: Scalar)
-    signal(A, T, M, G, V, Q, Late) :- universe(A, T),
+    rel signal(A: Future, @T, M: Scalar, G: Scalar, V: Price<USD>, Q: Scalar, O: Price<USD>, C20: Price<USD>)
+    signal(A, T, M, G, V, Q, O, C20) :- universe(A, T),
         session_of(A, T, S), prev(S, S1),
         atr(A, S1, V), V > 0 USD/contract, m_median(A, S1, Q), close@session(A, S1, PC),
         open0(A, T, O), close_before[30min](A, T, C30), close_before[20min](A, T, C20),
-        M = (C30 - O) / V, G = (O - PC) / V, Late = (C30 - C20) / (C30 - O).
+        M = (C30 - O) / V, G = (O - PC) / V.
 
     rel aligned(A: Future, @T)
-    aligned(A, T) :- signal(A, T, _, G, _, _, _), abs(G) < gap_free.
-    aligned(A, T) :- signal(A, T, M, G, _, _, _), G * M > 0.
+    aligned(A, T) :- signal(A, T, _, G, _, _, _, _), abs(G) < gap_free.
+    aligned(A, T) :- signal(A, T, M, G, _, _, _, _), G * M > 0.
+
+    # The morning is settled when the last ten minutes moved at most a third of the move so far.
+    rel settled(A: Future, @T)
+    settled(A, T) :- signal(A, T, M, _, V, _, O, C20), (O + M * V - C20) / (M * V) <= late_max.
 
     rel leg(A: Future, @T, Dir: Scalar, V: Price<USD>)
-    leg(A, T, Dir, V) :- signal(A, T, M, G, V, Q, Late),
-        Dir = case { abs(M) >= k_main * Q, aligned(A, T), Late <= late_max -> sign(M) ;
-                     abs(M) <  k_main * Q, G <= side_gap               -> -1 }.
+    leg(A, T, Dir, V) :- signal(A, T, M, G, V, Q, _, _),
+        Dir = case { abs(M) >= k_main * Q, abs(M) > 0, aligned(A, T), settled(A, T) -> sign(M) ;
+                     abs(M) <  k_main * Q, G <= side_gap                             -> -1 }.
+
+    # Observed for the researcher (8.1): the plan reaches `aligned` and
+    # `settled` only where a leg is being decided; observing them, and the
+    # median that gates the legs, materialises their extension at every
+    # decision bar for the ledger without changing a decision (Prop. 8.4).
+    observe signal
+    observe aligned trace instances
+    observe settled trace instances
+    observe m_median where A = "ES"
   }
 
   decisions {
@@ -1264,23 +1338,8 @@ strategy r8l {
     decide(T, hold(A, N)) :- leg(A, T, Dir, V), point_value(A, T, PV), N = Dir * risk / (V * PV).
   }
 
-  execution {
-    price         close
-    orders        moo_moc
-    lot           fractional
-    capital       1_000_000 USD fixed
-    commission    per_contract from catalog
-    slippage      none
-    impact        none
-    participation none
-    financing     none
-    leverage      unconstrained
-    actions       apply
-    delisting     last_price
-    oversize      halt
-    ruin          halt
-    numerics      two_pass
-  }
+  # Fixed $1M, commission per contract only, fractional contracts.
+  execution futures_fixed_base
 
   report {
     calendar es_days
@@ -1299,7 +1358,14 @@ counts them. The entry at
 traded minute" are what `moo_moc` on the session calendar means (S-6, order
 types), stated in the execution block instead of in two data relations.
 `late_max : Scalar = 1/3` is a literal expression, admitted in `params` so
-that the book's third is not an `one / three`.
+that the book's third is not an `one / three`. `settled` is a relation of its
+own so that the late test's division, with m times the ATR in the
+denominator, is demanded only where a main leg is being decided (5.3); the
+sidecar never evaluates it, which is the sidecar-leg loss of R11 removed by
+construction. The four `observe` lines materialise `signal`, `aligned`,
+`settled` and the ES median at every decision bar for the ledger, which is
+what R12 asked for: the rules the plan reaches at few bars have a definite
+extension at every bar, and a researcher reads it without touching the plan.
 
 ## 10. The checker
 
@@ -1332,14 +1398,14 @@ temporal stratification (F-12 item 1), W5 and W6.
 Each step is a change to the crate that leaves the two parity runs equal to
 their references; step 7 is the proof that the formulation lost nothing.
 
-1. **Blocks and closed configuration.** Parser and IR for the nine blocks; `ExecConfig` built from `execution`; the study reads the block; `abt run` takes a program and a catalog (or one bundle, the degenerate catalog) and nothing else, with `--param` kept for studies. The current corpus is migrated mechanically (a strategy's header lines become its `data`, `clock` and `decisions` blocks; a default execution library holds today's defaults, expanded in every file). WF-14, WF-17.
+1. **Blocks and closed configuration.** Parser and IR for the nine blocks; `ExecConfig` built from `execution`; the study reads the block; `abt run` takes a program and a catalog (or one bundle, the degenerate catalog) and nothing else, with `--param` kept for studies. The corpus is already written in the formulation: `corpus-v2/` holds the class catalogs, the library, the 23 strategies of `corpus/` rewritten plus `scale_in`, the two books and 35 negative cases, and `tests/corpus_v2.rs` asserts it as `tests/corpus.rs` asserts `corpus/` today. WF-14, WF-17.
 1a. **The catalog and the resolver.** The manifest's rows become the catalog relations of 3.10 over every bundle a directory holds; `abt data` lists and queries them; the `data` block resolves to a binding recorded with every run and trial; `abt data resolve` explains the choice.
 2. **Calendars and bar views.** `Resolution` becomes a calendar handle; the manifest declares classes and base resolutions; the `calendar` module and the bar-view cache; WF-16; `abt bundle env` generates the environment. MW14's bundle is rebuilt from the daily lake with no weekly step in the ingest.
 3. **Sessions and the decision clock.** `session` as a class property, `session(X, [a, b))` as a temporal constraint, `clock { decide on base at session + OFFSET }`. R8L's bundle is rebuilt from the minute bars with no print relations; the memory question of `docs/assessment.md` A2 (columnar stores) is a prerequisite for the 47M-bar bundle and is done here.
 4. **Universes, lists and vocabularies.** The `universe` block as the entity domain; `member`, `usable` and the manifest vocabulary; WF-15.
 5. **Order-independent bodies, explicit groups, case forms.** Definition 5.2 in the evaluator; the plan chooser of 5.2 (tests first, then by estimated cost); `within`; `case`; keyedness guard; WF-11, WF-13; the `+`/`-` annotations become optional, then removed.
 6. **Queries and provenance.** Done on the v1 kernel (section 15): `show`, the coverage report with its root causes and sample-bar explanations, `query --explain` (the `?` and `why not` forms at one level, with the fired instance's bindings), `--ledger` (observation over a run). To do: Δ and F (8.2), `why` over Δ, the recursive `why not`, `trace`, `observe` in the program, `show --tables`, `abt ir` and `abt hash`, and the socket on the fold. `abt explain` is retired into `query --explain`.
-7. **Library and the books.** The modules of section 7 replace `corpus/lib`; `corpus/company/*.dsl` are replaced by section 9's programs; the parity scripts are rerun and must match (1,852 of 1,852 weeks; 21,892 of 21,892 legs). The usability experiment is rerun on the same tasks with the same models and its first-attempt pass rate and attempts-to-clean are recorded beside the old ones.
+7. **Library and the books.** `corpus-v2/lib` replaces `corpus/lib` and `corpus-v2/company` replaces `corpus/company`; the parity scripts are rerun on them and must match (1,852 of 1,852 weeks; 21,892 of 21,892 legs). The usability experiment is rerun on the same tasks with the same models and its first-attempt pass rate and attempts-to-clean are recorded beside the old ones.
 
 Steps 1, 4 and 5 are parser, checker and evaluator work inside the crate's
 present structure; steps 2 and 3 touch the bundle format and the ingest and
@@ -1421,3 +1487,17 @@ volume at a sub-daily resolution, the false zero-commission warning, the
 executor relations' modes in the semantic model, and the builtins the
 README's one page lacked. The implementation order of section 11 is
 updated accordingly: step 6's first half is done.
+
+The corpus of the second formulation is written. `corpus-v2/` holds the
+three class catalogs, the seven library modules and the execution presets of
+section 7, the 23 strategies of `corpus/` rewritten plus `scale_in` (a cycle
+through an aggregate over a relation's own past, which temporal
+stratification admits and the first formulation rejected), the two books of
+section 9, and 35 negative cases, one or more per judgment of section 10 and
+of the retained ones. `corpus-v2/README.md` fixes the grammar the corpus
+assumes where this document leaves a form open: the `complete` qualifier of
+a `need`, which is how a program says its store is reviewed and WF-5 may
+close the bar primitives; the decision calendar as the default calendar of a
+relation; the universe complete by definition; the literal forms. Nothing in
+it is read by the present toolchain; `tests/corpus_v2.rs` is its acceptance
+test when step 1 lands.
