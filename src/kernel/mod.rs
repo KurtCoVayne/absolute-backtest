@@ -527,6 +527,10 @@ pub struct KernelStats {
     /// Derived results held in the memo at the end of the run.
     #[serde(default)]
     pub memo_entries: usize,
+    /// Instances that met a partial operation and were excluded by a later
+    /// literal (Kleene conjunction: never a halt).
+    #[serde(default)]
+    pub excluded_after_undefined: usize,
 }
 
 /// What the evaluator derived for one relation over a run: how many times
@@ -1077,6 +1081,14 @@ pub struct RunResult {
     /// What every relation derived over the run (the coverage report).
     #[serde(default)]
     pub coverage: Vec<RelationCoverage>,
+    /// Per rule and body literal (written index): bindings entering, bindings
+    /// leaving, and calls at which the literal left no binding (the observed
+    /// cardinalities of the plan and the failure counts).
+    #[serde(default)]
+    pub literal_counts: Vec<Vec<(u64, u64, u64)>>,
+    /// The plan the run evaluated under (`written` or `optimised`).
+    #[serde(default)]
+    pub plan: String,
 }
 
 impl RunResult {
@@ -1245,7 +1257,21 @@ impl std::fmt::Display for Explanation {
 }
 
 pub struct Kernel<'p> {
+    /// The program the kernel evaluates: the checked one, or the lowered copy
+    /// with its constants folded (compiler design, R6).
     pub(crate) prog: &'p Program,
+    /// The checked program as written, for diagnostics in the author's words.
+    pub(crate) source: &'p Program,
+    /// The plan (compiler design, "Lower"): per rule the evaluation order of
+    /// its body, the rules that contribute no work, the aggregation literals
+    /// sharing one window state, and the plan's name.
+    pub(crate) plan_order: Vec<Option<Rc<Vec<usize>>>>,
+    pub(crate) skip_rule: Vec<bool>,
+    pub(crate) shared_windows: FxHashMap<(usize, usize), usize>,
+    pub(crate) plan_label: String,
+    /// Per rule and written body literal: bindings in, bindings out, calls at
+    /// which the literal emptied the survivors.
+    pub(crate) literal_counts: Vec<Vec<(u64, u64, u64)>>,
     pub symbols: Symbols,
     pub(crate) stores: Vec<Store>,
     /// Shared so that a call holds its relation's facts without copying them.
@@ -1257,6 +1283,8 @@ pub struct Kernel<'p> {
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
     pub(crate) in_progress: FxHashSet<MemoKey>,
+    /// Calls that halted on a stuck instance, by memo key (see `call`).
+    pub(crate) memo_errors: FxHashMap<MemoKey, RunError>,
     pub(crate) domains: HashMap<Resolution, BTreeSet<i64>>,
     pub(crate) cfg: ExecConfig,
     pub(crate) price_rel: Option<usize>,
@@ -1327,6 +1355,43 @@ pub struct Kernel<'p> {
 impl<'p> Kernel<'p> {
     pub fn new(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
         Kernel::build(prog, dataset, cfg, true, None)
+    }
+
+    /// A kernel evaluating `prog` under a plan (compiler design, "Lower"):
+    /// the plan's literal orders, infeasible rules, shared window states
+    /// and folded constants are applied; everything else is `new`.
+    pub fn new_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        let mut k = Kernel::build(lowered.program_for(prog), dataset, cfg, true, None)?;
+        k.apply_plan(prog, lowered);
+        Ok(k)
+    }
+
+    /// The streaming counterpart of `new_planned` (see `new_streaming`).
+    pub fn new_streaming_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        let mut k = Kernel::build(lowered.program_for(prog), dataset, cfg, false, None)?;
+        k.apply_plan(prog, lowered);
+        Ok(k)
+    }
+
+    fn apply_plan(&mut self, source: &'p Program, lowered: &'p crate::lower::Lowered) {
+        self.source = source;
+        self.plan_label = lowered.label.clone();
+        self.plan_order = (0..self.prog.rules.len())
+            .map(|ri| {
+                let order = lowered.order.get(ri)?;
+                let written: Vec<usize> = (0..self.prog.rules[ri].body.len()).collect();
+                (*order != written).then(|| Rc::new(order.clone()))
+            })
+            .collect();
+        self.skip_rule = (0..self.prog.rules.len()).map(|ri| lowered.skip.get(ri).copied().unwrap_or(false)).collect();
+        self.shared_windows = lowered.shared_windows.iter().map(|(k, v)| (*k, *v)).collect();
+        // The numerics setting of the plan is the executor configuration's.
+        self.cfg.running_sums = lowered.numerics == crate::lower::Numerics::Running;
+    }
+
+    /// The plan this kernel evaluates under (`written` when none was applied).
+    pub fn plan_label(&self) -> &str {
+        &self.plan_label
     }
 
     /// A kernel over the dataset's symbols and tables but none of its facts:
@@ -1775,8 +1840,15 @@ impl<'p> Kernel<'p> {
         // A week of slack covers `prev` across weekends and holidays at any resolution.
         let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
         let n_rels = rels.len();
+        let literal_counts: Vec<Vec<(u64, u64, u64)>> = prog.rules.iter().map(|r| vec![(0, 0, 0); r.body.len()]).collect();
         Ok(Kernel {
             prog,
+            source: prog,
+            plan_order: vec![None; prog.rules.len()],
+            skip_rule: vec![false; prog.rules.len()],
+            shared_windows: Default::default(),
+            plan_label: "written".into(),
+            literal_counts,
             symbols,
             stores,
             rels,
@@ -1785,6 +1857,7 @@ impl<'p> Kernel<'p> {
             memo: Default::default(),
             asof_memo: Default::default(),
             in_progress: Default::default(),
+            memo_errors: Default::default(),
             domains,
             cfg,
             price_rel,
@@ -1893,6 +1966,7 @@ impl<'p> Kernel<'p> {
     pub fn invalidate_from(&mut self, key: i64) {
         self.memo.clear();
         self.asof_memo.clear();
+        self.memo_errors.clear();
         for cache in self.windows.values_mut() {
             let keep = std::mem::take(cache);
             *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
@@ -2013,7 +2087,14 @@ impl<'p> Kernel<'p> {
         exec.finish(self, &mut result);
         result.stats = self.stats();
         result.coverage = self.coverage();
+        result.literal_counts = self.literal_counts.clone();
+        result.plan = self.plan_label.clone();
         Ok(result)
+    }
+
+    /// The per-literal counters so far (see `RunResult::literal_counts`).
+    pub fn literal_counts(&self) -> &[Vec<(u64, u64, u64)>] {
+        &self.literal_counts
     }
 
     /// The bars of the time domain at `res` (section 6): what a relation at
@@ -2413,23 +2494,33 @@ impl<'p> Kernel<'p> {
             env[slot] = Some(val.clone());
             shown.push((var.clone(), self.show(val)));
         }
+        // Literal by literal in the written order, under Kleene conjunction
+        // (`solve_kleene`): the literal reported is the one at which the last
+        // instance was excluded, stuck instances included; an instance stuck
+        // to the end is the halt the run would have met.
         let mut envs = vec![env];
+        let mut stuck: Vec<eval::Stuck> = Vec::new();
         for (i, lit) in rule.body.iter().enumerate() {
-            let mut next = Vec::new();
-            for e in &envs {
-                self.step(&cr, lit, e, &mut next)?;
-            }
-            if next.is_empty() {
+            let before = envs.len() + stuck.len();
+            let (next, still) = self.solve_kleene_from(&cr, &rule.body, &[i], envs, stuck, None)?;
+            if next.is_empty() && still.is_empty() && before > 0 {
+                let shown_lit = self.source.rules.get(rule_idx).and_then(|r| r.body.get(i)).unwrap_or(lit);
                 return Ok(Explanation {
                     rule: cr.label.clone(),
                     t,
                     bindings: shown,
                     solutions: 0,
-                    failed_at: Some((i, lit.describe())),
+                    failed_at: Some((i, shown_lit.describe())),
                     solution: Vec::new(),
                 });
             }
             envs = next;
+            stuck = still;
+        }
+        if envs.is_empty() {
+            if let Some(s) = stuck.into_iter().next() {
+                return Err(s.error);
+            }
         }
         let mut solution: Vec<(String, String)> = cr.slots.iter().filter_map(|(name, &slot)| envs[0][slot].as_ref().map(|v| (name.clone(), self.show(v)))).collect();
         solution.sort();

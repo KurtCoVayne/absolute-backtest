@@ -209,6 +209,27 @@ fn moment_aggregate(agg: &str) -> bool {
     matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_beta")
 }
 
+/// An instance that met a partial operation while a body was solved: its
+/// bindings, the slots left undefined by the literal that failed, and the
+/// halt it would cause if no later literal excludes it.
+pub(crate) struct Stuck {
+    pub env: Env,
+    pub undefined: Vec<usize>,
+    pub error: RunError,
+}
+
+/// Whether two aggregation literals of one rule may share one window state
+/// (compiler design, R3 lowered): the same conjunction, written with the
+/// same variables, the same window and minimum, and the same arguments, so
+/// that the rows one solves are exactly the rows the other would.
+pub fn shareable_windows(rule: &Rule, primary: usize, other: usize) -> bool {
+    let (Some(a), Some(b)) = (rule.body.get(primary), rule.body.get(other)) else { return false };
+    match (a, b) {
+        (Literal::Agg { args: aa, conj: ca, .. }, Literal::Agg { args: ab, conj: cb, .. }) => aa == ab && ca == cb,
+        _ => false,
+    }
+}
+
 /// A windowed aggregation group: the rule, the aggregation literal, and the
 /// outer bindings its conjunction reads apart from the window's base time.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -273,6 +294,13 @@ impl<'p> Kernel<'p> {
         if let Some(hit) = self.memo.get(&memo_key) {
             return Ok(narrow(hit));
         }
+        // A call that halted on a stuck instance (Kleene conjunction: a
+        // partial operation no later literal excluded) halts again when
+        // repeated: the halt is memoised too, so that a ⊥ instance read by
+        // many callers at one bar is computed once.
+        if let Some(e) = self.memo_errors.get(&memo_key) {
+            return Err(e.clone());
+        }
         // WF-4 rules out a relation depending on itself at the same time;
         // debug builds (the tests) still check that the checker did its job.
         if cfg!(debug_assertions) && !self.in_progress.insert(memo_key.clone()) {
@@ -281,11 +309,45 @@ impl<'p> Kernel<'p> {
                 info.name
             )));
         }
+        let derived = self.derive_rules(&info, pattern);
+        if cfg!(debug_assertions) {
+            self.in_progress.remove(&memo_key);
+        }
+        let mut results = match derived {
+            Ok(r) => r,
+            Err(e) => {
+                if matches!(e, RunError::Arithmetic { .. }) {
+                    self.memo_errors.insert(memo_key, e.clone());
+                }
+                return Err(e);
+            }
+        };
+        if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
+            results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+        }
+        let cov = &mut self.coverage[rel];
+        cov.0 += 1;
+        cov.1 += usize::from(!results.is_empty());
+        cov.2 += results.len();
+        let rc = Rc::new(results);
+        self.memo.insert(memo_key, rc.clone());
+        Ok(narrow(&rc))
+    }
+
+    /// Every tuple the rules of a derived relation yield for a pattern, with
+    /// the rule that derived each (the first, when several do), or the halt
+    /// of an instance left stuck.
+    fn derive_rules(&mut self, info: &super::RelInfo, pattern: &[Option<Value>]) -> Result<Vec<(Tuple, usize)>, RunError> {
         let mut results: Vec<(Tuple, usize)> = Vec::new();
         // Duplicates are found by a scan while the set is small, by a hash
         // set once it grows (most calls derive at most a tuple or two).
         let mut seen: Option<super::hash::FxHashSet<Tuple>> = None;
         for &ri in &info.rules {
+            // A rule the rewriter proved infeasible (compiler design, R2)
+            // contributes no tuple: the plan skips it.
+            if self.skip_rule.get(ri).copied().unwrap_or(false) {
+                continue;
+            }
             let cr = self.compiled[ri].clone();
             let rule = &self.prog.rules[ri];
             let mut env: Env = vec![None; cr.nslots];
@@ -308,7 +370,14 @@ impl<'p> Kernel<'p> {
             if !applicable {
                 continue;
             }
-            let sols = self.solve(&cr, &rule.body, vec![env])?;
+            // The body in the plan's order (the written order without a
+            // plan); an instance left stuck on a partial operation halts the
+            // run here, where a decision demanded it (section 7).
+            let order = self.plan_order(ri);
+            let (sols, stuck) = self.solve_kleene(&cr, &rule.body, &order, vec![env], Some(ri))?;
+            if let Some(s) = stuck.into_iter().next() {
+                return Err(s.error);
+            }
             for sol in sols {
                 let mut tu = Vec::with_capacity(rule.head.terms.len());
                 for term in &rule.head.terms {
@@ -329,19 +398,24 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
-        if cfg!(debug_assertions) {
-            self.in_progress.remove(&memo_key);
+        Ok(results)
+    }
+
+    /// The index of a body literal in its rule, mapped to the literal whose
+    /// window state it shares under the plan (R3); the window caches are
+    /// keyed by it.
+    pub(crate) fn literal_index(&self, cr: &CompiledRule, lit: &Literal) -> usize {
+        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        self.shared_windows.get(&(cr.idx, literal)).copied().unwrap_or(literal)
+    }
+
+    /// The order the plan evaluates a rule's body in (the written order
+    /// without one).
+    pub(crate) fn plan_order(&self, ri: usize) -> Rc<Vec<usize>> {
+        match self.plan_order.get(ri).and_then(|o| o.clone()) {
+            Some(o) => o,
+            None => Rc::new((0..self.prog.rules[ri].body.len()).collect()),
         }
-        if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
-            results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
-        }
-        let cov = &mut self.coverage[rel];
-        cov.0 += 1;
-        cov.1 += usize::from(!results.is_empty());
-        cov.2 += results.len();
-        let rc = Rc::new(results);
-        self.memo.insert(memo_key, rc.clone());
-        Ok(narrow(&rc))
     }
 
     fn term_value(&mut self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<Value, RunError> {
@@ -413,18 +487,130 @@ impl<'p> Kernel<'p> {
             .ok_or_else(|| RunError::Internal(format!("unknown parameter `{}` in `{}`", name, unit)))
     }
 
-    pub(crate) fn solve(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], mut envs: Vec<Env>) -> Result<Vec<Env>, RunError> {
-        for lit in lits {
+    /// Solve a conjunction in the order written: the live solutions, or the
+    /// halt of an instance left stuck on a partial operation.
+    pub(crate) fn solve(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], envs: Vec<Env>) -> Result<Vec<Env>, RunError> {
+        let order: Vec<usize> = (0..lits.len()).collect();
+        let (live, stuck) = self.solve_kleene(cr, lits, &order, envs, None)?;
+        match stuck.into_iter().next() {
+            Some(s) => Err(s.error),
+            None => Ok(live),
+        }
+    }
+
+    /// The slots a literal mentions, by the rule's slot table.
+    fn literal_slots(cr: &CompiledRule, lit: &Literal) -> Vec<usize> {
+        let mut names = Vec::new();
+        literal_vars(lit, &mut names);
+        let mut slots: Vec<usize> = names.iter().filter_map(|v| cr.slots.get(v).copied()).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }
+
+    /// Solve a body under Kleene conjunction (semantic model, section 4; compiler
+    /// design, section 4.1, "interaction with ⊥"): the literals are taken in
+    /// `order`; an instance on which a literal meets a partial operation (a
+    /// division by zero, a log of a non-positive, an aggregate of too few
+    /// rows) is neither excluded nor fired but *stuck*, with the slots that
+    /// literal would have bound undefined. A later literal that mentions no
+    /// undefined slot still runs on it: when it is false the instance is
+    /// excluded, which is what the written order would have done had the
+    /// test come first; a literal that mentions an undefined slot is skipped
+    /// (its value is ⊥ too). What survives every literal stuck is returned
+    /// apart, and the caller halts on it, since no literal excluded it. The
+    /// set of fired, excluded and stuck instances is therefore independent
+    /// of the order, which is what lets the planner choose one.
+    ///
+    /// With `record`, the rule's per-literal counters are updated: the
+    /// bindings entering and leaving each literal (the observed cardinalities
+    /// the plan reports) and the literal at which a call lost its last
+    /// binding (the failure table).
+    pub(crate) fn solve_kleene(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], order: &[usize], envs: Vec<Env>, record: Option<usize>) -> Result<(Vec<Env>, Vec<Stuck>), RunError> {
+        self.solve_kleene_from(cr, lits, order, envs, Vec::new(), record)
+    }
+
+    /// `solve_kleene` continuing from live and stuck instances (what `explain`
+    /// steps literal by literal).
+    pub(crate) fn solve_kleene_from(
+        &mut self,
+        cr: &Rc<CompiledRule>,
+        lits: &[Literal],
+        order: &[usize],
+        envs: Vec<Env>,
+        stuck: Vec<Stuck>,
+        record: Option<usize>,
+    ) -> Result<(Vec<Env>, Vec<Stuck>), RunError> {
+        let mut live = envs;
+        let mut stuck: Vec<Stuck> = stuck;
+        for &li in order {
+            let lit = &lits[li];
+            let entering = live.len();
             let mut next = Vec::new();
-            for env in &envs {
-                self.step(cr, lit, env, &mut next)?;
+            for env in &live {
+                let mut out = Vec::new();
+                match self.step(cr, lit, env, &mut out) {
+                    Ok(()) => next.extend(out),
+                    Err(error @ RunError::Arithmetic { .. }) => {
+                        let undefined: Vec<usize> = Self::literal_slots(cr, lit).into_iter().filter(|&s| env[s].is_none()).collect();
+                        stuck.push(Stuck { env: env.clone(), undefined, error });
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            envs = next;
-            if envs.is_empty() {
+            if !stuck.is_empty() {
+                let mentioned = Self::literal_slots(cr, lit);
+                let mut still = Vec::with_capacity(stuck.len());
+                for s in stuck.drain(..) {
+                    if mentioned.iter().any(|m| s.undefined.contains(m)) {
+                        still.push(s);
+                        continue;
+                    }
+                    let mut out = Vec::new();
+                    match self.step(cr, lit, &s.env, &mut out) {
+                        Ok(()) => {
+                            if out.is_empty() {
+                                self.stats.excluded_after_undefined += 1;
+                            }
+                            for e in out {
+                                still.push(Stuck {
+                                    env: e,
+                                    undefined: s.undefined.clone(),
+                                    error: s.error.clone(),
+                                });
+                            }
+                        }
+                        Err(RunError::Arithmetic { .. }) => {
+                            let mut undefined = s.undefined;
+                            undefined.extend(mentioned.iter().copied().filter(|&m| s.env[m].is_none()));
+                            still.push(Stuck {
+                                env: s.env,
+                                undefined,
+                                error: s.error,
+                            });
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                stuck = still;
+            }
+            if let Some(ri) = record {
+                if let Some(counts) = self.literal_counts.get_mut(ri) {
+                    if let Some(c) = counts.get_mut(li) {
+                        c.0 += entering as u64;
+                        c.1 += next.len() as u64;
+                        if entering > 0 && next.is_empty() && stuck.is_empty() {
+                            c.2 += 1;
+                        }
+                    }
+                }
+            }
+            live = next;
+            if live.is_empty() && stuck.is_empty() {
                 break;
             }
         }
-        Ok(envs)
+        Ok((live, stuck))
     }
 
     /// The pattern an atom presents to `call`, and whether each term needs
@@ -1038,7 +1224,7 @@ impl<'p> Kernel<'p> {
         outer.dedup();
         // The literal by its position in the rule's body (aggregations do not
         // nest), so that the key survives a checkpoint.
-        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        let literal = self.literal_index(cr, lit);
         let key = WindowKey {
             rule: cr.idx,
             literal,
@@ -1113,7 +1299,7 @@ impl<'p> Kernel<'p> {
     /// at the group's first bar once it is known.
     /// The static shape of a rows window (rule, literal): computed once.
     fn rows_plan(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Result<Rc<RowsPlan>, RunError> {
-        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        let literal = self.literal_index(cr, lit);
         if let Some(p) = self.rows_plans.get(&(cr.idx, literal)) {
             return Ok(p.clone());
         }
@@ -1328,7 +1514,7 @@ impl<'p> Kernel<'p> {
     /// variables its conjunction binds (then rows in time order are rows in
     /// environment order). Judged once per rule and literal.
     fn time_ordered(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], env: &Env) -> bool {
-        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        let literal = self.literal_index(cr, lit);
         if let Some(&known) = self.time_ordered_memo.get(&(cr.idx, literal)) {
             return known;
         }
@@ -1385,7 +1571,7 @@ impl<'p> Kernel<'p> {
         let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
         outer.sort_unstable();
         outer.dedup();
-        let literal = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)).unwrap_or(usize::MAX);
+        let literal = self.literal_index(cr, lit);
         let key = WindowKey {
             rule: cr.idx,
             literal,

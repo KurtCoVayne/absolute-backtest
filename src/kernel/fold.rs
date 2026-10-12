@@ -276,6 +276,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         kernel.stats = cp.stats;
         kernel.memo.clear();
         kernel.asof_memo.clear();
+        kernel.memo_errors.clear();
         exec.restore(cp.executor).map_err(RunError::Config)?;
         let mut sched = Scheduler::new(&kernel);
         sched.open = cp.open_buckets.into_iter().collect();
@@ -380,6 +381,9 @@ impl<'p, 'e> Fold<'p, 'e> {
         }
         self.exec.finish(&mut self.kernel, &mut self.result);
         self.result.stats = self.kernel.stats();
+        self.result.coverage = self.kernel.coverage();
+        self.result.literal_counts = self.kernel.literal_counts().to_vec();
+        self.result.plan = self.kernel.plan_label().to_string();
         Ok((self.result, self.kernel))
     }
 }

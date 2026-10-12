@@ -15,8 +15,10 @@ pub mod ingest;
 pub mod ir;
 pub mod kernel;
 pub mod lexer;
+pub mod lower;
 pub mod observe;
 pub mod parser;
+pub mod plan;
 pub mod study;
 pub mod table;
 

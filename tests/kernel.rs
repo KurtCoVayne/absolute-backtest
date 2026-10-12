@@ -761,14 +761,37 @@ strategy unguarded {
     )
     .unwrap();
     assert!(!r.decisions.is_empty());
-    // Demanded at every bar, the same tuple halts on the first one.
+    // Demanded at every bar ahead of `selected`, the undefined `w` is read
+    // on the warm-up bars, but the body is a Kleene conjunction (compiler
+    // design, section 4.1): `selected(A, T)` is false there, so the instance
+    // is excluded, not stuck, and the run equals the one above. The written
+    // order of a body never decides whether a run halts.
     let demanded = src.replace(
         "decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).",
         "decide(T, target_weight(A, W)) :- bar(T), w(T, W), selected(A, T).",
     );
-    let (prog, _) = program(&demanded, "unguarded");
+    let (prog2, _) = program(&demanded, "unguarded");
+    let r2 = run(
+        &prog2,
+        &ds,
+        ExecConfig {
+            on_leverage: OnLeverage::Allow,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
+    let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", d.t, r.describe_decision(&d.decision))).collect() };
+    assert_eq!(show(&r), show(&r2));
+    assert!(r2.stats.excluded_after_undefined > 0, "{:?}", r2.stats);
+    // With nothing after it to exclude the instance, the undefined `w` is
+    // stuck and halts the run on the first bar it is demanded at.
+    let stuck = src.replace(
+        "decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).",
+        "decide(T, target_weight(A, W)) :- universe(A, T), w(T, W).",
+    );
+    let (prog3, _) = program(&stuck, "unguarded");
     match run(
-        &prog,
+        &prog3,
         &ds,
         ExecConfig {
             on_leverage: OnLeverage::Allow,
