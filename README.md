@@ -44,7 +44,7 @@ resampled bucket.
 | `src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, `abt explain --derivation`, `abt why-not`, `abt materialise`). |
 | `src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
 | `scripts/synth/` | Synthetic markets in the layouts of `equities_1w` and `futures_sessions`, on which the two company books run (`docs/llm-observability.md`). |
-| `experiments/llm-observability/` | The observability study: Haiku agents writing six strategies with and without the observability commands; prompts, tasks, sandboxes, scorer, and every run. |
+| `experiments/llm-observability/` | The observability study: Haiku agents writing six strategies with and without the observability commands; prompts, tasks, sandboxes, scorer, and every run. Every program the two studies' agents wrote is the compiler's out-of-sample corpus: `tests/experiments.rs` compiles, validates and verifies each (`docs/compiler-design.md`, section 12.1). |
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
 | `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
 | `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |

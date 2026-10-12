@@ -217,9 +217,24 @@ decide(2022-05-10, sell(SPY, 100))@2022-05-10  [trailing_stop::decide#2]
 
 `why-not` answers for an absent tuple: per rule of the relation, the first
 literal that excluded the instrument at the bar and the bindings at that
-point; when that literal is a supplied relation's atom with no tuple there
-(a `fill` that never happened, a primitive the data lacks), the verdict is
+point. When that literal reads a derived relation at an identity and bar the
+bindings fix, the question is asked again of that relation, indented under
+the rule, down to a comparison, a supplied relation, or eight levels: the
+answer ends at the root, not at the next relation down. When the deepest
+literal is a supplied relation's atom with no tuple there (a `fill` that
+never happened, a label the data never carries), the verdict is
 *absence-driven*: the data, not the rule, decided.
+
+```
+why not decide(E1) at 2025-10-31:
+  momentum_liquid_monthly::decide#1 excluded at literal 1 `selected(A, T, _)` with A = E1, T = 2025-10-31
+    why not selected(E1) at 2025-10-31:
+      momentum_liquid_monthly::selected#1 excluded at literal 1 `cand(A, T, _)` with A = E1, T = 2025-10-31
+        why not cand(E1) at 2025-10-31:
+          momentum_liquid_monthly::cand#1 excluded at literal 2 `member(A, T, "SP500")` with ...: absence-driven
+  ...
+verdict: absence-driven
+```
 
 `materialise` evaluates a relation at a bar from its rules whether or not
 the plan computed it: an elided relation (one nothing demanded reaches,

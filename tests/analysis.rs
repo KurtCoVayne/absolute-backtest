@@ -242,6 +242,29 @@ fn the_warnings_of_the_abstract_interpretation() {
     assert!(codes(&a).contains(&"A011".to_string()), "{:?}", a.warnings);
 }
 
+/// A008 is a warning, not a note, when an argument is a constant at every
+/// row (a point interval): the aggregate is undefined at every bar and the
+/// run halts at the first full window (the latent defect of the Oct 6
+/// study's MW14 attempt, `experiments/llm-usability/review/REVIEW.md`).
+#[test]
+fn a_constant_regressor_is_a_definite_a008() {
+    let src = with_rules(
+        r#"
+  rel b(-A: Equity, @T: Timestamp, -B: Scalar, -C: Scalar)
+  b(A, T, B, C) :- universe(A, T),
+      B = ols_beta(R, I) over (T1 in window(T, 60d, min 20), logret(A, T1, R), I = 1),
+      C = corr(R, J) over (T1 in window(T, 60d, min 20), logret(A, T1, R), J = 2.5).
+  decide(T, buy(A, qty)) :- b(A, T, B, C), B > 1, flat(A, T).
+"#,
+    );
+    let (_, a) = analysed(&src, "warn");
+    let a008: Vec<&absolute_backtest::analysis::Warning> = a.warnings.iter().filter(|w| w.code == "A008").collect();
+    assert_eq!(a008.len(), 2, "{:?}", a.warnings);
+    assert!(a008.iter().all(|w| !w.note), "definite, not a note: {:?}", a008);
+    assert!(a008.iter().any(|w| w.message.contains("regressor `I` is the constant 1")), "{:?}", a008);
+    assert!(a008.iter().any(|w| w.message.contains("`corr(R, J)` is the constant 2.5")), "{:?}", a008);
+}
+
 /// Comparisons refine the state (backward propagation), and the refined
 /// intervals give the planner its selectivities.
 #[test]

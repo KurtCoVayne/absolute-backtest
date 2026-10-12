@@ -531,6 +531,15 @@ pub struct KernelStats {
     /// literal (Kleene conjunction: never a halt).
     #[serde(default)]
     pub excluded_after_undefined: usize,
+    /// Running-sums windows built at the bar asked for because the buffer
+    /// no longer held the checkpoint's window (a departure from the
+    /// canonical walk; zero in a run whose groups are asked for in order).
+    #[serde(default)]
+    pub window_noncanonical: usize,
+    /// Rows-window requests behind a group's last bar (a query after the
+    /// run), each served from a buffer rebuilt by walking back from its bar.
+    #[serde(default)]
+    pub window_backward: usize,
 }
 
 /// What the evaluator derived for one relation over a run: how many times
@@ -1319,6 +1328,9 @@ pub struct Kernel<'p> {
     pub(crate) time_ordered_memo: FxHashMap<(usize, usize), bool>,
     pub(crate) rows_plans: FxHashMap<(usize, usize), Rc<eval::RowsPlan>>,
     pub(crate) rows_state: FxHashMap<eval::WindowKey, eval::RowsState>,
+    /// Each resolution's time domain as a sorted vector, for the running
+    /// sums' bar walk.
+    pub(crate) domain_vecs: FxHashMap<Resolution, Rc<Vec<i64>>>,
     /// Memo retention (data-bundle doc, section 2, "State"): derived tuples
     /// older than `memo_horizon` seconds before the current bar (and than the
     /// last few bars) are dropped, except the latest of each relation read
@@ -1932,6 +1944,7 @@ impl<'p> Kernel<'p> {
             time_ordered_memo: Default::default(),
             rows_plans: Default::default(),
             rows_state: Default::default(),
+            domain_vecs: Default::default(),
             recording: false,
             summary_rows: Vec::new(),
             memo_horizon,
