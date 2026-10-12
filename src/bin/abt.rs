@@ -42,11 +42,30 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 9] = ["synthetic", "verify-causality", "quiet", "all", "fills", "frictionless", "untested", "timing", "explain"];
+const FLAGS: [&str; 11] = [
+    "synthetic",
+    "verify-causality",
+    "quiet",
+    "all",
+    "fills",
+    "frictionless",
+    "untested",
+    "timing",
+    "explain",
+    "json",
+    "observed",
+];
 /// Options that may repeat.
 const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 76] = [
+const OPTIONS: [&str; 83] = [
     "strategy",
+    "stage",
+    "plan",
+    "numerics",
+    "tier",
+    "solver",
+    "replay-dir",
+    "derivation",
     "rel",
     "symbol",
     "ledger",
@@ -740,6 +759,34 @@ fn main() {
             let strategies = ws.strategies().count();
             println!("{} strategies, {} libraries checked: {} error(s), {} warning(s)", strategies, ws.libraries().count(), errors, warnings);
             exit(if errors > 0 { 1 } else { 0 })
+        }
+        "ir" => {
+            // abt ir --strategy NAME --stage parsed|checked|normalised [--json] <files...>
+            let ws = workspace(&args.files);
+            let stage = args.opts.get("stage").cloned().unwrap_or_else(|| "normalised".into());
+            let json = args.flags.contains("json");
+            if stage == "parsed" {
+                if json {
+                    println!("{}", serde_json::json!({"stage": "parsed", "source": absolute_backtest::compiler::print::render_parsed(&ws.units)}));
+                } else {
+                    print!("{}", absolute_backtest::compiler::print::render_parsed(&ws.units));
+                }
+                return;
+            }
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let text = stage_text(&args, &prog, &stage, json).unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                exit(2)
+            });
+            print!("{}", text);
         }
         "show" => {
             let ws = workspace(&args.files);
@@ -1717,6 +1764,33 @@ fn main() {
             println!("wrote {} relations to {}", ds.facts.len(), out);
         }
         _ => usage(1),
+    }
+}
+
+/// The text or JSON of a compiler stage for `abt ir --stage`.
+fn stage_text(args: &Args, prog: &absolute_backtest::check::Program, stage: &str, json: bool) -> Result<String, String> {
+    use absolute_backtest::compiler::Stage;
+    let render = |s: &dyn Stage| -> String {
+        if json {
+            format!("{}\n", serde_json::to_string_pretty(&s.json()).unwrap_or_default())
+        } else {
+            s.text()
+        }
+    };
+    match stage {
+        "checked" => Ok(if json {
+            format!("{}\n", serde_json::to_string_pretty(&absolute_backtest::compiler::print::checked_json(prog)).unwrap_or_default())
+        } else {
+            absolute_backtest::compiler::print::render_checked(prog)
+        }),
+        "normalised" | "normalized" => {
+            let nir = absolute_backtest::compiler::normalise(prog);
+            Ok(render(&absolute_backtest::compiler::normalise::NirStage { nir: &nir, prog }))
+        }
+        other => {
+            let _ = args;
+            Err(format!("--stage: `{}` is not one of parsed, checked, normalised", other))
+        }
     }
 }
 

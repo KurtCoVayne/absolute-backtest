@@ -9,6 +9,7 @@
 
 pub mod bundle;
 pub mod check;
+pub mod compiler;
 pub mod data;
 pub mod dump;
 pub mod ingest;
