@@ -1,7 +1,8 @@
 //! The compiler (docs/compiler-design.md): six total functions on the typed
 //! IR, each with a printable result, ending in a plan the kernel executes.
 //! `compile` runs Normalise, Analyse, Rewrite, Plan and Lower in order and
-//! keeps every stage's result; the verification tiers are run by `verify`.
+//! keeps every stage's result; tier 2 of the verification runs inside it
+//! (its verdicts license R2) and the other tiers are run by `verify`.
 
 pub mod normalise;
 pub mod print;
@@ -68,15 +69,16 @@ pub struct Compiled {
     pub rewritten: crate::rewrite::Rewritten,
     pub plan: crate::plan::Plan,
     pub lowered: crate::lower::Lowered,
+    /// The verification tiers that ran during compilation: tier 2, and
+    /// tier 3's feasibility obligations when a solver is named.
+    pub tiers: Vec<crate::verify::TierReport>,
+    /// The dead-rule verdicts those tiers gave R2.
+    pub dead: Vec<crate::rewrite::DeadVerdict>,
 }
 
-/// Run the pipeline: Normalise, Analyse, Rewrite, Plan, Lower. With
-/// `optimise` off the rewrites are not applied and the plan is the written
-/// order (the unoptimised path of section 6.6). `dead` carries the
-/// verdicts of the verification tiers that license R2 beyond Analyse.
-pub fn compile_with(prog: &Program, opts: &CompileOptions, dead: &[crate::rewrite::DeadVerdict]) -> Compiled {
-    let nir = normalise(prog);
-    let analysis = crate::analysis::analyse(prog, &nir, opts.stats.as_ref(), opts.margin_log2);
+/// Rewrite, Plan and Lower after Normalise and Analyse, with the dead-rule
+/// verdicts R2 reads.
+fn pipeline(prog: &Program, opts: &CompileOptions, nir: Nir, analysis: crate::analysis::Analysis, dead: &[crate::rewrite::DeadVerdict], tiers: Vec<crate::verify::TierReport>) -> Compiled {
     let stats = opts.stats.clone().unwrap_or_default();
     let rewritten = if opts.optimise {
         crate::rewrite::rewrite(prog, &nir, &analysis, dead, opts.numerics, opts.margin_log2)
@@ -104,10 +106,36 @@ pub fn compile_with(prog: &Program, opts: &CompileOptions, dead: &[crate::rewrit
         rewritten,
         plan,
         lowered,
+        tiers,
+        dead: dead.to_vec(),
     }
 }
 
-/// `compile_with` and no verdicts beyond Analyse.
+/// Run the pipeline: Normalise, Analyse, Rewrite, Plan, Lower. With
+/// `optimise` off the rewrites are not applied and the plan is the written
+/// order (the unoptimised path of section 6.6). `dead` carries the
+/// verdicts of the verification tiers that license R2 beyond Analyse; no
+/// tier runs here.
+pub fn compile_with(prog: &Program, opts: &CompileOptions, dead: &[crate::rewrite::DeadVerdict]) -> Compiled {
+    let nir = normalise(prog);
+    let analysis = crate::analysis::analyse(prog, &nir, opts.stats.as_ref(), opts.margin_log2);
+    pipeline(prog, opts, nir, analysis, dead, Vec::new())
+}
+
+/// The compilation: Normalise, Analyse, then tier 2 (and tier 3's
+/// feasibility obligations when a solver is named), whose infeasibility
+/// verdicts license R2, then Rewrite, Plan and Lower.
 pub fn compile(prog: &Program, opts: &CompileOptions) -> Compiled {
-    compile_with(prog, opts, &[])
+    let nir = normalise(prog);
+    let analysis = crate::analysis::analyse(prog, &nir, opts.stats.as_ref(), opts.margin_log2);
+    let t2 = crate::verify::obligations::tier2(prog, &analysis, opts.margin_log2);
+    let mut dead = t2.dead_verdicts();
+    let mut tiers = vec![t2];
+    if opts.solver.is_some() {
+        let driver = crate::verify::smt::Driver::from_options(opts, &prog.strategy);
+        let t3 = crate::verify::obligations::tier3_feasibility(prog, &analysis, &driver, opts.margin_log2, &tiers[0]);
+        dead.extend(t3.dead_verdicts());
+        tiers.push(t3);
+    }
+    pipeline(prog, opts, nir, analysis, &dead, tiers)
 }

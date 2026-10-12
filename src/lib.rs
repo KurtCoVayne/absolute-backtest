@@ -24,6 +24,7 @@ pub mod plan;
 pub mod rewrite;
 pub mod study;
 pub mod table;
+pub mod verify;
 
 pub use check::{check_program, check_workspace, Code, Diagnostic, Program, Severity, Workspace};
 pub use ir::*;

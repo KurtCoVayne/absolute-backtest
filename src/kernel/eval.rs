@@ -224,8 +224,17 @@ pub(crate) struct Stuck {
 /// that the rows one solves are exactly the rows the other would.
 pub fn shareable_windows(rule: &Rule, primary: usize, other: usize) -> bool {
     let (Some(a), Some(b)) = (rule.body.get(primary), rule.body.get(other)) else { return false };
+    // Equality of the written text, not of the IR: the IR carries spans,
+    // and two aggregations of one rule are never at one position.
+    let identity = |v: &str| v.to_string();
+    let text = |args: &[crate::ir::Expr], conj: &[Literal]| -> (Vec<String>, Vec<String>) {
+        (
+            args.iter().map(|e| crate::compiler::print::render_expr(e, &identity)).collect(),
+            conj.iter().map(|l| crate::compiler::print::render_literal(l, &identity)).collect(),
+        )
+    };
     match (a, b) {
-        (Literal::Agg { args: aa, conj: ca, .. }, Literal::Agg { args: ab, conj: cb, .. }) => aa == ab && ca == cb,
+        (Literal::Agg { args: aa, conj: ca, .. }, Literal::Agg { args: ab, conj: cb, .. }) => text(aa, ca) == text(ab, cb),
         _ => false,
     }
 }
