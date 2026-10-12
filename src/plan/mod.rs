@@ -5,8 +5,11 @@
 //! run, with the observed cardinalities beside them.
 
 pub mod cost;
+pub mod planner;
 pub mod print;
 pub mod search;
+
+pub use planner::{plan_program, PlanInputs};
 
 use crate::lower::Numerics;
 

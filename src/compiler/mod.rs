@@ -60,3 +60,20 @@ impl Default for CompileOptions {
 pub fn normalised(prog: &Program) -> Nir {
     normalise(prog)
 }
+
+/// Every stage's result for a program.
+pub struct Compiled {
+    pub nir: Nir,
+    pub plan: crate::plan::Plan,
+    pub lowered: crate::lower::Lowered,
+}
+
+/// Run the pipeline: Normalise, Analyse, Rewrite, Plan, Lower.
+pub fn compile(prog: &Program, opts: &CompileOptions) -> Compiled {
+    let nir = normalise(prog);
+    let stats = opts.stats.clone().unwrap_or_default();
+    let inputs = crate::plan::PlanInputs::default();
+    let plan = crate::plan::plan_program(prog, &inputs, &stats, opts.numerics, opts.optimise);
+    let lowered = crate::lower::order::lower(prog, &plan, None, opts.numerics);
+    Compiled { nir, plan, lowered }
+}

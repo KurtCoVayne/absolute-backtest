@@ -2755,6 +2755,44 @@ pub fn run(prog: &Program, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResu
     })
 }
 
+/// `run` under a plan (compiler design, "Lower"): the kernel applies the
+/// plan's literal orders, infeasible rules, shared window states and folded
+/// constants.
+pub fn run_planned(prog: &Program, lowered: &crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(s, || {
+                let mut k = Kernel::new_planned(prog, lowered, dataset, cfg)?;
+                k.run()
+            })
+            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+            .join()
+            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
+/// `run_fold` under a plan.
+pub fn run_fold_planned(prog: &Program, lowered: &crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(s, || {
+                let kernel = Kernel::new_streaming_planned(prog, lowered, dataset, cfg.clone())?;
+                let log = EventLog::from_dataset(&kernel, dataset)?;
+                let mut exec = SimExecutor::new(cfg);
+                let mut fold = Fold::new(kernel, &mut exec);
+                for ev in log.events {
+                    fold.step(ev)?;
+                }
+                fold.finish().map(|(r, _)| r)
+            })
+            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+            .join()
+            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
 /// `run` over a dataset the caller no longer needs: its facts move into the
 /// kernel (one copy in memory), and the kernel is not freed tuple by tuple
 /// at the end (the process is about to exit; a run of tens of millions of
