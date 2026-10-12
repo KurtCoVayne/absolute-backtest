@@ -1226,6 +1226,9 @@ pub struct Explanation {
     /// The variables of the first solution with their values, by name, when
     /// the rule fired: the instance a reader can check against the data.
     pub solution: Vec<(String, String)>,
+    /// The bindings of the first instance entering the excluding literal,
+    /// when the rule did not fire (the `failure` table's bindings).
+    pub at_failure: Vec<(String, String)>,
 }
 
 impl std::fmt::Display for Explanation {
@@ -1350,6 +1353,31 @@ pub struct Kernel<'p> {
     /// What the build noticed about the program against this data (a label
     /// the data never carries); reported with the run's warnings.
     pub(crate) run_warnings: Vec<RunWarning>,
+    /// Record the summary state of every windowed aggregation group at
+    /// every bar it serves (the `summary` state table of the compiler
+    /// design, section 7.2); off by default.
+    pub(crate) recording: bool,
+    pub(crate) summary_rows: Vec<SummaryRow>,
+}
+
+/// One row of the `summary` state table: a windowed aggregation group
+/// (rule, literal, the outer bindings it reads) at a bar, with the rows it
+/// held and, when running sums served it, the shifted moment sums.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct SummaryRow {
+    pub rule: usize,
+    pub literal: usize,
+    pub outer: Vec<Option<Value>>,
+    pub bar: i64,
+    pub agg: String,
+    pub rows: usize,
+    /// `running` (sliding compensated sums), `two_pass` (the window's rows
+    /// solved whole), `cached rows` (a calendar window's per-bar rows).
+    pub path: &'static str,
+    pub shift: Option<(f64, f64)>,
+    /// `Σx, Σy, Σx², Σy², Σxy` of the shifted values.
+    pub sums: Option<[f64; 5]>,
+    pub value: Option<f64>,
 }
 
 impl<'p> Kernel<'p> {
@@ -1398,6 +1426,17 @@ impl<'p> Kernel<'p> {
     }
 
     /// The plan this kernel evaluates under (`written` when none was applied).
+    /// Record the summary state of every windowed aggregation group at
+    /// every bar it serves (section 7.2's `summary` table).
+    pub fn record_summaries(&mut self, on: bool) {
+        self.recording = on;
+        if !on {
+            self.summary_rows.clear();
+        }
+    }
+    pub fn summary_rows(&self) -> &[SummaryRow] {
+        &self.summary_rows
+    }
     pub fn plan_label(&self) -> &str {
         &self.plan_label
     }
@@ -1893,6 +1932,8 @@ impl<'p> Kernel<'p> {
             time_ordered_memo: Default::default(),
             rows_plans: Default::default(),
             rows_state: Default::default(),
+            recording: false,
+            summary_rows: Vec::new(),
             memo_horizon,
             asof_read,
             rows_lookback,
@@ -2510,9 +2551,19 @@ impl<'p> Kernel<'p> {
         let mut stuck: Vec<eval::Stuck> = Vec::new();
         for (i, lit) in rule.body.iter().enumerate() {
             let before = envs.len() + stuck.len();
+            let entering: Option<Env> = envs.first().cloned().or_else(|| stuck.first().map(|s| s.env.clone()));
             let (next, still) = self.solve_kleene_from(&cr, &rule.body, &[i], envs, stuck, None)?;
             if next.is_empty() && still.is_empty() && before > 0 {
                 let shown_lit = self.source.rules.get(rule_idx).and_then(|r| r.body.get(i)).unwrap_or(lit);
+                let mut at_failure: Vec<(String, String)> = entering
+                    .map(|e| {
+                        cr.slots
+                            .iter()
+                            .filter_map(|(name, &slot)| e.get(slot).and_then(|v| v.as_ref()).map(|v| (name.clone(), self.show(v))))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                at_failure.sort();
                 return Ok(Explanation {
                     rule: cr.label.clone(),
                     t,
@@ -2520,6 +2571,7 @@ impl<'p> Kernel<'p> {
                     solutions: 0,
                     failed_at: Some((i, shown_lit.describe())),
                     solution: Vec::new(),
+                    at_failure,
                 });
             }
             envs = next;
@@ -2539,6 +2591,7 @@ impl<'p> Kernel<'p> {
             solutions: envs.len(),
             failed_at: None,
             solution,
+            at_failure: Vec::new(),
         })
     }
 }

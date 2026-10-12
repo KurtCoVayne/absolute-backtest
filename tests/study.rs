@@ -73,7 +73,7 @@ fn the_program_hash_ignores_the_name_and_variable_names_but_not_a_constant() {
     assert_eq!(program_hash(&a), program_hash(&c));
     let d = program(&momentum("delta", "").replace("skip : Duration = 0d", "skip : Duration = 1d"), "delta");
     assert_ne!(program_hash(&a), program_hash(&d));
-    assert_eq!(program_hash(&a).len(), 16);
+    assert_eq!(program_hash(&a).len(), 64);
 }
 
 #[test]

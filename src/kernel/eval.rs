@@ -1290,6 +1290,20 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        if self.recording {
+            self.summary_rows.push(super::SummaryRow {
+                rule: key.rule,
+                literal: key.literal,
+                outer: key.outer.clone(),
+                bar: t,
+                agg: agg.to_string(),
+                rows: rows.len(),
+                path: "cached rows",
+                shift: None,
+                sums: None,
+                value: None,
+            });
+        }
         // Bars before the window's start will not be asked for again by a
         // later bar of the same group; a request for an earlier base time
         // simply solves them again.
@@ -1475,6 +1489,21 @@ impl<'p> Kernel<'p> {
             } else {
                 None
             };
+            if self.recording {
+                let sums = if running.is_some() { st.sums.as_ref() } else { None };
+                self.summary_rows.push(super::SummaryRow {
+                    rule: key.rule,
+                    literal: key.literal,
+                    outer: key.outer.clone(),
+                    bar: t,
+                    agg: agg.to_string(),
+                    rows: count,
+                    path: if running.is_some() { "running" } else { "two_pass" },
+                    shift: sums.map(|r| r.shift),
+                    sums: sums.map(|r| r.s.map(|x| x.value())),
+                    value: running,
+                });
+            }
             let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(count); args.len()];
             if agg != "count" && count > 0 && running.is_none() {
                 let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi_r as u64);
@@ -1647,6 +1676,20 @@ impl<'p> Kernel<'p> {
             }
         }
         let mut rows = Vec::new();
+        if self.recording {
+            self.summary_rows.push(super::SummaryRow {
+                rule: key.rule,
+                literal: key.literal,
+                outer: key.outer.clone(),
+                bar: t,
+                agg: agg.to_string(),
+                rows: found.iter().map(|t1| cache[t1].len()).sum(),
+                path: "rows walk",
+                shift: None,
+                sums: None,
+                value: None,
+            });
+        }
         // Without environments only when every bar has at most one row (the
         // order within a bar is the environments').
         let bare = !want_env && found.iter().all(|t1| cache[t1].len() <= 1);

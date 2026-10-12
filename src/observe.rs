@@ -202,6 +202,83 @@ pub fn program_graph(prog: &Program) -> ProgramGraph {
 /// signature, kind, resolution, completeness, stratum, loop, depth, what it
 /// reads and its rules; the primitives last.
 pub fn show_program(prog: &Program) -> String {
+    render_program(prog, None)
+}
+
+/// Extra facts a graph renders per relation: tags for the bracket, and
+/// lines under the signature.
+pub type GraphFacts<'a> = &'a dyn Fn(&str) -> (Vec<String>, Vec<String>);
+
+/// The program graph extended with the compiler's facts (compiler design,
+/// section 7.1): the keyedness label, open or closed loop, demanded or
+/// elided, and the abstract value of each column.
+pub fn show_graph(prog: &Program, compiled: &crate::compiler::Compiled) -> String {
+    let analysis = &compiled.analysis;
+    let elided = &compiled.rewritten.elided;
+    let facts = |name: &str| -> (Vec<String>, Vec<String>) {
+        let mut tags = Vec::new();
+        let mut lines = Vec::new();
+        if let Some(r) = analysis.relation(name) {
+            if r.recursive && r.kind == "derived" {
+                tags.push(format!("{} ({})", r.keyedness.text(), r.keyedness_note));
+            }
+            tags.push(if elided.contains(name) {
+                "elided (R5: nothing demanded reaches it)".into()
+            } else if r.demanded {
+                "demanded".into()
+            } else {
+                "not demanded".into()
+            });
+            let cols: Vec<String> = r
+                .columns
+                .iter()
+                .map(|c| {
+                    if c.value.numeric {
+                        format!("{}: {} {}", c.name, c.ty, c.value.text())
+                    } else {
+                        format!("{}: {}", c.name, c.ty)
+                    }
+                })
+                .collect();
+            if !cols.is_empty() {
+                lines.push(format!("columns: {}", cols.join("; ")));
+            }
+            if !r.widened.is_empty() {
+                lines.push(format!("widened to ±∞ (A010): {}", r.widened.join(", ")));
+            }
+            if let Some(ri) = compiled.rewritten.infeasible.iter().find(|(ri, _)| prog.rules[**ri].head.name == name) {
+                lines.push(format!("infeasible rule (R2): {}: {}", prog.rule_label(*ri.0), ri.1));
+            }
+        }
+        (tags, lines)
+    };
+    let mut out = render_program(prog, Some(&facts));
+    if !elided.is_empty() {
+        let mut names: Vec<&String> = elided.iter().collect();
+        names.sort();
+        out.push_str("\nelided (R5): relations no demanded, observed or queried relation reaches; the planner emits no work for them, a query materialises them:\n");
+        for n in names {
+            if let Some(sig) = prog.relations.get(n.as_str()) {
+                out.push_str(&format!("  {}\n", crate::compiler::print::render_signature(sig, true)));
+            }
+        }
+    }
+    out.push_str(&format!(
+        "
+hash {}; plan `{}` ({} of {} rules reordered, {} infeasible, {} elided); {} analysis warning(s)
+",
+        compiled.nir.hash,
+        compiled.plan.label,
+        compiled.plan.totals.reordered,
+        compiled.plan.totals.rules,
+        compiled.plan.totals.infeasible,
+        compiled.plan.totals.elided,
+        compiled.analysis.warnings.len()
+    ));
+    out
+}
+
+fn render_program(prog: &Program, facts: Option<GraphFacts>) -> String {
     let g = program_graph(prog);
     let mut out = String::new();
     let count = |k: &str| g.nodes.iter().filter(|x| x.kind == k).count();
@@ -245,7 +322,12 @@ pub fn show_program(prog: &Program) -> String {
         }
         tags.push(if node.closed_loop { "closed loop (reads the book)".into() } else { "open loop".into() });
         tags.push(format!("depth {}", node.depth));
+        let (extra_tags, extra_lines) = facts.map(|f| f(&node.name)).unwrap_or_default();
+        tags.extend(extra_tags);
         out.push_str(&format!("{}  [{}]\n", node.signature, tags.join(", ")));
+        for l in extra_lines {
+            out.push_str(&format!("  {}\n", l));
+        }
         if !node.reads.is_empty() {
             let reads: Vec<String> = node.reads.iter().map(|(r, p)| format!("{}{}", r, p)).collect();
             out.push_str(&format!("  reads: {}\n", reads.join(", ")));

@@ -33,9 +33,16 @@ resampled bucket.
 | `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API, with the status of each section in this crate and the milestone that implements it. |
 | `docs/formal-foundations.md` | The formal foundations (Oct 8, 2026): the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results, what is new, and the seven changes the theory asks of the semantic model. |
 | `docs/language-v2.md` | The second formulation (Oct 8–9, 2026): a review of the MW14 and R8L changes against the foundations, and the proposal that follows: one data store per instrument class with every resolution derived, a data block that is a query over the catalog, explicit universes, programs as typed blocks with no run-time flags, order-independent rule bodies with sound short-circuiting, a library of formal operators, and a query facility with its state tables and algorithms; MW14 and R8L rewritten in it. Section 11 is the implementation order; section 15 the prototype and the Haiku study. Its corpus is `corpus-v2/`. |
-| `docs/observability.md` | The observability commands of this crate: `abt show` (the program graph), the coverage report every run prints (what every relation derived; the first empty relation when nothing was decided), `abt query --explain` (any relation at any bar, and why each rule did or did not fire), `--ledger` (a relation's tuples at every bar as Parquet). |
+| `docs/observability.md` | The observability commands of this crate: `abt show` and `abt graph` (the program graph, with the compiler's facts), the coverage report every run prints, `abt query --explain` (any relation at any bar, and why each rule did or did not fire), `--ledger`, the state tables (`abt table`, `--tables DIR`: extension, carried, summary, derivation, failure, coverage, plan, book, binding, as text, JSON or Arrow IPC), `abt explain --derivation` (a tuple's derivation tree), `abt why-not` (the excluding literal and the absence-driven verdict), `abt materialise` (an elided relation at a bar), and the compiler's `ir`, `rewrite-log`, `plan` and `verify`. |
 | `docs/llm-observability.md` | The observability study (Oct 9, 2026): twelve Haiku agents writing the two company books on synthetic data and four briefs, with and without the observability commands; what they found, and the defects they surfaced with their status. |
-| `src/observe.rs` | The program graph and the coverage report behind `abt show` and the run's coverage lines. |
+| `docs/compiler-design.md` | The compiler design (Oct 2026): the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers, the observability tables, and section 12's status of each piece in this crate. |
+| `src/compiler/` | Normalise (the normal form, canonical order and names, the SHA-256 program hash) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
+| `src/analysis/` | Analyse: strata, the open-loop partition, keyedness labels, demand, window lengths, and the abstract interpretation with warnings A001 to A011. |
+| `src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
+| `src/plan/`, `src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering that the kernel executes (`abt plan`). |
+| `src/verify/` | The verification tiers: exact linear feasibility, the SMT-LIB2 driver with replay files, constrained Horn clauses, translation validation, the runtime checks (`abt verify`). |
+| `src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, `abt explain --derivation`, `abt why-not`, `abt materialise`). |
+| `src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
 | `scripts/synth/` | Synthetic markets in the layouts of `equities_1w` and `futures_sessions`, on which the two company books run (`docs/llm-observability.md`). |
 | `experiments/llm-observability/` | The observability study: Haiku agents writing six strategies with and without the observability commands; prompts, tasks, sandboxes, scorer, and every run. |
 | `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
@@ -435,12 +442,25 @@ abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --syntheti
 abt show --strategy NAME <files...>
 abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain]
         (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>
-abt run ... [--ledger R1,R2,... --ledger-out DIR]
+abt run ... [--ledger R1,R2,... --ledger-out DIR] [--tables DIR]
+abt graph --strategy NAME <files...>
+abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
+abt rewrite-log --strategy NAME [--json] <files...>
+abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--out FILE] [--json]
+        (--data DIR | --bundle DIR | --synthetic ...) <files...>
+abt why-not --strategy NAME --rel R --symbol SYM [--at T] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+abt materialise --strategy NAME --rel R [--at T] [--inputs V1,...] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 ```
 
-`show`, the coverage report every `run` prints, `query` and `--ledger` are
-described in `docs/observability.md`.
+`show`, `graph`, the coverage report every `run` prints, `query`,
+`--ledger`, the state tables, `why-not`, `materialise`, `explain
+--derivation` and the compiler's `ir`, `rewrite-log`, `plan` and `verify`
+are described in `docs/observability.md`; the compiler itself in
+`docs/compiler-design.md`.
 
 `<files...>` are `.dsl` files or directories searched recursively. The
 synthetic market is seeded (`--seed`, default 7) and deterministic.

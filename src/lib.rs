@@ -22,6 +22,7 @@ pub mod observe;
 pub mod parser;
 pub mod plan;
 pub mod rewrite;
+pub mod state;
 pub mod study;
 pub mod table;
 pub mod verify;

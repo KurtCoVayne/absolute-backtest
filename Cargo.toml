@@ -18,7 +18,7 @@ path = "src/bin/abt.rs"
 # JSON and an append-only log of Parquet partitions.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-arrow = { version = "60", default-features = false }
+arrow = { version = "60", default-features = false, features = ["ipc"] }
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
 
 [profile.release]

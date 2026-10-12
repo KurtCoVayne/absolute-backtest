@@ -19,15 +19,6 @@ use crate::ir::{Builtin, Literal, Rule, WindowKind};
 /// existing lineage (section 10, open question 5: 0.8 by default).
 pub const SIMILARITY_THRESHOLD: f64 = 0.8;
 
-fn fnv1a(text: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in text.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
 /// A literal rendered in full (`Literal::describe` elides aggregation
 /// groups and reductions' orders).
 fn render_literal(l: &Literal) -> String {
@@ -159,9 +150,11 @@ pub fn normalized_text(prog: &Program) -> String {
     out
 }
 
-/// The program hash: 16 hex digits of FNV-1a over the normalised text.
+/// The program hash: the Normalise stage's SHA-256 over the canonical
+/// form (compiler design, section 2.9), 64 hex digits; a revision that
+/// renames variables or the strategy, or reorders literals, keeps it.
 pub fn program_hash(prog: &Program) -> String {
-    format!("{:016x}", fnv1a(&normalized_text(prog)))
+    crate::compiler::normalise::program_hash(&crate::compiler::normalise(prog))
 }
 
 /// Jaccard similarity of two rule sets.

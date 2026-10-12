@@ -223,8 +223,8 @@ impl Col {
     }
 }
 
-/// Write named columns of equal length as one Parquet file.
-pub fn write_table(path: &Path, cols: Vec<(&str, Col)>) -> Result<(), String> {
+/// Named columns of equal length as one Arrow schema and batch.
+fn batch_of(path: &Path, cols: Vec<(&str, Col)>) -> Result<(Arc<Schema>, Option<RecordBatch>), String> {
     let n = cols.first().map(|(_, c)| c.len()).unwrap_or(0);
     if let Some((name, _)) = cols.iter().find(|(_, c)| c.len() != n) {
         return Err(format!("{}: column `{}` has a different length", path.display(), name));
@@ -250,14 +250,50 @@ pub fn write_table(path: &Path, cols: Vec<(&str, Col)>) -> Result<(), String> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     }
+    let batch = if n > 0 {
+        Some(RecordBatch::try_new(schema.clone(), arrays).map_err(|e| format!("{}: {}", path.display(), e))?)
+    } else {
+        None
+    };
+    Ok((schema, batch))
+}
+
+/// Write named columns of equal length as one Parquet file.
+pub fn write_table(path: &Path, cols: Vec<(&str, Col)>) -> Result<(), String> {
+    let (schema, batch) = batch_of(path, cols)?;
     let file = File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), None).map_err(|e| e.to_string())?;
-    if n > 0 {
-        let batch = RecordBatch::try_new(schema, arrays).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let mut writer = ArrowWriter::try_new(file, schema, None).map_err(|e| e.to_string())?;
+    if let Some(batch) = batch {
         writer.write(&batch).map_err(|e| e.to_string())?;
     }
     writer.close().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Write named columns of equal length as one Arrow IPC file (the state
+/// tables' export format, compiler design, section 7.2).
+pub fn write_ipc(path: &Path, cols: Vec<(&str, Col)>) -> Result<(), String> {
+    let (schema, batch) = batch_of(path, cols)?;
+    let file = File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let mut writer = arrow::ipc::writer::FileWriter::try_new(file, &schema).map_err(|e| e.to_string())?;
+    if let Some(batch) = batch {
+        writer.write(&batch).map_err(|e| e.to_string())?;
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read an Arrow IPC file back as its column names and row count (what a
+/// test or a check needs; the cells are read through `Table` for Parquet).
+pub fn read_ipc_shape(path: &Path) -> Result<(Vec<String>, usize), String> {
+    let file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    let reader = arrow::ipc::reader::FileReader::try_new(file, None).map_err(|e| e.to_string())?;
+    let names: Vec<String> = reader.schema().fields().iter().map(|f| f.name().clone()).collect();
+    let mut rows = 0;
+    for batch in reader {
+        rows += batch.map_err(|e| e.to_string())?.num_rows();
+    }
+    Ok((names, rows))
 }
 
 /// Write a small table given as text, one row per line with comma-separated
