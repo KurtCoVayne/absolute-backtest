@@ -103,14 +103,14 @@ fn tier2_margin_feasible_ranges_and_nonlinear_parts() {
         r#"
     rel touching(A: Equity, @T)
     touching(A, T) :- universe(A, T), log_price_return(A, T, R), R > R.
-    rel open(A: Equity, @T)
-    open(A, T) :- universe(A, T), log_price_return(A, T, R), R > delta.
+    rel loose(A: Equity, @T)
+    loose(A, T) :- universe(A, T), log_price_return(A, T, R), R > delta.
     rel ranged(A: Equity, @T)
     ranged(A, T) :- universe(A, T), delta < 0.
     rel curved(A: Equity, @T)
     curved(A, T) :- universe(A, T), log_price_return(A, T, R), R * R < 0, R > 1.
 "#,
-        "    decide(T, trade(A, qty)) :- touching(A, T), open(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- ranged(A, T), curved(A, T), held(A, T, Q0), Q = -Q0.",
+        "    decide(T, trade(A, qty)) :- touching(A, T), loose(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- ranged(A, T), curved(A, T), held(A, T, Q0), Q = -Q0.",
     );
     let (p, diags) = program(&src, "v");
     let mut compiled = compile(&p, &CompileOptions::default());
@@ -123,7 +123,7 @@ fn tier2_margin_feasible_ranges_and_nonlinear_parts() {
     assert_eq!(o.verdict, Verdict::Infeasible);
     assert!(o.licenses.is_none() && o.evidence.contains("within the rounding margin"), "{:?}", o);
     assert!(!compiled.rewritten.infeasible.contains_key(&touching));
-    let (_, o) = by("v::open#1");
+    let (_, o) = by("v::loose#1");
     assert_eq!(o.verdict, Verdict::Feasible, "{:?}", o);
     let (ranged, o) = by("v::ranged#1");
     assert_eq!(o.verdict, Verdict::Infeasible);

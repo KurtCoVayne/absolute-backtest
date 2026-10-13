@@ -39,7 +39,8 @@ fn the_canonical_form_round_trips_on_the_corpus() {
         // written out as its own rules; it is checked against the class
         // catalog and the library of the base workspace, as a program is.
         let mut ws2 = common::base_workspace();
-        ws2.add_source(&text).unwrap_or_else(|e| panic!("{}: the canonical rendering does not parse: {} at {}\n{}", name, e.message, e.span, text));
+        ws2.add_source(&text)
+            .unwrap_or_else(|e| panic!("{}: the canonical rendering does not parse: {} at {}\n{}", name, e.message, e.span, text));
         let (p2, diags) = check_program(&ws2, &name);
         let errors: Vec<String> = diags.iter().filter(|d| d.severity == Severity::Error).map(|d| d.to_string()).collect();
         assert!(errors.is_empty(), "{}: the canonical rendering does not check:\n{}\n{}", name, errors.join("\n"), text);
@@ -193,7 +194,8 @@ fn the_surface_rendering_of_derived_forms_re_parses() {
     let nir = normalise(&prog);
     let text = NirStage { nir: &nir, prog: &prog }.text();
     let mut ws2 = common::base_workspace();
-    ws2.add_source(&text).unwrap_or_else(|e| panic!("the canonical rendering does not parse: {} at {}\n{}", e.message, e.span, text));
+    ws2.add_source(&text)
+        .unwrap_or_else(|e| panic!("the canonical rendering does not parse: {} at {}\n{}", e.message, e.span, text));
     let (p2, diags) = check_program(&ws2, "forms");
     assert!(diags.iter().all(|d| d.severity != Severity::Error), "{}\n{}", common::text(&diags), text);
     assert_eq!(normalise(&p2.unwrap()).hash, nir.hash);

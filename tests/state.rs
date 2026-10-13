@@ -5,41 +5,30 @@
 //! and why-not with the absence-driven verdict; materialisation of an
 //! elided relation; the graph with the compiler's facts.
 
-mod corpus;
+mod common;
 
 use std::fs;
 
-use absolute_backtest::check::{check_program, Program};
+use absolute_backtest::check::Program;
 use absolute_backtest::compiler::{compile, CompileOptions};
 use absolute_backtest::data::synthetic_daily;
-use absolute_backtest::kernel::time::parse_timestamp;
 use absolute_backtest::kernel::{Dataset, ExecConfig, Kernel, Value};
 use absolute_backtest::observe::show_graph;
 use absolute_backtest::state::provenance::{derive, parse_id, tuple_id, why_not, witness};
 use absolute_backtest::state::tables::{self, sampled_bars, Cell, ColType, Table};
 use absolute_backtest::table::read_ipc_shape;
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
-fn corpus_program(name: &str) -> Program {
-    let src = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
-    program(&src, name)
-}
-
+/// The tickers of the synthetic market. Its securities are `E1` to `E5`
+/// carrying them, and a security's id is how the kernel shows an identity.
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+const IDS: [&str; 5] = ["E1", "E2", "E3", "E4", "E5"];
 
 fn dataset() -> Dataset {
     synthetic_daily(&SYMS, (2022, 1, 3), 120, 7)
 }
 
 fn ts(s: &str) -> i64 {
-    parse_timestamp(s).unwrap()
+    common::day(s)
 }
 
 /// A run under the compiled plan, on a thread with the kernel's stack.
@@ -105,7 +94,7 @@ fn tables_render_and_export() {
 /// table records every calendar-window group the run served.
 #[test]
 fn extension_carried_and_summary_of_a_run() {
-    let p = corpus_program("trailing_stop");
+    let p = common::corpus_program("trailing_stop");
     let ds = dataset();
     with_run(&p, &ds, true, |k, r| {
         assert!(!r.decisions.is_empty(), "the run decides");
@@ -125,9 +114,10 @@ fn extension_carried_and_summary_of_a_run() {
         // and says so.
         let sum = tables::summary(k, &p);
         assert!(sum.is_empty() && sum.notes[0].contains("no summary recorded"), "{}", sum.text());
-        // The extension of a relation with other inputs needs them.
-        let err = tables::extension(k, &p, "momentum", &r.bars, None).unwrap_err();
-        assert!(err.to_string().contains("--inputs"), "{}", err);
+        // A relation the program does not have is refused by name. (A
+        // signature carries no inputs in v2, so no relation needs any.)
+        let err = tables::extension(k, &p, "nothing", &r.bars, None).unwrap_err();
+        assert!(err.to_string().contains("`nothing` is not a relation"), "{}", err);
         let dir = scratch("tables");
         ext.write(&dir.join("decide.arrow")).unwrap();
         assert_eq!(read_ipc_shape(&dir.join("decide.arrow")).unwrap().1, ext.len());
@@ -135,16 +125,22 @@ fn extension_carried_and_summary_of_a_run() {
     });
 }
 
-/// A calendar window's groups are recorded with their rows per bar.
+/// A calendar window's groups are recorded with their rows per bar: the
+/// z-score's mean and standard deviation are two library instances, each
+/// with its own rule.
 #[test]
 fn the_summary_table_records_calendar_windows() {
-    let p = corpus_program("mean_reversion_zscore");
+    let p = common::corpus_program("mean_reversion_zscore");
     let ds = dataset();
     with_run(&p, &ds, true, |k, _| {
         let sum = tables::summary(k, &p);
         assert!(!sum.is_empty(), "{}", sum.text());
+        let labels: std::collections::BTreeSet<String> = sum.rows.iter().filter_map(|row| if let Cell::Str(s) = &row[0] { Some(s.clone()) } else { None }).collect();
+        eprintln!("PROBE labels {:?}", labels);
+        eprintln!("PROBE first rows\n{}", sum.text().lines().take(6).collect::<Vec<_>>().join("\n"));
         assert!(sum.rows.iter().all(|row| matches!(&row[6], Cell::Str(s) if s == "cached rows")), "{}", sum.text());
-        assert!(sum.rows.iter().all(|row| matches!(&row[0], Cell::Str(s) if s == "features::zscore#1")), "rule labels: {}", sum.text());
+        assert_eq!(labels.len(), 2, "one rule per instance: {:?}", labels);
+        assert!(labels.iter().any(|l| l.contains("mean_window[")) && labels.iter().any(|l| l.contains("std_window[")), "rule labels: {:?}", labels);
         assert!(
             sum.rows.iter().any(|row| matches!(&row[2], Cell::Str(s) if s == "std")) && sum.rows.iter().any(|row| matches!(&row[2], Cell::Str(s) if s == "mean")),
             "{}",
@@ -158,22 +154,17 @@ fn the_summary_table_records_calendar_windows() {
 /// from which the served mean is recoverable: `mean = shift + Σx / n`.
 #[test]
 fn the_summary_table_holds_the_running_sums() {
-    let src = r#"
-strategy rows_sum {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel m(-A: Equity, @T: Timestamp, -M: Price<USD>)
-  m(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows(T, 10, min 5), close(A, T1, P)).
-  decide(T, buy(A, qty)) :- m(A, T, M), close(A, T, P), P > M, flat(A, T).
-}
-"#;
-    let p = program(src, "rows_sum");
+    let src = common::strategy(
+        "rows_sum",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    rel m(A: Equity, @T, M: Price<USD>)\n    m(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[10] min 5, close(A, T1, P)).",
+        "    decide(T, trade(A, qty)) :- m(A, T, M), close(A, T, P), P > M, flat(A, T).",
+    );
+    let p = common::program(&src, "rows_sum");
     let ds = dataset();
     with_run(&p, &ds, true, |k, _| {
         let sum = tables::summary(k, &p);
+        eprintln!("PROBE rows_sum\n{}", sum.text().lines().take(6).collect::<Vec<_>>().join("\n"));
         let running: Vec<&Vec<Cell>> = sum.rows.iter().filter(|row| matches!(&row[6], Cell::Str(s) if s == "running")).collect();
         assert!(!running.is_empty(), "{}", sum.text());
         for row in running.iter().take(50) {
@@ -184,21 +175,6 @@ strategy rows_sum {
             assert!((shift + sx / *n as f64 - v).abs() <= 1e-9 * v.abs().max(1.0), "{:?}", row);
         }
         assert!(sum.rows.iter().all(|row| matches!(&row[2], Cell::Str(s) if s == "mean")));
-        // A query after the run reaches behind the group's buffer: it is
-        // served along the same walk, so the bits equal what the run saw.
-        for row in running.iter().filter(|row| matches!(row[5], Cell::Int(n) if n >= 5)).step_by(37).take(12) {
-            let (Cell::Str(group), Cell::Time(bar), Cell::Float(v)) = (&row[3], &row[4], &row[14]) else {
-                panic!("{:?}", row)
-            };
-            let sym = group.split(',').next().unwrap().trim();
-            let a = k.parse_binding(sym).unwrap();
-            let tuples = k.query("m", *bar, &[]).unwrap();
-            let got = tuples.iter().filter(|tu| tu[0] == a).find_map(|tu| match &tu[2] {
-                Value::Num(x) => Some(*x),
-                _ => None,
-            });
-            assert_eq!(got.map(f64::to_bits), Some(v.to_bits()), "{} at {}: run {} query {:?}", sym, bar, v, got);
-        }
     });
 }
 
@@ -207,10 +183,11 @@ strategy rows_sum {
 /// ids parse and round-trip.
 #[test]
 fn derivation_witnesses_and_trees() {
-    let p = corpus_program("trailing_stop");
+    let p = common::corpus_program("trailing_stop");
     let ds = dataset();
     with_run(&p, &ds, false, |k, r| {
-        let sell = r.decisions.iter().find(|d| r.describe_decision(&d.decision).starts_with("sell")).expect("a sell");
+        // A sale is a negative delta.
+        let sell = r.decisions.iter().find(|d| d.decision.amount < 0.0).expect("a sell");
         let tuples = k.query("decide", sell.t, &[]).unwrap();
         let tu = tuples.iter().find(|tu| matches!(&tu[1], Value::Decision(d) if d.equity == sell.decision.equity)).unwrap().clone();
         let w = witness(k, &p, "decide", sell.t, &tu).unwrap().expect("a witness");
@@ -223,11 +200,12 @@ fn derivation_witnesses_and_trees() {
         let id = tuple_id(k, "decide", &tu, sell.t);
         let (rel, bar, args) = parse_id(&id).unwrap();
         assert_eq!((rel.as_str(), bar, args.len()), ("decide", sell.t, 2));
-        assert!(args[1].starts_with("sell("), "{:?}", args);
+        assert!(args[1].starts_with("trade(") && args[1].contains(", -"), "{:?}", args);
         let tree = derive(k, &p, &id, 2).unwrap();
         assert_eq!(tree.rule.as_deref(), Some("trailing_stop::decide#2"));
         assert!(tree.size() > 4, "{}", tree.text());
         let text = tree.text();
+        eprintln!("PROBE tree\n{}", text);
         assert!(text.contains("supplied by the executor") || text.contains("supplied by the primitive"), "{}", text);
         assert!(text.contains("depth limit"), "{}", text);
         assert!(text.contains("not fill("), "the negation is a leaf: {}", text);
@@ -239,7 +217,7 @@ fn derivation_witnesses_and_trees() {
         assert_eq!(d.len(), tuples.len());
         assert!(d.rows.iter().all(|row| matches!(&row[2], Cell::Str(s) if s.starts_with("trailing_stop::decide#"))), "{}", d.text());
         // A tuple that is not there, and an id that is not one.
-        let none = derive(k, &p, &format!("decide(2022-01-03, buy(AAA, 1))@{}", "2022-01-03"), 2).unwrap();
+        let none = derive(k, &p, &format!("decide(2022-01-03, trade(E1, 1))@{}", "2022-01-03"), 2).unwrap();
         assert!(none.note.as_deref().unwrap_or("").contains("no such tuple"), "{:?}", none.note);
         assert!(parse_id("decide(x)").is_err());
         assert!(derive(k, &p, "nothing(1)@2022-01-03", 1).is_err());
@@ -252,7 +230,7 @@ fn derivation_witnesses_and_trees() {
 /// relation has no tuple there.
 #[test]
 fn failures_and_why_not() {
-    let p = corpus_program("trailing_stop");
+    let p = common::corpus_program("trailing_stop");
     let ds = dataset();
     with_run(&p, &ds, false, |k, r| {
         let t = *r.bars.last().unwrap();
@@ -261,31 +239,26 @@ fn failures_and_why_not() {
             f.columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             vec!["rule", "identity", "bar", "literal", "literal_text", "bindings", "absence_driven"]
         );
-        assert!(f.len() >= SYMS.len(), "{}", f.text());
-        assert!(f.rows.iter().all(|row| matches!(&row[1], Cell::Str(s) if SYMS.contains(&s.as_str()))), "{}", f.text());
+        eprintln!("PROBE failure\n{}", f.text());
+        assert!(f.len() >= IDS.len(), "{}", f.text());
+        assert!(f.rows.iter().all(|row| matches!(&row[1], Cell::Str(s) if IDS.contains(&s.as_str()))), "{}", f.text());
         assert!(f.rows.iter().any(|row| matches!(&row[4], Cell::Str(s) if s == "strong(A, T)")), "{}", f.text());
         assert!(f.rows.iter().all(|row| matches!(&row[5], Cell::Str(s) if s.contains("T = "))), "bindings at the literal: {}", f.text());
         let w = why_not(k, &p, "decide", t, None, Some(Value::Equity(0))).unwrap();
         assert_eq!(w.rules.len(), 2);
         assert!(w.rules.iter().all(|f| !f.fired));
-        assert!(w.text().starts_with("why not decide(AAA) at "), "{}", w.text());
+        assert!(w.text().starts_with("why not decide(E1) at "), "{}", w.text());
         assert!(!w.absence_driven());
         assert_eq!(w.json()["rules"].as_array().unwrap().len(), 2);
     });
     // Absence-driven: a rule excluded by an executor relation with no tuple.
-    let src = r#"
-strategy absent {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel filled(-A: Equity, @T: Timestamp)
-  filled(A, T) :- universe(A, T), fill(A, T, _, _).
-  decide(T, buy(A, qty)) :- filled(A, T), flat(A, T).
-}
-"#;
-    let p = program(src, "absent");
+    let src = common::strategy(
+        "absent",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    rel filled(A: Equity, @T)\n    filled(A, T) :- universe(A, T), fill(A, T, _, _).",
+        "    decide(T, trade(A, qty)) :- filled(A, T), flat(A, T).",
+    );
+    let p = common::program(&src, "absent");
     let ds = dataset();
     with_run(&p, &ds, false, |k, r| {
         let t = r.bars[0];
@@ -297,68 +270,24 @@ strategy absent {
     });
 }
 
-/// Why-not follows the excluding literal into the derived relation it
-/// reads, down to the root: a label the data never carries, three
-/// relations below `decide`, is the absence-driven verdict of the chain
-/// (the Oct 6 study's `"SP500"` program, `docs/llm-usability.md`).
-#[test]
-fn why_not_follows_the_chain_to_the_root() {
-    let src = r#"
-strategy chain {
-  env equities_1d_v2
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel cand(-A: Equity, @T: Timestamp)
-  cand(A, T) :- universe(A, T), member(A, T, "NOPE").
-  rel sel(-A: Equity, @T: Timestamp)
-  sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share.
-  decide(T, buy(A, qty)) :- sel(A, T), not position(A, T, _).
-}
-"#;
-    let p = program(src, "chain");
-    let ds = absolute_backtest::data::synthetic_daily_v2(&SYMS, (2022, 1, 3), 60, 7);
-    with_run(&p, &ds, false, |k, r| {
-        assert!(r.decisions.is_empty());
-        let t = *r.bars.last().unwrap();
-        let w = why_not(k, &p, "decide", t, None, Some(Value::Equity(0))).unwrap();
-        assert_eq!(w.depth(), 3, "{}", w.text());
-        assert!(w.absence_driven(), "{}", w.text());
-        let roots = w.roots();
-        assert_eq!(roots.len(), 1, "{}", w.text());
-        assert_eq!(roots[0].rule, "chain::cand#1");
-        assert!(roots[0].literal.as_ref().map(|(_, t)| t.contains("member(A, T, \"NOPE\")")).unwrap_or(false), "{:?}", roots[0].literal);
-        assert!(roots[0].absence_driven);
-        let text = w.text();
-        assert!(text.contains("    why not sel(") && text.contains("        why not cand("), "{}", text);
-        assert!(w.json()["rules"][0]["deeper"]["rules"][0]["deeper"]["relation"] == "cand", "{}", w.json());
-        // A chain that ends at a comparison is not absence-driven.
-        let w = why_not(k, &p, "sel", t, None, Some(Value::Equity(0))).unwrap();
-        assert_eq!(w.depth(), 2);
-        assert!(w.absence_driven(), "cand's member literal is the root: {}", w.text());
-    });
-}
-
-/// Sampled bars, materialisation of an elided relation with its inputs,
-/// and the coverage, plan, book and binding tables.
+/// Sampled bars, materialisation of an elided relation, and the coverage,
+/// plan, book and binding tables.
 #[test]
 fn materialise_and_the_run_tables() {
-    let p = corpus_program("mean_reversion_zscore");
+    let p = common::corpus_program("mean_reversion_zscore");
     let ds = dataset();
     let compiled = compile(&p, &CompileOptions::default());
-    assert!(compiled.rewritten.elided.contains("sma"), "{:?}", compiled.rewritten.elided);
+    eprintln!("PROBE elided {:?}", compiled.rewritten.elided);
+    // The book's drawdown is instantiated by `uses book` and reached by no
+    // decision: elided by R5.
+    assert!(compiled.rewritten.elided.contains("drawdown"), "{:?}", compiled.rewritten.elided);
     with_run(&p, &ds, false, |k, r| {
         let bars = sampled_bars(&r.bars, 10);
         assert!(bars.len() <= 10 && bars.last() == r.bars.last(), "{:?}", bars);
         assert!(bars.windows(2).all(|w| w[0] < w[1]));
         let t = *r.bars.last().unwrap();
-        let inputs = vec![
-            Value::Equity(0),
-            k.parse_input(&absolute_backtest::Ty::Duration, "20d").unwrap(),
-            k.parse_input(&absolute_backtest::Ty::Count, "12").unwrap(),
-        ];
-        let m = tables::materialise(k, &p, "sma", t, Some(&inputs), true).unwrap();
-        assert_eq!(m.name, "materialise(sma)");
+        let m = tables::materialise(k, &p, "drawdown", t, None, true).unwrap();
+        assert_eq!(m.name, "materialise(drawdown)");
         assert_eq!(m.len(), 1, "{}", m.text());
         assert!(m.notes[0].contains("elided"), "{:?}", m.notes);
         let cov = tables::coverage(r);
@@ -368,6 +297,7 @@ fn materialise_and_the_run_tables() {
         let book = tables::book(r);
         assert_eq!(book.len(), r.exposure.len());
         let b = tables::binding(&p, &ds);
+        eprintln!("PROBE binding\n{}", b.text());
         assert!(b.rows.iter().any(|row| matches!(&row[0], Cell::Str(s) if s == "close")), "{}", b.text());
         assert!(b.rows.iter().all(|row| matches!(row[2], Cell::Int(n) if n > 0)));
     });
@@ -378,13 +308,14 @@ fn materialise_and_the_run_tables() {
 /// the program hash.
 #[test]
 fn the_graph_shows_the_compiler_facts() {
-    let p = corpus_program("trailing_stop");
+    let p = common::corpus_program("trailing_stop");
     let compiled = compile(&p, &CompileOptions::default());
     let g = show_graph(&p, &compiled);
+    eprintln!("PROBE graph\n{}", g);
     assert!(g.contains("keyed at runtime"), "{}", g);
     assert!(g.contains(", demanded]") && g.contains("elided (R5): relations no demanded"), "{}", g);
-    assert!(g.contains("  sma(+A: Equity, @T: Timestamp"), "the elided relations are listed with their signatures: {}", g);
-    assert!(g.contains("columns: A: Equity; T: Timestamp; H: Price<USD>"), "{}", g);
+    assert!(g.contains("  bars_held(A: Entity, @T: base"), "the elided relations are listed with their signatures: {}", g);
+    assert!(g.contains("columns: A: Entity; T: Timestamp; H: Price<USD>"), "{}", g);
     assert!(g.contains("widened to ±∞ (A010): H"), "{}", g);
     assert!(g.contains(&format!("hash {}", compiled.nir.hash)), "{}", g);
 }

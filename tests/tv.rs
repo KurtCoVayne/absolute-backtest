@@ -33,12 +33,15 @@ fn corpus_strategies() -> Vec<(String, Program)> {
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
 /// The synthetic market of a program's base: minute bars for a sub-daily
-/// base, else the daily market with its catalog.
+/// base, else the daily market with its catalog, over the four hundred
+/// bars the acceptance test runs every strategy on (on a shorter market
+/// the long-short book's legs drift past the execution block's gross
+/// limit and the run halts).
 fn dataset_for(p: &Program, seed: u64) -> Dataset {
     if p.base.is_sub_daily() {
         synthetic_minute(&SYMS, (2024, 1, 2), 30, 320, seed)
     } else {
-        synthetic_daily(&SYMS, (2022, 1, 3), 320, seed)
+        synthetic_daily(&SYMS, (2022, 1, 3), 400, seed)
     }
 }
 

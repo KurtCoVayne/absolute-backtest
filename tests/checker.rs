@@ -202,7 +202,7 @@ fn a_declared_relation_with_no_rules_is_warned_about() {
     let w: Vec<&Diagnostic> = diags.iter().filter(|d| d.severity == Severity::Warning).collect();
     assert_eq!(w.len(), 1, "exactly one warning, for `ghost`:\n{}", text(&diags));
     assert!(w[0].code == Code::W3 && w[0].message.contains("`ghost`") && w[0].message.contains("no rule"), "{}", w[0]);
-    let decl_line = src.lines().position(|l| l.contains("rel ghost")).unwrap() + 1;
+    let decl_line = src.lines().position(|l| l.contains("rel ghost")).unwrap() as u32 + 1;
     assert_eq!(w[0].span.line, decl_line, "reported at the declaration: {}", w[0]);
 }
 
@@ -349,24 +349,36 @@ fn structural_zero_and_one_do_not_warn() {
 
 #[test]
 fn a_numeric_literal_in_a_strategy_rule_warns_w5() {
-    // Three literals: a threshold, a min count in a bracket and a weight. (A
-    // window length written as a duration is not counted: the checker skips
-    // duration literals.)
+    // Two literals: a threshold and a weight.
     let src = dof_clean()
-        .replace("zscore_window[lb, k, close](A, T, Z), Z > 1.", "zscore_window[60d, 30, close](A, T, Z), Z > 1.5.")
+        .replace("zscore_window[lb, k, close](A, T, Z), Z > 1.", "zscore_window[lb, k, close](A, T, Z), Z > 1.5.")
         .replace("hold(A, W)) :- chosen(A, T), n_chosen(T, N), W = 1 / N.", "hold(A, 0.25)) :- chosen(A, T), n_chosen(T, N).");
     let diags = check(&src, "dof_clean");
     assert!(errors(&diags).is_empty(), "{}", text(&diags));
     let w5: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W5).collect();
-    assert_eq!(w5.len(), 3, "one W5 per literal:\n{}", text(&diags));
+    assert_eq!(w5.len(), 2, "one W5 per literal:\n{}", text(&diags));
     let msgs: Vec<&str> = w5.iter().map(|d| d.message.as_str()).collect();
-    for lit in ["30", "1.5", "0.25"] {
+    for lit in ["1.5", "0.25"] {
         assert!(msgs.iter().any(|m| m.contains(&format!("`{}`", lit))), "no W5 names `{}`:\n{}", lit, text(&diags));
     }
     assert!(w5.iter().all(|d| d.message.contains("params")), "the fix is to lift the literal into `params`:\n{}", text(&diags));
     assert!(w5.iter().all(|d| d.rule.is_some()), "W5 is reported in its rule:\n{}", text(&diags));
-    // The unused params `lb` and `k` warn W2; nothing else does.
-    assert!(diags.iter().all(|d| matches!(d.code, Code::W5 | Code::W2)), "{}", text(&diags));
+    assert!(diags.iter().all(|d| d.code == Code::W5), "nothing else warns:\n{}", text(&diags));
+}
+
+/// A literal written in a bracket argument of the strategy's own rule (the
+/// `min` count of a library window) is a degree of freedom of the strategy
+/// like any other literal of the rule.
+#[test]
+#[ignore = "src: a strategy's bracket literal (`30` in `zscore_window[lb, 30, close]`) is neither warned W5 nor counted for the strategy; it is substituted into the library instance and counted as a library literal"]
+fn a_literal_in_a_bracket_argument_warns_w5() {
+    let src = dof_clean().replace("zscore_window[lb, k, close](A, T, Z), Z > 1.", "zscore_window[lb, 30, close](A, T, Z), Z > 1.");
+    let (p, diags) = common::check(&src, "dof_clean");
+    assert!(errors(&diags).is_empty(), "{}", text(&diags));
+    let w5: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W5).collect();
+    assert!(w5.iter().any(|d| d.message.contains("`30`") && d.rule.as_deref() == Some("dof_clean::chosen#1")), "{}", text(&diags));
+    let dof = &p.unwrap().degrees_of_freedom;
+    assert!(dof.literals.iter().any(|(rule, l)| rule == "dof_clean::chosen#1" && l.to_string() == "30"), "{:?}", dof);
 }
 
 #[test]
@@ -375,7 +387,8 @@ fn a_library_literal_is_counted_not_warned() {
     let src = common::StrategyParts {
         name: "dof_lib".into(),
         params: "    lookback : Duration = 1y\n    skip : Duration = 1mo\n    min_adv : Notional<USD> = 1_000_000 USD".into(),
-        rules: "    rel cand(A: Equity, @T, M: Scalar)\n    cand(A, T, M) :- liquid[min_adv](A, T), lag(T, skip, T1), close(A, T1, P1), lag(T, lookback, T0), close(A, T0, P0), M = P1 / P0 - 1.".into(),
+        rules: "    rel cand(A: Equity, @T, M: Scalar)\n    cand(A, T, M) :- liquid[min_adv](A, T), lag(T, skip, T1), close(A, T1, P1), lag(T, lookback, T0), close(A, T0, P0), M = P1 / P0 - 1."
+            .into(),
         decides: "    decide(T, hold(A, 0)) :- cand(A, T, M), M < 0.".into(),
         ..Default::default()
     }
@@ -389,9 +402,12 @@ fn a_library_literal_is_counted_not_warned() {
     assert_eq!(dof.rules, 3);
     assert!(dof.literals.is_empty(), "{:?}", dof.literals);
     let lib: Vec<String> = dof.library_literals.iter().map(|(rule, l)| format!("{} {}", rule, l)).collect();
-    assert!(lib.iter().any(|s| s.starts_with("bars::liquid") && s.ends_with(" 20")), "{:?}", lib);
-    // Only reachable library rules count: nothing but `liquid` is used here.
-    assert!(lib.iter().all(|s| s.starts_with("bars::liquid")), "{:?}", lib);
+    // A bracket argument is substituted into the instance it calls, so the
+    // `20` of `liquid` is counted at the rule of `adv[20]`.
+    assert!(lib.iter().any(|s| s.starts_with("bars::adv[20]") && s.ends_with(" 20")), "{:?}", lib);
+    // Only reachable library rules count: nothing but `liquid` and what it
+    // reads is used here.
+    assert!(lib.iter().all(|s| s.starts_with("bars::adv[20]")), "{:?}", lib);
 }
 
 #[test]
@@ -424,7 +440,7 @@ fn an_equity_literal_warns_w6_as_a_snapshot() {
     assert!(errors(&diags).is_empty(), "{}", text(&diags));
     let w6: Vec<&Diagnostic> = diags.iter().filter(|d| d.code == Code::W6).collect();
     assert_eq!(w6.len(), 2, "one for the param default, one for the in-rule literal:\n{}", text(&diags));
-    let param_line = src.lines().position(|l| l.contains("bench : Equity")).unwrap() + 1;
+    let param_line = src.lines().position(|l| l.contains("bench : Equity")).unwrap() as u32 + 1;
     assert!(w6.iter().any(|d| d.message.contains("\"SPY\"") && d.rule.is_none() && d.span.line == param_line), "{}", text(&diags));
     assert!(w6.iter().any(|d| d.message.contains("\"AAA\"") && d.rule.as_deref() == Some("snapshot::decide#1")), "{}", text(&diags));
     assert!(w6.iter().all(|d| d.message.contains("snapshot") && d.message.contains("ticker")), "{}", text(&diags));

@@ -2,73 +2,64 @@
 //! end to end, determinism, the causality theorem, and the runtime
 //! diagnostics of section 7.
 
-mod corpus;
+mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::Path;
+use std::collections::BTreeMap;
 
-use absolute_backtest::check::{check_program, Program, Workspace};
-use absolute_backtest::data::{synthetic_daily, synthetic_minute};
-use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, OnLeverage, RunError, Value};
+use absolute_backtest::check::Program;
+use absolute_backtest::data::{business_days, synthetic_daily, synthetic_for_program, synthetic_minute};
+use absolute_backtest::kernel::time::format_timestamp;
+use absolute_backtest::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, OnLeverage, RunError, RunResult, Sym, Value};
 use absolute_backtest::{Duration, Lit};
 
-fn program(extra: &str, name: &str) -> (Program, Workspace) {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(extra).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    (p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n"))), ws)
+use common::day;
+
+/// Buy ten shares of a name whose return is positive when flat; sell the
+/// bar after a buy.
+fn up_down() -> Program {
+    common::program(&up_down_source(common::StrategyParts::default().universe), "up_down")
 }
 
-fn day(s: &str) -> i64 {
-    parse_timestamp(s).unwrap()
-}
-
-/// One symbol, five consecutive weekdays, crafted closes.
-fn crafted_daily(prices: &[f64]) -> Dataset {
-    let mut ds = Dataset::new();
-    let x = ds.intern("X");
-    let days = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"];
-    for (d, p) in days.iter().zip(prices) {
-        let t = day(d);
-        ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(*p)]);
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
+fn up_down_source(universe: String) -> String {
+    common::StrategyParts {
+        name: "up_down".into(),
+        universe,
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        rules: "    rel up(A: Equity, @T)
+    up(A, T) :- universe(A, T), price_return(A, T, R), R > 0."
+            .into(),
+        decides: "    decide(T, trade(A, qty)) :- up(A, T), flat(A, T).
+    decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0."
+            .into(),
+        ..Default::default()
     }
-    ds
+    .render()
 }
 
-const UP_DOWN: &str = r#"
-strategy up_down {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel up(-A: Equity, @T: Timestamp)
-  up(A, T) :- universe(A, T), logret(A, T, R), R > 0.
-  decide(T, buy(A, qty)) :- up(A, T), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).
+/// One symbol `X`, consecutive weekdays from 2024-01-08, crafted closes.
+fn crafted_daily(prices: &[f64]) -> Dataset {
+    common::market("X", prices)
 }
-"#;
+
+/// A frictionless book of `initial_cash`.
+fn hand(initial_cash: f64) -> ExecConfig {
+    ExecConfig {
+        initial_cash,
+        ..ExecConfig::frictionless()
+    }
+}
+
+/// The decisions of a run as `date decision`.
+fn describe(r: &RunResult) -> Vec<String> {
+    r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect()
+}
 
 #[test]
 fn executor_contract_by_hand() {
-    let (prog, _) = program(UP_DOWN, "up_down");
+    let prog = up_down();
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    let r = run(
-        &prog,
-        &ds,
-        ExecConfig {
-            initial_cash: 1000.0,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
-    let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
-    assert_eq!(decisions, vec!["2024-01-09 buy(X, 10)", "2024-01-10 sell(X, 10)", "2024-01-11 buy(X, 10)", "2024-01-12 sell(X, 10)"]);
+    let r = run(&prog, &ds, hand(1000.0)).unwrap();
+    assert_eq!(describe(&r), vec!["2024-01-09 trade(X, 10)", "2024-01-10 trade(X, -10)", "2024-01-11 trade(X, 10)", "2024-01-12 trade(X, -10)"]);
     let fills: Vec<(String, f64, f64)> = r.fills.iter().map(|f| (format_timestamp(f.t), f.quantity, f.price)).collect();
     assert_eq!(
         fills,
@@ -82,7 +73,7 @@ fn executor_contract_by_hand() {
 
 #[test]
 fn slippage_and_commission_apply_against_the_order() {
-    let (prog, _) = program(UP_DOWN, "up_down");
+    let prog = up_down();
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     let r = run(
         &prog,
@@ -105,17 +96,8 @@ fn slippage_and_commission_apply_against_the_order() {
 
 #[test]
 fn target_weight_sizes_from_equity_at_execution() {
-    let src = r#"
-strategy half {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = 0.5
-  decide(T, target_weight(A, w)) :- universe(A, T).
-}
-"#;
-    let (prog, _) = program(src, "half");
+    let src = common::strategy("half", "    w : Scalar = 0.5", "", "    decide(T, hold(A, w)) :- universe(A, T).");
+    let prog = common::program(&src, "half");
     let ds = crafted_daily(&[10.0, 10.0, 20.0, 20.0, 20.0]);
     let r = run(
         &prog,
@@ -135,15 +117,7 @@ strategy half {
     assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![37.0]);
     // On a fixed base (the default) the weight is of the capital: 50 shares
     // at 20 are 1000 = 0.5 * 2000, too much; the target is 25 shares.
-    let r = run(
-        &prog,
-        &ds,
-        ExecConfig {
-            initial_cash: 1000.0,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
+    let r = run(&prog, &ds, hand(1000.0)).unwrap();
     let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
     assert_eq!(qty, vec![50.0, -25.0]);
     assert_eq!(r.base_capital, Some(1000.0));
@@ -155,19 +129,15 @@ strategy half {
 
 #[test]
 fn conflicting_decisions_halt_naming_both_rules() {
-    let src = r#"
-strategy conflict {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param a : Quantity<Shares> = 10 shares
-  param b : Quantity<Shares> = 20 shares
-  decide(T, buy(A, a)) :- universe(A, T).
-  decide(T, buy(A, b)) :- universe(A, T).
-}
-"#;
-    let (prog, _) = program(src, "conflict");
+    let src = common::strategy(
+        "conflict",
+        "    a : Quantity<Shares> = 10 shares
+    b : Quantity<Shares> = 20 shares",
+        "",
+        "    decide(T, trade(A, a)) :- universe(A, T).
+    decide(T, trade(A, b)) :- universe(A, T).",
+    );
+    let prog = common::program(&src, "conflict");
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     match run(&prog, &ds, ExecConfig::default()) {
         Err(RunError::Conflict { equity, first, second, .. }) => {
@@ -181,18 +151,14 @@ strategy conflict {
 
 #[test]
 fn identical_decisions_from_two_rules_are_one_tuple() {
-    let src = r#"
-strategy same {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param a : Quantity<Shares> = 10 shares
-  decide(T, buy(A, a)) :- universe(A, T), flat(A, T).
-  decide(T, buy(A, a)) :- universe(A, T), close(A, T, _), flat(A, T).
-}
-"#;
-    let (prog, _) = program(src, "same");
+    let src = common::strategy(
+        "same",
+        "    a : Quantity<Shares> = 10 shares",
+        "",
+        "    decide(T, trade(A, a)) :- universe(A, T), flat(A, T).
+    decide(T, trade(A, a)) :- universe(A, T), close(A, T, _), flat(A, T).",
+    );
+    let prog = common::program(&src, "same");
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
     assert_eq!(r.decisions.len(), 1);
@@ -200,19 +166,14 @@ strategy same {
 
 #[test]
 fn partial_arithmetic_halts_with_rule_tuple_and_expression() {
-    let src = r#"
-strategy div0 {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel bad(-A: Equity, @T: Timestamp, -X: Scalar)
-  bad(A, T, X) :- universe(A, T), close(A, T, P), X = P / (P - P).
-  decide(T, buy(A, qty)) :- bad(A, T, X), X > 0.
-}
-"#;
-    let (prog, _) = program(src, "div0");
+    let src = common::strategy(
+        "div0",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    rel bad(A: Equity, @T, X: Scalar)
+    bad(A, T, X) :- universe(A, T), close(A, T, P), X = P / (P - P).",
+        "    decide(T, trade(A, qty)) :- bad(A, T, X), X > 0.",
+    );
+    let prog = common::program(&src, "div0");
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     match run(&prog, &ds, ExecConfig::default()) {
         Err(RunError::Arithmetic { rule, bindings, expr, message }) => {
@@ -227,18 +188,19 @@ strategy div0 {
 
 #[test]
 fn window_minimum_withholds_the_aggregate() {
-    let src = r#"
-strategy need3 {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), sma(A, T, 10d, 3, M), close(A, T, P), P > M, flat(A, T).
-}
-"#;
-    let (prog, _) = program(src, "need3");
-    // Rising prices: the sma is below the close whenever it exists, and it
+    let src = common::StrategyParts {
+        name: "need3".into(),
+        uses: "calendar, stat, bars, book".into(),
+        params: "    qty : Quantity<Shares> = 10 shares
+    lb : Duration = 10d
+    k : Count = 3"
+            .into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), mean_window[lb, k, close](A, T, M), close(A, T, P), P > M, flat(A, T).".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&src, "need3");
+    // Rising prices: the mean is below the close whenever it exists, and it
     // exists from the third bar on (three observations within ten days).
     let ds = crafted_daily(&[10.0, 11.0, 12.0, 13.0, 14.0]);
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
@@ -246,35 +208,10 @@ strategy need3 {
 }
 
 #[test]
-fn delta_quantities_must_be_positive() {
-    let src = r#"
-strategy neg {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 0 shares
-  decide(T, buy(A, qty)) :- universe(A, T).
-}
-"#;
-    let (prog, _) = program(src, "neg");
-    let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    assert!(matches!(run(&prog, &ds, ExecConfig::default()), Err(RunError::BadDecision { .. })));
-}
-
-#[test]
 fn explain_names_the_first_failing_literal() {
-    let (prog, _) = program(UP_DOWN, "up_down");
+    let prog = up_down();
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    let mut k = Kernel::new(
-        &prog,
-        &ds,
-        ExecConfig {
-            initial_cash: 1000.0,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
+    let mut k = Kernel::new(&prog, &ds, hand(1000.0)).unwrap();
     k.run().unwrap();
     let decide_buy = (0..prog.rules.len()).find(|&i| prog.rule_label(i) == "up_down::decide#1").unwrap();
     let ex = k.explain(decide_buy, day("2024-01-10"), &[]).unwrap();
@@ -285,106 +222,122 @@ fn explain_names_the_first_failing_literal() {
     assert!(ex.failed_at.is_none() && ex.solutions == 1, "{}", ex);
     let up = (0..prog.rules.len()).find(|&i| prog.rule_label(i) == "up_down::up#1").unwrap();
     let ex = k.explain(up, day("2024-01-08"), &[]).unwrap();
-    assert_eq!(ex.failed_at.as_ref().map(|(_, l)| l.clone()), Some("logret(A, T, R)".to_string()));
+    assert_eq!(ex.failed_at.as_ref().map(|(_, l)| l.clone()), Some("price_return(A, T, R)".to_string()));
 }
 
-#[test]
-fn resample_takes_the_last_fine_close_and_honours_min() {
-    let src = r#"
-strategy daily_from_minutes {
-  env equities_1m
-  uses bars
-  resolution @1d
-  mode target
-  rel up_day(-A: Equity, @T: Timestamp)
-  up_day(A, T) :- universe_d(A, T), resample(close_m(A, T1, P) to @1d as T, min 3, O = first(P), C = last(P)), C > O.
-  decide(T, target_quantity(A, 1 shares)) :- up_day(A, T).
+/// One minute bar of `sym` at `t` (open, high and low at the close).
+fn add_minute(ds: &mut Dataset, sym: Sym, t: i64, close: f64, volume: f64) {
+    for rel in ["open", "high", "low", "close"] {
+        ds.add(rel, vec![Value::Equity(sym), Value::Time(t), Value::Num(close)]);
+    }
+    ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
 }
-"#;
-    let (prog, _) = program(src, "daily_from_minutes");
+
+/// Minute closes of `sym` on the date `d` from 09:31, one a minute (labels
+/// are close instants), and the day's listing.
+fn minute_bars(ds: &mut Dataset, sym: Sym, d: &str, closes: &[f64]) {
+    ds.add("listed", vec![Value::Equity(sym), Value::Time(day(d))]);
+    for (i, p) in closes.iter().enumerate() {
+        add_minute(ds, sym, day(d) + 9 * 3600 + 31 * 60 + 60 * i as i64, *p, 100.0);
+    }
+}
+
+/// A minute bundle decided on its daily calendar, with `rules` and `decides`.
+fn daily_of_minutes(name: &str, params: &str, rules: &str, decides: &str) -> String {
+    common::StrategyParts {
+        name: name.into(),
+        needs: "need bars @1m   need listing".into(),
+        calendars: Some("daily = days".into()),
+        clock: "decide on daily".into(),
+        universe: "universe(A, T) :- listed(A, T), traded@daily(A, T).".into(),
+        params: params.into(),
+        rules: rules.into(),
+        decides: decides.into(),
+        report: "calendar daily   periods 252 per year".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// The daily bars of a minute bundle are bucket aggregates of its minutes
+/// (3.3): the first and last close of the day, over a minimum count of bars.
+#[test]
+fn a_bucket_aggregate_takes_the_days_closes_and_honours_a_minimum_count() {
+    let src = daily_of_minutes(
+        "daily_from_minutes",
+        "    one : Quantity<Shares> = 1 shares
+    min_bars : Count = 3",
+        "    rel up_day(A: Equity, @T)
+    up_day(A, T) :- universe(A, T), N = count(T1) over (T1 in bucket(daily, T), close(A, T1, _)), N >= min_bars,
+        O = first(P) over (T1 in bucket(daily, T), close(A, T1, P)), C = last(P1) over (T1 in bucket(daily, T), close(A, T1, P1)), C > O.",
+        "    decide(T, hold(A, one)) :- up_day(A, T).",
+    );
+    let prog = common::program(&src, "daily_from_minutes");
     let mut ds = Dataset::new();
-    let y = ds.intern("Y");
-    let bars = |d: &str, prices: &[f64], ds: &mut Dataset| {
-        for (i, p) in prices.iter().enumerate() {
-            let t = day(d) + 9 * 3600 + 31 * 60 + 60 * i as i64;
-            ds.add("close_m", vec![Value::Equity(y), Value::Time(t), Value::Num(*p)]);
-            ds.add("universe_m", vec![Value::Equity(y), Value::Time(t)]);
-        }
-    };
-    bars("2024-01-08", &[10.0, 9.0, 12.0], &mut ds); // up day: 10 -> 12
-    bars("2024-01-09", &[12.0, 11.0], &mut ds); // only two bars: below min 3, no bar
-    bars("2024-01-10", &[11.0, 13.0, 10.0], &mut ds); // down day
+    let y = ds.add_security("Y", "Y", day("2024-01-08"), None);
+    minute_bars(&mut ds, y, "2024-01-08", &[10.0, 9.0, 12.0]); // up day: 10 -> 12
+    minute_bars(&mut ds, y, "2024-01-09", &[12.0, 11.0]); // only two bars: below the minimum, no decision
+    minute_bars(&mut ds, y, "2024-01-10", &[11.0, 13.0, 10.0]); // down day
+    ds.derive_tickers();
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+    // A daily label is the day's last minute bar.
     let ds_days: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
-    assert_eq!(ds_days, vec!["2024-01-08"]);
+    assert_eq!(ds_days, vec!["2024-01-08T09:33:00"]);
     // Filled at the next daily bar, at that day's last minute close (11.0).
     assert_eq!(r.fills.len(), 1);
-    assert_eq!(format_timestamp(r.fills[0].t), "2024-01-09");
+    assert_eq!(format_timestamp(r.fills[0].t), "2024-01-09T09:32:00");
     assert_eq!(r.fills[0].price, 11.0);
 }
 
 #[test]
 fn position_feedback_is_visible_one_bar_later() {
-    let src = r#"
-strategy see_fill {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not bought_within(A, T, 30d).
-  decide(T, sell(A, Q)) :- universe(A, T), fill(A, T, Q, _), Q > 0 shares.
-}
-"#;
-    let (prog, _) = program(src, "see_fill");
+    let src = common::strategy(
+        "see_fill",
+        "    qty : Quantity<Shares> = 10 shares
+    cooldown : Duration = 30d",
+        "",
+        "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T), not bought_within[cooldown](A, T).
+    decide(T, trade(A, Q)) :- universe(A, T), fill(A, T, Q0, _), Q0 > 0 shares, Q = -Q0.",
+    );
+    let prog = common::program(&src, "see_fill");
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
-    let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
     // Buy on day 1, see the fill on day 2 and sell; the cooldown blocks re-entry.
-    assert_eq!(decisions, vec!["2024-01-08 buy(X, 10)", "2024-01-09 sell(X, 10)"]);
+    assert_eq!(describe(&r), vec!["2024-01-08 trade(X, 10)", "2024-01-09 trade(X, -10)"]);
 }
 
-fn corpus_strategy_sources() -> Vec<(String, String)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies");
-    let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    files.sort();
-    files
-        .into_iter()
-        .map(|f| (f.file_stem().unwrap().to_string_lossy().to_string(), fs::read_to_string(f).unwrap()))
-        .collect()
+/// The names of the corpus strategies.
+fn corpus_names() -> Vec<String> {
+    common::dsl_files("strategies").iter().map(|f| f.file_stem().unwrap().to_string_lossy().to_string()).collect()
 }
 
-const DAILY_SYMBOLS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+/// The daily market renames its second name and delists its last; the
+/// names the strategies cite ("AAA", "BBB", "SPY") stay listed.
+const SYMS: [&str; 5] = ["AAA", "XYZ", "BBB", "SPY", "DDD"];
 
-fn dataset_for(prog: &Program, seed: u64) -> Dataset {
-    let minute = prog.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1));
-    if minute {
-        synthetic_minute(&DAILY_SYMBOLS, (2024, 1, 2), 30, 320, seed)
-    } else if prog.relations.contains_key("split") {
-        absolute_backtest::data::synthetic_daily_v2(&DAILY_SYMBOLS, (2022, 1, 3), 320, seed)
-    } else {
-        synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), 320, seed)
-    }
+/// The synthetic market of the program's class and base: `days` daily bars,
+/// or thirty days of minute bars for a sub-daily base.
+fn dataset_for(prog: &Program, days: usize, seed: u64) -> Dataset {
+    let days = if prog.base.is_sub_daily() { 30 } else { days };
+    synthetic_for_program(prog, &SYMS, (2022, 1, 3), days, seed)
 }
 
 #[test]
 fn every_corpus_strategy_runs_and_is_deterministic() {
-    for (name, src) in corpus_strategy_sources() {
-        let (prog, _) = program(&src, &name);
-        let ds = dataset_for(&prog, 11);
-        let a = run(&prog, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{}: {}", name, e));
-        let b = run(&prog, &ds, ExecConfig::default()).unwrap();
-        let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {} {}", d.t, r.describe_decision(&d.decision), d.rule)).collect() };
+    for name in corpus_names() {
+        let prog = common::corpus_program(&name);
+        let ds = dataset_for(&prog, 400, 11);
+        let cfg = ExecConfig::from_program(&prog);
+        let a = run(&prog, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let b = run(&prog, &ds, cfg).unwrap();
+        let show = |r: &RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {} {}", d.t, r.describe_decision(&d.decision), d.rule)).collect() };
         assert_eq!(show(&a), show(&b), "{} is not deterministic", name);
         assert_eq!(a.final_cash.to_bits(), b.final_cash.to_bits(), "{} is not deterministic", name);
-        let modes: BTreeSet<_> = a.decisions.iter().map(|d| d.decision.ctor.mode()).collect();
-        assert!(modes.iter().all(|m| *m == prog.mode), "{} emitted decisions outside its mode", name);
-        // Every bar has a price, so the only drops are last-bar decisions.
+        // Every bar has a price, so the only drops are last-bar decisions and
+        // the decisions on the delisted name after its rows stop.
         let last = *a.bars.last().unwrap();
         assert!(
-            a.dropped
-                .iter()
-                .all(|(t, _, reason)| (*t == last && reason == "no next bar") || (prog.relations.contains_key("delisted") && reason.contains("no price"))),
+            a.dropped.iter().all(|(t, _, reason)| (*t == last && reason == "no next bar") || reason.contains("no price")),
             "{} dropped decisions: {:?}",
             name,
             a.dropped
@@ -397,13 +350,14 @@ fn corpus_strategies_trade_on_synthetic_data() {
     // A strategy that never decides on a year of five random walks is not
     // exercising the kernel; the breakout and spike cases are rarer, so they
     // get a longer history.
-    for (name, src) in corpus_strategy_sources() {
-        let (prog, _) = program(&src, &name);
-        let ds = match name.as_str() {
-            "breakout_52w" | "volume_spike" => synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), 900, 11),
-            _ => dataset_for(&prog, 11),
+    for name in corpus_names() {
+        let prog = common::corpus_program(&name);
+        let days = match name.as_str() {
+            "breakout_52w" | "volume_spike" => 900,
+            _ => 400,
         };
-        let r = run(&prog, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let ds = dataset_for(&prog, days, 11);
+        let r = run(&prog, &ds, ExecConfig::from_program(&prog)).unwrap_or_else(|e| panic!("{}: {}", name, e));
         assert!(!r.decisions.is_empty(), "{} made no decisions", name);
         assert!(!r.fills.is_empty(), "{} had no fills", name);
     }
@@ -411,50 +365,37 @@ fn corpus_strategies_trade_on_synthetic_data() {
 
 #[test]
 fn causality_theorem_holds_empirically() {
-    for name in [
-        "sma_crossover",
-        "trailing_stop",
-        "momentum_top_n",
-        "pairs_trading",
-        "low_vol_portfolio",
-        "resampled_momentum",
-        "opening_gap",
-    ] {
-        let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
-        let (prog, _) = program(&src, name);
-        let ds = dataset_for(&prog, 5);
-        let bars = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap().decision_bars();
+    for name in ["sma_crossover", "trailing_stop", "momentum_top_n", "pairs_trading", "low_vol_portfolio", "resampled_momentum", "opening_gap"] {
+        let prog = common::corpus_program(name);
+        let ds = dataset_for(&prog, 400, 5);
+        let cfg = ExecConfig::from_program(&prog);
+        let bars = Kernel::new(&prog, &ds, cfg.clone()).unwrap().decision_bars();
         let n = bars.len();
         let samples: Vec<i64> = [n / 3, n / 2, 2 * n / 3, n - 1].iter().map(|&i| bars[i]).collect();
-        let mismatches = verify_causality(&prog, &ds, ExecConfig::default(), &samples).unwrap();
+        let mismatches = verify_causality(&prog, &ds, cfg, &samples).unwrap();
         assert!(mismatches.is_empty(), "{}: {:?}", name, mismatches);
     }
 }
 
 #[test]
-fn delta_and_target_constructors_are_distinguished() {
-    assert_eq!(Ctor::parse("buy").map(|c| c.mode()), Some(absolute_backtest::DecisionMode::Delta));
-    assert_eq!(Ctor::parse("target_weight").map(|c| c.mode()), Some(absolute_backtest::DecisionMode::Target));
+fn hold_and_trade_constructors_are_distinguished() {
+    assert_eq!(Ctor::parse("trade").map(|c| c.is_target()), Some(false));
+    assert_eq!(Ctor::parse("hold_weight").map(|c| c.is_target()), Some(true));
+    assert_eq!(Ctor::parse("hold_quantity").map(|c| c.is_target()), Some(true));
+    assert_eq!(Ctor::parse("buy"), None);
 }
 
 #[test]
 fn a_missing_fill_price_drops_the_decision() {
-    let (prog, _) = program(UP_DOWN, "up_down");
+    // The universe is the listing alone, so a bar without a close is still
+    // one of X's rows (the listing and the volume stay).
+    let prog = common::program(&up_down_source("universe(A, T) :- listed(A, T).".into()), "up_down");
     let mut ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    // Remove the close on the bar after the first buy (2024-01-10); the
-    // universe and volume rows stay, so the bar still exists.
+    // Remove the close on the bar after the first buy (2024-01-10).
     let gone = day("2024-01-10");
     ds.facts.get_mut("close").unwrap().retain(|tu| tu[1] != Value::Time(gone));
-    let r = run(
-        &prog,
-        &ds,
-        ExecConfig {
-            initial_cash: 1000.0,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
-    // Thursday's log return needs Wednesday's close too, so the next buy is
+    let r = run(&prog, &ds, hand(1000.0)).unwrap();
+    // Thursday's return needs Wednesday's close too, so the next buy is
     // Friday's, which has no bar left to fill it: no fills at all, and both
     // decisions are dropped, each with its reason.
     let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
@@ -473,24 +414,16 @@ fn a_missing_fill_price_drops_the_decision() {
 /// arithmetic closes: decisions = fills + dropped.
 #[test]
 fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
-    let (prog, _) = program(UP_DOWN, "up_down");
+    let prog = up_down();
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    let r = run(
-        &prog,
-        &ds,
-        ExecConfig {
-            initial_cash: 1000.0,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
+    let r = run(&prog, &ds, hand(1000.0)).unwrap();
     // 01-09 buy, 01-10 sell, 01-11 buy, 01-12 sell: the last cannot fill.
     assert_eq!(r.decisions.len(), 4);
     assert_eq!(r.fills.len(), 3);
     assert_eq!(r.dropped.len(), 1, "{:?}", r.dropped);
     let (t, d, reason) = &r.dropped[0];
     assert_eq!(format_timestamp(*t), "2024-01-12");
-    assert_eq!(r.describe_decision(d), "sell(X, 10)");
+    assert_eq!(r.describe_decision(d), "trade(X, -10)");
     assert!(reason.contains("no next bar"), "{}", reason);
     assert_eq!(r.decisions.len(), r.fills.len() + r.dropped.len());
 }
@@ -501,19 +434,16 @@ fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
 /// parameter's type and range.
 #[test]
 fn parameter_overrides_change_the_run_within_type_and_range() {
-    let src = r#"
-strategy hold_n {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param hold : Duration = 1d in 1d..5d
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not bought_within(A, T, 30d).
-  decide(T, sell(A, Q)) :- held(A, T, Q), lag(T, hold, T0), decided(T0, buy(A, _)).
-}
-"#;
-    let (prog, _) = program(src, "hold_n");
+    let src = common::strategy(
+        "hold_n",
+        "    hold : Duration = 1d in 1d..5d
+    qty : Quantity<Shares> = 10 shares
+    cooldown : Duration = 30d",
+        "",
+        "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T), not bought_within[cooldown](A, T).
+    decide(T, trade(A, Q)) :- held(A, T, Q0), lag(T, hold, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.",
+    );
+    let prog = common::program(&src, "hold_n");
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     let with = |overrides: Vec<(&str, Lit)>| {
         run(
@@ -526,13 +456,12 @@ strategy hold_n {
         )
         .map_err(|e| e.to_string())
     };
-    let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect() };
-    let days = |n: i64| Lit::Duration(Duration { months: 0, days: n });
-    assert_eq!(show(&with(vec![]).unwrap()), vec!["2024-01-08 buy(X, 10)", "2024-01-09 sell(X, 10)"]);
-    assert_eq!(show(&with(vec![("hold", days(3))]).unwrap()), vec!["2024-01-08 buy(X, 10)", "2024-01-11 sell(X, 10)"]);
+    let days = |n: i64| Lit::Duration(Duration { months: 0, days: n, ..Duration::default() });
+    assert_eq!(describe(&with(vec![]).unwrap()), vec!["2024-01-08 trade(X, 10)", "2024-01-09 trade(X, -10)"]);
+    assert_eq!(describe(&with(vec![("hold", days(3))]).unwrap()), vec!["2024-01-08 trade(X, 10)", "2024-01-11 trade(X, -10)"]);
     assert_eq!(
-        show(&with(vec![("hold", days(3)), ("qty", Lit::Shares(25.0))]).unwrap()),
-        vec!["2024-01-08 buy(X, 25)", "2024-01-11 sell(X, 25)"]
+        describe(&with(vec![("hold", days(3)), ("qty", Lit::Quantity(25.0, "shares".into()))]).unwrap()),
+        vec!["2024-01-08 trade(X, 25)", "2024-01-11 trade(X, -25)"]
     );
     // Outside the range, of another type, or not a parameter: a request error, not a run.
     let err = with(vec![("hold", days(10))]).expect_err("10d is outside 1d..5d");
@@ -553,11 +482,20 @@ const TIME_EXIT_STRATEGIES: [(&str, i64, u64, usize); 3] = [("volume_spike", 5, 
 fn corpus_time_exits_close_every_entry_after_hold() {
     use absolute_backtest::kernel::time::{weekday, DAY};
     for (name, hold, seed, days) in TIME_EXIT_STRATEGIES {
-        let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
-        let (prog, _) = program(&src, name);
-        let ds = synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), days, seed);
-        let r = run(&prog, &ds, ExecConfig::default()).unwrap();
+        let prog = common::corpus_program(name);
+        let ds = synthetic_daily(&SYMS, (2022, 1, 3), days, seed);
+        let r = run(&prog, &ds, ExecConfig::from_program(&prog)).unwrap();
         let last = *r.bars.last().unwrap();
+        // The last bar each name is listed at: the market delists its last
+        // name, which then leaves the universe and is sold at the next bar,
+        // whatever `hold`.
+        let mut last_listed: BTreeMap<String, i64> = BTreeMap::new();
+        for tu in &ds.facts["listed"] {
+            let eq = ds.symbols.name(tu[0].as_equity().unwrap()).to_string();
+            let t = tu[1].as_time().unwrap();
+            let e = last_listed.entry(eq).or_insert(t);
+            *e = (*e).max(t);
+        }
         // The latest bar at which an entry decided at t0 must have been
         // exited: the first bar strictly after t0 + hold, which a weekend can
         // delay by at most three calendar days.
@@ -567,17 +505,18 @@ fn corpus_time_exits_close_every_entry_after_hold() {
         for d in &r.decisions {
             let eq = r.symbols[d.decision.equity as usize].clone();
             match d.decision.ctor {
-                Ctor::Buy => {
+                Ctor::Trade if d.decision.amount > 0.0 => {
                     assert!(!open.contains_key(&eq), "{}: {} bought again at {} while held", name, eq, format_timestamp(d.t));
                     if weekday(d.t) == 0 {
                         monday_entries += 1;
                     }
                     open.insert(eq, d.t);
                 }
-                Ctor::Sell => {
+                Ctor::Trade => {
                     let t0 = open.remove(&eq).unwrap_or_else(|| panic!("{}: {} sold at {} without an entry", name, eq, format_timestamp(d.t)));
+                    let delisted = d.t > last_listed[&eq];
                     assert!(
-                        d.t >= t0 + hold * DAY,
+                        delisted || d.t >= t0 + hold * DAY,
                         "{}: {} entered {} sold {} before hold elapsed",
                         name,
                         eq,
@@ -599,14 +538,14 @@ fn corpus_time_exits_close_every_entry_after_hold() {
 
 /// `X` with flat volume and price and one up day on a 3x volume: the corpus
 /// `volume_spike` entry on that day. `closes_removed` names bars whose close
-/// is withheld (the universe and volume rows stay, so the bars exist).
+/// is withheld (the listing and the volume stay, so the bars exist).
 fn spike_daily(spike_on: &str, closes_removed: &[&str]) -> Dataset {
-    use absolute_backtest::data::business_days;
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
+    let bars = business_days((2024, 1, 8), 25);
+    let x = ds.add_security("X", "X", bars[0], None);
     let spike = day(spike_on);
     let removed: Vec<i64> = closes_removed.iter().map(|d| day(d)).collect();
-    for t in business_days((2024, 1, 8), 25) {
+    for t in bars {
         let (price, volume) = if t < spike {
             (10.0, 1000.0)
         } else if t == spike {
@@ -614,12 +553,14 @@ fn spike_daily(spike_on: &str, closes_removed: &[&str]) -> Dataset {
         } else {
             (10.5, 1000.0)
         };
-        if !removed.contains(&t) {
-            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(price)]);
+        if removed.contains(&t) {
+            ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(volume)]);
+            ds.add("listed", vec![Value::Equity(x), Value::Time(t)]);
+        } else {
+            common::add_bar(&mut ds, x, t, price, volume);
         }
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(volume)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
     }
+    ds.derive_tickers();
     ds
 }
 
@@ -628,15 +569,14 @@ fn spike_daily(spike_on: &str, closes_removed: &[&str]) -> Dataset {
 /// (section 6, executor policy), flagged as such (trend-02, #16).
 #[test]
 fn corpus_time_exit_fills_at_the_last_price_when_the_fill_bar_has_no_close() {
-    let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies/volume_spike.dsl")).unwrap();
-    let (prog, _) = program(&src, "volume_spike");
-    // A Wednesday entry with hold 5d: the exit is due on the Monday after
+    let prog = common::corpus_program("volume_spike");
+    // A Wednesday entry with hold 5d: the exit is due on the Tuesday after
     // next or the day after. Both bars that could fill it lack a close.
     let ds = spike_daily("2024-01-31", &["2024-02-06", "2024-02-07"]);
-    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
-    let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
-    assert_eq!(decisions[0], "2024-01-31 buy(X, 100)", "{:?}", decisions);
-    let sells = decisions.iter().filter(|d| d.contains("sell")).count();
+    let r = run(&prog, &ds, ExecConfig::from_program(&prog)).unwrap();
+    let decisions = describe(&r);
+    assert_eq!(decisions[0], "2024-01-31 trade(X, 100)", "{:?}", decisions);
+    let sells = r.decisions.iter().filter(|d| d.decision.amount < 0.0).count();
     assert_eq!(sells, 1, "one exit, filled at the last price: {:?}", decisions);
     assert_eq!(r.fills.len(), 2, "{:?}", r.fills);
     assert!(r.fills[1].at_last_price && r.fills[1].quantity == -100.0, "{:?}", r.fills);
@@ -646,35 +586,23 @@ fn corpus_time_exit_fills_at_the_last_price_when_the_fill_bar_has_no_close() {
 
 /// Four symbols, five consecutive weekdays, one fixed close per symbol.
 fn cross_section(closes: &[(&str, f64)]) -> Dataset {
-    let mut ds = Dataset::new();
-    for d in ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"] {
-        let t = day(d);
-        for (name, p) in closes {
-            let s = ds.intern(name);
-            ds.add("close", vec![Value::Equity(s), Value::Time(t), Value::Num(*p)]);
-            ds.add("volume", vec![Value::Equity(s), Value::Time(t), Value::Num(1000.0)]);
-            ds.add("universe", vec![Value::Equity(s), Value::Time(t)]);
-        }
-    }
-    ds
+    let series: Vec<(&str, Vec<f64>)> = closes.iter().map(|(n, p)| (*n, vec![*p; 5])).collect();
+    let names: Vec<(&str, &[f64])> = series.iter().map(|(n, v)| (*n, v.as_slice())).collect();
+    common::markets((2024, 1, 8), &names)
 }
 
 fn quantile_cut(q: f64) -> String {
-    format!(
-        r#"
-strategy cut {{
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param q : Scalar = {}
-  rel cut(@T: Timestamp, -H: Price<USD>, -M: Price<USD>)
-  cut(T, H, M) :- bar(T), H = quantile(P, q) over (universe(A, T), close(A, T, P)),
-      M = median(P1) over (universe(A1, T), close(A1, T, P1)).
-  decide(T, target_weight(A, 0.1)) :- universe(A, T), close(A, T, P), cut(T, H, M), H = M, P > H.
-}}
-"#,
-        q
+    common::strategy(
+        "cut",
+        &format!(
+            "    q : Scalar = {}
+    w : Scalar = 0.1",
+            q
+        ),
+        "    rel cut(@T, H: Price<USD>, M: Price<USD>)
+    cut(T, H, M) :- bar(T), H = quantile(P, q) over (universe(A, T), close(A, T, P)) within (T),
+        M = median(P1) over (universe(A1, T), close(A1, T, P1)) within (T).",
+        "    decide(T, hold(A, w)) :- universe(A, T), close(A, T, P), cut(T, H, M), H = M, P > H.",
     )
 }
 
@@ -684,13 +612,13 @@ strategy cut {{
 #[test]
 fn quantile_conventions_and_the_aggregate_halt() {
     let ds = cross_section(&[("A", 1.0), ("B", 2.0), ("C", 3.0), ("D", 4.0)]);
-    let (prog, _) = program(&quantile_cut(0.5), "cut");
+    let prog = common::program(&quantile_cut(0.5), "cut");
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
     // quantile(0.5) of [1, 2, 3, 4] is 2.5, as is the median: C and D are above it.
     let first: Vec<String> = r.decisions.iter().filter(|d| format_timestamp(d.t) == "2024-01-08").map(|d| r.describe_decision(&d.decision)).collect();
-    assert_eq!(first, vec!["target_weight(C, 0.1)", "target_weight(D, 0.1)"]);
+    assert_eq!(first, vec!["hold(C, 0.1)", "hold(D, 0.1)"]);
 
-    let (prog, _) = program(&quantile_cut(1.5), "cut");
+    let prog = common::program(&quantile_cut(1.5), "cut");
     match run(&prog, &ds, ExecConfig::default()) {
         Err(RunError::Arithmetic { rule, expr, message, .. }) => {
             assert_eq!(rule, "cut::cut#1");
@@ -705,20 +633,18 @@ fn quantile_conventions_and_the_aggregate_halt() {
 /// the variables bound inside it, and they filter the group (trend-15).
 #[test]
 fn comparisons_and_assignments_inside_an_aggregation_filter_the_group() {
-    let src = r#"
-strategy n_up {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel above_ten(-A: Equity, @T: Timestamp, -N: Count)
-  above_ten(A, T, N) :- universe(A, T),
-      N = count(T1) over (T1 in window(T, 30d, min 1), close(A, T1, P), Cost = P * qty, Cost > 100 USD).
-  decide(T, buy(A, qty)) :- above_ten(A, T, N), N = 3, flat(A, T).
-}
-"#;
-    let (prog, _) = program(src, "n_up");
+    let src = common::strategy(
+        "n_up",
+        "    qty : Quantity<Shares> = 10 shares
+    lb : Duration = 30d
+    floor : Notional<USD> = 100 USD
+    n : Count = 3",
+        "    rel above_ten(A: Equity, @T, N: Count)
+    above_ten(A, T, N) :- universe(A, T),
+        N = count(T1) over (T1 in window[lb] min 1, close(A, T1, P), Cost = P * qty, Cost > floor).",
+        "    decide(T, trade(A, qty)) :- above_ten(A, T, N), N = n, flat(A, T).",
+    );
+    let prog = common::program(&src, "n_up");
     // Closes above 10 within the window: 0, 1, 1, 2, 3 on the five days.
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
@@ -726,78 +652,50 @@ strategy n_up {
     assert_eq!(decisions, vec!["2024-01-12"]);
 }
 
-/// Evaluation is top-down, so a degenerate tuple halts the run only when a
-/// decision demands it: `1 / N` with N = 0 on the warm-up bars is never
+/// Evaluation is by demand, so a degenerate tuple halts the run only when a
+/// decision asks for it: `1 / N` with N = 0 on the warm-up bars is never
 /// requested, because nothing is selected there (adv-15).
 #[test]
 fn partial_arithmetic_is_only_evaluated_for_demanded_tuples() {
-    let src = r#"
-strategy unguarded {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param n : Count = 2
-  rel candidate(-A: Equity, @T: Timestamp, -M: Scalar)
-  candidate(A, T, M) :- universe(A, T), momentum(A, T, 6mo, 1mo, M).
-  rel selected(-A: Equity, @T: Timestamp)
-  selected(A, T) :- bar(T), top(n, candidate(A, T, M), by (M desc, A asc)).
-  rel n_selected(@T: Timestamp, -N: Count)
-  n_selected(T, N) :- bar(T), N = count(A) over (selected(A, T)).
-  rel w(@T: Timestamp, -W: Scalar)
-  w(T, W) :- n_selected(T, N), W = 1 / N.
-  decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).
-}
-"#;
-    let (prog, _) = program(src, "unguarded");
-    let ds = synthetic_daily(&DAILY_SYMBOLS, (2022, 1, 3), 200, 3);
-    let r = run(
-        &prog,
-        &ds,
-        ExecConfig {
-            on_leverage: OnLeverage::Allow,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
+    let unguarded = |decide: &str| {
+        common::strategy(
+            "unguarded",
+            "    lookback : Duration = 6mo
+    skip : Duration = 1mo
+    n : Count = 2",
+            "    rel momentum(A: Equity, @T, M: Scalar)
+    momentum(A, T, M) :- universe(A, T), lag(T, skip, T1), close(A, T1, P1), lag(T, lookback, T0), close(A, T0, P0), M = P1 / P0 - 1.
+    rel selected(A: Equity, @T)
+    selected(A, T) :- bar(T), top[n](momentum(A, T, M) by (M desc, A asc)) within (T).
+    rel n_selected(@T, N: Count)
+    n_selected(T, N) :- bar(T), N = count(A) over (selected(A, T)) within (T).
+    rel w(@T, W: Scalar)
+    w(T, W) :- n_selected(T, N), W = 1 / N.",
+            decide,
+        )
+    };
+    let prog = common::program(&unguarded("    decide(T, hold(A, W)) :- selected(A, T), w(T, W)."), "unguarded");
+    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 200, 3);
+    let allow = || ExecConfig {
+        on_leverage: OnLeverage::Allow,
+        ..ExecConfig::frictionless()
+    };
+    let r = run(&prog, &ds, allow()).unwrap();
     assert!(!r.decisions.is_empty());
     // Demanded at every bar ahead of `selected`, the undefined `w` is read
-    // on the warm-up bars, but the body is a Kleene conjunction (compiler
-    // design, section 4.1): `selected(A, T)` is false there, so the instance
-    // is excluded, not stuck, and the run equals the one above. The written
-    // order of a body never decides whether a run halts.
-    let demanded = src.replace(
-        "decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).",
-        "decide(T, target_weight(A, W)) :- bar(T), w(T, W), selected(A, T).",
-    );
-    let (prog2, _) = program(&demanded, "unguarded");
-    let r2 = run(
-        &prog2,
-        &ds,
-        ExecConfig {
-            on_leverage: OnLeverage::Allow,
-            ..ExecConfig::frictionless()
-        },
-    )
-    .unwrap();
-    let show = |r: &absolute_backtest::kernel::RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", d.t, r.describe_decision(&d.decision))).collect() };
+    // on the warm-up bars, but the body is a Kleene conjunction (language-v2,
+    // 5.1): `selected(A, T)` is false there, so the instance is excluded, not
+    // stuck, and the run equals the one above. The written order of a body
+    // never decides whether a run halts.
+    let prog2 = common::program(&unguarded("    decide(T, hold(A, W)) :- bar(T), w(T, W), selected(A, T)."), "unguarded");
+    let r2 = run(&prog2, &ds, allow()).unwrap();
+    let show = |r: &RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", d.t, r.describe_decision(&d.decision))).collect() };
     assert_eq!(show(&r), show(&r2));
     assert!(r2.stats.excluded_after_undefined > 0, "{:?}", r2.stats);
     // With nothing after it to exclude the instance, the undefined `w` is
     // stuck and halts the run on the first bar it is demanded at.
-    let stuck = src.replace(
-        "decide(T, target_weight(A, W)) :- selected(A, T), w(T, W).",
-        "decide(T, target_weight(A, W)) :- universe(A, T), w(T, W).",
-    );
-    let (prog3, _) = program(&stuck, "unguarded");
-    match run(
-        &prog3,
-        &ds,
-        ExecConfig {
-            on_leverage: OnLeverage::Allow,
-            ..ExecConfig::frictionless()
-        },
-    ) {
+    let prog3 = common::program(&unguarded("    decide(T, hold(A, W)) :- universe(A, T), w(T, W)."), "unguarded");
+    match run(&prog3, &ds, allow()) {
         Err(RunError::Arithmetic { rule, message, .. }) => {
             assert_eq!(rule, "unguarded::w#1");
             assert_eq!(message, "division by zero");
@@ -810,55 +708,54 @@ strategy unguarded {
 /// `bars_per_day[i]` bars on day i from 09:31, closes `start_price + step *
 /// i + 0.01 * bar`. Labels are close instants.
 fn minute_days(bars_per_day: &[usize], start_price: f64, step: f64) -> Dataset {
-    use absolute_backtest::data::business_days;
     let mut ds = Dataset::new();
-    let y = ds.intern("Y");
-    for (i, (d, &n)) in business_days((2024, 1, 8), bars_per_day.len()).into_iter().zip(bars_per_day).enumerate() {
+    let days = business_days((2024, 1, 8), bars_per_day.len());
+    let y = ds.add_security("Y", "Y", days[0], None);
+    for (i, (d, &n)) in days.into_iter().zip(bars_per_day).enumerate() {
+        ds.add("listed", vec![Value::Equity(y), Value::Time(d)]);
         for b in 0..n {
             let t = d + 9 * 3600 + 31 * 60 + 60 * b as i64;
-            let p = start_price + step * i as f64 + 0.01 * b as f64;
-            ds.add("close_m", vec![Value::Equity(y), Value::Time(t), Value::Num(p)]);
-            ds.add("volume_m", vec![Value::Equity(y), Value::Time(t), Value::Num(100.0)]);
-            ds.add("universe_m", vec![Value::Equity(y), Value::Time(t)]);
+            add_minute(&mut ds, y, t, start_price + step * i as f64 + 0.01 * b as f64, 100.0);
         }
     }
+    ds.derive_tickers();
     ds
 }
 
-/// `min K` removes a bar from a relation, not from the time domain: a
-/// half-day with fewer than 300 minute bars has no `close_d`, yet it is a
-/// @1d bar, `prev` lands on it, the executor fills there at its last minute
-/// close whatever `min` the bars library asked for, and a rule that needs
-/// `close_d` at prev(T) does not fire on the day after (intraday-06,
-/// intraday-09).
+/// A minimum count removes a bar from a relation, not from the time domain:
+/// a half-day with fewer than 300 minute bars has no `close_d`, yet it is a
+/// daily bar, `prev` lands on it, the executor fills there at its last
+/// minute close, and a rule that needs `close_d` at prev(T) does not fire on
+/// the day after (intraday-06, intraday-09).
 #[test]
 fn a_short_day_stays_in_the_domain_without_a_bar() {
-    let src = r#"
-strategy up_vs_prev {
-  env equities_1m
-  uses bars
-  resolution @1d
-  mode target
-  rel up(-A: Equity, @T: Timestamp)
-  up(A, T) :- universe_d(A, T), close_d(A, T, C), prev(T, T0), close_d(A, T0, C0), C > C0.
-  decide(T, target_quantity(A, 1 shares)) :- up(A, T).
-}
-"#;
-    let (prog, _) = program(src, "up_vs_prev");
+    let src = daily_of_minutes(
+        "up_vs_prev",
+        "    one : Quantity<Shares> = 1 shares
+    full : Count = 300",
+        "    # The day's close, only on a day with a full session of bars.
+    rel close_d(A: Equity, @T, C: Price<USD>)
+    close_d(A, T, C) :- universe(A, T), N = count(T1) over (T1 in bucket(daily, T), close(A, T1, _)), N >= full, close@daily(A, T, C).
+    rel up(A: Equity, @T)
+    up(A, T) :- universe(A, T), close_d(A, T, C), prev(T, T0), close_d(A, T0, C0), C > C0.",
+        "    decide(T, hold(A, one)) :- up(A, T).",
+    );
+    let prog = common::program(&src, "up_vs_prev");
     // Mon..Fri: full, full, half-day (150 bars), full, full.
     let ds = minute_days(&[300, 300, 150, 300, 300], 50.0, 1.0);
     let bars = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap().decision_bars();
-    let days: Vec<String> = bars.iter().map(|t| format_timestamp(*t)).collect();
+    // A daily label is the day's last minute bar.
+    let days: Vec<String> = bars.iter().map(|t| format_timestamp(*t)[..10].to_string()).collect();
     assert_eq!(days, vec!["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"]);
     let r = run(&prog, &ds, ExecConfig::frictionless()).unwrap();
     // Tuesday fires (Monday has a bar); Wednesday has no close_d; Thursday's
     // prev is Wednesday, so it does not fire either; Friday fires again.
-    let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
+    let decisions: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)[..10].to_string()).collect();
     assert_eq!(decisions, vec!["2024-01-09", "2024-01-12"]);
     // Tuesday's decision is filled on the half-day at its last minute close
     // (bar 149 of the third day: 52 + 1.49).
     assert_eq!(r.fills.len(), 1);
-    assert_eq!(format_timestamp(r.fills[0].t), "2024-01-10");
+    assert_eq!(format_timestamp(r.fills[0].t), "2024-01-10T12:00:00");
     assert!((r.fills[0].price - 53.49).abs() < 1e-9, "{}", r.fills[0].price);
 }
 
@@ -870,7 +767,7 @@ fn synthetic_minute_bars_are_labelled_by_close_instant() {
     use absolute_backtest::kernel::time::bucket;
     use absolute_backtest::Resolution;
     let ds = synthetic_minute(&["AAA"], (2024, 1, 8), 1, 390, 1);
-    let mut times: Vec<i64> = ds.facts["close_m"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
+    let mut times: Vec<i64> = ds.facts["close"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
     times.sort();
     assert_eq!(format_timestamp(times[0]), "2024-01-08T09:31:00");
     assert_eq!(format_timestamp(times[389]), "2024-01-08T16:00:00");
@@ -885,28 +782,24 @@ fn synthetic_minute_bars_are_labelled_by_close_instant() {
 /// user-facing error instead of halting with an internal one.
 #[test]
 fn a_parameter_override_may_not_flip_a_lag_duration_to_zero() {
-    let src = r#"
-strategy lagz {
-  env equities_1d
-  resolution @1d
-  mode delta
-  param d : Duration = 5d in 0d..30d
-  param qty : Quantity<Shares> = 1 shares
-  rel cnt(+A: Equity, @T: Timestamp, -N: Scalar)
-  cnt(A, T, N) :- universe(A, T), lag(T, d, T1), cnt(A, T1, M), N = M + 1.
-  cnt(A, T, N) :- universe(A, T), N = 0, lag(T, 400d, T1), not universe(A, T1).
-  decide(T, buy(A, qty)) :- universe(A, T), cnt(A, T, N), N > 100.
-}
-"#;
-    let (prog, _) = program(src, "lagz");
+    let src = common::strategy(
+        "lagz",
+        "    d : Duration = 5d in 0d..30d
+    qty : Quantity<Shares> = 1 shares
+    limit : Scalar = 100",
+        "    rel cnt(A: Equity, @T, N: Scalar)
+    cnt(A, T, N) :- universe(A, T), N = case { lag(T, d, T1), cnt(A, T1, M) -> M + 1 ; else -> 0 }.",
+        "    decide(T, trade(A, qty)) :- universe(A, T), cnt(A, T, N), N > limit.",
+    );
+    let prog = common::program(&src, "lagz");
     let ds = synthetic_daily(&["AAA"], (2023, 1, 2), 40, 3);
     let fine = ExecConfig {
-        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 7 }))],
+        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 7, ..Duration::default() }))],
         ..ExecConfig::frictionless()
     };
     run(&prog, &ds, fine).unwrap();
     let flipped = ExecConfig {
-        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 0 }))],
+        param_overrides: vec![("d".to_string(), Lit::Duration(Duration { months: 0, days: 0, ..Duration::default() }))],
         ..ExecConfig::frictionless()
     };
     match run(&prog, &ds, flipped) {
@@ -920,20 +813,16 @@ strategy lagz {
 /// `start`, and nothing runs after `end`; both drivers agree.
 #[test]
 fn a_run_window_warms_up_on_earlier_bars_and_trades_inside_it() {
-    let src = r#"
-strategy windowed {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  rel up(-A: Equity, @T: Timestamp)
-  up(A, T) :- universe(A, T), close(A, T, P), prev(T, T0), close(A, T0, P0), P > P0.
-  decide(T, target_weight(A, 0.5)) :- up(A, T).
-}
-"#;
-    let (prog, _) = program(src, "windowed");
+    let src = common::strategy(
+        "windowed",
+        "    w : Scalar = 0.5",
+        "    rel up(A: Equity, @T)
+    up(A, T) :- universe(A, T), close(A, T, P), prev(T, T0), close(A, T0, P0), P > P0.",
+        "    decide(T, hold(A, w)) :- up(A, T).",
+    );
+    let prog = common::program(&src, "windowed");
     let ds = crafted_daily(&[10.0, 11.0, 12.0, 13.0, 14.0, 15.0]);
-    let days = absolute_backtest::data::business_days((2024, 1, 8), 6);
+    let days = business_days((2024, 1, 8), 6);
     let cfg = ExecConfig {
         start: Some(days[2]),
         end: Some(days[4]),

@@ -54,7 +54,11 @@ fn price_literal_types_as_price_per_share() {
     assert_eq!(floor.value.ty().to_string(), "Price<USD>");
 
     let (program, diags) = common::check(&src, "floor_test");
-    assert!(diags.is_empty(), "a Price<USD> parameter with a price literal default should check clean, got:\n{}", common::text(&diags));
+    assert!(
+        diags.is_empty(),
+        "a Price<USD> parameter with a price literal default should check clean, got:\n{}",
+        common::text(&diags)
+    );
     assert!(program.is_some());
 }
 
@@ -74,8 +78,19 @@ fn money_literal_stays_notional() {
 fn price_literal_is_a_number_in_the_kernel() {
     let prog = common::program(&strategy("60 USD/share"), "floor_test");
     let ds = common::market("X", &[50.0, 70.0, 55.0, 61.0, 59.0]);
-    let r = run(&prog, &ds, ExecConfig { initial_cash: 10_000.0, ..ExecConfig::frictionless() }).unwrap();
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 10_000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
     let decisions: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", format_timestamp(d.t), r.describe_decision(&d.decision))).collect();
     // Buy when the close is above 60 USD/share and flat, sell the bar after.
-    assert_eq!(decisions, vec!["2024-01-09 trade(X, 10)", "2024-01-10 trade(X, -10)", "2024-01-11 trade(X, 10)", "2024-01-12 trade(X, -10)"]);
+    assert_eq!(
+        decisions,
+        vec!["2024-01-09 trade(X, 10)", "2024-01-10 trade(X, -10)", "2024-01-11 trade(X, 10)", "2024-01-12 trade(X, -10)"]
+    );
 }

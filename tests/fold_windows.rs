@@ -12,12 +12,15 @@ use absolute_backtest::kernel::{run, run_fold, Dataset, ExecConfig, RunResult};
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
 /// The synthetic market of a program's base: minute bars for a sub-daily
-/// base, else the daily market with its catalog.
+/// base, else the daily market with its catalog, over the four hundred
+/// bars the acceptance test runs every strategy on (on a shorter market
+/// the long-short book's legs drift past the execution block's gross
+/// limit and the run halts).
 fn dataset_for(p: &Program, seed: u64) -> Dataset {
     if p.base.is_sub_daily() {
         synthetic_minute(&SYMS, (2024, 1, 2), 30, 320, seed)
     } else {
-        synthetic_daily(&SYMS, (2022, 1, 3), 320, seed)
+        synthetic_daily(&SYMS, (2022, 1, 3), 400, seed)
     }
 }
 
@@ -96,11 +99,14 @@ fn a_rolling_feature_solves_each_bar_once() {
     )
     .unwrap();
     assert_eq!(digest(&cached), digest(&uncached));
-    let bars = cached.bars.len();
-    assert_eq!(bars, 320);
-    // Every (name, bar) once: 5 * 320, plus nothing for the bars before a name's first call.
-    assert!(cached.stats.window_bars_solved <= 5 * bars, "{:?}", cached.stats);
-    assert!(cached.stats.window_bars_solved >= 5 * (bars - 1), "{:?}", cached.stats);
+    assert_eq!(cached.bars.len(), 320);
+    // Every (name, bar) of the universe once (the last name is delisted at
+    // four fifths of the market, so its rows stop early), plus nothing for
+    // the bars before a name's first call; one group per name.
+    let rows = ds.facts["close"].len();
+    assert!(cached.stats.window_bars_solved <= rows, "{:?} over {} rows", cached.stats, rows);
+    assert!(cached.stats.window_bars_solved >= rows - 5, "{:?} over {} rows", cached.stats, rows);
+    assert_eq!(cached.stats.window_groups, 5, "{:?}", cached.stats);
     // Without the cache about forty bars per call.
     assert!(uncached.stats.window_bars_solved > 20 * cached.stats.window_bars_solved, "{:?} vs {:?}", uncached.stats, cached.stats);
     assert_eq!(cached.stats.window_calls, uncached.stats.window_calls);

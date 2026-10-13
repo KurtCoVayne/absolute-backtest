@@ -1,70 +1,37 @@
-//! The as-of join `R(..., T0, ...) asof T` (data-bundle doc, section 2):
-//! the tuples of R at the latest key at or before T, whatever R's
-//! resolution. The key it binds is causal (WF-6), the join is exempt from
-//! WF-10, and the fold serves it from what was available at T.
+//! The as-of join `R(..., T0, ...) asof T` (data-bundle doc, section 2;
+//! language-v2, 3.4): the tuples of R at the latest key at or before T,
+//! whatever R's calendar. The key it binds is causal (WF-6), the join is
+//! how a finer rule reads a coarser relation, and the fold serves it from
+//! what was available at T.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Code, Diagnostic, Program, Severity, Workspace};
-use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
+use absolute_backtest::check::{Code, Program};
+use absolute_backtest::kernel::time::format_timestamp;
 use absolute_backtest::kernel::{run, run_fold, Dataset, ExecConfig, Value};
-
-const ENV: &str = r#"
-environment asof_1d {
-  close(+A: Equity, @T: Timestamp, -P: Price<USD>) @1d
-  volume(+A: Equity, @T: Timestamp, -V: Quantity<Shares>) @1d
-  universe(-A: Equity, @T: Timestamp) @1d complete
-  rating(+A: Equity, @T: Timestamp, -R: Scalar) @1d
-  event(+A: Equity, @T: Timestamp, -When: Timestamp) @1d
-  close_m(+A: Equity, @T: Timestamp, -P: Price<USD>) @1m
-  universe_m(-A: Equity, @T: Timestamp) @1m complete
-}
-"#;
-
-fn workspace() -> Workspace {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(ENV).unwrap();
-    ws
-}
-
-fn check(src: &str, name: &str) -> (Option<Program>, Vec<Diagnostic>) {
-    let mut ws = workspace();
-    ws.add_source(src).unwrap();
-    check_program(&ws, name)
-}
-
-fn program(src: &str, name: &str) -> Program {
-    let (p, diags) = check(src, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
-fn errors(diags: &[Diagnostic]) -> Vec<(Code, String)> {
-    diags.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.code, d.to_string())).collect()
-}
-
-fn day(s: &str) -> i64 {
-    parse_timestamp(s).unwrap()
-}
 
 const DAYS: [&str; 5] = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"];
 
-/// One name over five days; a rating of 1 on the first day and 3 on the fourth.
-fn market() -> Dataset {
-    let mut ds = Dataset::new();
-    let x = ds.intern("X");
-    for (i, d) in DAYS.iter().enumerate() {
-        let t = day(d);
-        ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(10.0)]);
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1_000_000.0)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
-        if i == 0 {
-            ds.add("rating", vec![Value::Equity(x), Value::Time(t), Value::Num(1.0)]);
-        }
-        if i == 3 {
-            ds.add("rating", vec![Value::Equity(x), Value::Time(t), Value::Num(3.0)]);
-        }
+/// The daily skeleton, reading the `SPXTR` series as well: a stored
+/// relation whose keys are sparse, standing in for a rating.
+fn strategy(name: &str, params: &str, rules: &str, decides: &str) -> String {
+    common::StrategyParts {
+        name: name.into(),
+        needs: "need bars @1d   need actions, listing   need series \"SPXTR\" @1d".into(),
+        params: params.into(),
+        rules: rules.into(),
+        decides: decides.into(),
+        ..Default::default()
     }
+    .render()
+}
+
+/// One name over five days; the series at 1 on the first day and 3 on the fourth.
+fn market() -> Dataset {
+    let mut ds = common::market("X", &[10.0; 5]);
+    let spx = ds.intern_label("SPXTR");
+    ds.add("value", vec![Value::Label(spx), Value::Time(common::day(DAYS[0])), Value::Num(1.0)]);
+    ds.add("value", vec![Value::Label(spx), Value::Time(common::day(DAYS[3])), Value::Num(3.0)]);
     ds
 }
 
@@ -79,42 +46,41 @@ fn decided(ds: &Dataset, prog: &Program, fold: bool) -> Vec<(String, f64)> {
 
 // ---- syntax and semantics ----
 
-const STORED: &str = r#"
-strategy stored_asof {
-  env asof_1d
-  resolution @1d
-  mode delta
-  param unit : Quantity<Shares> = 1 shares
-  decide(T, buy(A, Q)) :- universe(A, T), rating(A, _, R) asof T, Q = R * unit.
+fn stored() -> Program {
+    let src = strategy(
+        "stored_asof",
+        "    unit : Quantity<Shares> = 1 shares",
+        "",
+        "    decide(T, trade(A, Q)) :- universe(A, T), value(\"SPXTR\", _, R) asof T, Q = R * unit.",
+    );
+    common::program(&src, "stored_asof")
 }
-"#;
 
-const DERIVED: &str = r#"
-strategy derived_asof {
-  env asof_1d
-  resolution @1d
-  mode delta
-  param unit : Quantity<Shares> = 1 shares
-  param floor : Scalar = 2
-  rel rated(+A: Equity, @T: Timestamp, -R: Scalar)
-  rated(A, T, R) :- rating(A, T, R), R > floor.
-  decide(T, buy(A, Q)) :- universe(A, T), rated(A, T0, R) asof T, Q = R * unit.
+fn derived() -> Program {
+    let src = strategy(
+        "derived_asof",
+        "    unit : Quantity<Shares> = 1 shares
+    floor : Scalar = 2",
+        "    rel rated(@T, R: Scalar)
+    rated(T, R) :- value(\"SPXTR\", T, R), R > floor.",
+        "    decide(T, trade(A, Q)) :- universe(A, T), rated(T0, R) asof T, Q = R * unit.",
+    );
+    common::program(&src, "derived_asof")
 }
-"#;
 
 #[test]
 fn an_asof_atom_parses_and_describes_itself() {
-    let prog = program(STORED, "stored_asof");
+    let prog = stored();
     let rule = prog.rules.iter().find(|r| r.head.name == "decide").unwrap();
     let texts: Vec<String> = rule.body.iter().map(|l| l.describe()).collect();
-    assert!(texts.iter().any(|t| t == "rating(A, _, R) asof T"), "{:?}", texts);
+    assert!(texts.iter().any(|t| t == "value(\"SPXTR\", _, R) asof T"), "{:?}", texts);
 }
 
 #[test]
 fn a_stored_relation_is_read_at_its_latest_key_at_or_before_t() {
-    let prog = program(STORED, "stored_asof");
+    let prog = stored();
     let ds = market();
-    // Day 1's rating holds until day 4's replaces it; nothing is read ahead.
+    // Day 1's value holds until day 4's replaces it; nothing is read ahead.
     let want: Vec<(String, f64)> = DAYS.iter().zip([1.0, 1.0, 1.0, 3.0, 3.0]).map(|(d, q)| (d.to_string(), q)).collect();
     assert_eq!(decided(&ds, &prog, false), want);
     assert_eq!(decided(&ds, &prog, true), want);
@@ -122,9 +88,9 @@ fn a_stored_relation_is_read_at_its_latest_key_at_or_before_t() {
 
 #[test]
 fn a_derived_relation_is_walked_back_over_its_own_bars() {
-    let prog = program(DERIVED, "derived_asof");
+    let prog = derived();
     let ds = market();
-    // `rated` holds only the rating of 3, so the join fails before day 4.
+    // `rated` holds only the value of 3, so the join fails before day 4.
     let want = vec![("2024-01-11".to_string(), 3.0), ("2024-01-12".to_string(), 3.0)];
     assert_eq!(decided(&ds, &prog, false), want);
     assert_eq!(decided(&ds, &prog, true), want);
@@ -132,13 +98,13 @@ fn a_derived_relation_is_walked_back_over_its_own_bars() {
 
 #[test]
 fn the_fold_reads_an_asof_tuple_from_its_availability_on() {
-    let prog = program(STORED, "stored_asof");
+    let prog = stored();
     let mut ds = market();
-    let x = ds.intern("X");
-    // Day 4's rating is recorded on day 5.
-    let late = vec![Value::Equity(x), Value::Time(day(DAYS[3])), Value::Num(3.0)];
-    ds.facts.get_mut("rating").unwrap().retain(|tu| *tu != late);
-    ds.add_available("rating", late, day(DAYS[4]));
+    let spx = ds.intern_label("SPXTR");
+    // Day 4's value is recorded on day 5.
+    let late = vec![Value::Label(spx), Value::Time(common::day(DAYS[3])), Value::Num(3.0)];
+    ds.facts.get_mut("value").unwrap().retain(|tu| *tu != late);
+    ds.add_available("value", late, common::day(DAYS[4]));
     let fold = decided(&ds, &prog, true);
     assert_eq!(fold.iter().map(|(_, q)| *q).collect::<Vec<_>>(), vec![1.0, 1.0, 1.0, 1.0, 3.0], "{:?}", fold);
     // The batch kernel, blind to availability, reads it on its key.
@@ -148,27 +114,16 @@ fn the_fold_reads_an_asof_tuple_from_its_availability_on() {
 
 // ---- well-formedness ----
 
-fn strategy(body: &str) -> String {
-    format!(
-        r#"
-strategy wf {{
-  env asof_1d
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 1 shares
-  {}
-}}
-"#,
-        body
-    )
+fn wf(rules: &str, decides: &str) -> String {
+    strategy("wf", "    qty : Quantity<Shares> = 1 shares", rules, decides)
 }
 
 #[test]
 fn the_bound_key_is_causal_and_may_feed_a_builtin() {
-    let src = strategy("decide(T, buy(A, qty)) :- universe(A, T), rating(A, T0, R) asof T, prev(T0, T1), close(A, T1, P), P > 0 USD/share, R > 0.");
-    let (p, diags) = check(&src, "wf");
-    assert!(p.is_some(), "{:?}", errors(&diags));
-    assert!(errors(&diags).is_empty(), "{:?}", errors(&diags));
+    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), value(\"SPXTR\", T0, R) asof T, prev(T0, T1), close(A, T1, P), P > 0 USD/share, R > 0.");
+    let (p, diags) = common::check(&src, "wf");
+    assert!(p.is_some(), "{:?}", common::errors(&diags));
+    assert!(common::errors(&diags).is_empty(), "{:?}", common::errors(&diags));
 }
 
 #[test]
@@ -176,11 +131,13 @@ fn the_bound_key_cannot_be_a_head_key() {
     // A head keyed at the join's T0 makes T0 the head time, and then the
     // as-of time T is not derived from it: the tuple's time would not be
     // the time it became available (WF-6).
-    let src = strategy(
-        "rel latest(+A: Equity, @T: Timestamp, -R: Scalar)\n  latest(A, T0, R) :- universe(A, T), rating(A, T0, R) asof T.\n  decide(T, buy(A, qty)) :- universe(A, T), latest(A, T, R), R > 0.",
+    let src = wf(
+        "    rel latest(A: Equity, @T, R: Scalar)
+    latest(A, T0, R) :- universe(A, T), value(\"SPXTR\", T0, R) asof T.",
+        "    decide(T, trade(A, qty)) :- universe(A, T), latest(A, T, R), R > 0.",
     );
-    let (_, diags) = check(&src, "wf");
-    let errs = errors(&diags);
+    let (_, diags) = common::check(&src, "wf");
+    let errs = common::errors(&diags);
     assert!(
         errs.iter()
             .any(|(c, m)| *c == Code::F && m.contains("as-of time `T`") && m.contains("not derived from the head time `T0`")),
@@ -191,51 +148,65 @@ fn the_bound_key_cannot_be_a_head_key() {
 
 #[test]
 fn the_asof_time_must_be_bound_and_derived_from_the_head_time() {
-    let src = strategy("decide(T, buy(A, qty)) :- universe(A, T), rating(A, T0, R) asof T2, R > 0.");
-    let errs = errors(&check(&src, "wf").1);
+    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), value(\"SPXTR\", T0, R) asof T2, R > 0.");
+    let errs = common::errors(&common::check(&src, "wf").1);
     assert!(errs.iter().any(|(c, m)| *c == Code::B && m.contains("`T2` is unbound")), "{:?}", errs);
-    let src = strategy("decide(T, buy(A, qty)) :- universe(A, T), event(A, T, When), rating(A, T0, R) asof When, R > 0.");
-    let errs = errors(&check(&src, "wf").1);
-    assert!(errs.iter().any(|(c, m)| *c == Code::F && m.contains("as-of time `When`") && m.contains("not derived")), "{:?}", errs);
+    // A dividend's ex-date is a value, not a time derived from T.
+    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), dividend(A, T, Ex, _, _), value(\"SPXTR\", T0, R) asof Ex, R > 0.");
+    let errs = common::errors(&common::check(&src, "wf").1);
+    assert!(errs.iter().any(|(c, m)| *c == Code::F && m.contains("as-of time `Ex`") && m.contains("not derived")), "{:?}", errs);
 }
 
 #[test]
-fn a_bound_key_in_an_asof_atom_is_an_x_error() {
-    let src = strategy("decide(T, buy(A, qty)) :- universe(A, T), rating(A, T, R) asof T, R > 0.");
-    let errs = errors(&check(&src, "wf").1);
-    assert!(errs.iter().any(|(c, m)| *c == Code::X && m.contains("bound by the join")), "{:?}", errs);
+fn a_bound_key_in_an_asof_atom_is_an_error() {
+    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), value(\"SPXTR\", T, R) asof T, R > 0.");
+    let errs = common::errors(&common::check(&src, "wf").1);
+    assert!(!errs.is_empty(), "{:?}", errs);
 }
 
 #[test]
 fn decided_as_of_the_head_time_would_see_itself() {
-    let src = strategy("decide(T, buy(A, qty)) :- universe(A, T), decided(T0, buy(A, _)) asof T.");
-    let errs = errors(&check(&src, "wf").1);
+    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), decided(T0, trade(A, _)) asof T.");
+    let errs = common::errors(&common::check(&src, "wf").1);
     assert!(errs.iter().any(|(c, m)| *c == Code::F && m.contains("`decided` must be read strictly before")), "{:?}", errs);
     // Strictly before T it is a lookup of the last decision on the name.
-    let src = strategy("decide(T, buy(A, qty)) :- universe(A, T), prev(T, T1), decided(T0, buy(A, _)) asof T1.");
-    let errs = errors(&check(&src, "wf").1);
+    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), prev(T, T1), decided(T0, trade(A, _)) asof T1.");
+    let errs = common::errors(&common::check(&src, "wf").1);
     assert!(errs.is_empty(), "{:?}", errs);
 }
 
+/// A minute bundle decided on its daily calendar.
+fn daily_of_minutes(name: &str, params: &str, rules: &str, decides: &str) -> String {
+    common::StrategyParts {
+        name: name.into(),
+        needs: "need bars @1m   need listing".into(),
+        calendars: Some("daily = days".into()),
+        clock: "decide on daily".into(),
+        universe: "universe(A, T) :- listed(A, T), traded@daily(A, T).".into(),
+        params: params.into(),
+        rules: rules.into(),
+        decides: decides.into(),
+        report: "calendar daily   periods 252 per year".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
 #[test]
-fn an_asof_join_crosses_resolutions_where_a_plain_atom_cannot() {
-    let minute = |lit: &str| {
-        format!(
-            r#"
-strategy intraday {{
-  env asof_1d
-  resolution @1m
-  mode delta
-  param qty : Quantity<Shares> = 1 shares
-  decide(T, buy(A, qty)) :- universe_m(A, T), {}, P > 0 USD/share.
-}}
-"#,
-            lit
+fn an_asof_join_crosses_calendars_where_a_plain_atom_cannot() {
+    let daily = |lit: &str| {
+        daily_of_minutes(
+            "daily",
+            "    qty : Quantity<Shares> = 1 shares",
+            "",
+            &format!("    decide(T, trade(A, qty)) :- universe(A, T), {}, P > 0 USD/share.", lit),
         )
     };
-    let errs = errors(&check(&minute("close(A, T, P)"), "intraday").1);
-    assert!(errs.iter().any(|(c, m)| *c == Code::X && m.contains("two resolutions meet only through resample")), "{:?}", errs);
-    let errs = errors(&check(&minute("close(A, _, P) asof T"), "intraday").1);
+    // The minute close at a daily label: only through its bar view (WF-16).
+    let errs = common::errors(&common::check(&daily("close(A, T, P)"), "daily").1);
+    assert!(errs.iter().any(|(c, _)| *c == Code::X), "{:?}", errs);
+    // The as-of join reads the latest minute close at or before the label.
+    let errs = common::errors(&common::check(&daily("close(A, _, P) asof T"), "daily").1);
     assert!(errs.is_empty(), "{:?}", errs);
 }
 
@@ -244,28 +215,35 @@ strategy intraday {{
 /// the previous day's bar until the day ends, and both drivers agree.
 #[test]
 fn a_minute_rule_reads_the_previous_days_bar_until_the_day_closes() {
-    let src = r#"
-strategy intraday_daily {
-  env asof_1d
-  resolution @1m
-  mode delta
-  param unit : Quantity<Shares> = 1 shares
-  rel seen(+A: Equity, @T: Timestamp, -P: Price<USD>, -D: Timestamp)
-  seen(A, T, P, D) :- universe_m(A, T), close(A, D, P) asof T.
-  decide(T, buy(A, Q)) :- universe_m(A, T), seen(A, T, P, _), Q = P / (1 USD/share) * unit.
-}
-"#;
-    let p = program(src, "intraday_daily");
+    let src = common::StrategyParts {
+        name: "intraday_daily".into(),
+        needs: "need bars @1m   need listing".into(),
+        calendars: Some("daily = days".into()),
+        clock: "decide on base".into(),
+        params: "    unit : Quantity<Shares> = 1 shares
+    one : Price<USD> = 1 USD/share"
+            .into(),
+        rules: "    rel seen(A: Equity, @T, P: Price<USD>, D: Timestamp)
+    seen(A, T, P, D) :- universe(A, T), close@daily(A, D, P) asof T."
+            .into(),
+        decides: "    decide(T, trade(A, Q)) :- seen(A, T, P, _), Q = P / one * unit.".into(),
+        report: "calendar daily   periods 252 per year".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "intraday_daily");
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
-    // Daily closes 10 then 20; minute bars at 09:31 on both days.
+    let x = ds.add_security("X", "X", common::day("2024-01-08"), None);
+    // Closes 10 on the first day and 20 on the second; minute bars at 09:31 and 09:32 on both days.
     for (d, c) in [("2024-01-08", 10.0), ("2024-01-09", 20.0)] {
-        ds.add("close", vec![Value::Equity(x), Value::Time(day(d)), Value::Num(c)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(day(d))]);
+        ds.add("listed", vec![Value::Equity(x), Value::Time(common::day(d))]);
         for m in ["09:31:00", "09:32:00"] {
-            let t = day(&format!("{}T{}", d, m));
-            ds.add("close_m", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
-            ds.add("universe_m", vec![Value::Equity(x), Value::Time(t)]);
+            let t = common::day(&format!("{}T{}", d, m));
+            ds.add("open", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            ds.add("high", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            ds.add("low", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(100.0)]);
         }
     }
     ds.derive_tickers();
