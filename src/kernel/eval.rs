@@ -39,39 +39,115 @@ pub(crate) struct RowsPlan {
 /// the aggregate itself when running sums answered it (no columns then).
 type Columns = (usize, Vec<Vec<f64>>, Option<f64>);
 
-/// The moment aggregate over a group's rows `lo..hi` (buffer positions)
-/// from its running sums, moved from the window they last covered by adding
-/// the rows that entered and removing those that left; rebuilt from the
-/// rows when the window moved back, jumped past them, or `n` rows were added
-/// since the last rebuild.
-fn running_value(st: &mut RowsState, agg: &str, lo: usize, hi: usize, n: usize) -> Option<f64> {
-    let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi as u64);
-    let reusable = match &st.sums {
-        Some(r) => r.lo <= lo_id && r.hi <= hi_id && r.lo >= st.base_id && r.hi >= lo_id && r.since_rebuild < n.max(8),
-        None => false,
+/// The window of a rows group at bar `b`, as positions `lo..hi` in its row
+/// buffer: the rows among the last `n` anchored bars at or before `b` (all
+/// of them from the group's first bar when the buffer reaches it). `None`
+/// when the buffer does not hold the anchors the window needs.
+fn window_at(st: &RowsState, b: i64, n: usize) -> Option<(usize, usize)> {
+    let hi_a = st.anchors.partition_point(|a| *a <= b);
+    if hi_a == 0 {
+        return Some((st.rows.len(), st.rows.len()));
+    }
+    let lo_t = if hi_a >= n && n > 0 {
+        st.anchors[hi_a - n]
+    } else if st.from_start {
+        st.anchors[0]
+    } else {
+        return None;
     };
-    if !reusable {
-        let first = &st.rows[lo].2;
-        let shift = (first.first().copied().unwrap_or(0.0), first.get(1).copied().unwrap_or(0.0));
+    let lo = st.rows.partition_point(|(t1, _, _)| *t1 < lo_t);
+    let hi = st.rows.partition_point(|(t1, _, _)| *t1 <= b);
+    Some((lo, hi))
+}
+
+/// The moment aggregate over a group's window at bar `t` from running
+/// sums that are a function of the group's rows and the bar alone, never
+/// of which bars were asked for (the compiler design's I2: the reduction
+/// order of a demanded value is fixed). The sums walk the group's time
+/// domain bar by bar: at a checkpoint (every `K = max(n, 8)`-th bar of the
+/// domain) they are rebuilt from the window's rows, shifted by its first
+/// row; at an anchored bar they take the rows that entered and drop those
+/// that left; at any other bar the window is unchanged. A request at `t`
+/// brings the sums from where they are to `t` along that walk, or from the
+/// checkpoint at or before `t` when they are behind it, past it, or
+/// absent. The one departure, counted in the kernel's statistics, is a
+/// checkpoint window the buffer no longer holds; the sums are then built
+/// at `t` itself.
+fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], noncanonical: &mut usize) -> Option<f64> {
+    let k = n.max(8);
+    let it = bars.binary_search(&t).ok()?;
+    let ic = it - it % k;
+    let rebuild = |st: &mut RowsState, b: i64, lo: usize, hi: usize| {
+        let first = st.rows.get(lo).filter(|_| lo < hi).map(|r| &r.2);
+        let shift = (first.and_then(|f| f.first().copied()).unwrap_or(0.0), first.and_then(|f| f.get(1).copied()).unwrap_or(0.0));
         let shift = (if shift.0.is_finite() { shift.0 } else { 0.0 }, if shift.1.is_finite() { shift.1 } else { 0.0 });
-        let mut r = RunningSums::new(lo_id, shift);
+        let mut r = RunningSums::new(st.base_id + lo as u64, shift);
         for i in lo..hi {
             r.apply(&st.rows[i].2, 1.0);
         }
-        r.hi = hi_id;
+        r.hi = st.base_id + hi as u64;
+        r.at = b;
         st.sums = Some(r);
-    } else {
+    };
+    let advance = |st: &mut RowsState, b: i64, lo: usize, hi: usize| {
+        let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi as u64);
         let base = st.base_id;
+        let rows = &st.rows;
         let r = st.sums.as_mut().unwrap();
-        for id in r.hi..hi_id {
-            r.apply(&st.rows[(id - base) as usize].2, 1.0);
-            r.since_rebuild += 1;
+        for id in r.hi.max(lo_id)..hi_id {
+            r.apply(&rows[(id - base) as usize].2, 1.0);
         }
-        for id in r.lo..lo_id {
-            r.apply(&st.rows[(id - base) as usize].2, -1.0);
+        for id in r.lo..lo_id.min(r.hi) {
+            r.apply(&rows[(id - base) as usize].2, -1.0);
         }
-        r.lo = lo_id;
-        r.hi = hi_id;
+        r.lo = lo_id.max(r.lo);
+        r.hi = hi_id.max(r.hi);
+        r.at = b;
+    };
+    // Where to start the walk: just after the sums' bar when they are
+    // behind `t` on the walk, else at the checkpoint.
+    let from = match &st.sums {
+        Some(r) if r.at == t => None,
+        Some(r) if r.at < t && r.at >= bars[ic] => bars.binary_search(&r.at).ok().map(|i| i + 1),
+        _ => {
+            match window_at(st, bars[ic], n) {
+                Some((lo, hi)) if lo <= hi => rebuild(st, bars[ic], lo, hi),
+                _ => {
+                    *noncanonical += 1;
+                    let (lo, hi) = window_at(st, t, n)?;
+                    rebuild(st, t, lo, hi);
+                    return st.sums.as_ref().unwrap().aggregate(agg);
+                }
+            }
+            Some(ic + 1)
+        }
+    };
+    if let Some(from) = from {
+        for &b in &bars[from..=it] {
+            let Some((lo, hi)) = window_at(st, b, n) else {
+                *noncanonical += 1;
+                let (lo, hi) = window_at(st, t, n)?;
+                rebuild(st, t, lo, hi);
+                return st.sums.as_ref().unwrap().aggregate(agg);
+            };
+            let ib = bars.binary_search(&b).ok()?;
+            if ib % k == 0 {
+                rebuild(st, b, lo, hi);
+            } else if st.anchors.binary_search(&b).is_ok() {
+                advance(st, b, lo, hi);
+            } else {
+                st.sums.as_mut().unwrap().at = b;
+            }
+        }
+    }
+    let (lo, hi) = window_at(st, t, n)?;
+    let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi as u64);
+    let r = st.sums.as_ref()?;
+    if r.lo != lo_id || r.hi != hi_id {
+        // The walk did not land on the window asked for (a row the walk's
+        // anchors did not account for): built at `t` itself.
+        *noncanonical += 1;
+        rebuild(st, t, lo, hi);
     }
     st.sums.as_ref().unwrap().aggregate(agg)
 }
@@ -139,8 +215,11 @@ impl Neumaier {
 /// Running sums over the rows with ids in `lo..hi` of a group: of a and b
 /// (the aggregate's first two arguments) shifted by the window's first
 /// values at the last re-anchor, their squares and their product. Adding a
-/// row and removing one are O(1); every `n` additions the sums are rebuilt
-/// from the rows, so rounding cannot accumulate over a long history.
+/// row and removing one are O(1); at every checkpoint of the group's time
+/// domain (every `max(n, 8)`-th bar) the sums are rebuilt from the rows, so
+/// rounding cannot accumulate over a long history, and the walk from
+/// checkpoint to checkpoint is the same whatever bars were asked for
+/// (`running_value`).
 #[derive(Clone, Debug)]
 struct RunningSums {
     lo: u64,
@@ -150,7 +229,8 @@ struct RunningSums {
     /// Rows in the window with a non-finite argument (the exact path then
     /// answers, as it does for any window holding one).
     nonfinite: usize,
-    since_rebuild: usize,
+    /// The bar of the group's time domain the sums were last brought to.
+    at: i64,
 }
 
 impl RunningSums {
@@ -161,7 +241,7 @@ impl RunningSums {
             shift,
             s: [Neumaier::default(); 5],
             nonfinite: 0,
-            since_rebuild: 0,
+            at: i64::MIN,
         }
     }
     fn apply(&mut self, vals: &[f64], sign: f64) {
@@ -1025,6 +1105,20 @@ impl<'p> Kernel<'p> {
         }
     }
 
+    /// The rule's time domain as a sorted vector (cached per calendar, and
+    /// per instrument on the sessions calendar): the bars the running sums
+    /// walk, with their indices.
+    fn domain_bars(&mut self, cr: &CompiledRule, env: &Env) -> Result<Rc<Vec<i64>>, RunError> {
+        let cal = self.prog.infos[cr.idx].cal.clone();
+        let entity = if cal.per_entity() { cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity()) } else { None };
+        let key = (cal, entity);
+        if let Some(v) = self.domain_vecs.get(&key) {
+            return Ok(v.clone());
+        }
+        let v: Rc<Vec<i64>> = Rc::new(self.domain(cr, env)?.iter().copied().collect());
+        self.domain_vecs.insert(key, v.clone());
+        Ok(v)    }
+
     pub(crate) fn step(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &Env, out: &mut Vec<Env>) -> Result<(), RunError> {
         match lit {
             Literal::Atom(a) => out.extend(self.atom_matches(cr, a, env)?),
@@ -1645,7 +1739,17 @@ impl<'p> Kernel<'p> {
             literal: plan.literal,
             outer: plan.outer.iter().map(|&s| env[s].clone()).collect(),
         };
-        let mut st = self.rows_state.remove(&key).unwrap_or_default();
+        // A request behind the group's last bar (a query after the run, a
+        // recursion reaching back) is served from a buffer rebuilt by walking
+        // back from that bar, exactly as a group first asked there would be,
+        // so that the running sums answer it along the same canonical walk;
+        // the group's own buffer is left as it is.
+        let mut original = self.rows_state.remove(&key);
+        let backward = original.as_ref().map(|s| s.upto != i64::MIN && t < s.upto).unwrap_or(false);
+        let mut st = if backward { RowsState::default() } else { original.take().unwrap_or_default() };
+        if backward {
+            self.stats.window_backward += 1;
+        }
         // Bring the group up to t: a new group walks back to N (plus slack)
         // anchored bars; a known one solves only the bars since its last call.
         let fresh: Vec<i64> = if st.anchors.is_empty() && st.rows.is_empty() && st.upto == i64::MIN {
@@ -1665,7 +1769,7 @@ impl<'p> Kernel<'p> {
                         anchors += 1;
                     }
                     bars.push(t1);
-                    if anchors >= n + ROWS_SLACK {
+                    if anchors >= n + n.max(8) + ROWS_SLACK {
                         st.from_start = false;
                         break 'walk;
                     }
@@ -1726,7 +1830,11 @@ impl<'p> Kernel<'p> {
             let hi_r = st.rows.partition_point(|(t1, _, _)| *t1 <= t);
             let count = hi_r.saturating_sub(lo);
             let running = if self.cfg.running_sums && moment_aggregate(agg) && count >= 2 {
-                running_value(&mut st, agg, lo, hi_r, n)
+                let bars = self.domain_bars(cr, env)?;
+                let mut noncanonical = 0;
+                let v = running_value(&mut st, agg, t, n, &bars, &mut noncanonical);
+                self.stats.window_noncanonical += noncanonical;
+                v
             } else {
                 None
             };
@@ -1767,8 +1875,10 @@ impl<'p> Kernel<'p> {
         } else {
             None
         };
-        // Keep N plus slack anchored bars (a call a few bars back is served).
-        while st.anchors.len() > n + ROWS_SLACK {
+        // Keep N plus a checkpoint's span plus slack anchored bars (a call a
+        // few bars back, and the rebuild at the checkpoint before any bar,
+        // are served from the buffer).
+        while st.anchors.len() > n + n.max(8) + ROWS_SLACK {
             st.anchors.pop_front();
             st.from_start = false;
         }
@@ -1785,7 +1895,14 @@ impl<'p> Kernel<'p> {
             st.rows.pop_front();
             st.base_id += 1;
         }
-        self.rows_state.insert(key, st);
+        match (backward, original) {
+            (true, Some(o)) => {
+                self.rows_state.insert(key, o);
+            }
+            _ => {
+                self.rows_state.insert(key, st);
+            }
+        }
         Ok(served)
     }
 
@@ -2392,12 +2509,26 @@ mod running_tests {
         }
     }
 
+    /// A group whose every bar `0..rows.len()` is anchored and holds one row.
     fn state(rows: &[(f64, f64)]) -> RowsState {
         let mut st = RowsState::default();
         for (i, (a, b)) in rows.iter().enumerate() {
             st.rows.push_back((i as i64, Vec::new(), vec![*a, *b]));
+            st.anchors.push_back(i as i64);
         }
+        st.from_start = true;
         st
+    }
+
+    /// The running value of the window of `n` rows ending at row `hi - 1`
+    /// (the bar `hi - 1` of a domain of one bar per row).
+    fn at(st: &mut RowsState, agg: &str, lo: usize, hi: usize, n: usize) -> Option<f64> {
+        assert_eq!(hi - lo, n.min(hi));
+        let bars: Vec<i64> = (0..st.rows.len() as i64).collect();
+        let mut nc = 0;
+        let v = running_value(st, agg, hi as i64 - 1, n, &bars, &mut nc);
+        assert_eq!(nc, 0, "the buffer holds every checkpoint");
+        v
     }
 
     #[test]
@@ -2411,7 +2542,7 @@ mod running_tests {
             for hi in n..rows.len() {
                 let lo = hi - n;
                 for agg in ["mean", "sum", "std", "cov", "corr", "ols_slope"] {
-                    let got = running_value(&mut st, agg, lo, hi, n).unwrap_or_else(|| panic!("{} n={} hi={}: no running value", agg, n, hi));
+                    let got = at(&mut st, agg, lo, hi, n).unwrap_or_else(|| panic!("{} n={} hi={}: no running value", agg, n, hi));
                     let cols = vec![rows[lo..hi].iter().map(|r| r.0).collect::<Vec<f64>>(), rows[lo..hi].iter().map(|r| r.1).collect()];
                     let Some(Value::Num(want)) = aggregate(agg, &cols).unwrap() else { panic!() };
                     let scale = want.abs().max(1e-300);
@@ -2425,15 +2556,47 @@ mod running_tests {
     fn a_flat_or_non_finite_window_is_left_to_the_exact_path() {
         let flat = vec![(5.0, 1.0); 30];
         let mut st = state(&flat);
-        assert_eq!(running_value(&mut st, "mean", 0, 20, 20), Some(5.0));
+        assert_eq!(at(&mut st, "mean", 0, 20, 20), Some(5.0));
         for agg in ["std", "corr", "ols_slope"] {
-            assert_eq!(running_value(&mut st, agg, 0, 20, 20), None, "{}", agg);
+            assert_eq!(at(&mut st, agg, 0, 20, 20), None, "{}", agg);
         }
         let mut rows: Vec<(f64, f64)> = (0..30).map(|i| (i as f64, 2.0 * i as f64)).collect();
         rows[10].0 = f64::NAN;
         let mut st = state(&rows);
-        assert_eq!(running_value(&mut st, "mean", 5, 15, 10), None);
+        assert_eq!(at(&mut st, "mean", 5, 15, 10), None);
         // Once the NaN has left the window, the sums answer again.
-        assert_eq!(running_value(&mut st, "mean", 11, 21, 10), Some(15.5));
+        assert_eq!(at(&mut st, "mean", 11, 21, 10), Some(15.5));
+    }
+
+    /// The compiler design's I2 for the running path: the value at a bar is
+    /// a function of the group's rows and the bar, whatever bars were asked
+    /// for before it. A group served at every bar, one served every third
+    /// bar, one first asked late, and one asked backwards agree to the bit.
+    #[test]
+    fn running_sums_do_not_depend_on_which_bars_were_asked_for() {
+        let mut r = stream(11);
+        let rows: Vec<(f64, f64)> = (0..600).map(|i| (1.0e3 + 20.0 * r() + 0.3 * i as f64, i as f64 + r())).collect();
+        let bars: Vec<i64> = (0..rows.len() as i64).collect();
+        for n in [5usize, 18, 40] {
+            let mut every = state(&rows);
+            let mut third = state(&rows);
+            let mut late = state(&rows);
+            let mut back = state(&rows);
+            let mut nc = 0;
+            let mut reference: Vec<(i64, Option<f64>)> = Vec::new();
+            for t in (n as i64 - 1)..rows.len() as i64 {
+                reference.push((t, running_value(&mut every, "std", t, n, &bars, &mut nc)));
+            }
+            for &(t, want) in reference.iter().filter(|(t, _)| t % 3 == 0) {
+                assert_eq!(running_value(&mut third, "std", t, n, &bars, &mut nc), want, "n={} t={} every third bar", n, t);
+            }
+            for &(t, want) in reference.iter().filter(|(t, _)| *t >= 300) {
+                assert_eq!(running_value(&mut late, "std", t, n, &bars, &mut nc), want, "n={} t={} first asked late", n, t);
+            }
+            for &(t, want) in reference.iter().rev().step_by(7) {
+                assert_eq!(running_value(&mut back, "std", t, n, &bars, &mut nc), want, "n={} t={} asked backwards", n, t);
+            }
+            assert_eq!(nc, 0);
+        }
     }
 }

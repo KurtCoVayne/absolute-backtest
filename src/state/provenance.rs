@@ -331,6 +331,9 @@ pub struct Failure {
     /// The excluding literal is a supplied relation's atom with no tuple.
     pub absence_driven: bool,
     pub error: Option<String>,
+    /// When the excluding literal reads a derived relation at an identity
+    /// and bar the bindings fix: why that relation has no tuple there.
+    pub deeper: Option<Box<WhyNot>>,
 }
 
 /// The head variable that names the instrument: the first entity-typed
@@ -412,6 +415,7 @@ pub fn failures(k: &mut Kernel, prog: &Program, rel: &str, bar: i64, inputs: Opt
                 bindings: Vec::new(),
                 absence_driven: false,
                 error: None,
+                deeper: None,
             };
             match k.explain_with(ri, bar, &set, &bindings) {
                 Ok(ex) => {
@@ -460,18 +464,25 @@ pub struct WhyNot {
 
 impl WhyNot {
     pub fn text(&self) -> String {
-        let mut out = format!("why not {}({}) at {}:\n", self.relation, self.identity, format_timestamp(self.bar));
+        let mut out = String::new();
+        self.render(&mut out, 0);
+        out
+    }
+    fn render(&self, out: &mut String, depth: usize) {
+        let pad = "  ".repeat(depth);
+        out.push_str(&format!("{}why not {}({}) at {}:\n", pad, self.relation, self.identity, format_timestamp(self.bar)));
         if self.rules.is_empty() {
-            out.push_str("  no rule: the relation is supplied, not derived\n");
+            out.push_str(&format!("{}  no rule: the relation is supplied, not derived\n", pad));
         }
         for f in &self.rules {
             if f.fired {
-                out.push_str(&format!("  {} fired ({} solution(s)): the tuple is present\n", f.rule, f.solutions));
+                out.push_str(&format!("{}  {} fired ({} solution(s)): the tuple is present\n", pad, f.rule, f.solutions));
                 continue;
             }
             match (&f.literal, &f.error) {
                 (Some((i, text)), _) => out.push_str(&format!(
-                    "  {} excluded at literal {} `{}`{}{}\n",
+                    "{}  {} excluded at literal {} `{}`{}{}\n",
+                    pad,
                     f.rule,
                     i + 1,
                     text,
@@ -482,11 +493,13 @@ impl WhyNot {
                     },
                     if f.absence_driven { ": absence-driven (a supplied relation has no tuple there)" } else { "" }
                 )),
-                (None, Some(e)) => out.push_str(&format!("  {} halted: {}\n", f.rule, e)),
-                (None, None) => out.push_str(&format!("  {} did not fire\n", f.rule)),
+                (None, Some(e)) => out.push_str(&format!("{}  {} halted: {}\n", pad, f.rule, e)),
+                (None, None) => out.push_str(&format!("{}  {} did not fire\n", pad, f.rule)),
+            }
+            if let Some(d) = &f.deeper {
+                d.render(out, depth + 2);
             }
         }
-        out
     }
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -502,20 +515,63 @@ impl WhyNot {
                 "bindings": f.bindings.iter().map(|(v, x)| serde_json::json!({"var": v, "value": x})).collect::<Vec<_>>(),
                 "absence_driven": f.absence_driven,
                 "error": f.error,
+                "deeper": f.deeper.as_ref().map(|d| d.json()),
             })).collect::<Vec<_>>(),
         })
     }
     /// The verdict: `absence-driven` when every rule that did not fire was
-    /// excluded by a supplied relation's absent tuple.
+    /// excluded by a supplied relation's absent tuple, directly or through
+    /// the derived relations its excluding literal reads.
     pub fn absence_driven(&self) -> bool {
         let failed: Vec<&Failure> = self.rules.iter().filter(|f| !f.fired).collect();
-        !failed.is_empty() && failed.iter().all(|f| f.absence_driven)
+        !failed.is_empty() && failed.iter().all(|f| f.absence_driven || f.deeper.as_ref().map(|d| d.absence_driven()).unwrap_or(false))
+    }
+    /// The deepest excluding literals: the root causes the chain reaches.
+    pub fn roots(&self) -> Vec<&Failure> {
+        let mut out = Vec::new();
+        for f in self.rules.iter().filter(|f| !f.fired) {
+            match &f.deeper {
+                Some(d) => out.extend(d.roots()),
+                None => out.push(f),
+            }
+        }
+        out
+    }
+    /// The number of levels the chain reaches.
+    pub fn depth(&self) -> usize {
+        1 + self.rules.iter().filter_map(|f| f.deeper.as_ref().map(|d| d.depth())).max().unwrap_or(0)
     }
 }
 
-/// Why `rel` has no tuple for `identity` at `bar`.
+/// How deep `why_not` follows derived relations by default.
+pub const WHY_NOT_DEPTH: usize = 8;
+
+/// Why `rel` has no tuple for `identity` at `bar`: per rule the first
+/// excluding literal, and when that literal reads a derived relation at an
+/// identity and bar the bindings fix, why that relation has no tuple there,
+/// down to a comparison, a supplied relation, or `WHY_NOT_DEPTH` levels.
 pub fn why_not(k: &mut Kernel, prog: &Program, rel: &str, bar: i64, inputs: Option<&[Value]>, symbol: Option<Value>) -> Result<WhyNot, RunError> {
-    let rules = failures(k, prog, rel, bar, inputs, symbol.clone())?;
+    why_not_to_depth(k, prog, rel, bar, inputs, symbol, WHY_NOT_DEPTH)
+}
+
+pub fn why_not_to_depth(k: &mut Kernel, prog: &Program, rel: &str, bar: i64, inputs: Option<&[Value]>, symbol: Option<Value>, depth: usize) -> Result<WhyNot, RunError> {
+    let mut rules = failures(k, prog, rel, bar, inputs, symbol.clone())?;
+    if depth > 0 {
+        for f in rules.iter_mut() {
+            if f.fired {
+                continue;
+            }
+            let Some((li, _)) = &f.literal else { continue };
+            let Some((name, sub_bar, sub_inputs, sub_symbol)) = derived_target(k, prog, f.rule_index, *li, &f.bindings) else {
+                continue;
+            };
+            match why_not_to_depth(k, prog, &name, sub_bar, Some(&sub_inputs), sub_symbol, depth - 1) {
+                Ok(w) => f.deeper = Some(Box::new(w)),
+                Err(RunError::NotABar { .. }) | Err(RunError::Request(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
     Ok(WhyNot {
         relation: rel.to_string(),
         identity: symbol
@@ -525,4 +581,43 @@ pub fn why_not(k: &mut Kernel, prog: &Program, rel: &str, bar: i64, inputs: Opti
         bar,
         rules,
     })
+}
+
+/// The derived relation an excluding literal reads, with the bar, inputs
+/// and instrument the bindings fix for it; `None` when the literal is not
+/// an atom of a derived relation or a needed term is unbound.
+fn derived_target(k: &Kernel, prog: &Program, ri: usize, li: usize, bindings: &[(String, String)]) -> Option<(String, i64, Vec<Value>, Option<Value>)> {
+    let rule = &prog.rules[ri];
+    let atom = match rule.body.get(li)? {
+        Literal::Atom(a) | Literal::AsOf { atom: a, .. } => a,
+        _ => return None,
+    };
+    if prog.rules_for(&atom.name).is_empty() {
+        return None;
+    }
+    let sig = prog.relations.get(&atom.name)?;
+    let bound = |v: &str| bindings.iter().find(|(n, _)| n == v).map(|(_, x)| x.as_str());
+    let text_of = |t: &Term| -> Option<String> {
+        match t {
+            Term::Var(v, _) => bound(v).map(|s| s.to_string()),
+            Term::Lit(l, _) => Some(render_lit(l)),
+            Term::Param(p, _) => prog.param(&rule.unit, p).map(|p| render_lit(&p.value)),
+            Term::Wild(_) | Term::Ctor(..) => None,
+        }
+    };
+    let key = sig.key_pos()?;
+    let bar = parse_timestamp(&text_of(atom.terms.get(key)?)?)?;
+    let mut inputs = Vec::new();
+    let mut symbol = None;
+    for (i, a) in sig.args.iter().enumerate() {
+        let term = atom.terms.get(i)?;
+        if a.mode == Mode::In {
+            inputs.push(k.parse_input(&a.ty, &text_of(term)?).ok()?);
+        } else if i != key && a.ty.is_entity() && symbol.is_none() {
+            if let Some(t) = text_of(term) {
+                symbol = k.parse_binding(&t).ok();
+            }
+        }
+    }
+    Some((atom.name.clone(), bar, inputs, symbol))
 }

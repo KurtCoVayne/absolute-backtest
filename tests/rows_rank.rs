@@ -13,16 +13,19 @@ use absolute_backtest::kernel::{run, run_fold, Dataset, ExecConfig, Kernel, Valu
 fn rolling() -> String {
     common::strategy(
         "rolling",
-        "",
+        "    n : Count = 3
+    w : Scalar = 0.1
+    cut_avg : Count = 2
+    cut_ord : Count = 3",
         "    rel avg3(A: Equity, @T, M: Price<USD>)
-    avg3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[3], close(A, T1, P)).
+    avg3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[n], close(A, T1, P)).
     rel px(A: Equity, @T, P: Price<USD>)
     px(A, T, P) :- universe(A, T), close(A, T, P).
-    rel rk(A: Equity, @T, K: Scalar)
+    rel rk(A: Equity, @T, K: Count)
     rk(A, T, K) :- bar(T), K = rank_average(px(A, T, P) by (P desc)) within (T).
     rel ordk(A: Equity, @T, K: Count)
     ordk(A, T, K) :- bar(T), K = rank(px(A, T, P) by (P desc, A asc)) within (T).",
-        "    decide(T, hold(A, 0.1)) :- rk(A, T, K), ordk(A, T, K2), avg3(A, T, _), K <= 1.5, K2 <= 3.",
+        "    decide(T, hold(A, w)) :- rk(A, T, K), ordk(A, T, K2), avg3(A, T, _), K <= cut_avg, K2 <= cut_ord.",
     )
 }
 
@@ -109,7 +112,7 @@ fn the_fold_and_the_uncached_evaluation_agree_with_the_batch_kernel() {
 #[test]
 fn the_checker_judges_rows_and_rank() {
     let src = rolling();
-    let bad_len = src.replace("rows[3]", "rows[3d]");
+    let bad_len = src.replace("rows[n]", "rows[3d]");
     let (p, diags) = common::check(&bad_len, "rolling");
     assert!(p.is_none() && common::text(&diags).contains("a Count (the number of rows)"), "{}", common::text(&diags));
     // Ordinal ties need a total order; averaged ones do not.
@@ -129,13 +132,14 @@ fn the_checker_judges_rows_and_rank() {
 fn a_rows_window_counts_the_anchors_rows_and_aggregates_the_valid_ones() {
     let src = common::strategy(
         "sparse",
-        "    floor : Price<USD> = 11 USD/share",
+        "    floor : Price<USD> = 11 USD/share
+    w : Scalar = 0.1",
         "    # A value only on days with a close above the floor.
     rel high_close(A: Equity, @T, P: Price<USD>)
     high_close(A, T, P) :- close(A, T, P), P > floor.
     rel last3(A: Equity, @T, M: Price<USD>)
     last3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[3] min 1, high_close(A, T1, P)).",
-        "    decide(T, hold(A, 0.1)) :- universe(A, T), last3(A, T, _).",
+        "    decide(T, hold(A, w)) :- universe(A, T), last3(A, T, _).",
     );
     let p = common::program(&src, "sparse");
     let (ds, days) = market();

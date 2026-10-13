@@ -446,35 +446,71 @@ impl<'a> Interp<'a> {
                 }
             }
             "corr" => {
-                Self::warn(
-                    col,
-                    "A008",
-                    span,
-                    format!(
-                        "`corr` is undefined when `{}` or `{}` is constant over the window",
-                        render_expr(&args[0], &identity),
-                        args.get(1).map(|a| render_expr(a, &identity)).unwrap_or_default()
+                // A point interval is a constant at every row: the aggregate
+                // is undefined at every bar, a warning rather than a note.
+                let constant = [Some(&x), y.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find(|v| v.numeric && v.interval.lo == v.interval.hi && v.interval.lo.is_finite());
+                match constant {
+                    Some(c) => Self::warn(
+                        col,
+                        "A008",
+                        span,
+                        format!(
+                            "`corr` is undefined at every bar: an argument of `corr({}, {})` is the constant {} over every window; the run halts at the first full window",
+                            render_expr(&args[0], &identity),
+                            args.get(1).map(|a| render_expr(a, &identity)).unwrap_or_default(),
+                            c.interval.lo
+                        ),
+                        false,
+                        false,
                     ),
-                    true,
-                    false,
-                );
+                    None => Self::warn(
+                        col,
+                        "A008",
+                        span,
+                        format!(
+                            "`corr` is undefined when `{}` or `{}` is constant over the window",
+                            render_expr(&args[0], &identity),
+                            args.get(1).map(|a| render_expr(a, &identity)).unwrap_or_default()
+                        ),
+                        true,
+                        false,
+                    ),
+                }
                 AbsVal {
                     may_undef: true,
                     ..AbsVal::of_interval(Some(&scalar), Interval::new(-1.0, 1.0))
                 }
             }
-            "ols_beta" => {
-                Self::warn(
-                    col,
-                    "A008",
-                    span,
-                    format!(
-                        "`ols_beta` is undefined when `{}` is constant over the window",
-                        args.get(1).map(|a| render_expr(a, &identity)).unwrap_or_default()
+            "ols_slope" => {
+                let regressor = y.as_ref().filter(|v| v.numeric && v.interval.lo == v.interval.hi && v.interval.lo.is_finite());
+                match regressor {
+                    Some(c) => Self::warn(
+                        col,
+                        "A008",
+                        span,
+                        format!(
+                            "`ols_slope` is undefined at every bar: the regressor `{}` is the constant {} over every window; the run halts at the first full window",
+                            args.get(1).map(|a| render_expr(a, &identity)).unwrap_or_default(),
+                            c.interval.lo
+                        ),
+                        false,
+                        false,
                     ),
-                    true,
-                    false,
-                );
+                    None => Self::warn(
+                        col,
+                        "A008",
+                        span,
+                        format!(
+                            "`ols_slope` is undefined when `{}` is constant over the window",
+                            args.get(1).map(|a| render_expr(a, &identity)).unwrap_or_default()
+                        ),
+                        true,
+                        false,
+                    ),
+                }
                 let wy = y.as_ref().map(|v| v.interval).unwrap_or(Interval::TOP);
                 let c = if xi.is_bottom() || wy.is_bottom() { 0.0 } else { (xi.hi - xi.lo) * (wy.hi - wy.lo) / 4.0 };
                 let vx = if wy.is_bottom() { 0.0 } else { (wy.hi - wy.lo) * (wy.hi - wy.lo) / 4.0 };

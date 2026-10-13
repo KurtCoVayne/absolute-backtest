@@ -184,6 +184,21 @@ strategy rows_sum {
             assert!((shift + sx / *n as f64 - v).abs() <= 1e-9 * v.abs().max(1.0), "{:?}", row);
         }
         assert!(sum.rows.iter().all(|row| matches!(&row[2], Cell::Str(s) if s == "mean")));
+        // A query after the run reaches behind the group's buffer: it is
+        // served along the same walk, so the bits equal what the run saw.
+        for row in running.iter().filter(|row| matches!(row[5], Cell::Int(n) if n >= 5)).step_by(37).take(12) {
+            let (Cell::Str(group), Cell::Time(bar), Cell::Float(v)) = (&row[3], &row[4], &row[14]) else {
+                panic!("{:?}", row)
+            };
+            let sym = group.split(',').next().unwrap().trim();
+            let a = k.parse_binding(sym).unwrap();
+            let tuples = k.query("m", *bar, &[]).unwrap();
+            let got = tuples.iter().filter(|tu| tu[0] == a).find_map(|tu| match &tu[2] {
+                Value::Num(x) => Some(*x),
+                _ => None,
+            });
+            assert_eq!(got.map(f64::to_bits), Some(v.to_bits()), "{} at {}: run {} query {:?}", sym, bar, v, got);
+        }
     });
 }
 
@@ -279,6 +294,48 @@ strategy absent {
         assert!(w.text().contains("fill(A, T, _, _)") && w.text().contains("absence-driven"), "{}", w.text());
         let f = tables::failure(k, &p, "filled", t, None, None).unwrap();
         assert!(f.rows.iter().all(|row| row[6] == Cell::Bool(true)), "{}", f.text());
+    });
+}
+
+/// Why-not follows the excluding literal into the derived relation it
+/// reads, down to the root: a label the data never carries, three
+/// relations below `decide`, is the absence-driven verdict of the chain
+/// (the Oct 6 study's `"SP500"` program, `docs/llm-usability.md`).
+#[test]
+fn why_not_follows_the_chain_to_the_root() {
+    let src = r#"
+strategy chain {
+  env equities_1d_v2
+  resolution @1d
+  mode delta
+  param qty : Quantity<Shares> = 10 shares
+  rel cand(-A: Equity, @T: Timestamp)
+  cand(A, T) :- universe(A, T), member(A, T, "NOPE").
+  rel sel(-A: Equity, @T: Timestamp)
+  sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share.
+  decide(T, buy(A, qty)) :- sel(A, T), not position(A, T, _).
+}
+"#;
+    let p = program(src, "chain");
+    let ds = absolute_backtest::data::synthetic_daily_v2(&SYMS, (2022, 1, 3), 60, 7);
+    with_run(&p, &ds, false, |k, r| {
+        assert!(r.decisions.is_empty());
+        let t = *r.bars.last().unwrap();
+        let w = why_not(k, &p, "decide", t, None, Some(Value::Equity(0))).unwrap();
+        assert_eq!(w.depth(), 3, "{}", w.text());
+        assert!(w.absence_driven(), "{}", w.text());
+        let roots = w.roots();
+        assert_eq!(roots.len(), 1, "{}", w.text());
+        assert_eq!(roots[0].rule, "chain::cand#1");
+        assert!(roots[0].literal.as_ref().map(|(_, t)| t.contains("member(A, T, \"NOPE\")")).unwrap_or(false), "{:?}", roots[0].literal);
+        assert!(roots[0].absence_driven);
+        let text = w.text();
+        assert!(text.contains("    why not sel(") && text.contains("        why not cand("), "{}", text);
+        assert!(w.json()["rules"][0]["deeper"]["rules"][0]["deeper"]["relation"] == "cand", "{}", w.json());
+        // A chain that ends at a comparison is not absence-driven.
+        let w = why_not(k, &p, "sel", t, None, Some(Value::Equity(0))).unwrap();
+        assert_eq!(w.depth(), 2);
+        assert!(w.absence_driven(), "cand's member literal is the root: {}", w.text());
     });
 }
 

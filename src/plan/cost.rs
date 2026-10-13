@@ -196,7 +196,7 @@ pub struct LiteralCost {
 pub fn aggregate_class(agg: &str) -> &'static str {
     match agg {
         "sum" | "count" | "max" | "min" | "first" | "last" => "distributive",
-        "mean" | "std" | "cov" | "corr" | "ols_beta" => "algebraic",
+        "mean" | "std" | "cov" | "corr" | "ols_slope" => "algebraic",
         "median" | "quantile" => "holistic",
         _ => "unknown",
     }
@@ -206,7 +206,7 @@ pub fn aggregate_class(agg: &str) -> &'static str {
 /// numerics setting: what the plan reports (section 5.4, as this kernel
 /// carries it).
 pub fn implementation(agg: &str, window: Option<WindowKind>, running: bool) -> String {
-    let moment = matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_beta");
+    let moment = matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_slope");
     match (window, moment, running) {
         (Some(WindowKind::Rows), true, true) => "sliding compensated sums (Neumaier), rebuilt every N rows; exact two-pass where the sums cannot answer".into(),
         (Some(WindowKind::Rows), true, false) => "two-pass over the window's cached rows".into(),

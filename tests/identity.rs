@@ -4,36 +4,30 @@
 //! later company; `ticker(A, @T, S)` is a relation; a ticker literal names
 //! the security carrying it at the bundle date.
 
-mod corpus;
+mod common;
 
 use std::fs;
 
-use absolute_backtest::check::{check_program, Program};
+use absolute_backtest::check::Program;
 use absolute_backtest::data::{business_days, check_identities, load_parquet_dir, write_parquet_dir};
 use absolute_backtest::kernel::time::format_timestamp;
 use absolute_backtest::kernel::{run, Dataset, ExecConfig, RunError, Value};
 use absolute_backtest::table::{to_text, write_text_table};
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
+/// Buy the security carrying `ticker` once, when flat, and hold it.
+fn hold_named(ticker: &str) -> Program {
+    let src = common::strategy(
+        "hold_named",
+        &format!(
+            "    target : Equity = \"{}\"
+    qty : Quantity<Shares> = 10 shares",
+            ticker
+        ),
+        "",
+        "    decide(T, trade(target, qty)) :- universe(target, T), flat(target, T).",
+    );
+    common::program(&src, "hold_named")
 }
-
-/// Buy the named security once, when flat, and hold it.
-const HOLD_NAMED: &str = r#"
-strategy hold_named {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param target : Equity = "BBB"
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(target, qty)) :- universe(target, T), flat(target, T).
-}
-"#;
 
 /// Six weekdays from 2024-01-08. E1 is AAA throughout; E2 is BBB for the
 /// first three days and BBX from the fourth; E3 lists on the fifth day and
@@ -50,9 +44,7 @@ fn market() -> Dataset {
             if !listed {
                 continue;
             }
-            ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
-            ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(1_000_000.0)]);
-            ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
+            common::add_bar(&mut ds, sym, t, p, 1_000_000.0);
         }
     }
     ds.derive_tickers();
@@ -60,7 +52,7 @@ fn market() -> Dataset {
 }
 
 fn day(ds: &Dataset, i: usize) -> i64 {
-    let mut keys: Vec<i64> = ds.facts["universe"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
+    let mut keys: Vec<i64> = ds.facts["listed"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
     keys.sort();
     keys.dedup();
     keys[i]
@@ -92,7 +84,7 @@ fn the_ticker_relation_is_derived_from_the_security_table() {
 #[test]
 fn a_ticker_change_keeps_the_position_on_the_same_id() {
     let ds = market();
-    let p = program(HOLD_NAMED, "hold_named");
+    let p = hold_named("BBB");
     // As of the bundle date (the last bar) BBB is E3; ask for E2 by its old name as of day 2.
     let cfg = ExecConfig {
         initial_cash: 10_000.0,
@@ -113,7 +105,7 @@ fn a_ticker_change_keeps_the_position_on_the_same_id() {
 #[test]
 fn a_reused_ticker_resolves_by_the_bundle_date() {
     let ds = market();
-    let p = program(HOLD_NAMED, "hold_named");
+    let p = hold_named("BBB");
     // Default bundle date: the last bar, when BBB is the new listing E3.
     let r = run(
         &p,
@@ -144,14 +136,14 @@ fn a_reused_ticker_resolves_by_the_bundle_date() {
 #[test]
 fn a_ticker_nobody_carries_at_the_bundle_date_is_a_configuration_error() {
     let ds = market();
-    let p = program(&HOLD_NAMED.replace("\"BBB\"", "\"ZZZ\""), "hold_named");
+    let p = hold_named("ZZZ");
     let err = run(&p, &ds, ExecConfig::frictionless()).err().unwrap();
     match &err {
         RunError::Config(m) => assert!(m.contains("ZZZ") && m.contains("2024-01-15"), "{}", m),
         e => panic!("expected a configuration error, got {}", e),
     }
     // BBX exists only from day 4: as of day 2 it is unknown.
-    let p = program(&HOLD_NAMED.replace("\"BBB\"", "\"BBX\""), "hold_named");
+    let p = hold_named("BBX");
     let err = run(
         &p,
         &ds,
@@ -164,8 +156,14 @@ fn a_ticker_nobody_carries_at_the_bundle_date_is_a_configuration_error() {
     .unwrap();
     assert!(err.to_string().contains("BBX"), "{}", err);
     // A dataset without a security table is the old world: the ticker is the id.
-    let legacy = absolute_backtest::data::synthetic_daily(&["AAA", "BBB"], (2024, 1, 8), 6, 1);
-    let r = run(&program(HOLD_NAMED, "hold_named"), &legacy, ExecConfig::frictionless()).unwrap();
+    let mut legacy = Dataset::new();
+    let (aaa, bbb) = (legacy.intern("AAA"), legacy.intern("BBB"));
+    for t in business_days((2024, 1, 8), 6) {
+        common::add_bar(&mut legacy, aaa, t, 10.0, 1_000_000.0);
+        common::add_bar(&mut legacy, bbb, t, 20.0, 1_000_000.0);
+    }
+    legacy.derive_tickers();
+    let r = run(&hold_named("BBB"), &legacy, ExecConfig::frictionless()).unwrap();
     assert_eq!(r.symbols[r.fills[0].equity as usize], "BBB");
 }
 
@@ -190,7 +188,7 @@ fn the_identity_bundle_tests_catch_overlaps() {
 
 #[test]
 fn the_security_table_loads_and_round_trips_through_parquet() {
-    let p = program(HOLD_NAMED, "hold_named");
+    let p = hold_named("BBB");
     let dir = std::env::temp_dir().join(format!("abt-identity-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -228,7 +226,7 @@ fn the_security_table_loads_and_round_trips_through_parquet() {
 #[test]
 fn an_input_or_binding_names_a_security_by_id_or_by_ticker() {
     let ds = market();
-    let p = program(HOLD_NAMED, "hold_named");
+    let p = hold_named("BBB");
     let k = absolute_backtest::kernel::Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
     assert_eq!(k.parse_binding("E2").unwrap(), Value::Equity(ds.symbols.get("E2").unwrap()));
     assert_eq!(k.parse_binding("BBX").unwrap(), Value::Equity(ds.symbols.get("E2").unwrap()), "a ticker resolves as of the bundle date");
