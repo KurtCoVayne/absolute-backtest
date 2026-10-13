@@ -607,13 +607,13 @@ fn derived_target(k: &Kernel, prog: &Program, ri: usize, li: usize, bindings: &[
     };
     let key = sig.key_pos()?;
     let bar = parse_timestamp(&text_of(atom.terms.get(key)?)?)?;
-    let mut inputs = Vec::new();
+    // Signatures carry no inputs (language-v2, 4.2): the step binds the
+    // relation's instrument, when the atom names one.
+    let inputs = Vec::new();
     let mut symbol = None;
     for (i, a) in sig.args.iter().enumerate() {
         let term = atom.terms.get(i)?;
-        if a.mode == Mode::In {
-            inputs.push(k.parse_input(&a.ty, &text_of(term)?).ok()?);
-        } else if i != key && a.ty.is_entity() && symbol.is_none() {
+        if i != key && a.ty.is_entity() && symbol.is_none() {
             if let Some(t) = text_of(term) {
                 symbol = k.parse_binding(&t).ok();
             }
