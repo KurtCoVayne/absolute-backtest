@@ -1110,14 +1110,19 @@ impl<'p> Kernel<'p> {
     /// walk, with their indices.
     fn domain_bars(&mut self, cr: &CompiledRule, env: &Env) -> Result<Rc<Vec<i64>>, RunError> {
         let cal = self.prog.infos[cr.idx].cal.clone();
-        let entity = if cal.per_entity() { cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity()) } else { None };
+        let entity = if cal.per_entity() {
+            cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity())
+        } else {
+            None
+        };
         let key = (cal, entity);
         if let Some(v) = self.domain_vecs.get(&key) {
             return Ok(v.clone());
         }
         let v: Rc<Vec<i64>> = Rc::new(self.domain(cr, env)?.iter().copied().collect());
         self.domain_vecs.insert(key, v.clone());
-        Ok(v)    }
+        Ok(v)
+    }
 
     pub(crate) fn step(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &Env, out: &mut Vec<Env>) -> Result<(), RunError> {
         match lit {
