@@ -119,11 +119,8 @@ impl Default for StrategyParts {
 impl StrategyParts {
     pub fn render(&self) -> String {
         let calendars = self.calendars.as_ref().map(|c| format!("  calendars {{ {} }}\n", c)).unwrap_or_default();
-        let execution = if self.execution.trim_start().starts_with('{') {
-            format!("  execution {}\n", self.execution)
-        } else {
-            format!("  execution {}\n", self.execution)
-        };
+        // A preset name, a preset with overrides, or a block of fields.
+        let execution = format!("  execution {}\n", self.execution);
         format!(
             "strategy {name} {{\n  data {{ class {class}   {needs}   require tested   prefer latest }}\n  uses {uses}\n{calendars}  clock {{ {clock} }}\n  universe {{ {universe} }}\n  params {{\n{params}\n  }}\n  rules {{\n{rules}\n  }}\n  decisions {{\n    silence {silence}\n    orders {orders}\n{decides}\n  }}\n{execution}  report {{ {report} }}\n}}\n",
             name = self.name,

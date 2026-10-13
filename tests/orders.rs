@@ -170,12 +170,16 @@ fn an_intraday_moc_fills_at_the_sessions_last_print() {
 
 #[test]
 fn the_checker_admits_an_order_only_in_a_decide_head_and_judges_its_shape() {
+    // A bare word in the order's place is resolved as a name first (U);
+    // a term shaped like an order is judged by its fields (T).
     for (order, needle) in [
-        ("limit", "an order is"),
-        ("limit(qty)", "parameter `qty` is Quantity<Shares>"),
-        ("limit(level, forever)", "not a time in force"),
+        ("limit", "`limit` is neither a parameter"),
+        ("limit(qty)", "parameter `qty` is Quantity<Unit>"),
+        ("limit(level, forever)", "`forever` is neither a parameter"),
+        ("limit(level, 1d)", "not a time in force"),
         ("stop(level, bars(1.5))", "bars"),
-        ("fok", "an order is"),
+        ("fok", "`fok` is neither a parameter"),
+        ("fok(level)", "an order is"),
     ] {
         let src = buy_once(order).replace("level : Price<USD> = 9.5 USD/share", "level : Price<USD> = 9.5 USD/share\n    n : Count = 2");
         let (p, diags) = checked(&src, "buy_once");

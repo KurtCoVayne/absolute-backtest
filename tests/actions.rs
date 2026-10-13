@@ -5,64 +5,55 @@
 //! by reason; the `catalog` library derives total return and a point-in-time
 //! adjusted close from the same events.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{business_days, synthetic_daily_v2};
+use absolute_backtest::data::{business_days, synthetic_daily};
 use absolute_backtest::kernel::time::format_timestamp;
-use absolute_backtest::kernel::{run, Action, Dataset, ExecConfig, Lot, Value};
+use absolute_backtest::kernel::{run, Action, Dataset, ExecConfig, Lot, Sym, Value};
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
+/// A daily equity strategy over the catalog (bars, actions, the listing and
+/// the `SPX` list) with the `catalog` library in scope.
+fn equity(name: &str, params: &str, decides: &str) -> String {
+    common::StrategyParts {
+        name: name.into(),
+        needs: "need bars @1d   need actions   need listing   need lists \"SPX\"".into(),
+        uses: "calendar, bars, book, catalog".into(),
+        params: params.into(),
+        decides: decides.into(),
+        ..Default::default()
+    }
+    .render()
 }
 
 /// Buy 10 of X once, when flat, and hold.
-const HOLD: &str = r#"
-strategy hold {
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).
+fn hold() -> String {
+    equity("hold", "    qty : Quantity<Shares> = 10 shares", "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).")
 }
-"#;
 
 /// Short 10 of X once and hold.
-const SHORT: &str = r#"
-strategy short_hold {
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, short(A, qty)) :- universe(A, T), flat(A, T).
+fn short_hold() -> String {
+    equity(
+        "short_hold",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    decide(T, trade(A, Q)) :- universe(A, T), flat(A, T), Q = -qty.",
+    )
 }
-"#;
 
 struct Market {
     ds: Dataset,
-    x: u32,
+    x: Sym,
     days: Vec<i64>,
 }
 
 /// One symbol X over `n` weekdays from 2024-01-08 with the given closes (a
-/// `None` day has no price and no universe row: delisted).
+/// `None` day has no bar and no listing row: delisted).
 fn market(closes: &[Option<f64>]) -> Market {
     let days = business_days((2024, 1, 8), closes.len());
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
+    let x = ds.add_security("X", "X", days[0], None);
     for (t, p) in days.iter().zip(closes) {
         if let Some(p) = p {
-            for rel in ["open", "high", "low", "close"] {
-                ds.add(rel, vec![Value::Equity(x), Value::Time(*t), Value::Num(*p)]);
-            }
-            ds.add("volume", vec![Value::Equity(x), Value::Time(*t), Value::Num(1_000_000.0)]);
-            ds.add("universe", vec![Value::Equity(x), Value::Time(*t)]);
+            common::add_bar(&mut ds, x, *t, *p, 1_000_000.0);
         }
     }
     ds.derive_tickers();
@@ -88,7 +79,7 @@ fn a_split_multiplies_the_position_at_the_ex_date_and_cashes_the_fraction() {
     // Bought 10 at 20 on day 2; a 2:1 split on day 3 halves the as-traded price.
     let mut m = market(&[Some(20.0), Some(20.0), Some(10.0), Some(10.0), Some(10.0)]);
     m.ds.add("split", vec![Value::Equity(m.x), Value::Time(m.days[2]), Value::Num(2.0)]);
-    let p = program(HOLD, "hold");
+    let p = common::program(&hold(), "hold");
     let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
     assert_eq!(r.fills.len(), 1, "{:?}", r.fills);
     assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![20.0]);
@@ -101,7 +92,7 @@ fn a_split_multiplies_the_position_at_the_ex_date_and_cashes_the_fraction() {
     // A 3:2 split of 15 shares is 22.5: whole lots keep 22 and cash the half share at the new price.
     let mut m = market(&[Some(30.0), Some(30.0), Some(20.0), Some(20.0), Some(20.0)]);
     m.ds.add("split", vec![Value::Equity(m.x), Value::Time(m.days[2]), Value::Num(1.5)]);
-    let p = program(&HOLD.replace("10 shares", "15 shares"), "hold");
+    let p = common::program(&hold().replace("10 shares", "15 shares"), "hold");
     let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
     assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![22.0]);
     assert!(close(r.final_cash, 1000.0 - 450.0 + 0.5 * 20.0), "{}", r.final_cash);
@@ -119,7 +110,7 @@ fn a_dividend_is_credited_on_the_pay_date_for_the_shares_held_at_the_ex_date() {
         "dividend",
         vec![Value::Equity(m.x), Value::Time(m.days[0]), Value::Time(m.days[2]), Value::Time(m.days[4]), Value::Num(1.0)],
     );
-    let p = program(HOLD, "hold");
+    let p = common::program(&hold(), "hold");
     let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
     let cash: Vec<f64> = r.exposure.iter().map(|e| e.cash).collect();
     // The day-1 decision fills on day 2 (cash 800 at that mark); the 10.00 arrives at the day-5 mark.
@@ -131,7 +122,7 @@ fn a_dividend_is_credited_on_the_pay_date_for_the_shares_held_at_the_ex_date() {
     assert_eq!(format_timestamp(divs[0].t), "2024-01-12");
     assert!(close(divs[0].cash, 10.0));
     // A short pays it.
-    let r = run(&program(SHORT, "short_hold"), &m.ds, cfg(1000.0)).unwrap();
+    let r = run(&common::program(&short_hold(), "short_hold"), &m.ds, cfg(1000.0)).unwrap();
     let cash: Vec<f64> = r.exposure.iter().map(|e| e.cash).collect();
     assert_eq!(cash, vec![1000.0, 1200.0, 1200.0, 1200.0, 1190.0, 1190.0], "{:?}", cash);
     // The library's total return sees the dividend: (19 + 1) / 20 - 1 = 0 on
@@ -141,11 +132,12 @@ fn a_dividend_is_credited_on_the_pay_date_for_the_shares_held_at_the_ex_date() {
         "dividend",
         vec![Value::Equity(m2.x), Value::Time(m2.days[0]), Value::Time(m2.days[2]), Value::Time(m2.days[4]), Value::Num(1.0)],
     );
-    let src = HOLD.replace(
-        "decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).",
-        "decide(T, buy(A, qty)) :- universe(A, T), ret(A, T, R), R = 0.",
+    let src = equity(
+        "hold",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    decide(T, trade(A, qty)) :- universe(A, T), total_return(A, T, R), R = 0.",
     );
-    let p = program(&src, "hold");
+    let p = common::program(&src, "hold");
     let r = run(&p, &m2.ds, cfg(1000.0)).unwrap();
     let decided: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
     assert_eq!(decided, vec!["2024-01-09", "2024-01-10"], "{:?}", decided);
@@ -157,35 +149,21 @@ fn the_library_adjusts_for_splits_causally() {
     // adjusted close is continuous in the first bar's share basis.
     let mut m = market(&[Some(40.0), Some(40.0), Some(20.0), Some(20.0), Some(22.0)]);
     m.ds.add("split", vec![Value::Equity(m.x), Value::Time(m.days[2]), Value::Num(2.0)]);
-    let probe = |rule: &str| {
-        format!(
-            r#"
-strategy probe {{
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode target
-  param up : Scalar = 0.05
-  param lvl : Price<USD> = 41 USD/share
-  {rule}
-}}
-"#
-        )
-    };
+    let probe = |rule: &str| equity("probe", "    up : Scalar = 0.05\n    lvl : Price<USD> = 41 USD/share", &format!("    {rule}"));
     let decided = |src: &str| -> Vec<String> {
-        let p = program(src, "probe");
+        let p = common::program(src, "probe");
         let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
         r.decisions.iter().map(|d| format_timestamp(d.t)).collect()
     };
     // The split day has zero total return; day 5 is +10%.
-    assert_eq!(decided(&probe("decide(T, target_weight(A, 0)) :- universe(A, T), ret(A, T, R), R > up.")), vec!["2024-01-12"]);
+    assert_eq!(decided(&probe("decide(T, hold(A, 0)) :- universe(A, T), total_return(A, T, R), R > up.")), vec!["2024-01-12"]);
     // The adjusted close is 40, 40, 40, 40, 44: continuous across the split,
     // above 41 on day 5 only; the as-traded 22 never is.
-    assert_eq!(decided(&probe("decide(T, target_weight(A, 0)) :- universe(A, T), close_adj(A, T, P), P > lvl.")), vec!["2024-01-12"]);
-    assert!(decided(&probe("decide(T, target_weight(A, 0)) :- universe(A, T), close(A, T, P), P > lvl.")).is_empty());
+    assert_eq!(decided(&probe("decide(T, hold(A, 0)) :- universe(A, T), adj_close(A, T, P), P > lvl.")), vec!["2024-01-12"]);
+    assert!(decided(&probe("decide(T, hold(A, 0)) :- universe(A, T), close(A, T, P), P > lvl.")).is_empty());
     // Before the split the adjusted close equals the close.
     assert_eq!(
-        decided(&probe("decide(T, target_weight(A, 0)) :- universe(A, T), close_adj(A, T, P), close(A, T, P0), P = P0.")),
+        decided(&probe("decide(T, hold(A, 0)) :- universe(A, T), adj_close(A, T, P), close(A, T, P0), P = P0.")),
         vec!["2024-01-08", "2024-01-09"]
     );
 }
@@ -199,7 +177,7 @@ fn a_delisting_force_closes_at_the_last_trade_with_a_haircut_by_reason() {
     for &t in &m.days[2..] {
         m.ds.add("delisted", vec![Value::Equity(m.x), Value::Time(t), Value::Label(bankrupt)]);
     }
-    let p = program(HOLD, "hold");
+    let p = common::program(&hold(), "hold");
     let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
     // Bankruptcy: a full haircut by default; the position is closed at zero.
     assert_eq!(r.fills.len(), 2, "{:?}", r.fills);
@@ -247,21 +225,14 @@ fn a_delisting_force_closes_at_the_last_trade_with_a_haircut_by_reason() {
 
 #[test]
 fn membership_and_classification_are_point_in_time_relations() {
-    let src = r#"
-strategy in_index {
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  param idx : Label = "SPX"
-  param sector : Label = "tech"
-  decide(T, buy(A, qty)) :- universe(A, T), member(A, T, idx), classification(A, T, "scheme", sector), flat(A, T).
-}
-"#;
+    let src = equity(
+        "in_index",
+        "    qty : Quantity<Shares> = 10 shares\n    idx : Label = \"SPX\"\n    code : Label = \"tech\"",
+        "    decide(T, trade(A, qty)) :- universe(A, T), member(A, T, idx), classification(A, T, \"sector\", code), flat(A, T).",
+    );
     let mut m = market(&[Some(10.0); 4]);
     let spx = m.ds.intern_label("SPX");
-    let scheme = m.ds.intern_label("scheme");
+    let scheme = m.ds.intern_label("sector");
     let tech = m.ds.intern_label("tech");
     let fin = m.ds.intern_label("fin");
     // A member from day 2; a tech name until day 3, then fin.
@@ -274,7 +245,7 @@ strategy in_index {
             vec![Value::Equity(m.x), Value::Time(t), Value::Label(scheme), Value::Label(if i < 3 { tech } else { fin })],
         );
     }
-    let p = program(src, "in_index");
+    let p = common::program(&src, "in_index");
     let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
     let decided: Vec<String> = r.decisions.iter().map(|d| format_timestamp(d.t)).collect();
     assert_eq!(decided, vec!["2024-01-09"], "a member and tech only on day 2 while flat: {:?}", decided);
@@ -282,7 +253,7 @@ strategy in_index {
 
 #[test]
 fn the_synthetic_catalog_market_has_every_event_and_runs_the_corpus_strategy() {
-    let ds = synthetic_daily_v2(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
+    let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
     assert_eq!(ds.securities.len(), 6, "five names, one of which changes ticker: {:?}", ds.securities);
     assert!(!ds.facts["split"].is_empty());
     assert!(ds.facts["dividend"].len() >= 2);
@@ -291,16 +262,14 @@ fn the_synthetic_catalog_market_has_every_event_and_runs_the_corpus_strategy() {
     for rel in ["open", "high", "low"] {
         assert_eq!(ds.facts[rel].len(), ds.facts["close"].len());
     }
-    // The delisted name leaves the universe and its prices stop.
+    // The delisted name leaves the listing and its prices stop.
     let delisted_sym = ds.facts["delisted"][0][0].as_equity().unwrap();
     let first_delisted = ds.facts["delisted"].iter().map(|tu| tu[1].as_time().unwrap()).min().unwrap();
-    assert!(!ds.facts["universe"]
-        .iter()
-        .any(|tu| tu[0].as_equity() == Some(delisted_sym) && tu[1].as_time().unwrap() >= first_delisted));
-    // Lows at or below closes, highs at or above.
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/total_return_momentum.dsl")).unwrap();
-    let p = program(&src, "total_return_momentum");
-    let r = run(&p, &ds, ExecConfig::default()).unwrap();
+    for rel in ["listed", "close"] {
+        assert!(!ds.facts[rel].iter().any(|tu| tu[0].as_equity() == Some(delisted_sym) && tu[1].as_time().unwrap() >= first_delisted));
+    }
+    let p = common::corpus_program("total_return_momentum");
+    let r = run(&p, &ds, ExecConfig::from_program(&p)).unwrap();
     assert!(!r.decisions.is_empty() && !r.fills.is_empty());
     assert!(
         r.actions.iter().any(|a| matches!(a.action, Action::Split { .. })) || r.actions.iter().any(|a| matches!(a.action, Action::Dividend { .. })),

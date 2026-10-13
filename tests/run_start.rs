@@ -1,105 +1,75 @@
-//! What the kernel settles before a run starts, found by the Oct 9 study: an
-//! order that needs a print the data has no relation for is refused, a label
-//! the data never carries is warned; and the daily reading of the average
-//! daily volume at a sub-daily resolution.
+//! What the kernel settles before a run starts, found by the Oct 9 study: a
+//! label the data never carries is warned; and the daily reading of the
+//! average daily volume at a sub-daily resolution.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program, Workspace};
-use absolute_backtest::data::{synthetic_daily_v2, synthetic_minute};
-use absolute_backtest::kernel::time::parse_timestamp;
+use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::{Dataset, ExecConfig, Kernel, Value};
 
-fn program(extra: &str, name: &str) -> (Program, Workspace) {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(extra).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    (p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n"))), ws)
+/// Buy one share of a member of the list `list` when flat.
+fn member_of(name: &str, list: &str) -> String {
+    common::StrategyParts {
+        name: name.into(),
+        needs: format!("need bars @1d   need actions   need listing   need lists \"{list}\""),
+        params: "    qty : Quantity<Shares> = 1 shares".into(),
+        decides: format!("    decide(T, trade(A, qty)) :- universe(A, T), member(A, T, \"{list}\"), flat(A, T)."),
+        ..Default::default()
+    }
+    .render()
 }
 
-const MOO_MIN: &str = r#"
-strategy moo_min {
-  env equities_1m
-  uses features_m
-  resolution @1m
-  mode delta
-  param qty : Quantity<Shares> = 1 shares
-  decide(T, buy(A, qty, moo)) :- universe_m(A, T), flat_m(A, T).
-}
-"#;
-
-/// The minute environment has `close_m` and no `open_m`: a market-on-open
-/// order could never fill, so the run is refused before it starts.
-#[test]
-fn an_order_without_its_open_series_is_refused_at_run_start() {
-    let (prog, _) = program(MOO_MIN, "moo_min");
-    let ds = synthetic_minute(&["AAA"], (2024, 1, 2), 2, 30, 7);
-    let err = Kernel::new(&prog, &ds, ExecConfig::frictionless()).err().expect("refused").to_string();
-    assert!(err.contains("moo_min::decide#1"), "{}", err);
-    assert!(err.contains("`moo` order"), "{}", err);
-    assert!(err.contains("`close_m`") && err.contains("no open companion") && err.contains("`open_m`"), "{}", err);
-    assert!(err.contains("use `market` or `moc`"), "{}", err);
-}
-
-const WRONG_LABEL: &str = r#"
-strategy wrong_label {
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 1 shares
-  decide(T, buy(A, qty)) :- universe(A, T), member(A, T, "NDX"), flat(A, T).
-}
-"#;
-
-/// The synthetic catalog's index is labelled `SPX`; a program naming `NDX`
+/// The synthetic catalog's lists are `SPX` and `SP500`; a program naming
+/// `SP400` (a list of the class's vocabulary the data happens not to carry)
 /// decides nothing, and the run says so, naming the labels the data holds.
 /// A warning and not a refusal: a vocabulary member the data happens not to
 /// carry is a legitimate literal that is simply false on it.
 #[test]
 fn an_unknown_label_is_warned_at_run_start() {
-    let (prog, _) = program(WRONG_LABEL, "wrong_label");
-    let ds = synthetic_daily_v2(&["AAA", "BBB"], (2022, 1, 3), 40, 7);
+    let prog = common::program(&member_of("wrong_label", "SP400"), "wrong_label");
+    let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 40, 7);
     let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let result = k.run().unwrap();
     assert!(result.decisions.is_empty());
     let w = result.warnings.iter().find(|w| w.bias == "vocabulary").expect("a vocabulary warning");
-    assert!(w.message.contains("`NDX`") && w.message.contains("no relation of the data"), "{}", w.message);
+    assert!(w.message.contains("`SP400`") && w.message.contains("no relation of the data"), "{}", w.message);
     assert!(w.message.contains("SPX"), "{}", w.message);
     // The same program with the data's label runs without the warning.
-    let (prog, _) = program(&WRONG_LABEL.replace("NDX", "SPX").replace("wrong_label", "right_label"), "right_label");
+    let prog = common::program(&member_of("right_label", "SPX"), "right_label");
     let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let result = k.run().unwrap();
     assert!(result.warnings.iter().all(|w| w.bias != "vocabulary"));
 }
-
-const NEVER_MIN: &str = r#"
-strategy never_min {
-  env equities_1m
-  resolution @1m
-  mode delta
-  param qty : Quantity<Shares> = 1 shares
-  param floor : Price<USD> = 100000 USD/share
-  decide(T, buy(A, qty)) :- universe_m(A, T), close_m(A, T, P), P > floor.
-}
-"#;
 
 /// Two days of three minute bars with a volume of 100 each: at a minute
 /// resolution the ADV at a bar of the second day is the first day's summed
 /// volume, 300, not the mean bar volume of 100.
 #[test]
 fn adv_at_a_minute_resolution_is_a_daily_volume() {
-    let (prog, _) = program(NEVER_MIN, "never_min");
+    // Buys above a price floor no bar reaches: never trades.
+    let src = common::StrategyParts {
+        name: "never_min".into(),
+        needs: "need bars @1m   need listing".into(),
+        params: "    qty : Quantity<Shares> = 1 shares\n    floor : Price<USD> = 100000 USD/share".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), close(A, T, P), P > floor.".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&src, "never_min");
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
+    let x = ds.add_security("X", "X", common::day("2024-01-02"), None);
+    for d in ["2024-01-02", "2024-01-03"] {
+        ds.add("listed", vec![Value::Equity(x), Value::Time(common::day(d))]);
+    }
     let bars = ["2024-01-02T09:31:00", "2024-01-02T09:32:00", "2024-01-02T09:33:00", "2024-01-03T09:31:00", "2024-01-03T09:32:00"];
     for b in bars {
-        let t = parse_timestamp(b).unwrap();
-        ds.add("close_m", vec![Value::Equity(x), Value::Time(t), Value::Num(10.0)]);
-        ds.add("volume_m", vec![Value::Equity(x), Value::Time(t), Value::Num(100.0)]);
-        ds.add("universe_m", vec![Value::Equity(x), Value::Time(t)]);
+        let t = common::day(b);
+        for rel in ["open", "high", "low", "close"] {
+            ds.add(rel, vec![Value::Equity(x), Value::Time(t), Value::Num(10.0)]);
+        }
+        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(100.0)]);
     }
+    ds.derive_tickers();
     let k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let sym = k.symbols.get("X").unwrap();
     let bars = k.decision_bars();
