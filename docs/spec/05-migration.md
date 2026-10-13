@@ -18,12 +18,12 @@ Oct 12, 2026 · the sequence of changes that turns the present crate into the th
 
 ### M-0 · Workspace
 
-Convert the crate into a Cargo workspace: `crates/abt-wire`, `crates/abt-agg` (empty), `crates/abt-data` (empty), `crates/abt-kernel` (the present `src/` moved as is), `crates/abt-query` (empty), `crates/abt` (the present `src/bin/abt.rs`, calling `abt-kernel`). `abt-wire` gets the scalar types (P-1.1), `Hash` with BLAKE3, the canonical form (P-6) and the first message types (`Hello`, `Frame`, `Error`). CI runs the workspace.
+Convert the crate into a Cargo workspace: `crates/abt-wire`, `crates/abt-agg` (empty), `crates/abt-data` (empty), `crates/abt-kernel` (the present `src/` moved as is), `crates/abt-query` (empty), `crates/abt` (the present `src/bin/abt.rs`, calling `abt-kernel`). `abt-wire` gets the FlatBuffers schema `schema/abt.fbs` with the scalar types and the first messages (`Hello`, `Error`, the `Message` union), the `planus` build step, `Hash` with BLAKE3, the canonical form (P-6) and the frame codec (P-2.2). CI runs the workspace.
 
 | Files | Lines |
 | --- | --- |
 | `Cargo.toml` (workspace), `crates/*/Cargo.toml` | 80 |
-| `crates/abt-wire/src/{lib, scalar, hash, canonical, frame}.rs` | 700 |
+| `crates/abt-wire/schema/abt.fbs`, `build.rs` (planus), `src/{lib, scalar, hash, canonical, frame, convert}.rs` | 900 |
 | `crates/abt-kernel/src/**` (moved, paths fixed) | 0 new |
 | `tests/` moved under `crates/abt-kernel/tests/` | 0 new |
 

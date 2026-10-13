@@ -10,6 +10,8 @@ Oct 12, 2026 · the only boundary between the three programs (A-D3). Tags and cr
 
 Types and messages, with serialisation, canonical bytes and hashing, and nothing else: no evaluation, no storage, no statistics. A function enters `abt-wire` only if it is (de)serialisation, validation of a frame, or the BLAKE3 of a canonical form (A-D2).
 
+The source of truth for every wire type is the FlatBuffers schema `abt-wire/schema/abt.fbs` (section 2.2), compiled at build time by `planus` (a pure-Rust FlatBuffers compiler) into zero-copy readers (`DemandRef`, `BindingRef`, …) and owned types (`Demand`, `Binding`, …). Services read requests through the readers without allocating; the owned types derive `Serialize`/`Deserialize` for logs, `--json` and the canonical form (section 6), and convert to and from the readers by generated code. [D] A schema file rather than Rust types as the source of truth: a zero-copy format needs a layout the compiler owns; the owned types keep the ergonomics the rest of the crates expect, at the cost of one generated conversion per message, which `planus` writes.
+
 | Group | Types |
 | --- | --- |
 | Scalars | `Entity(u64)`, `Time(i64 ns)`, `Label(u32)`, `Num(f64)`, `Count(i64)`, `Bool`, `Bytes` (D-2.1) |
@@ -51,12 +53,16 @@ A service listens on a Unix domain socket (`--socket PATH`, default `$XDG_RUNTIM
 ### 2.2 Frames
 
 ```
-Frame = length: u32 (big-endian, bytes that follow) | kind: u8 | correlation: u64 | payload
-kind  = 0 hello | 1 request (JSON) | 2 response (JSON) | 3 schema (Arrow IPC schema message) | 4 batch (Arrow IPC record batch)
-      | 5 end (end of a streaming response or stream) | 6 error (JSON) | 7 cancel | 8 ack (JSON) | 9 ping | 10 pong
+Frame = length: u32 (little-endian, bytes that follow) | kind: u8 | correlation: u64 (little-endian) | payload
+kind  = 0 hello | 1 request (FlatBuffer) | 2 response (FlatBuffer) | 3 schema (Arrow IPC schema message) | 4 batch (Arrow IPC record batch)
+      | 5 end (end of a streaming response or stream) | 6 error (FlatBuffer) | 7 cancel | 8 ack (FlatBuffer) | 9 ping | 10 pong
 ```
 
-JSON payloads are the `serde` rendering of the `abt-wire` types; tabular payloads are Arrow IPC streaming format, one `schema` frame then `batch` frames, with the correlation id of the request they answer. A request's response is one `response` frame, or a `response` followed by `schema`/`batch`… frames and `end`. A subscription is a response followed by batches of events (D-5.1, one Arrow batch per up to 4,096 events, flushed at every barrier and at least every 10 ms live) that ends only on `cancel` or on the stream's end. Maximum frame size 64 MiB; larger tables are split into batches.
+Control payloads (`hello`, `request`, `response`, `error`, `ack`) are FlatBuffers with the root type `Message`, a union over every request and response type of section 3, size-prefixed and verified once on receipt (the `planus` verifier is linear in the buffer and rejects any out-of-bounds offset); fields are then read in place with no parsing and no allocation. Tabular payloads are Arrow IPC streaming format, one `schema` frame then `batch` frames, with the correlation id of the request they answer; Arrow IPC's own framing is FlatBuffers, so the whole protocol has one metadata encoding. A request's response is one `response` frame, or a `response` followed by `schema`/`batch`… frames and `end`. A subscription is a response followed by batches of events (D-5.1, one Arrow batch per up to 4,096 events, flushed at every barrier and at least every 10 ms live) that ends only on `cancel` or on the stream's end. Maximum frame size 64 MiB; larger tables are split into batches.
+
+**The size rule.** A control payload holds only what scales with the program, the plan or the request: a demand, a binding, a query form, a status. Anything whose size scales with the data (a barrier index, a list of versions per contract, a catalog answer) is an Arrow table following the response. A control payload over 1 MiB is a protocol error.
+
+[D] FlatBuffers over JSON, CBOR, MessagePack, protobuf, Cap'n Proto and SBE for the control plane. The owner asked for the fastest standard encoding. Zero-copy formats (FlatBuffers, Cap'n Proto, SBE) read without parsing or allocation, which the parse-based formats cannot match; among them FlatBuffers is already a dependency through Arrow IPC, has a pure-Rust compiler, and expresses nested, optional and variable-length messages (a `Demand`, a `Predicate`) that SBE's fixed layouts do not; Cap'n Proto needs the C++ `capnp` compiler and its RPC layer is not wanted. Protobuf is parse-and-allocate, and Arrow Flight is protobuf over gRPC, slower than this envelope on the same socket. The cost is a schema file as a second artefact beside the Rust types, which generation makes mechanical, and the loss of readable frames in a raw socket dump, which `abt wire decode` restores by rendering any frame through the owned types.
 
 ### 2.3 Sessions
 
@@ -90,7 +96,8 @@ Every error names what the caller can act on (the need, the plan over budget, th
 | `query` | `View`, `QueryForm`, `ReceiptFilter`, `with_seq: bool` | a table (streamed) |
 | `explain` | as `query` | `{ rows, bytes, partitions, cached }` |
 | `aggregate` | `View`, `AggregateRequest` | a table (streamed) and `{ cache_key }` |
-| `subscribe` | `StreamSpec`, `from_seq`, `paced: bool`, `to_seq?` | event batches until `cancel` or `to_seq` |
+| `subscribe` | `StreamSpec`, `from_seq`, `paced: bool`, `to_seq?`, `with_index: bool` | `{ stream }`, then, when `with_index`, the barrier index as an Arrow table (`calendar`, `label`, `seq`) before the first event batch; then event batches until `cancel` or `to_seq` |
+| `stream_index` | `StreamSpec` | the barrier index alone, as an Arrow table, computed from the merge without streaming (what the query layer reads to turn an embargo into a `to_seq`, Q-2.3) |
 | `ack` | `seq` | — |
 | `put` | `relation`, `RelationSchema`, batches | `{ version, seq_range }` |
 | `get` | `cache_key` or `version` | a table (streamed) or `not_found` |
@@ -184,7 +191,9 @@ Column types are D-2.1's; every table has `seq: UInt64` available on request. Fi
 
 ## 6. Canonical forms and hashing
 
-Every `abt-wire` type has a canonical byte form: JSON per RFC 8785 (JSON Canonicalization Scheme: sorted member names, no whitespace, shortest round-trip number rendering, UTF-16 code-unit string ordering), with `f64` NaN and infinities forbidden in canonical forms (an error at construction). A hash is BLAKE3 over the canonical bytes. The normal form of a program (V-8.4) and of a plan (Q-2.4) are rendered as text by the kernel and the query layer respectively and hashed as UTF-8 bytes, so that `abt hash` and `abt plan check` print what was hashed.
+Every `abt-wire` type has a canonical byte form, distinct from its wire encoding: JSON per RFC 8785 (JSON Canonicalization Scheme: sorted member names, no whitespace, shortest round-trip number rendering, UTF-16 code-unit string ordering) rendered from the owned type, with `f64` NaN and infinities forbidden in canonical forms (an error at construction) and `i64` written as decimal integers. A hash is BLAKE3 over the canonical bytes. The wire encoding is never hashed: a FlatBuffer's bytes depend on the builder's layout and padding, so two equal messages need not be byte-equal, while their canonical forms are. Hashing is rare (once per program, plan and binding), so the cost of the rendering is irrelevant; readability is not, since `abt hash --show` prints the hashed bytes. The normal form of a program (V-8.4) and of a plan (Q-2.4) are rendered as text by the kernel and the query layer respectively and hashed as UTF-8 bytes, so that `abt hash` and `abt plan check` print what was hashed.
+
+`--json` on the command line renders the owned types with `Time` as ISO-8601 strings with nanoseconds and hashes as hex, because readers outside Rust lose integers above 2⁵³; the canonical form keeps the integer, and the two renderings are never confused because only `Canonical` feeds a hash.
 
 [E] RFC 8785 (Rundgren, Jordan, Erdtman 2020); BLAKE3.
 
@@ -198,6 +207,6 @@ The protocol version is `major.minor`. A minor change adds optional fields, fram
 
 ## 8. What is established, new and decided in this document
 
-- [E] Arrow IPC streaming format; RFC 8785; BLAKE3; the aggregate classes (F-8); Chan–Golub–LeVeque; Neumaier summation.
+- [E] Arrow IPC streaming format; FlatBuffers (the Arrow IPC metadata encoding); RFC 8785; BLAKE3; the aggregate classes (F-8); Chan–Golub–LeVeque; Neumaier summation.
 - [N] One implementation, one answer (1.1); transport invisibility (5.1).
-- [D] Unix sockets and in-process channels only (2.1); JSON control and Arrow data frames rather than a schema compiler (protobuf/Flight), because the tables are the interface and JSON control messages are readable in a log; no authentication (in-house, socket permissions); the `abt-wire` no-logic rule (1.1); `abt-agg` requires and asserts canonical order rather than sorting (1.2).
+- [D] Unix sockets and in-process channels only (2.1); FlatBuffers control frames and Arrow data frames, the fastest standard pairing, with the reasons and the rejected alternatives in 2.2; the size rule that keeps data-sized payloads out of control frames (2.2); the schema file as the source of truth with generated owned types (1.1); canonical forms separate from the wire encoding (6); no authentication (in-house, socket permissions); the `abt-wire` no-logic rule (1.1); `abt-agg` requires and asserts canonical order rather than sorting (1.2).
