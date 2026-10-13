@@ -1,24 +1,15 @@
 //! The metrics library (data-bundle doc, section 7): return metrics with
 //! their conventions fixed by hand-computed values, the Bailey–López de
 //! Prado statistics against worked numbers, PBO on constructed grids, the
-//! trading metrics of a run, and the DSL metrics over `nav` agreeing with
-//! the kernel's own.
+//! trading metrics of a run, and the `book` library's metrics over `nav`
+//! agreeing with the kernel's own.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
 use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::time::parse_timestamp;
 use absolute_backtest::kernel::{run, ExecConfig, Kernel, Value};
 use absolute_backtest::study::{block_bootstrap_sharpe, capacity, deflated_sharpe, min_track_record_length, newey_west_t, pbo_cscv, probabilistic_sharpe, return_metrics, trading_metrics, Returns};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol * b.abs().max(1.0)
@@ -149,8 +140,7 @@ fn the_block_bootstrap_is_seeded_and_brackets_the_estimate() {
 
 #[test]
 fn trading_metrics_and_capacity_read_the_run() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/momentum_top_n.dsl")).unwrap();
-    let prog = program(&src, "momentum_top_n");
+    let prog = common::corpus_program("momentum_top_n");
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
     let r = run(&prog, &ds, ExecConfig::default()).unwrap();
     let tm = trading_metrics(&r, 252.0);
@@ -168,23 +158,21 @@ fn trading_metrics_and_capacity_read_the_run() {
     assert!(capacity(&r0, 252.0, 0.01).is_none());
 }
 
-const GUARD: &str = r#"
-strategy drawdown_guard {
-  env equities_1d
-  uses features
-  uses metrics
-  resolution @1d
-  mode target
-  param w : Scalar = 0.2
-  param limit : Scalar = 0.03
-  decide(T, target_weight(A, w)) :- universe(A, T), drawdown(T, D), D < limit.
-  decide(T, target_weight(A, 0)) :- held(A, T, _), drawdown(T, D), D >= limit.
+/// A fifth of the capital in every name while the book's drawdown is under
+/// the limit, flat once it crosses it; the twenty-row NAV volatility is an
+/// instance of the `book` library the strategy names.
+fn guard() -> String {
+    common::strategy(
+        "drawdown_guard",
+        "    w : Scalar = 0.2\n    limit : Scalar = 0.03",
+        "    rel vol20(@T, V: Scalar)\n    vol20(T, V) :- nav_vol[20](T, V).",
+        "    decide(T, hold(A, w)) :- universe(A, T), drawdown(T, D), D < limit.\n    decide(T, hold(A, 0)) :- held(A, T, _), drawdown(T, D), D >= limit.",
+    )
 }
-"#;
 
 #[test]
 fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
-    let prog = program(GUARD, "drawdown_guard");
+    let prog = common::program(&guard(), "drawdown_guard");
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 200, 3);
     let mut k = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap();
     let r = k.run().unwrap();
@@ -200,7 +188,7 @@ fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
         let nav = k.query("nav", t, &[]).unwrap();
         assert_eq!(nav[0][1], Value::Num(e));
         if i > 0 {
-            let nr = k.query("nav_ret", t, &[]).unwrap();
+            let nr = k.query("nav_return", t, &[]).unwrap();
             assert!(close(nr[0][1].as_f64().unwrap(), rets.r[i - 1], 1e-12));
             compared += 1;
         }
@@ -208,13 +196,7 @@ fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
     assert_eq!(compared, rets.len());
     // The guard acted: some bar saw the drawdown cross the limit.
     assert!(r.decisions.iter().any(|d| d.decision.amount == 0.0), "the guard never fired");
-    let v = k
-        .query(
-            "nav_vol",
-            *r.bars.last().unwrap(),
-            &[Value::Dur(Box::new(absolute_backtest::Duration { months: 0, days: 20 })), Value::Num(10.0)],
-        )
-        .unwrap();
+    let v = k.query("nav_vol[20]", *r.bars.last().unwrap(), &[]).unwrap();
     assert_eq!(v.len(), 1);
 }
 

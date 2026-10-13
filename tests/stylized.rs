@@ -6,13 +6,11 @@
 //! `ABT_BUNDLE_DIR`; without it the ranges are skipped with a note, and the
 //! strategies are only shown to trade on the synthetic catalog market.
 
-mod corpus;
+mod common;
 
-use std::fs;
 use std::path::Path;
 
 use absolute_backtest::bundle::load_bundle;
-use absolute_backtest::check::{check_program, Program};
 use absolute_backtest::data::synthetic_daily_v2;
 use absolute_backtest::kernel::{run, ExecConfig, RunResult};
 use absolute_backtest::study::{return_metrics, subperiod_sharpes, trading_metrics, ReturnMetrics};
@@ -20,20 +18,11 @@ use absolute_backtest::Lit;
 
 const CANONICAL: [&str; 4] = ["momentum_12_1", "low_volatility", "short_term_reversal", "size_proxy"];
 
-fn program(name: &str) -> Program {
-    let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
-    let mut ws = corpus::base_workspace();
-    ws.add_source(&src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
 #[test]
 fn the_canonical_strategies_trade_both_legs_on_the_synthetic_catalog_market() {
     let ds = synthetic_daily_v2(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 400, 11);
     for name in CANONICAL {
-        let prog = program(name);
+        let prog = common::corpus_program(name);
         // Compounding: the legs are re-sized to equity at each rebalance.
         let cfg = ExecConfig {
             compounding: true,
@@ -124,7 +113,7 @@ fn the_canonical_premiums_land_in_their_published_ranges_on_the_bundle() {
     let n: i64 = std::env::var("ABT_STYLIZED_N").ok().and_then(|s| s.parse().ok()).unwrap_or(50);
     let mut problems = Vec::new();
     for range in &RANGES {
-        let prog = program(range.name);
+        let prog = common::corpus_program(range.name);
         let (ds, manifest) = load_bundle(&prog, Path::new(&dir), false).unwrap_or_else(|e| panic!("{}", e));
         let cfg = ExecConfig {
             param_overrides: vec![("n".to_string(), Lit::Int(n))],

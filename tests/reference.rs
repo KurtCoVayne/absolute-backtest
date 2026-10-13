@@ -1,28 +1,21 @@
-//! The pandas reference (data-bundle doc, section 8): every daily corpus
-//! strategy, and the tiny action markets, replayed through
+//! The pandas reference (data-bundle doc, section 8): every daily corpus-v2
+//! strategy under its own execution block, a set of policy and model
+//! variants, and the tiny action markets, replayed through
 //! `reference/engine.py` from a kernel dump and compared by
 //! `reference/diff.py` (fills identical in quantity, price to floating
 //! tolerance, the book and NAV within tolerance). Skipped, with a note,
 //! where `python3` with pandas is not installed.
 
-mod corpus;
+mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{business_days, synthetic_daily, synthetic_daily_v2};
+use absolute_backtest::check::Program;
+use absolute_backtest::data::{business_days, synthetic_daily};
 use absolute_backtest::dump::write_dump;
 use absolute_backtest::kernel::{run, Dataset, ExecConfig, OnLeverage, OnOversize, Value};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
 
 fn reference_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("reference")
@@ -60,7 +53,15 @@ fn diff(tag: &str, prog: &Program, ds: &Dataset, cfg: ExecConfig) -> Result<(), 
     }
 }
 
-const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+/// The names of the synthetic market: its second name is renamed halfway
+/// and its last delisted at four fifths, so the names the strategies cite
+/// ("AAA", "BBB", "SPY") stay listed throughout.
+const SYMS: [&str; 5] = ["AAA", "XYZ", "BBB", "SPY", "DDD"];
+
+/// The synthetic daily market with the catalog, over `days` bars.
+fn market(days: usize) -> Dataset {
+    synthetic_daily(&SYMS, (2022, 1, 3), days, 11)
+}
 
 #[test]
 fn every_daily_corpus_strategy_agrees_with_the_reference() {
@@ -68,30 +69,24 @@ fn every_daily_corpus_strategy_agrees_with_the_reference() {
         eprintln!("skipped: python3 with pandas is not installed");
         return;
     }
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies");
-    let mut files: Vec<PathBuf> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    files.sort();
     let mut compared = 0;
-    for f in files {
+    for f in common::dsl_files("strategies") {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
-        let src = fs::read_to_string(&f).unwrap();
-        let prog = program(&src, &name);
-        if prog.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1)) {
+        let prog = common::corpus_program(&name);
+        if prog.base.is_sub_daily() {
             // The reference executor is written for the daily contract.
             continue;
         }
-        let ds = if prog.relations.contains_key("split") {
-            synthetic_daily_v2(&SYMS, (2022, 1, 3), 320, 11)
-        } else {
-            synthetic_daily(&SYMS, (2022, 1, 3), 320, 11)
-        };
+        let ds = market(400);
+        // The run is the program: its execution block configures the executor.
+        let cfg = ExecConfig::from_program(&prog);
         // A run the kernel's policies halt is the policy tests' business;
         // the comparison wants completed runs.
-        if let Err(absolute_backtest::kernel::RunError::Risk { message, .. }) = run(&prog, &ds, ExecConfig::default()) {
+        if let Err(absolute_backtest::kernel::RunError::Risk { message, .. }) = run(&prog, &ds, cfg.clone()) {
             eprintln!("{}: halted ({}), not compared", name, message);
             continue;
         }
-        diff(&name, &prog, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{}", e));
+        diff(&name, &prog, &ds, cfg).unwrap_or_else(|e| panic!("{}", e));
         compared += 1;
     }
     assert!(compared >= 14, "{} strategies compared", compared);
@@ -103,9 +98,8 @@ fn policy_and_model_variants_agree_with_the_reference() {
         eprintln!("skipped: python3 with pandas is not installed");
         return;
     }
-    let read = |name: &str| fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap();
-    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 400, 11);
-    let lsq = program(&read("long_short_quantile"), "long_short_quantile");
+    let ds = market(400);
+    let lsq = common::corpus_program("long_short_quantile");
     diff("reg-t", &lsq, &ds, ExecConfig::reg_t()).unwrap_or_else(|e| panic!("{}", e));
     // Both accountings: the default fixed base, and weights of equity.
     diff(
@@ -118,7 +112,7 @@ fn policy_and_model_variants_agree_with_the_reference() {
         },
     )
     .unwrap_or_else(|e| panic!("{}", e));
-    let top = program(&read("momentum_top_n"), "momentum_top_n");
+    let top = common::corpus_program("momentum_top_n");
     diff(
         "compounding-long",
         &top,
@@ -140,8 +134,8 @@ fn policy_and_model_variants_agree_with_the_reference() {
         },
     )
     .unwrap_or_else(|e| panic!("{}", e));
-    let spike = program(&read("volume_spike"), "volume_spike");
-    let long = synthetic_daily(&SYMS, (2022, 1, 3), 600, 11);
+    let spike = common::corpus_program("volume_spike");
+    let long = market(600);
     diff(
         "clamp-reject",
         &spike,
@@ -165,7 +159,7 @@ fn policy_and_model_variants_agree_with_the_reference() {
         },
     )
     .unwrap_or_else(|e| panic!("{}", e));
-    let monthly = program(&read("monthly_rebalance"), "monthly_rebalance");
+    let monthly = common::corpus_program("monthly_rebalance");
     diff(
         "fractional",
         &monthly,
@@ -176,7 +170,7 @@ fn policy_and_model_variants_agree_with_the_reference() {
         },
     )
     .unwrap_or_else(|e| panic!("{}", e));
-    let pairs = program(&read("pairs_trading"), "pairs_trading");
+    let pairs = common::corpus_program("pairs_trading");
     diff(
         "fixed-slippage-rates",
         &pairs,
@@ -197,28 +191,30 @@ fn policy_and_model_variants_agree_with_the_reference() {
 // ---- the action markets (section 8: a split, a dividend, a spin-off as a
 // dividend in kind, a delisting), each with a hand-computed NAV ----
 
-const HOLD: &str = r#"
-strategy hold {
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).
+/// A daily strategy that buys ten shares of every listed name it does not
+/// hold; it reads the actions, so the executor applies them to the book.
+fn hold_program() -> Program {
+    let src = common::StrategyParts {
+        name: "hold".into(),
+        needs: "need bars @1d   need actions, listing".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).".into(),
+        ..Default::default()
+    }
+    .render();
+    common::program(&src, "hold")
 }
-"#;
 
-fn market(closes: &[Option<f64>]) -> (Dataset, u32, Vec<i64>) {
+/// One name `X` over consecutive weekdays from 2024-01-08: a bar (open,
+/// high and low at the close, volume a million) and the listing on every
+/// day with a close, nothing on a day without one.
+fn market_x(closes: &[Option<f64>]) -> (Dataset, u32, Vec<i64>) {
     let days = business_days((2024, 1, 8), closes.len());
     let mut ds = Dataset::new();
     let x = ds.intern("X");
     for (t, p) in days.iter().zip(closes) {
         if let Some(p) = p {
-            for rel in ["open", "high", "low", "close"] {
-                ds.add(rel, vec![Value::Equity(x), Value::Time(*t), Value::Num(*p)]);
-            }
-            ds.add("volume", vec![Value::Equity(x), Value::Time(*t), Value::Num(1_000_000.0)]);
-            ds.add("universe", vec![Value::Equity(x), Value::Time(*t)]);
+            common::add_bar(&mut ds, x, *t, *p, 1_000_000.0);
         }
     }
     ds.derive_tickers();
@@ -241,28 +237,28 @@ fn the_action_markets_agree_with_the_reference_and_their_hand_computed_nav() {
         eprintln!("skipped: python3 with pandas is not installed");
         return;
     }
-    let prog = program(HOLD, "hold");
+    let prog = hold_program();
     // A 3-for-1 split on day 3: 10 shares at 30 become 30 at 10; NAV 300 throughout.
-    let (mut ds, x, days) = market(&[Some(30.0), Some(30.0), Some(10.0), Some(10.0), Some(10.0)]);
+    let (mut ds, x, days) = market_x(&[Some(30.0), Some(30.0), Some(10.0), Some(10.0), Some(10.0)]);
     ds.add("split", vec![Value::Equity(x), Value::Time(days[2]), Value::Num(3.0)]);
     let r = run(&prog, &ds, frictionless(1000.0)).unwrap();
     assert_eq!(r.final_positions.get(&x), Some(&30.0));
     assert_eq!(r.equity_curve.last().unwrap().1, 1000.0);
     diff("split", &prog, &ds, frictionless(1000.0)).unwrap_or_else(|e| panic!("{}", e));
     // A dividend of 1.5 announced day 1, ex day 3, paid day 4: 10 shares earn 15.
-    let (mut ds, x, days) = market(&[Some(20.0), Some(20.0), Some(18.5), Some(18.5), Some(18.5)]);
+    let (mut ds, x, days) = market_x(&[Some(20.0), Some(20.0), Some(18.5), Some(18.5), Some(18.5)]);
     ds.add("dividend", vec![Value::Equity(x), Value::Time(days[0]), Value::Time(days[2]), Value::Time(days[3]), Value::Num(1.5)]);
     let r = run(&prog, &ds, frictionless(1000.0)).unwrap();
     assert_eq!(r.equity_curve.last().unwrap().1, 1000.0);
     diff("dividend", &prog, &ds, frictionless(1000.0)).unwrap_or_else(|e| panic!("{}", e));
     // A spin-off valued in cash: a dividend in kind of 4 a share on the ex-date.
-    let (mut ds, x, days) = market(&[Some(20.0), Some(20.0), Some(16.0), Some(16.0), Some(16.0)]);
+    let (mut ds, x, days) = market_x(&[Some(20.0), Some(20.0), Some(16.0), Some(16.0), Some(16.0)]);
     ds.add("dividend", vec![Value::Equity(x), Value::Time(days[0]), Value::Time(days[2]), Value::Time(days[2]), Value::Num(4.0)]);
     let r = run(&prog, &ds, frictionless(1000.0)).unwrap();
     assert_eq!(r.equity_curve.last().unwrap().1, 1000.0);
     diff("spin-off", &prog, &ds, frictionless(1000.0)).unwrap_or_else(|e| panic!("{}", e));
     // A bankruptcy on day 4: the position is written off at the full haircut.
-    let (mut ds, x, days) = market(&[Some(20.0), Some(20.0), Some(5.0), None, None]);
+    let (mut ds, x, days) = market_x(&[Some(20.0), Some(20.0), Some(5.0), None, None]);
     let bankrupt = ds.labels.intern("bankruptcy");
     ds.add("delisted", vec![Value::Equity(x), Value::Time(days[3]), Value::Label(bankrupt)]);
     let r = run(&prog, &ds, frictionless(1000.0)).unwrap();

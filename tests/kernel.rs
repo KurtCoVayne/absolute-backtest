@@ -837,3 +837,30 @@ fn a_run_window_warms_up_on_earlier_bars_and_trades_inside_it() {
     assert_eq!(f.bars, r.bars);
     assert_eq!(f.final_cash.to_bits(), r.final_cash.to_bits());
 }
+
+#[test]
+fn probe_tmp() {
+    for (label, agg) in [
+        ("count no filter", "N = count(T1) over (T1 in window[lb] min 1, close(A, T1, P))"),
+        ("count P filter", "N = count(T1) over (T1 in window[lb] min 1, close(A, T1, P), P > floor_p)"),
+        ("count cost filter", "N = count(T1) over (T1 in window[lb] min 1, close(A, T1, P), P * qty > floor)"),
+        ("count P filter literal", "N = count(T1) over (T1 in window[lb] min 1, close(A, T1, P), P > 10 USD/share)"),
+        ("count P filter 20d", "N = count(T1) over (T1 in window[lb2] min 1, close(A, T1, P), P > floor_p)"),
+        ("count prior", "N = count(T1) over (T1 in prior_window[lb] min 1, close(A, T1, P), P > floor_p)"),
+    ] {
+        let src = common::strategy(
+            "n_up",
+            "    qty : Quantity<Shares> = 10 shares\n    lb : Duration = 30d\n    lb2 : Duration = 20d\n    floor : Notional<USD> = 100 USD\n    floor_p : Price<USD> = 10 USD/share\n    n : Count = 3",
+            &format!("    rel above_ten(A: Equity, @T, N: Count)\n    above_ten(A, T, N) :- universe(A, T), {}.", agg),
+            "    decide(T, trade(A, qty)) :- above_ten(A, T, N), N = n, flat(A, T).",
+        );
+        let (p, diags) = common::check(&src, "n_up");
+        let Some(prog) = p else { eprintln!("{}: {}", label, common::text(&diags)); continue };
+        let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+        let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
+        let r = k.run().unwrap();
+        let counts: Vec<Option<i64>> = r.bars.iter().map(|t| k.query("above_ten", *t, &[]).unwrap().first().and_then(|tu| if let Value::Count(c) = tu[2] { Some(c) } else { None })).collect();
+        let r2 = run(&prog, &ds, ExecConfig::frictionless()).unwrap();
+        eprintln!("{}: {:?} (plan {} decisions {}; run() plan {} decisions {})", label, counts, r.plan, r.decisions.len(), r2.plan, r2.decisions.len());
+    }
+}

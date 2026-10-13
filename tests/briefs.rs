@@ -3,7 +3,7 @@
 //! first-attempt pass rate, the diagnostics, the attempts to a valid
 //! program and the verdict of the first valid one on the synthetic market.
 
-mod corpus;
+mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,20 +18,19 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn corpus_file(name: &str) -> String {
-    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/strategies/{}.dsl", name))).unwrap()
-}
+/// The corpus-v2 workspace a command-line invocation reads: the catalog,
+/// the library and the strategies (not the negative cases).
+const CORPUS: [&str; 3] = ["corpus-v2/catalog", "corpus-v2/lib", "corpus-v2/strategies"];
 
-const UNBOUND: &str = r#"
-strategy first_try {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 100 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), Z > 0.
+/// A first attempt whose head variable `X` is bound by nothing (B).
+fn unbound() -> String {
+    common::strategy(
+        "first_try",
+        "    qty : Quantity<Shares> = 100 shares",
+        "    rel signal(A: Equity, @T, X: Scalar)\n    signal(A, T, X) :- log_price_return(A, T, R), R > 0.",
+        "    decide(T, trade(A, qty)) :- signal(A, T, X), X > 0.5, flat(A, T).",
+    )
 }
-"#;
 
 fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     let root = temp_dir(tag);
@@ -43,18 +42,18 @@ fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     fs::write(briefs.join("momentum.md"), "Top momentum names, equal weight.").unwrap();
     fs::write(briefs.join("untried.md"), "Nobody has tried this one.").unwrap();
     fs::create_dir_all(attempts.join("crossover")).unwrap();
-    fs::write(attempts.join("crossover/1.dsl"), UNBOUND).unwrap();
+    fs::write(attempts.join("crossover/1.dsl"), unbound()).unwrap();
     fs::write(attempts.join("crossover/2.dsl"), "this is not a program").unwrap();
-    fs::write(attempts.join("crossover/3.dsl"), corpus_file("sma_crossover")).unwrap();
+    fs::write(attempts.join("crossover/3.dsl"), common::corpus_source("strategies", "sma_crossover")).unwrap();
     fs::create_dir_all(attempts.join("momentum")).unwrap();
-    fs::write(attempts.join("momentum/1.dsl"), corpus_file("momentum_top_n")).unwrap();
+    fs::write(attempts.join("momentum/1.dsl"), common::corpus_source("strategies", "momentum_top_n")).unwrap();
     (root, briefs, attempts)
 }
 
 #[test]
 fn the_harness_records_attempts_diagnostics_and_verdicts() {
     let (root, briefs, attempts) = fixture("harness");
-    let ws = corpus::base_workspace();
+    let ws = common::base_workspace();
     let r = report(&ws, &briefs, &attempts).unwrap();
     assert_eq!(r.briefs.len(), 3, "the README is not a brief");
     let crossover = r.briefs.iter().find(|b| b.brief == "crossover").unwrap();
@@ -89,17 +88,8 @@ fn the_command_line_prints_and_writes_the_report() {
     let (root, briefs, attempts) = fixture("cli");
     let out = root.join("report.json");
     let o = Command::new(env!("CARGO_BIN_EXE_abt"))
-        .args([
-            "briefs",
-            "report",
-            "--briefs",
-            &briefs.to_string_lossy(),
-            "--attempts",
-            &attempts.to_string_lossy(),
-            "--out",
-            &out.to_string_lossy(),
-            "corpus/",
-        ])
+        .args(["briefs", "report", "--briefs", &briefs.to_string_lossy(), "--attempts", &attempts.to_string_lossy(), "--out", &out.to_string_lossy()])
+        .args(CORPUS)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap();
@@ -113,7 +103,7 @@ fn the_command_line_prints_and_writes_the_report() {
 
 #[test]
 fn the_repository_briefs_are_listed_without_attempts() {
-    let ws = corpus::base_workspace();
+    let ws = common::base_workspace();
     let briefs = Path::new(env!("CARGO_MANIFEST_DIR")).join("briefs");
     let r = report(&ws, &briefs, &briefs.join("attempts")).unwrap();
     assert!(r.briefs.len() >= 8, "{} briefs", r.briefs.len());

@@ -190,9 +190,6 @@ fn the_scripts_of_tiers_3_and_4_replay_from_their_files() {
         &mut compiled,
     );
     let t3 = report.tier(3).unwrap();
-    for o in &t3.obligations {
-        eprintln!("t3 {} {} {:?} {:?} {}", o.id, o.kind, o.rule, o.logic, o.statement);
-    }
     let pair = t3.obligations.iter().find(|o| o.kind == "guard disjointness").expect("a pair obligation");
     assert_eq!(pair.verdict, Verdict::Undecided);
     let text = fs::read_to_string(pair.replay_file.as_ref().expect("a replay file")).unwrap();
@@ -220,9 +217,6 @@ fn the_scripts_of_tiers_3_and_4_replay_from_their_files() {
         "an assignment alone is no guard"
     );
     let t4 = report.tier(4).unwrap();
-    for o in &t4.obligations {
-        eprintln!("t4 {} {} {:?} {}", o.id, o.kind, o.rule, o.statement);
-    }
     let inv = t4.obligations.iter().find(|o| o.id == "t4-high_since_entry-H-ge-1").expect("the lower-bound candidate");
     assert!(inv.statement.contains("`high_since_entry.H ≥ 0`"), "{}", inv.statement);
     assert_eq!(inv.verdict, Verdict::Undecided);
@@ -260,9 +254,6 @@ fn a_solver_subprocess_settles_the_obligations() {
     };
     let mut compiled = compile(&p, &opts);
     let t3c = compiled.tiers.iter().find(|t| t.tier == 3).expect("tier 3 feasibility runs in compile with a solver");
-    for o in &t3c.obligations {
-        eprintln!("t3c {} {} {:?} {:?} {:?}", o.id, o.kind, o.rule, o.verdict, o.replay_file);
-    }
     assert!(
         t3c.obligations.iter().all(|o| o.verdict == Verdict::Feasible),
         "{:?}",
@@ -280,9 +271,6 @@ fn a_solver_subprocess_settles_the_obligations() {
         &mut compiled,
     );
     let t3 = report.tier(3).unwrap();
-    for o in &t3.obligations {
-        eprintln!("t3 {} {} {:?} {:?} {:?}", o.id, o.kind, o.rule, o.verdict, o.replay_file);
-    }
     let pair = t3.obligations.iter().find(|o| o.kind == "guard disjointness").unwrap();
     assert_eq!(pair.verdict, Verdict::Proved, "{:?}", pair);
     assert!(pair.elapsed_ms <= pair.budget_ms + 500);

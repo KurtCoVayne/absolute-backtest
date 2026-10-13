@@ -1,55 +1,45 @@
 //! The acceptance test (compiler design, section 8, items 4 and 5):
-//! determinism, every corpus program run under two thread counts with
+//! determinism, every corpus-v2 strategy run under two thread counts with
 //! bit-identical outputs; and truncation, each binding cut at ten sampled
 //! bars with `decide` equal up to each. The books (items 1 and 3) run in
 //! `tests/tv.rs` when their bundles are named; the corpus and the warnings
-//! (item 2) in `tests/corpus.rs` and `tests/analysis.rs`; the usability
+//! (item 2) in `tests/corpus_v2.rs` and `tests/analysis.rs`; the usability
 //! study (item 6) is a separate experiment.
 
-mod corpus;
+mod common;
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
 
-use absolute_backtest::check::{check_program, Program};
+use absolute_backtest::check::Program;
 use absolute_backtest::compiler::{compile, CompileOptions};
-use absolute_backtest::data::{synthetic_daily, synthetic_daily_v2, synthetic_minute};
+use absolute_backtest::data::synthetic_for_program;
 use absolute_backtest::kernel::{run_planned, Dataset, ExecConfig};
 use absolute_backtest::lower::Lowered;
 use absolute_backtest::verify::tv::{digest, first_difference, run_with_ledgers, Ledgers};
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
 fn corpus_strategies() -> Vec<(String, Program)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies");
-    let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    files.sort();
-    files
+    common::dsl_files("strategies")
         .into_iter()
         .map(|f| {
             let name = f.file_stem().unwrap().to_string_lossy().to_string();
-            let src = fs::read_to_string(&f).unwrap();
-            (name.clone(), program(&src, &name))
+            let p = common::corpus_program(&name);
+            (name, p)
         })
         .collect()
 }
 
-const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+/// The names of the synthetic market: its second name is renamed halfway
+/// and its last delisted at four fifths, so the names the strategies cite
+/// ("AAA", "BBB", "SPY") stay listed throughout.
+const SYMS: [&str; 5] = ["AAA", "XYZ", "BBB", "SPY", "DDD"];
 
+/// The synthetic market of a program's class and base: 400 daily bars
+/// with the catalog, or 30 sessions of minute bars.
 fn dataset_for(p: &Program, seed: u64) -> Dataset {
-    if p.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1)) {
-        synthetic_minute(&SYMS, (2024, 1, 2), 30, 320, seed)
-    } else if p.relations.contains_key("split") {
-        synthetic_daily_v2(&SYMS, (2022, 1, 3), 320, seed)
+    if p.base.is_sub_daily() {
+        synthetic_for_program(p, &SYMS, (2024, 1, 2), 30, seed)
     } else {
-        synthetic_daily(&SYMS, (2022, 1, 3), 320, seed)
+        synthetic_for_program(p, &SYMS, (2022, 1, 3), 400, seed)
     }
 }
 
@@ -57,7 +47,7 @@ fn dataset_for(p: &Program, seed: u64) -> Dataset {
 type Outcome = Result<(Vec<String>, Ledgers), String>;
 
 fn outcome(p: &Program, lowered: &Lowered, ds: &Dataset) -> Outcome {
-    run_with_ledgers(p, lowered, ds, ExecConfig::default()).map(|r| (r.digest, r.ledgers))
+    run_with_ledgers(p, lowered, ds, ExecConfig::from_program(p)).map(|r| (r.digest, r.ledgers))
 }
 
 fn assert_same_outcome(name: &str, what: &str, a: &Outcome, b: &Outcome) {
@@ -118,7 +108,8 @@ fn decisions_are_the_same_on_every_truncated_binding() {
     for (name, p) in corpus_strategies() {
         let lowered = compile(&p, &CompileOptions::default()).lowered;
         let ds = dataset_for(&p, 11);
-        let full = match run_planned(&p, &lowered, &ds, ExecConfig::default()) {
+        let cfg = ExecConfig::from_program(&p);
+        let full = match run_planned(&p, &lowered, &ds, cfg.clone()) {
             Ok(r) => r,
             Err(e) => panic!("{}: {}", name, e),
         };
@@ -136,7 +127,7 @@ fn decisions_are_the_same_on_every_truncated_binding() {
         assert!(!samples.is_empty(), "{}", name);
         for t in samples {
             let cut = ds.truncated(&p, t);
-            let partial = match run_planned(&p, &lowered, &cut, ExecConfig::default()) {
+            let partial = match run_planned(&p, &lowered, &cut, cfg.clone()) {
                 Ok(r) => r,
                 Err(absolute_backtest::kernel::RunError::NoBars) => continue,
                 Err(e) => panic!("{} truncated at {}: {}", name, t, e),
@@ -165,8 +156,9 @@ fn the_digest_is_deterministic_across_runs() {
     let (name, p) = corpus_strategies().into_iter().find(|(n, _)| n == "momentum_top_n").unwrap();
     let lowered = compile(&p, &CompileOptions::default()).lowered;
     let ds = dataset_for(&p, 3);
-    let a = run_planned(&p, &lowered, &ds, ExecConfig::default()).unwrap();
-    let b = run_planned(&p, &lowered, &ds, ExecConfig::default()).unwrap();
+    let cfg = ExecConfig::from_program(&p);
+    let a = run_planned(&p, &lowered, &ds, cfg.clone()).unwrap();
+    let b = run_planned(&p, &lowered, &ds, cfg).unwrap();
     assert_eq!(digest(&a), digest(&b), "{}", name);
     assert!(digest(&a).iter().any(|l| l.starts_with("decision ")), "{}", name);
 }

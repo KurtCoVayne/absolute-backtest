@@ -49,6 +49,22 @@ fn with_run<T: Send>(p: &Program, ds: &Dataset, summaries: bool, f: impl for<'k>
     })
 }
 
+/// The corpus's z-score mean reversion with one relation of its own that
+/// no decision reads: the count of names in the universe at a bar. Only
+/// the library relations a decision reaches are instantiated, so this is
+/// what R5 elides in a program.
+fn zscore_with_probe() -> String {
+    common::StrategyParts {
+        name: "zscore_probe".into(),
+        uses: "calendar, stat, book".into(),
+        params: "    n : Duration = 20d\n    k : Count = 12\n    entry : Scalar = -2.0\n    exit : Scalar = 0.0\n    qty : Quantity<Shares> = 100 shares".into(),
+        rules: "    rel oversold(A: Equity, @T)\n    oversold(A, T) :- zscore_window[n, k, close](A, T, Z), Z < entry.\n    rel recovered(A: Equity, @T)\n    recovered(A, T) :- zscore_window[n, k, close](A, T, Z), Z > exit.\n    rel probe(@T, N: Count)\n    probe(T, N) :- bar(T), N = count(A) over (universe(A, T)) within (T).".into(),
+        decides: "    decide(T, trade(A, qty)) :- oversold(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- recovered(A, T), held(A, T, Q0), Q = -Q0.".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
 fn scratch(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("abt-state-{}-{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&d);
@@ -175,6 +191,21 @@ fn the_summary_table_holds_the_running_sums() {
             assert!((shift + sx / *n as f64 - v).abs() <= 1e-9 * v.abs().max(1.0), "{:?}", row);
         }
         assert!(sum.rows.iter().all(|row| matches!(&row[2], Cell::Str(s) if s == "mean")));
+        // A query after the run reaches behind the group's buffer: it is
+        // served along the same walk, so the bits equal what the run saw.
+        for row in running.iter().filter(|row| matches!(row[5], Cell::Int(n) if n >= 5)).step_by(37).take(12) {
+            let (Cell::Str(group), Cell::Time(bar), Cell::Float(v)) = (&row[3], &row[4], &row[14]) else {
+                panic!("{:?}", row)
+            };
+            let sym = group.split(',').next().unwrap().trim();
+            let a = k.parse_binding(sym).unwrap();
+            let tuples = k.query("m", *bar, &[]).unwrap();
+            let got = tuples.iter().filter(|tu| tu[0] == a).find_map(|tu| match &tu[2] {
+                Value::Num(x) => Some(*x),
+                _ => None,
+            });
+            assert_eq!(got.map(f64::to_bits), Some(v.to_bits()), "{} at {}: run {} query {:?}", sym, bar, v, got);
+        }
     });
 }
 
@@ -270,24 +301,60 @@ fn failures_and_why_not() {
     });
 }
 
+/// Why-not follows the excluding literal into the derived relation it
+/// reads, down to the root: a list the data never carries, three relations
+/// below `decide`, is the absence-driven verdict of the chain (the Oct 6
+/// study's `"SP500"` program, `docs/llm-usability.md`).
+#[test]
+fn why_not_follows_the_chain_to_the_root() {
+    let src = common::StrategyParts {
+        name: "chain".into(),
+        needs: "need bars @1d   need listing   need lists \"NOPE\"".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        rules: "    rel cand(A: Equity, @T)\n    cand(A, T) :- universe(A, T), member(A, T, \"NOPE\").\n    rel sel(A: Equity, @T)\n    sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share.".into(),
+        decides: "    decide(T, trade(A, qty)) :- sel(A, T), not position(A, T, _).".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "chain");
+    let ds = absolute_backtest::data::synthetic_daily_v2(&SYMS, (2022, 1, 3), 60, 7);
+    with_run(&p, &ds, false, |k, r| {
+        assert!(r.decisions.is_empty());
+        let t = *r.bars.last().unwrap();
+        let w = why_not(k, &p, "decide", t, None, Some(Value::Equity(0))).unwrap();
+        eprintln!("PROBE chain\n{}", w.text());
+        assert_eq!(w.depth(), 3, "{}", w.text());
+        assert!(w.absence_driven(), "{}", w.text());
+        let roots = w.roots();
+        assert_eq!(roots.len(), 1, "{}", w.text());
+        assert_eq!(roots[0].rule, "chain::cand#1");
+        assert!(roots[0].literal.as_ref().map(|(_, t)| t.contains("member(A, T, \"NOPE\")")).unwrap_or(false), "{:?}", roots[0].literal);
+        assert!(roots[0].absence_driven);
+        let text = w.text();
+        assert!(text.contains("    why not sel(") && text.contains("        why not cand("), "{}", text);
+        assert!(w.json()["rules"][0]["deeper"]["rules"][0]["deeper"]["relation"] == "cand", "{}", w.json());
+        // A chain that ends at a comparison is not absence-driven.
+        let w = why_not(k, &p, "sel", t, None, Some(Value::Equity(0))).unwrap();
+        assert_eq!(w.depth(), 2);
+        assert!(w.absence_driven(), "cand's member literal is the root: {}", w.text());
+    });
+}
+
 /// Sampled bars, materialisation of an elided relation, and the coverage,
 /// plan, book and binding tables.
 #[test]
 fn materialise_and_the_run_tables() {
-    let p = common::corpus_program("mean_reversion_zscore");
+    let p = common::program(&zscore_with_probe(), "zscore_probe");
     let ds = dataset();
     let compiled = compile(&p, &CompileOptions::default());
-    eprintln!("PROBE elided {:?}", compiled.rewritten.elided);
-    // The book's drawdown is instantiated by `uses book` and reached by no
-    // decision: elided by R5.
-    assert!(compiled.rewritten.elided.contains("drawdown"), "{:?}", compiled.rewritten.elided);
+    assert!(compiled.rewritten.elided.contains("probe"), "{:?}", compiled.rewritten.elided);
     with_run(&p, &ds, false, |k, r| {
         let bars = sampled_bars(&r.bars, 10);
         assert!(bars.len() <= 10 && bars.last() == r.bars.last(), "{:?}", bars);
         assert!(bars.windows(2).all(|w| w[0] < w[1]));
         let t = *r.bars.last().unwrap();
-        let m = tables::materialise(k, &p, "drawdown", t, None, true).unwrap();
-        assert_eq!(m.name, "materialise(drawdown)");
+        let m = tables::materialise(k, &p, "probe", t, None, true).unwrap();
+        assert_eq!(m.name, "materialise(probe)");
         assert_eq!(m.len(), 1, "{}", m.text());
         assert!(m.notes[0].contains("elided"), "{:?}", m.notes);
         let cov = tables::coverage(r);
@@ -311,11 +378,17 @@ fn the_graph_shows_the_compiler_facts() {
     let p = common::corpus_program("trailing_stop");
     let compiled = compile(&p, &CompileOptions::default());
     let g = show_graph(&p, &compiled);
-    eprintln!("PROBE graph\n{}", g);
     assert!(g.contains("keyed at runtime"), "{}", g);
-    assert!(g.contains(", demanded]") && g.contains("elided (R5): relations no demanded"), "{}", g);
-    assert!(g.contains("  bars_held(A: Entity, @T: base"), "the elided relations are listed with their signatures: {}", g);
+    assert!(g.contains(", demanded]"), "{}", g);
     assert!(g.contains("columns: A: Entity; T: Timestamp; H: Price<USD>"), "{}", g);
     assert!(g.contains("widened to ±∞ (A010): H"), "{}", g);
     assert!(g.contains(&format!("hash {}", compiled.nir.hash)), "{}", g);
+    // Only the library relations a decision reaches are instantiated: what
+    // R5 elides is a strategy's own relation nothing demands, listed with
+    // its signature.
+    let p = common::program(&zscore_with_probe(), "zscore_probe");
+    let compiled = compile(&p, &CompileOptions::default());
+    let g = show_graph(&p, &compiled);
+    assert!(g.contains("elided (R5): relations no demanded"), "{}", g);
+    assert!(g.contains("  probe(@T: base, N: Count)"), "the elided relations are listed with their signatures: {}", g);
 }

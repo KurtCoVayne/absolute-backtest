@@ -30,7 +30,10 @@ fn corpus_strategies() -> Vec<(String, Program)> {
         .collect()
 }
 
-const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+/// The names of the synthetic markets, in the order the acceptance test
+/// uses: the daily market renames its second name halfway and delists its
+/// last, so the tickers the strategies cite (`AAA`, `BBB`, `SPY`) stay.
+const SYMS: [&str; 5] = ["AAA", "XYZ", "BBB", "SPY", "DDD"];
 
 /// The synthetic market of a program's base: minute bars for a sub-daily
 /// base, else the daily market with its catalog, over the four hundred
@@ -189,32 +192,38 @@ fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfi
 /// the book.
 #[test]
 fn the_optimised_plan_equals_the_written_plan_on_the_corpus() {
-    for (name, p) in corpus_strategies() {
-        let ds = dataset_for(&p, 11);
-        let cfg = ExecConfig::from_program(&p);
+    let strategies = corpus_strategies();
+    let mut ran = 0;
+    for (name, p) in &strategies {
+        let ds = dataset_for(p, 11);
+        let cfg = ExecConfig::from_program(p);
         let numerics = Numerics::from_running_sums(cfg.running_sums);
         let compiled = compile(
-            &p,
+            p,
             &CompileOptions {
                 numerics,
                 ..CompileOptions::default()
             },
         );
-        let written = Lowered::written(&p, numerics);
-        let a = run_with_ledgers(&p, &written, &ds, cfg.clone());
-        let b = run_with_ledgers(&p, &compiled.lowered, &ds, cfg);
+        let written = Lowered::written(p, numerics);
+        let a = run_with_ledgers(p, &written, &ds, cfg.clone());
+        let b = run_with_ledgers(p, &compiled.lowered, &ds, cfg);
         match (a, b) {
             (Ok((da, la)), Ok((db, lb))) => {
-                assert_same(&name, "runs", &da, &db);
+                ran += 1;
+                assert_same(name, "runs", &da, &db);
                 assert_eq!(la.keys().collect::<Vec<_>>(), lb.keys().collect::<Vec<_>>(), "{}: ledger sets differ", name);
                 for (rel, rows) in &la {
-                    assert_same(&name, &format!("ledger of {}", rel), rows, &lb[rel]);
+                    assert_same(name, &format!("ledger of {}", rel), rows, &lb[rel]);
                 }
             }
             (Err(ea), Err(eb)) => assert_eq!(ea.split(" at tuple").next(), eb.split(" at tuple").next(), "{}: both halted, differently", name),
             (a, b) => panic!("{}: one plan halted and the other did not: written {:?}, optimised {:?}", name, a.map(|_| ()), b.map(|_| ())),
         }
     }
+    // Every strategy runs to the end on this market (the acceptance test's),
+    // so no comparison above was of two halts.
+    assert_eq!(ran, strategies.len());
 }
 
 /// The two company books under the run configurations their execution

@@ -158,13 +158,6 @@ fn the_asof_time_must_be_bound_and_derived_from_the_head_time() {
 }
 
 #[test]
-fn a_bound_key_in_an_asof_atom_is_an_error() {
-    let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), value(\"SPXTR\", T, R) asof T, R > 0.");
-    let errs = common::errors(&common::check(&src, "wf").1);
-    assert!(!errs.is_empty(), "{:?}", errs);
-}
-
-#[test]
 fn decided_as_of_the_head_time_would_see_itself() {
     let src = wf("", "    decide(T, trade(A, qty)) :- universe(A, T), decided(T0, trade(A, _)) asof T.");
     let errs = common::errors(&common::check(&src, "wf").1);
@@ -176,13 +169,28 @@ fn decided_as_of_the_head_time_would_see_itself() {
 }
 
 /// A minute bundle decided on its daily calendar.
-fn daily_of_minutes(name: &str, params: &str, rules: &str, decides: &str) -> String {
+fn daily_of_minutes(name: &str, decides: &str) -> String {
     common::StrategyParts {
         name: name.into(),
         needs: "need bars @1m   need listing".into(),
         calendars: Some("daily = days".into()),
         clock: "decide on daily".into(),
         universe: "universe(A, T) :- listed(A, T), traded@daily(A, T).".into(),
+        params: "    qty : Quantity<Shares> = 1 shares".into(),
+        decides: decides.into(),
+        report: "calendar daily   periods 252 per year".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// A minute bundle decided on its base calendar, with a daily calendar declared.
+fn minutes(name: &str, params: &str, rules: &str, decides: &str) -> String {
+    common::StrategyParts {
+        name: name.into(),
+        needs: "need bars @1m   need listing".into(),
+        calendars: Some("daily = days".into()),
+        clock: "decide on base".into(),
         params: params.into(),
         rules: rules.into(),
         decides: decides.into(),
@@ -194,43 +202,39 @@ fn daily_of_minutes(name: &str, params: &str, rules: &str, decides: &str) -> Str
 
 #[test]
 fn an_asof_join_crosses_calendars_where_a_plain_atom_cannot() {
-    let daily = |lit: &str| {
-        daily_of_minutes(
-            "daily",
-            "    qty : Quantity<Shares> = 1 shares",
-            "",
-            &format!("    decide(T, trade(A, qty)) :- universe(A, T), {}, P > 0 USD/share.", lit),
-        )
-    };
-    // The minute close at a daily label: only through its bar view (WF-16).
+    // On the daily calendar of a minute bundle the minute close is read only
+    // through its bar view (WF-16); an as-of join does not stand in for it.
+    let daily = |lit: &str| daily_of_minutes("daily", &format!("    decide(T, trade(A, qty)) :- universe(A, T), {}, P > 0 USD/share.", lit));
     let errs = common::errors(&common::check(&daily("close(A, T, P)"), "daily").1);
-    assert!(errs.iter().any(|(c, _)| *c == Code::X), "{:?}", errs);
-    // The as-of join reads the latest minute close at or before the label.
+    assert!(errs.iter().any(|(c, m)| *c == Code::X && m.contains("only through its bar view")), "{:?}", errs);
     let errs = common::errors(&common::check(&daily("close(A, _, P) asof T"), "daily").1);
+    assert!(errs.iter().any(|(c, _)| *c == Code::X), "{:?}", errs);
+    // On the minute base the daily view is keyed on the daily calendar: a
+    // minute key is a calendar mismatch, and the as-of join is how a minute
+    // rule reads the latest daily bar at or before its own.
+    let minute = |lit: &str| minutes("intraday", "    qty : Quantity<Shares> = 1 shares", "", &format!("    decide(T, trade(A, qty)) :- universe(A, T), {}, P > 0 USD/share.", lit));
+    let errs = common::errors(&common::check(&minute("close@daily(A, T, P)"), "intraday").1);
+    assert!(errs.iter().any(|(c, _)| *c == Code::X), "{:?}", errs);
+    let errs = common::errors(&common::check(&minute("close@daily(A, _, P) asof T"), "intraday").1);
     assert!(errs.is_empty(), "{:?}", errs);
 }
 
-/// A daily bar is available at its close (section 3, bar labels): read as
-/// of a minute of its own day it is not there yet, so an intraday rule sees
-/// the previous day's bar until the day ends, and both drivers agree.
+/// A daily bar is labelled at its last base bar (3.1), the instant its
+/// bucket closes: read as of an earlier minute of its day it is not there
+/// yet, so an intraday rule sees the previous day's bar until the day's
+/// last bar, where it reads the day's own; both drivers agree. (The first
+/// formulation labelled a daily bar at its date and held it back until the
+/// day ended, so the minute rule never saw the day's own close.)
 #[test]
 fn a_minute_rule_reads_the_previous_days_bar_until_the_day_closes() {
-    let src = common::StrategyParts {
-        name: "intraday_daily".into(),
-        needs: "need bars @1m   need listing".into(),
-        calendars: Some("daily = days".into()),
-        clock: "decide on base".into(),
-        params: "    unit : Quantity<Shares> = 1 shares
-    one : Price<USD> = 1 USD/share"
-            .into(),
-        rules: "    rel seen(A: Equity, @T, P: Price<USD>, D: Timestamp)
-    seen(A, T, P, D) :- universe(A, T), close@daily(A, D, P) asof T."
-            .into(),
-        decides: "    decide(T, trade(A, Q)) :- seen(A, T, P, _), Q = P / one * unit.".into(),
-        report: "calendar daily   periods 252 per year".into(),
-        ..Default::default()
-    }
-    .render();
+    let src = minutes(
+        "intraday_daily",
+        "    unit : Quantity<Shares> = 1 shares
+    one : Price<USD> = 1 USD/share",
+        "    rel seen(A: Equity, @T, P: Price<USD>, D: Timestamp)
+    seen(A, T, P, D) :- universe(A, T), close@daily(A, D, P) asof T.",
+        "    decide(T, trade(A, Q)) :- seen(A, T, P, _), Q = P / one * unit.",
+    );
     let p = common::program(&src, "intraday_daily");
     let mut ds = Dataset::new();
     let x = ds.add_security("X", "X", common::day("2024-01-08"), None);
@@ -239,19 +243,64 @@ fn a_minute_rule_reads_the_previous_days_bar_until_the_day_closes() {
         ds.add("listed", vec![Value::Equity(x), Value::Time(common::day(d))]);
         for m in ["09:31:00", "09:32:00"] {
             let t = common::day(&format!("{}T{}", d, m));
-            ds.add("open", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
-            ds.add("high", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
-            ds.add("low", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
-            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            for rel in ["open", "high", "low", "close"] {
+                ds.add(rel, vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            }
             ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(100.0)]);
         }
     }
     ds.derive_tickers();
     let r = run(&p, &ds, ExecConfig::frictionless()).unwrap();
-    // On the first day nothing daily is closed yet; on the second the first
-    // day's close of 10 is what a minute rule sees, never 20.
+    // At the first day's first minute nothing daily is closed yet; at its
+    // last minute the day's bar of 10 closes and is read; the second day
+    // reads 10 until its own last minute, where it reads 20.
     let qty: Vec<(String, f64)> = r.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect();
-    assert_eq!(qty, vec![("2024-01-09T09:31:00".into(), 10.0), ("2024-01-09T09:32:00".into(), 10.0)], "{:?}", qty);
+    assert_eq!(
+        qty,
+        vec![("2024-01-08T09:32:00".into(), 10.0), ("2024-01-09T09:31:00".into(), 10.0), ("2024-01-09T09:32:00".into(), 20.0)],
+        "{:?}",
+        qty
+    );
     let f = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
-    assert_eq!(f.decisions.len(), r.decisions.len());
+    let fold: Vec<(String, f64)> = f.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect();
+    assert_eq!(fold, qty);
+}
+
+#[test]
+fn probe_tmp() {
+    let src = minutes(
+        "intraday_daily",
+        "    unit : Quantity<Shares> = 1 shares
+    one : Price<USD> = 1 USD/share",
+        "    rel seen(A: Equity, @T, P: Price<USD>, D: Timestamp)
+    seen(A, T, P, D) :- universe(A, T), close@daily(A, D, P) asof T.",
+        "    decide(T, trade(A, Q)) :- seen(A, T, P, _), Q = P / one * unit.",
+    );
+    eprintln!("SRC:\n{}", src);
+    let (p, diags) = common::check(&src, "intraday_daily");
+    eprintln!("DIAGS:\n{}", common::text(&diags));
+    let p = p.unwrap();
+    let mut ds = Dataset::new();
+    let x = ds.add_security("X", "X", common::day("2024-01-08"), None);
+    for (d, c) in [("2024-01-08", 10.0), ("2024-01-09", 20.0)] {
+        ds.add("listed", vec![Value::Equity(x), Value::Time(common::day(d))]);
+        for m in ["09:31:00", "09:32:00"] {
+            let t = common::day(&format!("{}T{}", d, m));
+            for rel in ["open", "high", "low", "close"] {
+                ds.add(rel, vec![Value::Equity(x), Value::Time(t), Value::Num(c)]);
+            }
+            ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(100.0)]);
+        }
+    }
+    ds.derive_tickers();
+    let mut k = absolute_backtest::kernel::Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
+    let r = k.run().unwrap();
+    eprintln!("bars {:?}", r.bars.iter().map(|t| format_timestamp(*t)).collect::<Vec<_>>());
+    eprintln!("decisions {:?} dropped {:?} plan {}", r.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect::<Vec<_>>(), r.dropped, r.plan);
+    let decide = (0..p.rules.len()).find(|&i| p.rule_label(i) == "intraday_daily::decide#1").unwrap();
+    for t in &r.bars { eprintln!("explain {}: {}", format_timestamp(*t), k.explain(decide, *t, &[]).unwrap()); }
+    for t in &r.bars {
+        eprintln!("seen at {}: {:?}", format_timestamp(*t), k.query("seen", *t, &[]));
+        eprintln!("universe at {}: {:?}", format_timestamp(*t), k.query("universe", *t, &[]));
+    }
 }

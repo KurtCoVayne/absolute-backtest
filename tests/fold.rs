@@ -19,7 +19,10 @@ fn corpus_strategies() -> Vec<(String, Program)> {
         .collect()
 }
 
-const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+/// The names of the synthetic markets, in the order the acceptance test
+/// uses: the daily market renames its second name halfway and delists its
+/// last, so the tickers the strategies cite (`AAA`, `BBB`, `SPY`) stay.
+const SYMS: [&str; 5] = ["AAA", "XYZ", "BBB", "SPY", "DDD"];
 
 /// The synthetic market of a program's base: minute bars for a sub-daily
 /// base, else the daily market with its catalog. Four hundred daily bars,
