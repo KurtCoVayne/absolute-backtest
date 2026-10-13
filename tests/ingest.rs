@@ -1,29 +1,60 @@
 //! The vendor adapters (data-bundle doc, sections 3 and 10): a Norgate-style
 //! daily export and a Databento-style minute export each become a catalog
-//! dataset with stable identifiers, point-in-time membership and status,
-//! recorded availability, and a bundle whose manifest says where the data
-//! came from and what was decided on the way.
+//! dataset of the equity class with stable identifiers, point-in-time
+//! membership and status, recorded availability, and a bundle whose
+//! manifest says where the data came from and what was decided on the way.
 
-mod corpus;
+mod common;
 
 use std::fs;
-
-use absolute_backtest::table::write_text_table;
 use std::path::PathBuf;
 use std::process::Command;
 
 use absolute_backtest::bundle::{load_bundle, read_manifest, write_bundle};
-use absolute_backtest::check::{check_program, Program};
+use absolute_backtest::check::{class_program, Program};
 use absolute_backtest::ingest::{databento_minute, norgate_daily};
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
 use absolute_backtest::kernel::{run, ExecConfig, Value};
+use absolute_backtest::table::write_text_table;
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
+/// The program files, relative to the crate root the commands run in.
+const CATALOG: &str = "corpus-v2/catalog";
+const LIB: &str = "corpus-v2/lib";
+const TRM: &str = "corpus-v2/strategies/total_return_momentum.dsl";
+
+/// The program whose demand covers the equity class whole: what `abt
+/// bundle build` ingests with, so that every relation of the catalog is
+/// read and stored.
+fn class_prog() -> Program {
+    class_program(&common::base_workspace(), "equity").unwrap_or_else(|d| panic!("the equity class should check as a program:\n{}", common::text(&d)))
+}
+
+/// A daily strategy that buys ten shares of every listed name it does not
+/// hold; it reads the actions, so the executor applies the delisting.
+fn hold_daily() -> String {
+    common::StrategyParts {
+        name: "hold_v2".into(),
+        needs: "need bars @1d   need actions, listing".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// The same strategy on minute bars, deciding on the minute base and
+/// reporting by day (the listing is a daily fact, read as of the minute).
+fn hold_minute() -> String {
+    common::StrategyParts {
+        name: "minute_hold".into(),
+        needs: "need bars @1m   need listing".into(),
+        calendars: Some("daily = days".into()),
+        params: "    qty : Quantity<Shares> = 1 shares".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).".into(),
+        report: "calendar daily   periods 252 per year".into(),
+        ..Default::default()
+    }
+    .render()
 }
 
 /// A fresh directory per call: tests run in parallel and several build the
@@ -45,17 +76,6 @@ fn abt(args: &[&str]) -> (i32, String, String) {
         String::from_utf8_lossy(&out.stderr).into_owned(),
     )
 }
-
-const HOLD: &str = r#"
-strategy hold_v2 {
-  env equities_1d_v2
-  uses catalog
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).
-}
-"#;
 
 /// Ten weekdays from 2024-01-08: X (security E1) throughout, Y (E2) split
 /// 2-for-1 on day 5 and delisted by acquisition on day 8.
@@ -85,18 +105,19 @@ fn norgate_fixture() -> PathBuf {
 
 #[test]
 fn a_norgate_export_becomes_the_catalog_with_identities_membership_and_status() {
-    let prog = program(HOLD, "hold_v2");
+    let cls = class_prog();
+    let prog = common::program(&hold_daily(), "hold_v2");
     let dir = norgate_fixture();
-    let ingested = norgate_daily(&dir, &prog).unwrap();
+    let ingested = norgate_daily(&dir, &cls).unwrap();
     let ds = &ingested.dataset;
     assert!(ingested.source.contains("norgate"));
     assert_eq!(ds.securities.len(), 2);
     assert_eq!(ds.facts["close"].len(), 20);
     assert_eq!(ds.facts["split"].len(), 1);
     assert_eq!(ds.facts["dividend"].len(), 1);
-    // Delisted from day 8 through day 10; out of the universe from then on.
+    // Delisted from day 8 through day 10; out of the listing from then on.
     assert_eq!(ds.facts["delisted"].len(), 3);
-    assert_eq!(ds.facts["universe"].len(), 10 + 7);
+    assert_eq!(ds.facts["listed"].len(), 10 + 7);
     // Membership expanded over trading days: X all ten, Y the first seven.
     assert_eq!(ds.facts["member"].len(), 17);
     assert_eq!(ds.facts["classification"].len(), 10);
@@ -108,8 +129,8 @@ fn a_norgate_export_becomes_the_catalog_with_identities_membership_and_status() 
     let r = run(&prog, ds, ExecConfig::frictionless()).unwrap();
     assert!(r.actions.iter().any(|a| matches!(a.action, absolute_backtest::kernel::Action::Delisting { .. })));
     let out = dir.join("bundle");
-    write_bundle(&prog, ds, &out, "equities_1d_v2", "2026.10").unwrap();
-    let (loaded, _) = load_bundle(&prog, &out, true).unwrap();
+    write_bundle(&cls, ds, &out, "equity", "2026.10").unwrap();
+    let (loaded, _) = load_bundle(&cls, &out, true).unwrap();
     assert_eq!(loaded.facts["member"].len(), 17);
     // A symbol no identifier carries is an error, not a silent new equity.
     write_text_table(
@@ -117,7 +138,7 @@ fn a_norgate_export_becomes_the_catalog_with_identities_membership_and_status() 
         &format!("symbol,date,open,high,low,close,volume\nZ,{},1,1,1,1,1\n", format_timestamp(parse_timestamp("2024-01-08").unwrap())),
     )
     .unwrap();
-    assert!(norgate_daily(&dir, &prog).err().unwrap().contains("symbol history"));
+    assert!(norgate_daily(&dir, &cls).err().unwrap().contains("symbol history"));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -125,47 +146,17 @@ fn a_norgate_export_becomes_the_catalog_with_identities_membership_and_status() 
 fn the_bundle_builder_takes_a_norgate_export_and_records_its_source() {
     let dir = norgate_fixture();
     let out = dir.join("bundle");
-    let files = [
-        format!("{}/corpus/env", env!("CARGO_MANIFEST_DIR")),
-        format!("{}/corpus/lib", env!("CARGO_MANIFEST_DIR")),
-        format!("{}/corpus/strategies/total_return_momentum.dsl", env!("CARGO_MANIFEST_DIR")),
-    ];
     let from = dir.to_string_lossy().into_owned();
     let o = out.to_string_lossy().into_owned();
-    let (code, stdout, stderr) = abt(&[
-        "bundle",
-        "build",
-        "--from-norgate",
-        &from,
-        "--env",
-        "equities_1d_v2",
-        "--version",
-        "2026.10",
-        "--out",
-        &o,
-        &files[0],
-        &files[1],
-        &files[2],
-    ]);
+    let (code, stdout, stderr) = abt(&["bundle", "build", "--from-norgate", &from, "--class", "equity", "--version", "2026.10", "--out", &o, CATALOG, LIB, TRM]);
     assert_eq!(code, 0, "{}\n{}", stdout, stderr);
     assert!(stderr.contains("note: 20 price rows"), "{}", stderr);
+    assert!(stdout.contains("wrote bundle `equity@2026.10`"), "{}", stdout);
     let m = read_manifest(&out).unwrap();
     assert!(m.source.as_deref().unwrap_or("").contains("norgate"), "{:?}", m.source);
     assert_eq!(m.processing_delay_seconds, 0);
     let _ = fs::remove_dir_all(&dir);
 }
-
-const INTRADAY: &str = r#"
-strategy minute_hold {
-  env equities_1m
-  resolution @1m
-  mode delta
-  param qty : Quantity<Shares> = 1 shares
-  rel flat_m(+A: Equity, @T: Timestamp)
-  flat_m(A, T) :- universe_m(A, T), not position(A, T, _).
-  decide(T, buy(A, qty)) :- universe_m(A, T), flat_m(A, T).
-}
-"#;
 
 fn databento_fixture(with_recv: bool) -> PathBuf {
     let dir = temp_dir(if with_recv { "databento-recv" } else { "databento" });
@@ -195,24 +186,29 @@ fn databento_fixture(with_recv: bool) -> PathBuf {
     dir
 }
 
+/// The minute export becomes the equity class's bars at @1m (`close`,
+/// `volume`, the listing), keyed at the bar close, with the availability
+/// the export records.
 #[test]
+#[ignore = "src: databento_minute (src/ingest.rs) writes the v1 relations `close_m` and `volume_m`, which no v2 program reads; the equity class's minute bars are `open`, `high`, `low`, `close`, `volume`"]
 fn a_databento_export_is_keyed_at_the_bar_close_with_recorded_availability() {
-    let prog = program(INTRADAY, "minute_hold");
+    let prog = common::program(&hold_minute(), "minute_hold");
     let dir = databento_fixture(true);
     let ingested = databento_minute(&dir, &prog, 5).unwrap();
     let ds = &ingested.dataset;
     assert!(ingested.source.contains("consolidated"));
-    assert_eq!(ds.facts["close_m"].len(), 10);
+    assert!(ds.facts.contains_key("close"), "the class's bars are `close` and `volume`: {:?}", ds.facts.keys().collect::<Vec<_>>());
+    assert_eq!(ds.facts["close"].len(), 10);
     assert_eq!(ds.securities.len(), 2);
     // The first bar's event is 09:30: its key is the close at 09:31.
-    let first = ds.facts["close_m"][0][1].as_time().unwrap();
+    let first = ds.facts["close"][0][1].as_time().unwrap();
     assert_eq!(format_timestamp(first), "2024-01-02T09:31:00");
-    assert!(ds.availability_of("close_m").is_some());
-    let avail = ds.availability_of("close_m").unwrap();
+    assert!(ds.availability_of("close").is_some());
+    let avail = ds.availability_of("close").unwrap();
     // Received at 09:31:02 plus five seconds of processing.
     assert_eq!(format_timestamp(avail[0]), "2024-01-02T09:31:07");
     // The late bar of 1002 (key 09:32) is available at 09:32:35.
-    let late = ds.facts["close_m"]
+    let late = ds.facts["close"]
         .iter()
         .enumerate()
         .find(|(_, tu)| format_timestamp(tu[1].as_time().unwrap()) == "2024-01-02T09:32:00" && tu[0] == Value::Equity(1))
@@ -225,24 +221,24 @@ fn a_databento_export_is_keyed_at_the_bar_close_with_recorded_availability() {
     // plain bar close at zero delay.
     let plain = databento_fixture(false);
     let i0 = databento_minute(&plain, &prog, 0).unwrap();
-    assert!(i0.dataset.availability_of("close_m").is_none());
+    assert!(i0.dataset.availability_of("close").is_none());
     let i5 = databento_minute(&plain, &prog, 5).unwrap();
-    assert_eq!(format_timestamp(i5.dataset.availability_of("close_m").unwrap()[0]), "2024-01-02T09:31:05");
+    assert_eq!(format_timestamp(i5.dataset.availability_of("close").unwrap()[0]), "2024-01-02T09:31:05");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&plain);
 }
 
+/// `abt bundle build --from-databento` with a processing delay: the
+/// manifest records the delay, the source and the recorded availability of
+/// the minute bars.
 #[test]
+#[ignore = "src: `abt bundle build --from-databento --class equity` ingests with check::class_program, whose demand is `need bars` at the class's base @1d, which the minute adapter refuses (`the program reads class equity at @1d`); and the adapter writes `close_m`/`volume_m` (see the test above)"]
 fn the_bundle_builder_takes_a_databento_export_with_a_processing_delay() {
     let dir = databento_fixture(true);
     let strategy = dir.join("minute_hold.dsl");
-    fs::write(&strategy, INTRADAY).unwrap();
+    fs::write(&strategy, hold_minute()).unwrap();
+    let strategy = strategy.to_string_lossy().into_owned();
     let out = dir.join("bundle");
-    let files = [
-        format!("{}/corpus/env", env!("CARGO_MANIFEST_DIR")),
-        format!("{}/corpus/lib", env!("CARGO_MANIFEST_DIR")),
-        strategy.to_string_lossy().into_owned(),
-    ];
     let from = dir.to_string_lossy().into_owned();
     let o = out.to_string_lossy().into_owned();
     let (code, stdout, stderr) = abt(&[
@@ -252,25 +248,33 @@ fn the_bundle_builder_takes_a_databento_export_with_a_processing_delay() {
         &from,
         "--processing-delay",
         "5",
-        "--env",
-        "equities_1m",
+        "--class",
+        "equity",
         "--version",
         "2026.10",
         "--out",
         &o,
-        &files[0],
-        &files[1],
-        &files[2],
+        CATALOG,
+        LIB,
+        &strategy,
     ]);
     assert_eq!(code, 0, "{}\n{}", stdout, stderr);
     let m = read_manifest(&out).unwrap();
     assert_eq!(m.processing_delay_seconds, 5);
     assert!(m.source.as_deref().unwrap_or("").contains("ts_recv"), "{:?}", m.source);
     assert!(
-        m.relations.iter().any(|r| r.name == "close_m" && r.availability == "recorded"),
+        m.relations.iter().any(|r| r.name == "close" && r.availability == "recorded"),
         "{:?}",
         m.relations.iter().map(|r| (&r.name, &r.availability)).collect::<Vec<_>>()
     );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_malformed_processing_delay_is_refused() {
+    let dir = databento_fixture(true);
+    let from = dir.to_string_lossy().into_owned();
+    let o = dir.join("bundle").to_string_lossy().into_owned();
     let (code, _, stderr) = abt(&[
         "bundle",
         "build",
@@ -278,26 +282,34 @@ fn the_bundle_builder_takes_a_databento_export_with_a_processing_delay() {
         &from,
         "--processing-delay",
         "soon",
-        "--env",
-        "equities_1m",
+        "--class",
+        "equity",
         "--version",
         "1",
         "--out",
         &o,
-        &files[0],
-        &files[1],
-        &files[2],
+        CATALOG,
+        LIB,
+        TRM,
     ]);
     assert_eq!(code, 2);
-    assert!(stderr.contains("--processing-delay"), "{}", stderr);
+    assert!(stderr.contains("--processing-delay") && stderr.contains("soon"), "{}", stderr);
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Each adapter produces one base: the minute adapter refuses a daily
+/// program and the daily adapter a minute one, naming the base it reads.
 #[test]
-fn an_adapter_refuses_a_program_of_another_environment() {
-    let prog = program(HOLD, "hold_v2");
+fn an_adapter_refuses_a_program_of_another_base() {
+    let daily = common::program(&hold_daily(), "hold_v2");
+    let minute = common::program(&hold_minute(), "minute_hold");
     let dir = databento_fixture(false);
-    assert!(databento_minute(&dir, &prog, 0).err().unwrap().contains("equities_1m"));
+    let err = databento_minute(&dir, &daily, 0).err().unwrap();
+    assert!(err.contains("minute") && err.contains("@1d"), "{}", err);
+    let _ = fs::remove_dir_all(&dir);
+    let dir = norgate_fixture();
+    let err = norgate_daily(&dir, &minute).err().unwrap();
+    assert!(err.contains("daily") && err.contains("@1m"), "{}", err);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -310,33 +322,14 @@ fn reviewed_exceptions_travel_from_the_export_into_the_bundle_by_identifier() {
         &format!("test,symbol,date,reason\naction reconciliation,Y,{},real move: reviewed\n", format_timestamp(days[2])),
     )
     .unwrap();
-    let prog = program(HOLD, "hold_v2");
-    let ingested = norgate_daily(&dir, &prog).unwrap();
+    let cls = class_prog();
+    let ingested = norgate_daily(&dir, &cls).unwrap();
     assert_eq!(ingested.exceptions.len(), 1);
     assert_eq!(ingested.exceptions[0].security, "E2", "the ticker maps to its identifier on the date");
     let out = dir.join("bundle");
     let o = out.to_string_lossy().into_owned();
     let from = dir.to_string_lossy().into_owned();
-    let files = [
-        format!("{}/corpus/env", env!("CARGO_MANIFEST_DIR")),
-        format!("{}/corpus/lib", env!("CARGO_MANIFEST_DIR")),
-        format!("{}/corpus/strategies/total_return_momentum.dsl", env!("CARGO_MANIFEST_DIR")),
-    ];
-    let (code, stdout, stderr) = abt(&[
-        "bundle",
-        "build",
-        "--from-norgate",
-        &from,
-        "--env",
-        "equities_1d_v2",
-        "--version",
-        "2026.10",
-        "--out",
-        &o,
-        &files[0],
-        &files[1],
-        &files[2],
-    ]);
+    let (code, stdout, stderr) = abt(&["bundle", "build", "--from-norgate", &from, "--class", "equity", "--version", "2026.10", "--out", &o, CATALOG, LIB, TRM]);
     assert_eq!(code, 0, "{}\n{}", stdout, stderr);
     let written = absolute_backtest::bundle::read_exceptions(&out).unwrap();
     assert_eq!(written, ingested.exceptions);

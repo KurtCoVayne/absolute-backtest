@@ -762,17 +762,15 @@ impl<'a> Interp<'a> {
                                 Term::Lit(l, _) => Some(self.lit_val(l)),
                                 _ => None,
                             };
+                            // A delta is signed (language-v2, 4.4): only a quantity
+                            // that is always zero is a decision that trades nothing.
                             if let Some(q) = q {
-                                if q.numeric && (q.sign.may_be_negative() || q.sign.may_be_zero()) {
+                                if q.numeric && q.interval.lo == 0.0 && q.interval.hi == 0.0 {
                                     Self::warn(
                                         &mut col,
                                         "A011",
                                         *span,
-                                        format!(
-                                            "`{}` may carry a non-positive quantity: {} (a delta decision needs a positive one; the kernel halts on it)",
-                                            t,
-                                            q.interval.text()
-                                        ),
+                                        format!("`{}` always carries a zero quantity: {} (the decision trades nothing)", t, q.interval.text()),
                                         false,
                                         self.stats.is_some(),
                                     );

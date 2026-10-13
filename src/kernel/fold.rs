@@ -143,10 +143,23 @@ impl Scheduler {
     /// tuple falls into a closed bucket.
     fn advance(&mut self, k: &mut Kernel, key: i64, avail: i64, native: Resolution) -> Vec<(Cal, i64)> {
         let mut closed = Vec::new();
-        let _ = native;
+        // The base buckets are the bars: only a tuple at the base resolution
+        // opens one (a catalog tuple keyed at a date on a minute base is
+        // not a bar); any tuple's availability closes the base bucket it
+        // passes, so a decision is taken when the stream reaches its end.
+        let base_tuple = native == k.prog.base;
         let needed = self.needed.clone();
         for r in &needed {
             let front = self.label_of(r, avail);
+            if *r == Cal::Base && !base_tuple {
+                if let Some(l) = self.open.get(r).copied() {
+                    if l < front {
+                        closed.push((r.clone(), l));
+                        self.open.remove(r);
+                    }
+                }
+                continue;
+            }
             match self.open.get(r).copied() {
                 Some(l) if l == front => {}
                 Some(l) if l < front => {

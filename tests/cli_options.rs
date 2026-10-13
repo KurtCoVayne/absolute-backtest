@@ -28,8 +28,16 @@ fn malformed_option_values_are_errors_naming_the_option() {
     let cases: &[(&[&str], &str, &str)] = &[
         (&["run", "--strategy", "sma_crossover", "--synthetic", "--days", "abc", "--quiet", CATALOG, LIB, SMA], "--days", "abc"),
         (&["run", "--strategy", "sma_crossover", "--synthetic", "--seed", "x", "--quiet", CATALOG, LIB, SMA], "--seed", "x"),
-        (&["run", "--strategy", "sma_crossover", "--synthetic", "--as-of", "yesterday", "--quiet", CATALOG, LIB, SMA], "--as-of", "yesterday"),
-        (&["run", "--strategy", "sma_crossover", "--synthetic", "--start", "soon", "--quiet", CATALOG, LIB, SMA], "--start", "soon"),
+        (
+            &["run", "--strategy", "sma_crossover", "--synthetic", "--as-of", "yesterday", "--quiet", CATALOG, LIB, SMA],
+            "--as-of",
+            "yesterday",
+        ),
+        (
+            &["run", "--strategy", "sma_crossover", "--synthetic", "--start", "soon", "--quiet", CATALOG, LIB, SMA],
+            "--start",
+            "soon",
+        ),
         (&["run", "--strategy", "sma_crossover", "--synthetic", "--end", "never", "--quiet", CATALOG, LIB, SMA], "--end", "never"),
         (
             &["explain", "--strategy", "sma_crossover", "--rule", "decide#1", "--at", "yesterday", "--synthetic", CATALOG, LIB, SMA],
@@ -138,7 +146,18 @@ fn usage_documents_every_option() {
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }
-    for gone in ["--cash", "--capital", "--commission", "--slippage-bps", "--margin", "--price-relation", "--lot", "--haircut", "--report-by", "--periods-per-year"] {
+    for gone in [
+        "--cash",
+        "--capital",
+        "--commission",
+        "--slippage-bps",
+        "--margin",
+        "--price-relation",
+        "--lot",
+        "--haircut",
+        "--report-by",
+        "--periods-per-year",
+    ] {
         assert!(!stderr.contains(gone), "usage still offers {} (the execution and report blocks own it):\n{}", gone, stderr);
     }
     assert!(stderr.contains("`execution` block") && stderr.contains("`report` block"), "{}", stderr);
@@ -173,8 +192,21 @@ fn an_execution_price_without_a_price_value_is_rejected() {
 
 #[test]
 fn explain_outside_the_time_domain_says_so() {
-    let (code, stdout, stderr) =
-        abt(&["explain", "--strategy", "sma_crossover", "--rule", "decide#1", "--at", "2030-01-01", "--synthetic", "--days", "300", CATALOG, LIB, SMA]);
+    let (code, stdout, stderr) = abt(&[
+        "explain",
+        "--strategy",
+        "sma_crossover",
+        "--rule",
+        "decide#1",
+        "--at",
+        "2030-01-01",
+        "--synthetic",
+        "--days",
+        "300",
+        CATALOG,
+        LIB,
+        SMA,
+    ]);
     assert_eq!(code, 1, "stdout: {}\nstderr: {}", stdout, stderr);
     assert!(stderr.contains("2030-01-01") && stderr.contains("not a bar"), "{}", stderr);
     assert!(
@@ -185,8 +217,21 @@ fn explain_outside_the_time_domain_says_so() {
     );
     // The synthetic market's last bar (300 weekdays from 2022-01-03) is in
     // the domain and still explains.
-    let (code, stdout, _) =
-        abt(&["explain", "--strategy", "sma_crossover", "--rule", "decide#1", "--at", "2023-02-24", "--synthetic", "--days", "300", CATALOG, LIB, SMA]);
+    let (code, stdout, _) = abt(&[
+        "explain",
+        "--strategy",
+        "sma_crossover",
+        "--rule",
+        "decide#1",
+        "--at",
+        "2023-02-24",
+        "--synthetic",
+        "--days",
+        "300",
+        CATALOG,
+        LIB,
+        SMA,
+    ]);
     assert_eq!(code, 0);
     assert!(stdout.contains("decide#1") && stdout.contains("2023-02-24"), "{}", stdout);
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join(CATALOG).is_dir());

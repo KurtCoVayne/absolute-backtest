@@ -1,5 +1,5 @@
 //! Lineage (data-bundle doc, section 6): a strategy revision belongs to the
-//! lineage it declares with `revises "<hash>"`, and a strategy whose rules
+//! lineage of the program its rules most resemble, and a strategy whose rules
 //! are near enough an existing lineage's is attached to it anyway, with a
 //! warning, so that renaming is not a way to reset a trial count.
 //!
@@ -178,7 +178,7 @@ pub fn jaccard(a: &[String], b: &[String]) -> f64 {
 pub enum Attachment {
     /// The first member of its lineage.
     Root,
-    /// Declared with `revises`.
+    /// Attached to the program with that hash (an explicit revision).
     Revises(String),
     /// Attached by the checker's similarity comparison.
     Similarity { to: String, score: f64 },
@@ -250,7 +250,7 @@ impl Lineages {
         self.find_member(hash).map(|(l, _)| l)
     }
 
-    /// Open the lineage for a checked program: its own, the one it revises,
+    /// Open the lineage for a checked program: its own, or
     /// the nearest one by similarity above the threshold, or a new one.
     pub fn open(&mut self, prog: &Program, now: u64) -> Result<Opened, String> {
         let hash = program_hash(prog);

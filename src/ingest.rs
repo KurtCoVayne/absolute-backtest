@@ -252,7 +252,7 @@ fn optional(dir: &Path, stem: &str) -> Result<Option<Table>, String> {
     }
 }
 
-/// The Databento-style minute layout (the catalog target, `equities_1m`),
+/// The Databento-style minute layout (the `equity` class at a minute base),
 /// Parquet files in `dir`:
 ///
 /// - `ohlcv-1m`: `ts_event,instrument_id,open,high,low,close,volume` with

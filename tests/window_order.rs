@@ -9,7 +9,11 @@ use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::{run, ExecConfig};
 
 fn strategy(order_a: bool) -> String {
-    let conj = if order_a { "T1 in window[lb] min k, close(A, T1, P)" } else { "close(A, T1, P), T1 in window[lb] min k" };
+    let conj = if order_a {
+        "T1 in window[lb] min k, close(A, T1, P)"
+    } else {
+        "close(A, T1, P), T1 in window[lb] min k"
+    };
     common::strategy(
         "w",
         "    qty : Quantity<Shares> = 10 shares

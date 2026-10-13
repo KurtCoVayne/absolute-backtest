@@ -1,5 +1,5 @@
-//! The kernel: evaluation of a checked program over an environment instance
-//! in the closed executor loop of section 7. Evaluation is top-down with
+//! The kernel: evaluation of a checked program over the data its demand
+//! binds, in the closed executor loop of section 7. Evaluation is top-down with
 //! memoisation; every derived tuple is requested at a bound temporal key, and
 //! WF-4 and WF-8 guarantee that every such request terminates.
 

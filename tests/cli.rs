@@ -324,11 +324,7 @@ fn check_prints_degrees_of_freedom_per_strategy() {
     let out = abt(&args);
     let (stdout, _) = text(&out);
     assert_eq!(out.status.code(), Some(0), "{}", stdout);
-    assert!(
-        stdout.contains("momentum_top_n: degrees of freedom: 4 params, 0 literals, 7 rules (+ 2 library literals)"),
-        "{}",
-        stdout
-    );
+    assert!(stdout.contains("momentum_top_n: degrees of freedom: 4 params, 0 literals, 7 rules (+ 1 library literal)"), "{}", stdout);
     let files = strategy_files("relative_strength");
     let mut args = vec!["check"];
     args.extend(files.iter().map(|s| s.as_str()));

@@ -1,7 +1,8 @@
-//! Rule evaluation: a body is solved literal by literal in the order written
-//! (section 4), each literal mapping a set of partial bindings to a larger
-//! or smaller set. Derived relations are requested through `call`, which
-//! memoises by temporal key and inputs.
+//! Rule evaluation: a body is solved literal by literal in the plan's order
+//! (the written order without a plan), under Kleene's three-valued
+//! conjunction (language-v2, section 5), each literal mapping a set of
+//! partial bindings to a larger or smaller set. Derived relations are
+//! requested through `call`, which memoises by temporal key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;

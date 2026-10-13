@@ -12,11 +12,10 @@ defines it, in five parts.
 | `negative/` | 35 cases, one or more per judgment of section 10 and of the retained ones; each file's `# expect:` header names the code it must produce. |
 
 It is the acceptance corpus of the implementation ordered in section 11 of
-that document: when the checker of the second formulation lands,
-`tests/corpus_v2.rs` asserts that every strategy here checks clean (modulo
-its `# allow:` lines) and every negative case produces its code, as
-`tests/corpus.rs` does for `corpus/` today. Nothing here is read by the
-present toolchain.
+that document: `tests/corpus_v2.rs` asserts that every strategy and company
+program here checks clean (modulo its `# allow:` lines), that every
+negative case produces its code, and that every program runs on synthetic
+data of its class and decides.
 
 ## The grammar the corpus assumes
 

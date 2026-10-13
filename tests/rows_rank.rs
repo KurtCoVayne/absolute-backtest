@@ -33,8 +33,11 @@ fn rolling() -> String {
 fn market() -> (Dataset, Vec<i64>) {
     let days = business_days((2024, 1, 8), 6);
     let mut ds = Dataset::new();
-    let names: [(&str, [f64; 6]); 3] =
-        [("AAA", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]), ("BBB", [20.0, 21.0, 0.0, 0.0, 24.0, 25.0]), ("CCC", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0])];
+    let names: [(&str, [f64; 6]); 3] = [
+        ("AAA", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
+        ("BBB", [20.0, 21.0, 0.0, 0.0, 24.0, 25.0]),
+        ("CCC", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
+    ];
     for (name, closes) in names {
         let s = ds.add_security(name, name, days[0], None);
         for (t, p) in days.iter().zip(closes) {
