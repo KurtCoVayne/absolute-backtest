@@ -103,8 +103,13 @@ fn keyed(prog: &Program, nir: &Nir, name: &str, visiting: &mut HashSet<String>, 
 fn collect_atoms<'a>(body: &'a [Literal], out: &mut Vec<&'a Atom>) {
     for l in body {
         match l {
-            Literal::Atom(a) | Literal::AsOf { atom: a, .. } | Literal::Top { atom: a, .. } | Literal::Resample { inner: a, .. } => out.push(a),
+            Literal::Atom(a) | Literal::AsOf { atom: a, .. } | Literal::Top { atom: a, .. } => out.push(a),
             Literal::Agg { conj, .. } => collect_atoms(conj, out),
+            Literal::Case { branches, .. } => {
+                for b in branches {
+                    collect_atoms(&b.guard, out);
+                }
+            }
             _ => {}
         }
     }
@@ -200,7 +205,8 @@ pub fn keyedness(prog: &Program, nir: &Nir, recursive: &BTreeSet<String>) -> BTr
 /// The parametric positions of a relation: its `+` arguments that are not
 /// entity-typed (3.4).
 fn parametric_positions(sig: &Signature) -> Vec<usize> {
-    sig.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In && !a.ty.is_entity()).map(|(i, _)| i).collect()
+    let _ = sig;
+    Vec::new()
 }
 
 /// A call site: the atom and the rule it is in.
@@ -332,6 +338,7 @@ pub fn bars_per_day(res: Resolution) -> f64 {
         Resolution::M30 => 48.0,
         Resolution::H1 => 24.0,
         Resolution::D1 => 1.0,
+        Resolution::W1 => 1.0 / 5.0,
     }
 }
 
@@ -375,7 +382,7 @@ fn window_values(prog: &Program, rule: &Rule, e: &Expr, demand: &BTreeMap<String
                 return vec![];
             };
             match demand.get(&rule.head.name) {
-                Some(DemandSet::Static(ts)) => ts.iter().filter_map(|t| t.get(k)).filter_map(|s| crate::parser::parse_lit(s).ok()).collect(),
+                Some(DemandSet::Static(ts)) => ts.iter().filter_map(|t| t.get(k)).filter_map(|s| crate::syntax::parse_lit(s).ok()).collect(),
                 _ => vec![],
             }
         }
@@ -390,7 +397,10 @@ fn window_values(prog: &Program, rule: &Rule, e: &Expr, demand: &BTreeMap<String
 pub fn window_lengths(prog: &Program, stats: Option<&Statistics>, demand: &BTreeMap<String, DemandSet>) -> Vec<WindowFacts> {
     let mut out = Vec::new();
     for (ri, rule) in prog.rules.iter().enumerate() {
-        let res = prog.infos[ri].resolution;
+        let res = match &prog.infos[ri].cal {
+            Cal::Base => prog.base,
+            _ => Resolution::D1,
+        };
         for (li, lit) in rule.body.iter().enumerate() {
             let Literal::Agg { conj, .. } = lit else { continue };
             let Some(Literal::Window { kind, dur, min, .. }) = conj.iter().find(|l| matches!(l, Literal::Window { .. })) else {
@@ -417,6 +427,18 @@ pub fn window_lengths(prog: &Program, stats: Option<&Statistics>, demand: &BTree
                         .collect();
                     ("rows".to_string(), ns.iter().copied().reduce(f64::max))
                 }
+                WindowKind::PriorRows => {
+                    let ns: Vec<f64> = lengths
+                        .iter()
+                        .filter_map(|l| match l {
+                            Lit::Int(n) => Some(*n as f64),
+                            _ => None,
+                        })
+                        .collect();
+                    ("prior_rows".to_string(), ns.iter().copied().reduce(f64::max))
+                }
+                WindowKind::Bucket(c) => (format!("bucket({})", c), None),
+                WindowKind::Session => ("session".to_string(), None),
                 WindowKind::Window | WindowKind::Prior => {
                     let ds: Vec<Duration> = lengths.iter().filter_map(|l| if let Lit::Duration(d) = l { Some(*d) } else { None }).collect();
                     let name = if *kind == WindowKind::Window { "window" } else { "prior_window" };

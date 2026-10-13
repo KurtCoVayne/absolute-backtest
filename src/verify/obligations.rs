@@ -36,7 +36,7 @@ use crate::ir::{Atom, BinOp, CmpOp, Expr, Kind, Lit, Literal, Term};
 pub(super) fn magnitude(l: &Lit) -> Option<f64> {
     match l {
         Lit::Int(i) => Some(*i as f64),
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Some(*x),
+        Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => Some(*x),
         _ => None,
     }
 }
@@ -641,13 +641,13 @@ impl<'a> Smt<'a> {
             Term::Var(v, _) => Some(self.var(v, s)),
             Term::Wild(_) | Term::Ctor(..) => None,
             Term::Lit(l, _) => match l {
-                Lit::Str(x) | Lit::Equity(x) | Lit::Label(x) => Some(self.entity(x, s, entities)),
+                Lit::Str(x) | Lit::Entity(x) | Lit::Label(x) => Some(self.entity(x, s, entities)),
                 _ => q_of_lit(l).map(numeral),
             },
             Term::Param(p, _) => {
                 let unit = self.unit.clone();
                 match self.prog.param(&unit, p).map(|p| p.value.clone()) {
-                    Some(Lit::Str(x) | Lit::Equity(x) | Lit::Label(x)) => Some(self.entity(&x, s, entities)),
+                    Some(Lit::Str(x) | Lit::Entity(x) | Lit::Label(x)) => Some(self.entity(&x, s, entities)),
                     _ => self.param(p, s),
                 }
             }
@@ -1392,9 +1392,14 @@ fn literal_diffs(a: &Literal, b: &Literal, out: &mut Vec<(Expr, Lit)>) {
             expr_diffs(m1, m2, out);
         }
         (Literal::Top { n: Some(n1), .. }, Literal::Top { n: Some(n2), .. }) => expr_diffs(n1, n2, out),
-        (Literal::Resample { min: m1, aggs: g1, .. }, Literal::Resample { min: m2, aggs: g2, .. }) => {
-            expr_diffs(m1, m2, out);
-            for ((_, _, x), (_, _, y)) in g1.iter().zip(g2.iter()) {
+        (Literal::Case { branches: b1, otherwise: o1, .. }, Literal::Case { branches: b2, otherwise: o2, .. }) => {
+            for (x, y) in b1.iter().zip(b2.iter()) {
+                for (g, h) in x.guard.iter().zip(y.guard.iter()) {
+                    literal_diffs(g, h, out);
+                }
+                expr_diffs(&x.value, &y.value, out);
+            }
+            if let (Some(x), Some(y)) = (o1, o2) {
                 expr_diffs(x, y, out);
             }
         }

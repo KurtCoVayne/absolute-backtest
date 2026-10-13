@@ -358,7 +358,7 @@ pub fn parse_grid_axis(s: &str) -> Result<(String, Vec<Lit>), String> {
         if raw.is_empty() {
             continue;
         }
-        let lit = crate::parser::parse_lit(raw).map_err(|e| format!("--grid {}: `{}` is not a literal: {}", name, raw, e.message))?;
+        let lit = crate::syntax::parse_lit(raw).map_err(|e| format!("--grid {}: `{}` is not a literal: {}", name, raw, e.message))?;
         lits.push(lit);
     }
     if lits.is_empty() {
@@ -558,7 +558,7 @@ fn evaluate_all(prog: &Program, data: &Dataset, cfgs: &[ExecConfig], runner: &Ru
 }
 
 fn evaluate(prog: &Program, data: &Dataset, cfg: ExecConfig, runner: &Runner, keep: &dyn Fn(i64) -> bool) -> Result<Evaluated, String> {
-    let ppy = periods_per_year(prog.resolution);
+    let ppy = periods_per_year(prog);
     let result = runner(prog, data, cfg).map_err(|e| e.to_string())?;
     let curve = masked_curve(&result.metric_curve(), keep);
     let metrics = return_metrics(&curve, ppy);
@@ -629,7 +629,7 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
         _ => ds.clone(),
     };
     let keep = |t: i64| !embargo.contains(t);
-    let ppy = periods_per_year(prog.resolution);
+    let ppy = periods_per_year(prog);
     let log = project.log();
     let mut outcomes = Vec::new();
     let mut curves = Vec::new();
@@ -819,7 +819,7 @@ fn walk_forward(
             scheme.describe()
         ));
     }
-    let ppy = periods_per_year(prog.resolution);
+    let ppy = periods_per_year(prog);
     let mut reports = Vec::new();
     let mut stitched: Vec<(i64, f64)> = Vec::new();
     let mut level = 1.0;
@@ -983,7 +983,7 @@ pub fn best_point(outcomes: &[Outcome], objective: &str) -> usize {
 /// warned).
 pub fn log_untracked(project: &Project, prog: &Program, result: &RunResult, cfg: &ExecConfig, bundle: Option<String>) -> Result<Trial, String> {
     let opened = project.open_lineage(prog)?;
-    let ppy = periods_per_year(prog.resolution);
+    let ppy = periods_per_year(prog);
     project.log().append(Trial {
         seq: 0,
         at: now(),

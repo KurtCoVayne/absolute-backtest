@@ -30,7 +30,7 @@ use std::str::FromStr;
 use absolute_backtest::check::{check_program, check_workspace, Severity, Workspace};
 use absolute_backtest::data;
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
-use absolute_backtest::kernel::{ExecConfig, Kernel, Lot, OnOversize, OnRuin, RunError, RunResult, Value};
+use absolute_backtest::kernel::{ExecConfig, Kernel, RunError, RunResult, Value};
 use absolute_backtest::{observe, Mode, Term, Ty};
 
 struct Args {
@@ -42,29 +42,21 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 11] = [
-    "synthetic",
-    "verify-causality",
-    "quiet",
-    "all",
-    "fills",
-    "frictionless",
-    "untested",
-    "timing",
-    "explain",
-    "json",
-    "observed",
-];
+const FLAGS: [&str; 10] = ["synthetic", "verify-causality", "quiet", "all", "fills", "untested", "timing", "explain", "json", "observed"];
 /// Options that may repeat.
-const MULTI: [&str; 5] = ["bind", "param", "haircut", "grid", "require"];
-const OPTIONS: [&str; 86] = [
+const MULTI: [&str; 4] = ["bind", "param", "grid", "require"];
+/// Every option. The executor's fields are not among them: a run is
+/// configured by the program's `execution` block, and its reporting by the
+/// `report` block (language-v2, 4.3 and 4.5); what remains here is what
+/// describes the run itself (its data, its window, the bundle date), the
+/// compiler's choices that keep the result, and the commands' arguments.
+const OPTIONS: [&str; 51] = [
     "strategy",
     "table",
     "depth",
     "tables",
     "stage",
     "plan",
-    "numerics",
     "tier",
     "solver",
     "replay-dir",
@@ -73,22 +65,12 @@ const OPTIONS: [&str; 86] = [
     "symbol",
     "ledger",
     "ledger-out",
-    "window-sums",
     "threads",
-    "report-calendar",
-    "actions",
     "start",
     "end",
-    "periods-per-year",
-    "report-by",
     "returns",
     "dump",
     "nav",
-    "compounding",
-    "capital",
-    "commission-bps",
-    "delist-proceeds",
-    "dividends",
     "briefs",
     "from-norgate",
     "from-databento",
@@ -108,42 +90,18 @@ const OPTIONS: [&str; 86] = [
     "bundle",
     "from",
     "version",
-    "haircut",
     "as-of",
-    "margin",
-    "max-gross",
-    "maintenance",
-    "on-margin-call",
-    "cash-rate",
-    "margin-rate",
-    "short-rebate",
-    "participation",
-    "impact",
-    "adv-window",
-    "volume-relation",
-    "commission-min",
-    "fee-bps",
-    "slippage-vol",
-    "vol-window",
-    "on-leverage",
-    "on-oversize",
-    "on-ruin",
-    "lot",
     "inputs",
     "bind",
     "param",
     "data",
     "rule",
     "at",
-    "env",
+    "class",
     "out",
     "days",
     "symbols",
     "seed",
-    "cash",
-    "slippage-bps",
-    "commission",
-    "price-relation",
 ];
 
 fn parse_args() -> Args {
@@ -172,7 +130,10 @@ fn parse_args() -> Args {
                     opts.insert(name.to_string(), v);
                 }
             } else {
-                eprintln!("unknown option --{}", name);
+                eprintln!(
+                    "unknown option --{} (the executor's fields are set by the program's execution block, the reporting by its report block)",
+                    name
+                );
                 usage(1)
             }
         } else {
@@ -227,12 +188,12 @@ fn run_keeping(
                             notes.push(format!("rule {} takes inputs; explain it at a bar with abt query --rel {} --inputs ... --explain", label, c.relation));
                             continue;
                         }
-                        let res = prog.relations.get(&c.relation).and_then(|s| s.res).unwrap_or(prog.resolution);
+                        let cal = prog.cal_of(&c.relation);
                         let first = result.bars[0];
                         let last = *result.bars.last().unwrap();
-                        let bars: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
+                        let bars: Vec<i64> = k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect();
                         let Some(&t) = bars.get(bars.len() / 2) else {
-                            notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, res));
+                            notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, prog.cal_name(&cal)));
                             continue;
                         };
                         match k.explain(ri, t, &[]) {
@@ -258,6 +219,21 @@ fn run_keeping(
             .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
             .join()
             .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
+/// The program that covers a class whole (every relation, list and series
+/// the catalog declares), for the bundle and synthetic-market commands.
+fn class_program_or_exit(ws: &Workspace, class: &str) -> absolute_backtest::check::Program {
+    absolute_backtest::check::class_program(ws, class).unwrap_or_else(|diags| {
+        for d in &diags {
+            eprintln!("{}", d);
+        }
+        eprintln!(
+            "the catalog's class `{}` does not check as a program; pass the class file (and the standard library) among the files",
+            class
+        );
+        exit(1)
     })
 }
 
@@ -312,13 +288,13 @@ fn at_option(args: &Args) -> Option<i64> {
 /// The bar a query is about: `--at`, or the last bar of the relation's
 /// resolution inside the run.
 fn bar_for(k: &Kernel, prog: &absolute_backtest::check::Program, rel: &str, at: Option<i64>, bars: &[i64]) -> Result<i64, RunError> {
-    let res = prog.relations.get(rel).and_then(|s| s.res).unwrap_or(prog.resolution);
+    let cal = prog.cal_of(rel);
     let last = bars.last().copied().ok_or(RunError::NoBars)?;
     let t = match at {
         Some(t) => t,
-        None => k.bars_at(res).into_iter().rfind(|&b| b <= last).unwrap_or(last),
+        None => k.bars_at(&cal).into_iter().rfind(|&b| b <= last).unwrap_or(last),
     };
-    k.check_bar(res, t)?;
+    k.check_bar(&cal, t)?;
     Ok(t)
 }
 
@@ -336,7 +312,7 @@ fn inputs_for(k: &Kernel, prog: &absolute_backtest::check::Program, rel: &str, a
         let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
         return Err(RunError::Request(format!("`{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
     };
-    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect();
+    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).map(|a| (a.name.clone(), a.ty.clone())).collect();
     if need.len() != raw.len() {
         let shown: Vec<String> = need.iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
         return Err(RunError::Request(format!(
@@ -400,7 +376,7 @@ fn write_tables(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
         .filter(|(_, s)| matches!(s.kind, absolute_backtest::Kind::Derived { .. } | absolute_backtest::Kind::Output))
         .filter(|(n, _)| plan.relations.iter().find(|r| &r.name == *n).map(|r| r.demanded && !r.elided).unwrap_or(false))
         .filter(|(_, s)| {
-            let inputs: Vec<&absolute_backtest::Arg> = s.args.iter().filter(|a| a.mode == Mode::In).collect();
+            let inputs: Vec<&absolute_backtest::Arg> = s.args.iter().filter(|a| false && a.mode == Mode::Key).collect();
             inputs.is_empty() || matches!(inputs.as_slice(), [a] if a.ty.is_entity())
         })
         .map(|(n, _)| n.clone())
@@ -459,7 +435,7 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
         };
         // A relation whose only input is its entity is written for every
         // symbol; any other input must be given at a bar with `query --inputs`.
-        let inputs: Vec<&absolute_backtest::Arg> = sig.args.iter().filter(|a| a.mode == Mode::In).collect();
+        let inputs: Vec<&absolute_backtest::Arg> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).collect();
         let per_symbol = matches!(inputs.as_slice(), [a] if a.ty.is_entity());
         if !inputs.is_empty() && !per_symbol {
             let names: Vec<&str> = inputs.iter().map(|a| a.name.as_str()).collect();
@@ -474,8 +450,7 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
         } else {
             vec![]
         };
-        let res = sig.res.unwrap_or(prog.resolution);
-        let bars: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
+        let bars: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
         let width = sig.args.len();
         let mut times: Vec<Option<i64>> = Vec::new();
         let mut cols: Vec<Col> = sig
@@ -541,20 +516,7 @@ type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::ker
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--cash X | --capital X] [--compounding on|off] [--slippage-bps X] [--slippage-vol X] [--vol-window N] [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]\n          [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]\n          [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow] [--cash-rate X] [--margin-rate X] [--short-rebate X]\n          [--price-relation REL] [--as-of DATE] [--haircut REASON=X]... [--param NAME=VALUE]...\n          [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow] [--on-ruin halt|continue] [--lot whole|fractional]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--report-by bar|day] [--periods-per-year X] [--dump DIR] [--quiet] [--timing] <files...>\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--inputs V1,V2,...] [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --synthetic ...) [--price-relation REL] <files...>\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, resolution, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [--numerics running|two_pass] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--inputs V1,...] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--inputs V1,...] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--inputs V1,...] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt run ... [--tables DIR]   (write the state tables of the run as Arrow IPC under DIR: coverage, plan with observed counts, book, binding, summary, extension/<R>, carried/<R>, derivation and failure of decide at the sampled bars)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt run ... [--ledger R1,R2,... --ledger-out DIR]   (write every tuple of the named relations at every bar of the run as DIR/<relation>.parquet, and the coverage as DIR/coverage.parquet)\n  abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --env NAME --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt run --strategy NAME --bundle DIR [--untested] <files...>   (a bundle in place of --data or --synthetic)\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny] [--objective METRIC] [--require METRIC>=X]... [executor options] <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report\'s metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --price-relation REL  the primitive the executor fills at (default: the `close`-like relation at the decision resolution)\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --inputs V1,V2,...    the rule's (or, for query, the relation's) `+` arguments, in signature order\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses\n  --numerics KIND       running (default; sliding compensated sums) or two_pass (the two-pass formulas): the aggregate implementation the plan selects; --window-sums sets it too\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --on-leverage POLICY  when a fill would borrow or put gross exposure above equity: halt (default), reject, allow\n  --on-oversize POLICY  when a sell or cover would cross zero: halt (default), clamp, allow\n  --on-ruin POLICY      when equity is not positive with orders pending: halt (default), continue\n  --lot ROUNDING        order quantities: whole shares (default) or fractional\n  --commission X        commission per share (default 0.005), --commission-min X per-order minimum (default 1.00)\n  --commission-bps X    commission in basis points of traded notional on both sides (default 0), added to the per-share schedule
-  --fee-bps X           regulatory fee on sells, in basis points of notional (default 0.278)\n  --slippage-bps X      fixed slippage against the order (default 0); --slippage-vol X adds X times the fill bar's realized volatility (default 0.1)\n  --vol-window N        bars of log returns behind the realized volatility (default 20; below 10 returns only the fixed part applies)\n  --participation X     a fill is at most X of the bar's volume (default 0.1; 0 is no cap); a delta remainder expires, a target re-issues itself\n  --impact X            fill price moves against the order by X * sqrt(filled / ADV) (default 0.1; 0 is none); --adv-window N days behind ADV (default 20; bars at a daily resolution, whole days of summed volume at a finer one)\n  --volume-relation REL the primitive that supplies bar volumes (default: the `volume`-like relation at the decision resolution)\n  --margin PRESET       none (default: no borrowing, 1x gross, halt) or reg-t (2x gross, 25% maintenance, reject beyond)\n  --max-gross X         gross exposure may reach X times equity (default 1); --maintenance X margin call below X of gross (default 0.25)\n  --on-margin-call P    at a margin call: halt (default), liquidate pro rata, allow\n  --cash-rate X         annual rate on positive cash (default 0, warned); --margin-rate X on a debit (default 0.05); --short-rebate X on short notional (default 0)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)
-  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --haircut REASON=X    the haircut on the last trade of a name delisted for REASON (repeatable; defaults: bankruptcy 1, regulatory 1, acquisition 0, voluntary 0, other 1)
-  --delist-proceeds P   by-reason (default: last trade less the reason's haircut, with commission) or last-price (last trade, no haircut, no cost)
-  --dividends D         cash (default: credited at the pay date) or reinvest (fractional shares at the ex-date close, no cost)
-  --actions A           apply (default: splits and dividends adjust the book) or in-prices (the price relation is a total-return series that already carries them; delistings still apply)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --window-sums running|exact  rolling mean/sum/std/cov/corr/ols_beta over rows windows: running (default) from sliding sums, O(1) a bar, equal to rounding; exact, the two-pass formulas bit for bit (the parity runs use it)
-  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)
-  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage
-  --returns FILE        write the returns per reporting period to FILE as Parquet: t,ret,pnl
-  --report-calendar REL with --report-by day, report on the days of relation REL (zero for a day without activity, days outside it left out)
-  --report-by bar|day   the reporting period of the metrics and --returns: the decision bar (default) or the calendar day
-  --periods-per-year X  periods a year for annualising (default: by the resolution per bar, 252 per day; 52 for a weekly book)\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --capital X           the fixed base under --compounding off, the starting cash otherwise (an alias of --cash; default 1000000)
-  --compounding on|off  off (default): weights size against the fixed capital, leverage is judged against it and a bar's return is the NAV change over it; on: weights size against equity and returns compound
-  --frictionless        slippage, impact, the participation cap, the per-share commission and the fees off; a security table's per-contract commission, --commission-bps and the funding rates stay (the run is warned)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised] [--kernel batch|fold]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the workspace must hold a strategy of the class)\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report's metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
     );
     exit(code)
 }
@@ -609,7 +571,9 @@ fn collect_dsl(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn synthetic_for(prog: &absolute_backtest::check::Program, opts: &HashMap<String, String>) -> absolute_backtest::kernel::Dataset {
+    // The instruments table names the market when the program writes one.
     let symbols: Vec<String> = match opts.get("symbols") {
+        None if !prog.instruments.is_empty() => prog.instruments.iter().map(|(n, _)| n.clone()).collect(),
         None => vec!["AAA".into(), "BBB".into(), "CCC".into(), "DDD".into(), "SPY".into()],
         Some(s) => {
             let syms: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
@@ -622,20 +586,11 @@ fn synthetic_for(prog: &absolute_backtest::check::Program, opts: &HashMap<String
     };
     let syms: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
     let seed: u64 = option(opts, "seed", "a non-negative integer", 7);
-    let minute = prog
-        .relations
-        .values()
-        .any(|s| matches!(s.kind, absolute_backtest::Kind::Primitive { .. }) && s.res == Some(absolute_backtest::Resolution::M1));
-    if minute {
-        let days: usize = option(opts, "days", "a number of days", 40);
-        data::synthetic_minute(&syms, (2024, 1, 2), days, 390, seed)
-    } else if prog.relations.contains_key("split") {
-        let days: usize = option(opts, "days", "a number of days", 500);
-        data::synthetic_daily_v2(&syms, (2022, 1, 3), days, seed)
-    } else {
-        let days: usize = option(opts, "days", "a number of days", 500);
-        data::synthetic_daily(&syms, (2022, 1, 3), days, seed)
-    }
+    // The market of the program's class and base: minute futures with
+    // sessions, minute equities, or daily equities with the catalog.
+    let days: usize = option(opts, "days", "a number of days", if prog.base.is_sub_daily() { 40 } else { 500 });
+    let start = if prog.base.is_sub_daily() { (2024, 1, 2) } else { (2022, 1, 3) };
+    data::synthetic_for_program(prog, &syms, start, days, seed)
 }
 
 /// The dataset a run uses: synthetic, a bundle or a loose Parquet directory, as the options say.
@@ -668,160 +623,98 @@ fn load_dataset(args: &Args, prog: &absolute_backtest::check::Program) -> (absol
     (dataset, bundle_label)
 }
 
-/// The executor configuration the options describe (a margin preset, then every option over it).
-fn exec_config(args: &Args) -> ExecConfig {
-    let preset = args.opts.get("margin").map(|s| s.as_str()).unwrap_or("none");
-    let base = match preset {
-        "none" => ExecConfig::default(),
-        "reg-t" => ExecConfig::reg_t(),
-        other => {
-            eprintln!("--margin: `{}` is not one of none, reg-t", other);
+/// The executor configuration of a run: the program's `execution` block
+/// (every field that changes the result is in the program, language-v2
+/// 4.3), with what describes the run itself: its window, the bundle date a
+/// ticker literal resolves at, and parameter overrides.
+fn exec_config(args: &Args, prog: &absolute_backtest::check::Program) -> ExecConfig {
+    let mut cfg = ExecConfig::from_program(prog);
+    cfg.as_of = args.opts.get("as-of").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--as-of: `{}` is not a timestamp (YYYY-MM-DD)", s);
             exit(2)
-        }
-    };
-    let base = if args.flags.contains("frictionless") {
-        ExecConfig { ..ExecConfig::frictionless() }.with_margin_of(&base)
-    } else {
-        base
-    };
-    let compounding = match args.opts.get("compounding").map(|s| s.as_str()) {
-        None => base.compounding,
-        Some("on") => true,
-        Some("off") => false,
-        Some(other) => {
-            eprintln!("--compounding: `{}` is not one of on, off", other);
+        })
+    });
+    cfg.start = args.opts.get("start").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--start: `{}` is not a timestamp (YYYY-MM-DD)", s);
             exit(2)
-        }
-    };
-    if args.opts.contains_key("cash") && args.opts.contains_key("capital") {
-        eprintln!("--cash and --capital name the same amount; pass one");
-        exit(2)
-    }
-    let cash_opt = if args.opts.contains_key("capital") { "capital" } else { "cash" };
-    let cfg = ExecConfig {
-        initial_cash: option(&args.opts, cash_opt, "an amount", base.initial_cash),
-        compounding,
-        slippage_bps: option(&args.opts, "slippage-bps", "a number of basis points", base.slippage_bps),
-        slippage_vol_mult: option(&args.opts, "slippage-vol", "a multiple of realized volatility", base.slippage_vol_mult),
-        vol_window: option(&args.opts, "vol-window", "a number of bars", base.vol_window),
-        vol_min_obs: base.vol_min_obs,
-        commission_per_share: option(&args.opts, "commission", "an amount per share", base.commission_per_share),
-        commission_min_per_order: option(&args.opts, "commission-min", "an amount per order", base.commission_min_per_order),
-        commission_bps: option(&args.opts, "commission-bps", "a number of basis points", base.commission_bps),
-        fee_bps_on_sells: option(&args.opts, "fee-bps", "a number of basis points", base.fee_bps_on_sells),
-        participation_cap: option(&args.opts, "participation", "a fraction of bar volume", base.participation_cap),
-        impact_coef: option(&args.opts, "impact", "an impact coefficient", base.impact_coef),
-        adv_window: option(&args.opts, "adv-window", "a number of bars", base.adv_window),
-        participation_warn: base.participation_warn,
-        volume_relation: args.opts.get("volume-relation").cloned(),
-        max_gross: option(&args.opts, "max-gross", "a multiple of equity", base.max_gross),
-        maintenance_margin: option(&args.opts, "maintenance", "a fraction of gross exposure", base.maintenance_margin),
-        on_margin_call: option(&args.opts, "on-margin-call", "one of halt, liquidate, allow", base.on_margin_call),
-        cash_rate: option(&args.opts, "cash-rate", "an annual rate", base.cash_rate),
-        margin_rate: option(&args.opts, "margin-rate", "an annual rate", base.margin_rate),
-        short_rebate: option(&args.opts, "short-rebate", "an annual rate", base.short_rebate),
-        borrow: base.borrow.clone(),
-        delisting_haircut_default: base.delisting_haircut_default,
-        delist_at_last_price: match args.opts.get("delist-proceeds").map(|s| s.as_str()) {
-            None | Some("by-reason") => base.delist_at_last_price,
-            Some("last-price") => true,
-            Some(other) => {
-                eprintln!("--delist-proceeds: `{}` is not one of by-reason, last-price", other);
-                exit(2)
-            }
-        },
-        actions_in_prices: match args.opts.get("actions").map(|s| s.as_str()) {
-            None | Some("apply") => base.actions_in_prices,
-            Some("in-prices") => true,
-            Some(other) => {
-                eprintln!("--actions: `{}` is not one of apply, in-prices", other);
-                exit(2)
-            }
-        },
-        reinvest_dividends: match args.opts.get("dividends").map(|s| s.as_str()) {
-            None | Some("cash") => base.reinvest_dividends,
-            Some("reinvest") => true,
-            Some(other) => {
-                eprintln!("--dividends: `{}` is not one of cash, reinvest", other);
-                exit(2)
-            }
-        },
-        window_cache: base.window_cache,
-        running_sums: match args.opts.get("window-sums").map(|s| s.as_str()) {
-            None => base.running_sums,
-            Some("running") => true,
-            Some("exact") => false,
-            Some(other) => {
-                eprintln!("--window-sums: `{}` is not one of running, exact", other);
-                exit(2)
-            }
-        },
-        delisting_haircuts: {
-            let mut hs = base.delisting_haircuts.clone();
-            for h in args.multi.get("haircut").cloned().unwrap_or_default() {
-                let (reason, x) = h.split_once('=').unwrap_or_else(|| {
-                    eprintln!("--haircut takes REASON=FRACTION, not `{}`", h);
-                    exit(2)
-                });
-                let x: f64 = x.trim().parse().unwrap_or_else(|_| {
-                    eprintln!("--haircut {}: `{}` is not a fraction", reason, x);
-                    exit(2)
-                });
-                hs.retain(|(r, _)| r != reason.trim());
-                hs.push((reason.trim().to_string(), x));
-            }
-            hs
-        },
-        as_of: args.opts.get("as-of").map(|s| {
-            parse_timestamp(s).unwrap_or_else(|| {
-                eprintln!("--as-of: `{}` is not a timestamp (YYYY-MM-DD)", s);
-                exit(2)
-            })
-        }),
-        price_relation: args.opts.get("price-relation").cloned(),
-        on_leverage: option(&args.opts, "on-leverage", "one of halt, reject, allow", base.on_leverage),
-        on_oversize: option(&args.opts, "on-oversize", "one of halt, clamp, allow", OnOversize::Halt),
-        on_ruin: option(&args.opts, "on-ruin", "one of halt, continue", OnRuin::Halt),
-        lot: option(&args.opts, "lot", "one of whole, fractional", Lot::Whole),
-        start: args.opts.get("start").map(|s| {
-            parse_timestamp(s).unwrap_or_else(|| {
-                eprintln!("--start: `{}` is not a timestamp (YYYY-MM-DD)", s);
-                exit(2)
-            })
-        }),
-        end: args.opts.get("end").map(|s| {
-            parse_timestamp(s).unwrap_or_else(|| {
-                eprintln!("--end: `{}` is not a timestamp (YYYY-MM-DD)", s);
-                exit(2)
-            })
-        }),
-        param_overrides: args
-            .multi
-            .get("param")
-            .map(|ps| {
-                ps.iter()
-                    .map(|p| {
-                        let (name, raw) = p.split_once('=').unwrap_or_else(|| {
-                            eprintln!("--param takes NAME=VALUE, not `{}`", p);
+        })
+    });
+    cfg.end = args.opts.get("end").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--end: `{}` is not a timestamp (YYYY-MM-DD)", s);
+            exit(2)
+        })
+    });
+    cfg.param_overrides = args
+        .multi
+        .get("param")
+        .map(|ps| {
+            ps.iter()
+                .map(|p| {
+                    let (name, raw) = p.split_once('=').unwrap_or_else(|| {
+                        eprintln!("--param takes NAME=VALUE, not `{}`", p);
+                        exit(1)
+                    });
+                    let (name, raw) = (name.trim(), raw.trim());
+                    // A literal in the language's grammar; a bare identifier is an instrument.
+                    let lit = absolute_backtest::syntax::parse_lit(raw).unwrap_or_else(|e| {
+                        if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
+                            absolute_backtest::Lit::Str(raw.to_string())
+                        } else {
+                            eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
                             exit(1)
-                        });
-                        let (name, raw) = (name.trim(), raw.trim());
-                        // A literal in the DSL's grammar; a bare identifier is an equity.
-                        let lit = absolute_backtest::parser::parse_lit(raw).unwrap_or_else(|e| {
-                            if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
-                                absolute_backtest::Lit::Str(raw.to_string())
-                            } else {
-                                eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
-                                exit(1)
-                            }
-                        });
-                        (name.to_string(), lit)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
+                        }
+                    });
+                    (name.to_string(), lit)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     cfg
+}
+
+/// How the report block's calendar (4.5) partitions a run into periods:
+/// per decision bar when it is the decision calendar, per calendar day on
+/// `days`, and per session day on a sessions calendar (the days the root,
+/// or any root, had a session, read from the data's `session` rows).
+/// Another calendar reports per decision bar, with a note.
+fn report_periods(prog: &absolute_backtest::check::Program, dataset: &absolute_backtest::kernel::Dataset) -> (bool, Option<std::collections::BTreeSet<i64>>, Option<String>) {
+    use absolute_backtest::Cal;
+    let cal = prog.report_cal();
+    if cal == prog.decision_cal {
+        return (false, None, None);
+    }
+    match &cal {
+        Cal::Days => (true, None, None),
+        Cal::Sessions | Cal::SessionsOf(_) => {
+            let root = match &cal {
+                Cal::SessionsOf(r) => Some(r.clone()),
+                _ => None,
+            };
+            let days: std::collections::BTreeSet<i64> = dataset
+                .facts
+                .get("session")
+                .map(|tus| {
+                    tus.iter()
+                        .filter(|tu| root.as_ref().map(|r| tu[0].as_equity().map(|s| dataset.symbols.name(s) == r).unwrap_or(false)).unwrap_or(true))
+                        .filter_map(|tu| tu.get(1).and_then(|v| v.as_time()))
+                        .map(time_day)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (true, Some(days), None)
+        }
+        other => (
+            false,
+            None,
+            Some(format!(
+                "report calendar `{}` is not the decision calendar, `days` or a sessions calendar; the periods are the decision bars",
+                prog.cal_name(other)
+            )),
+        ),
+    }
 }
 
 /// What runs the program: the batch kernel, the fold, or the fold with checkpoints.
@@ -1034,7 +927,7 @@ fn main() {
             let mut plan = compiled.plan.clone();
             if observed {
                 let (ds, _) = loaded.as_ref().unwrap();
-                let cfg = exec_config(&args);
+                let cfg = exec_config(&args, &prog);
                 match absolute_backtest::kernel::run_planned(&prog, &compiled.lowered, ds, cfg) {
                     Ok(r) => plan = plan.with_observed(&r.literal_counts),
                     Err(e) => {
@@ -1097,7 +990,7 @@ fn main() {
                 None => compile_options(&args, &prog),
             };
             let mut compiled = absolute_backtest::compiler::compile(&prog, &opts);
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             let inputs = absolute_backtest::verify::VerifyInputs {
                 prog: &prog,
                 diags: &diags,
@@ -1137,7 +1030,7 @@ fn main() {
                 Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
             );
             let compiled = absolute_backtest::compiler::compile(&prog, &opts);
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             let at = at_option(&args);
             let json = args.flags.contains("json");
             let out = args.opts.get("out").map(PathBuf::from);
@@ -1208,7 +1101,7 @@ fn main() {
                 Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
             );
             let compiled = absolute_backtest::compiler::compile(&prog, &opts);
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             let at = at_option(&args);
             let json = args.flags.contains("json");
             let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
@@ -1242,7 +1135,7 @@ fn main() {
                 Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
             );
             let compiled = absolute_backtest::compiler::compile(&prog, &opts);
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             let at = at_option(&args);
             let json = args.flags.contains("json");
             let elided = compiled.rewritten.elided.contains(&rel);
@@ -1277,7 +1170,7 @@ fn main() {
                 Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
             );
             let compiled = absolute_backtest::compiler::compile(&prog, &opts);
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             let json = args.flags.contains("json");
             let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
                 k.run()?;
@@ -1321,7 +1214,7 @@ fn main() {
                 exit(1)
             };
             let (dataset, _) = load_dataset(&args, &prog);
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             let rel = args.opts.get("rel").cloned().unwrap_or_else(|| {
                 eprintln!("query needs --rel RELATION");
                 usage(1)
@@ -1348,18 +1241,18 @@ fn main() {
                         let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
                         return Err(RunError::Request(format!("`{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
                     };
-                    let res = sig.res.unwrap_or(prog.resolution);
+                    let cal = sig.cal.clone();
                     let last = *result.bars.last().unwrap();
                     let t = match at {
                         Some(t) => t,
-                        None => k.bars_at(res).into_iter().rfind(|&b| b <= last).unwrap_or(last),
+                        None => k.bars_at(&cal).into_iter().rfind(|&b| b <= last).unwrap_or(last),
                     };
-                    k.check_bar(res, t)?;
-                    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect();
+                    k.check_bar(&cal, t)?;
+                    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).map(|a| (a.name.clone(), a.ty.clone())).collect();
                     // A relation whose only input is its entity (`close(+A, @T, -P)`)
                     // is queried for the symbol when --inputs is not given.
                     let raw_inputs: Vec<String> = match (&symbol, raw_inputs.is_empty(), need.as_slice()) {
-                        (Some(s), true, [(_, Ty::Equity)]) => vec![s.clone()],
+                        (Some(s), true, [(_, Ty::Entity)]) => vec![s.clone()],
                         _ => raw_inputs,
                     };
                     if need.len() != raw_inputs.len() {
@@ -1393,7 +1286,7 @@ fn main() {
                         "{} at {} ({}): {} tuple(s){}\n",
                         rel,
                         format_timestamp(t),
-                        res,
+                        prog.cal_name(&cal),
                         shown.len(),
                         match &symbol {
                             Some(s) => format!(" for {}", s),
@@ -1454,7 +1347,7 @@ fn main() {
             let checked_at = started.elapsed().as_secs_f64();
             let (mut dataset, bundle_label) = load_dataset(&args, &prog);
             let loaded_at = started.elapsed().as_secs_f64();
-            let cfg = exec_config(&args);
+            let cfg = exec_config(&args, &prog);
             if args.cmd == "explain" {
                 let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
                 let at_text = args.opts.get("at").cloned().unwrap_or_else(|| usage(1));
@@ -1533,17 +1426,7 @@ fn main() {
             let verify = args.flags.contains("verify-causality");
             // What the report needs from the data, read before a run may take it over.
             let tuple_count: usize = dataset.facts.values().map(|tus| tus.len()).sum();
-            let calendar: Option<std::collections::BTreeSet<i64>> = args.opts.get("report-calendar").map(|rel| {
-                let Some(k) = prog.relations.get(rel).and_then(|s| s.key_pos()) else {
-                    eprintln!("--report-calendar: `{}` is not a relation of the program", rel);
-                    std::process::exit(2)
-                };
-                dataset
-                    .facts
-                    .get(rel)
-                    .map(|tus| tus.iter().filter_map(|tu| tu[k].as_time()).map(time_day).collect())
-                    .unwrap_or_default()
-            });
+            let (by_day, calendar, period_note) = report_periods(&prog, &dataset);
             // The plan (compiler design, "Lower"): the optimised one unless
             // `--plan written` asks for the written order and no rewrite.
             let opts = compile_options_with(
@@ -1667,31 +1550,18 @@ fn main() {
             for (k, v) in data::summarize(&result.metric_curve()) {
                 println!("{:>14}: {:.4}", k, v);
             }
-            let by_day = match args.opts.get("report-by").map(|s| s.as_str()) {
-                None | Some("bar") => false,
-                Some("day") => true,
-                Some(other) => {
-                    eprintln!("--report-by: `{}` is not one of bar, day", other);
-                    std::process::exit(2)
-                }
-            };
-            let default_ppy = if by_day { 252.0 } else { absolute_backtest::study::metrics::periods_per_year(prog.resolution) };
-            let ppy: f64 = option(&args.opts, "periods-per-year", "a number of periods", default_ppy);
+            let ppy: f64 = prog.report.periods_per_year;
+            if let Some(n) = &period_note {
+                println!("note: {}", n);
+            }
             let cm = absolute_backtest::study::metrics::convention_metrics_on(&result, ppy, by_day, calendar.as_ref());
             match result.base_capital {
                 Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested); end_equity and total_return above compound those period returns, total_pnl below is additive on the base", b),
                 None => println!("accounting: compounding; a period's return is the NAV change over the previous NAV"),
             }
             println!(
-                "metrics per {} ({} a year, {} periods): cagr {:.6}   max_drawdown {:.6}   sharpe {:.4} (population {:.4})   volatility {:.4}",
-                if by_day { "day" } else { "bar" },
-                ppy,
-                cm.periods,
-                cm.cagr,
-                cm.max_drawdown,
-                cm.sharpe,
-                cm.sharpe_population,
-                cm.volatility_population
+                "metrics per {} period ({} a year, {} periods): cagr {:.6}   max_drawdown {:.6}   sharpe {:.4} (population {:.4})   volatility {:.4}",
+                prog.report.calendar, ppy, cm.periods, cm.cagr, cm.max_drawdown, cm.sharpe, cm.sharpe_population, cm.volatility_population
             );
             println!(
                 "additive: annual_return {:.6}   max_drawdown {:.6}   total_pnl {:.2}   profit_factor {:.3} per period, {:.3} per trade   trades {}   win_rate {:.3}",
@@ -1889,7 +1759,7 @@ fn main() {
                             })
                         })
                         .collect();
-                    let exec = exec_config(&args);
+                    let exec = exec_config(&args, &prog);
                     let (spec, opened) = project.declare(&prog, holdout, &objective, thresholds, exec).unwrap_or_else(|e| fail(e));
                     println!("study {} declared in {}", spec.id, dir);
                     println!(
@@ -1931,7 +1801,7 @@ fn main() {
                     for g in args.multi.get("grid").cloned().unwrap_or_default() {
                         axes.push(study::parse_grid_axis(&g).unwrap_or_else(|e| fail(e)));
                     }
-                    let grid = study::Grid::new(axes, &exec_config(&args).param_overrides);
+                    let grid = study::Grid::new(axes, &exec_config(&args, &prog).param_overrides);
                     let points = grid.points.clone();
                     let scheme = args.opts.get("walk-forward").map(|s| {
                         study::WalkForward::parse(s).unwrap_or_else(|e| {
@@ -2177,24 +2047,17 @@ fn main() {
             }
         }
         "bundle" => {
-            // abt bundle build (--from DIR | --synthetic ...) --env NAME --version V --out DIR <files...>
+            // abt bundle build (--from DIR | --synthetic ...) --class CLASS --version V --out DIR <files...>
             // abt bundle test DIR <files...>
             let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
             let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
             match sub.as_str() {
                 "build" => {
                     let ws = workspace(&rest);
-                    let env = args.opts.get("env").cloned().unwrap_or_else(|| usage(1));
+                    let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
                     let version = args.opts.get("version").cloned().unwrap_or_else(|| usage(1));
                     let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
-                    let prog = ws
-                        .strategies()
-                        .filter(|s| s.env.as_ref().map(|e| e.0 == env).unwrap_or(false))
-                        .find_map(|s| check_program(&ws, &s.name).0)
-                        .unwrap_or_else(|| {
-                            eprintln!("bundle build needs a strategy in the workspace that uses environment `{}` and checks clean", env);
-                            exit(1)
-                        });
+                    let prog = class_program_or_exit(&ws, &env);
                     let mut source: Option<String> = None;
                     let mut exceptions = Vec::new();
                     let processing_delay: i64 = option(&args.opts, "processing-delay", "a number of seconds", 0);
@@ -2266,14 +2129,7 @@ fn main() {
                         eprintln!("{}", e);
                         exit(2)
                     });
-                    let prog = ws
-                        .strategies()
-                        .filter(|s| s.env.as_ref().map(|e| e.0 == m.name).unwrap_or(false))
-                        .find_map(|s| check_program(&ws, &s.name).0)
-                        .unwrap_or_else(|| {
-                            eprintln!("bundle test needs a strategy in the workspace that uses environment `{}` and checks clean", m.name);
-                            exit(1)
-                        });
+                    let prog = class_program_or_exit(&ws, &m.name);
                     let (m, results) = absolute_backtest::bundle::test_bundle(&prog, &dir).unwrap_or_else(|e| {
                         eprintln!("{}", e);
                         exit(2)
@@ -2299,18 +2155,10 @@ fn main() {
         }
         "synth" => {
             let ws = workspace(&args.files);
-            let env = args.opts.get("env").cloned().unwrap_or_else(|| usage(1));
+            let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
             let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
-            // The writer needs a checked program over the environment: use the
-            // first strategy on it that checks clean.
-            let prog = ws
-                .strategies()
-                .filter(|s| s.env.as_ref().map(|e| e.0 == env).unwrap_or(false))
-                .find_map(|s| check_program(&ws, &s.name).0)
-                .unwrap_or_else(|| {
-                    eprintln!("synth needs a strategy in the workspace that uses environment `{}` and checks clean", env);
-                    exit(1)
-                });
+            // The writer needs a program whose demand covers the class whole.
+            let prog = class_program_or_exit(&ws, &env);
             let ds = synthetic_for(&prog, &args.opts);
             data::write_parquet_dir(&prog, &ds, Path::new(&out)).unwrap_or_else(|e| {
                 eprintln!("{}", e);
@@ -2377,13 +2225,8 @@ fn compile_options(args: &Args, prog: &absolute_backtest::check::Program) -> abs
 /// planner and the bundle-relative verdicts).
 fn compile_options_with(args: &Args, prog: &absolute_backtest::check::Program, loaded: Option<(&absolute_backtest::kernel::Dataset, &str)>) -> absolute_backtest::compiler::CompileOptions {
     use absolute_backtest::compiler::CompileOptions;
-    let numerics = match args.opts.get("numerics") {
-        Some(n) => n.parse().unwrap_or_else(|e: String| {
-            eprintln!("--numerics: {}", e);
-            exit(2)
-        }),
-        None => absolute_backtest::lower::Numerics::from_running_sums(exec_config(args).running_sums),
-    };
+    // The execution block's `numerics` field selects the aggregate implementation.
+    let numerics = absolute_backtest::lower::Numerics::from_running_sums(exec_config(args, prog).running_sums);
     let optimise = match args.opts.get("plan").map(|s| s.as_str()) {
         None | Some("optimised") | Some("optimized") => true,
         Some("written") => false,
@@ -2394,10 +2237,10 @@ fn compile_options_with(args: &Args, prog: &absolute_backtest::check::Program, l
     };
     let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
     let stats = match loaded {
-        Some((ds, label)) => Some(absolute_backtest::plan::cost::Statistics::from_dataset(prog, ds, label).with_start(prog, ds, exec_config(args).start)),
+        Some((ds, label)) => Some(absolute_backtest::plan::cost::Statistics::from_dataset(prog, ds, label).with_start(prog, ds, exec_config(args, prog).start)),
         None if has_data => {
             let (ds, label) = load_dataset(args, prog);
-            let cfg = exec_config(args);
+            let cfg = exec_config(args, prog);
             Some(
                 absolute_backtest::plan::cost::Statistics::from_dataset(prog, &ds, &label.unwrap_or_else(|| if args.flags.contains("synthetic") { "synthetic".into() } else { "data".into() }))
                     .with_start(prog, &ds, cfg.start),

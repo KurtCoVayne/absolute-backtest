@@ -1,5 +1,10 @@
-//! The typed intermediate representation: domains, dimensional types,
-//! relation signatures, rules and the seven literal forms (spec sections 2 to 4).
+//! The core intermediate representation of a linked program: domains,
+//! dimensional types, calendars, relation signatures, rules and the literal
+//! forms of `docs/language-v2.md` (sections 3 to 5). The front end
+//! (`syntax`) parses the blocks of a program into an AST; the elaborator
+//! (`check`) links the libraries, instantiates their templates and produces
+//! a program over these types, which the kernel, the compiler stages and the
+//! query facility read.
 
 use std::fmt;
 
@@ -16,7 +21,9 @@ impl fmt::Display for Span {
     }
 }
 
-/// The fixed, totally ordered set of bar resolutions (section 3).
+/// A base resolution (section 3.1): the finest bar length a bundle holds for
+/// a class, or the native resolution of a series. Resolutions are totally
+/// ordered from the finest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Resolution {
     M1,
@@ -25,6 +32,7 @@ pub enum Resolution {
     M30,
     H1,
     D1,
+    W1,
 }
 
 impl Resolution {
@@ -36,15 +44,16 @@ impl Resolution {
             "30m" => Resolution::M30,
             "1h" => Resolution::H1,
             "1d" => Resolution::D1,
+            "1w" => Resolution::W1,
             _ => return None,
         })
     }
-    /// `self` is strictly finer than `other` (every `other` bar is a union of whole `self` bars).
+    /// `self` is strictly finer than `other`.
     pub fn finer_than(self, other: Resolution) -> bool {
         self < other
     }
-    /// Length of one bar in seconds; `None` for the daily resolution, whose
-    /// bucket is the civil date rather than a fixed number of seconds.
+    /// Length of one bar in seconds; `None` for the daily and weekly
+    /// resolutions, whose buckets are civil periods.
     pub fn seconds(self) -> Option<i64> {
         Some(match self {
             Resolution::M1 => 60,
@@ -52,8 +61,19 @@ impl Resolution {
             Resolution::M15 => 900,
             Resolution::M30 => 1800,
             Resolution::H1 => 3600,
-            Resolution::D1 => return None,
+            Resolution::D1 | Resolution::W1 => return None,
         })
+    }
+    pub fn is_sub_daily(self) -> bool {
+        self.seconds().is_some()
+    }
+    /// The calendar a resolution corresponds to over a finer base.
+    pub fn as_calendar(self) -> Cal {
+        match self {
+            Resolution::D1 => Cal::Days,
+            Resolution::W1 => Cal::Weeks(1),
+            _ => Cal::Base,
+        }
     }
 }
 
@@ -66,13 +86,83 @@ impl fmt::Display for Resolution {
             Resolution::M30 => "@30m",
             Resolution::H1 => "@1h",
             Resolution::D1 => "@1d",
+            Resolution::W1 => "@1w",
         };
         f.write_str(s)
     }
 }
 
-/// A dimension vector over currency, shares and time. Exponents are stored
-/// doubled so that half-integer exponents (from `sqrt`) are exact integers.
+/// A calendar over the class's base domain (Definition 3.2): the base
+/// singletons, civil periods, or the instrument's sessions.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum Cal {
+    Base,
+    Days,
+    Weeks(u32),
+    Months(u32),
+    Years(u32),
+    /// Each instrument's own sessions (a class property).
+    Sessions,
+    /// The sessions of one root, a calendar every rule may share.
+    SessionsOf(String),
+}
+
+impl Cal {
+    /// A civil-period calendar's rank in the refinement chain base < days <
+    /// weeks < months < years; sessions are comparable with base only.
+    fn rank(&self) -> Option<u32> {
+        Some(match self {
+            Cal::Base => 0,
+            Cal::Days => 1,
+            Cal::Weeks(_) => 2,
+            Cal::Months(_) => 3,
+            Cal::Years(_) => 4,
+            Cal::Sessions | Cal::SessionsOf(_) => return None,
+        })
+    }
+    /// `self` ≼ `other`: every class of `other` is a union of classes of
+    /// `self` (Proposition 3.3). Two civil calendars of one period kind are
+    /// comparable when one's count divides the other's.
+    pub fn refines(&self, other: &Cal) -> bool {
+        if self == other || *self == Cal::Base {
+            return true;
+        }
+        match (self, other) {
+            (Cal::Weeks(a), Cal::Weeks(b)) | (Cal::Months(a), Cal::Months(b)) | (Cal::Years(a), Cal::Years(b)) => b % a == 0,
+            (Cal::Months(a), Cal::Years(b)) => (12 * b) % a == 0,
+            (Cal::Sessions | Cal::SessionsOf(_), _) | (_, Cal::Sessions | Cal::SessionsOf(_)) => false,
+            (a, b) => match (a.rank(), b.rank()) {
+                (Some(x), Some(y)) => x < y && !matches!((a, b), (Cal::Weeks(_), Cal::Months(_)) | (Cal::Weeks(_), Cal::Years(_))),
+                _ => false,
+            },
+        }
+    }
+    pub fn is_sessions(&self) -> bool {
+        matches!(self, Cal::Sessions | Cal::SessionsOf(_))
+    }
+    /// Per-instrument: its domain depends on the entity.
+    pub fn per_entity(&self) -> bool {
+        matches!(self, Cal::Sessions)
+    }
+}
+
+impl fmt::Display for Cal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Cal::Base => write!(f, "base"),
+            Cal::Days => write!(f, "days"),
+            Cal::Weeks(n) => write!(f, "weeks({})", n),
+            Cal::Months(n) => write!(f, "months({})", n),
+            Cal::Years(n) => write!(f, "years({})", n),
+            Cal::Sessions => write!(f, "sessions"),
+            Cal::SessionsOf(r) => write!(f, "sessions of \"{}\"", r),
+        }
+    }
+}
+
+/// A dimension vector over currency, the class's unit and time. Exponents
+/// are stored doubled so that half-integer exponents (from `sqrt`) are
+/// exact integers.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Dim {
     pub c2: i32,
@@ -102,11 +192,21 @@ impl Dim {
             currency: Some(code.to_string()),
         }
     }
+    /// The class's unit: a share, a contract.
     pub const fn shares() -> Dim {
         Dim { c2: 0, s2: 2, t2: 0, currency: None }
     }
     pub fn is_scalar(&self) -> bool {
         self.c2 == 0 && self.s2 == 0 && self.t2 == 0
+    }
+    pub fn is_price(&self) -> bool {
+        self.c2 == 2 && self.s2 == -2 && self.t2 == 0
+    }
+    pub fn is_notional(&self) -> bool {
+        self.c2 == 2 && self.s2 == 0 && self.t2 == 0
+    }
+    pub fn is_quantity(&self) -> bool {
+        self.c2 == 0 && self.s2 == 2 && self.t2 == 0
     }
     fn normalise(mut self) -> Dim {
         if self.c2 == 0 {
@@ -171,7 +271,7 @@ impl fmt::Display for Dim {
         match (self.c2, self.s2, self.t2) {
             (0, 0, 0) => write!(f, "Scalar"),
             (2, -2, 0) => write!(f, "Price<{}>", cur),
-            (0, 2, 0) => write!(f, "Quantity<Shares>"),
+            (0, 2, 0) => write!(f, "Quantity<Unit>"),
             (2, 0, 0) => write!(f, "Notional<{}>", cur),
             (0, 0, 2) => write!(f, "Duration"),
             _ => {
@@ -184,7 +284,7 @@ impl fmt::Display for Dim {
                 };
                 write!(
                     f,
-                    "Dim(C^{} S^{} Θ^{}{})",
+                    "Dim(C^{} U^{} Θ^{}{})",
                     h(self.c2),
                     h(self.s2),
                     h(self.t2),
@@ -195,25 +295,30 @@ impl fmt::Display for Dim {
     }
 }
 
-/// A value type (section 2). `Quantity` carries a dimension vector; `IntLit`
-/// is the checker's type for a bare integer literal, which coerces to `Count`
-/// or `Scalar` from context and never survives into a signature.
+/// A value type (section 2 of the semantic model, with the second
+/// formulation's entity sort). `IntLit` is the checker's type for a bare
+/// integer literal, which coerces to `Count` or `Scalar` from context and
+/// never survives into a signature.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty {
-    Equity,
+    /// The class's entity sort (`Equity`, `Future`, or `Entity` in a library).
+    Entity,
     Timestamp,
     Duration,
     Count,
     Quantity(Dim),
     Decision,
     IntLit,
-    /// A name from a closed vocabulary the bundle defines (a delisting
-    /// reason, an index, a classification code; data-bundle doc, section
-    /// 3): interned, compared with `=` only, never an identity column.
+    /// A name from a closed vocabulary the bundle defines (a list, a
+    /// delisting reason, a classification code, a series name): interned,
+    /// compared with `=` only.
     Label,
-    /// A string literal before the checker resolves it: an `Equity` or a
-    /// `Label` from context, the way a bare integer is a Count or a Scalar.
+    /// A string literal before the checker resolves it: an entity or a
+    /// label from context.
     StrLit,
+    /// A dimension variable of a library signature (`D`), resolved at
+    /// instantiation.
+    DimVar(String),
 }
 
 impl Ty {
@@ -221,12 +326,13 @@ impl Ty {
         Ty::Quantity(Dim::scalar())
     }
     pub fn is_entity(&self) -> bool {
-        matches!(self, Ty::Equity)
+        matches!(self, Ty::Entity)
     }
-    /// Parse a surface type name such as `Price<USD>`.
+    /// Parse a surface type name such as `Price<USD>`; `entity` names the
+    /// class's entity sort.
     pub fn parse(name: &str, arg: Option<&str>) -> Option<Ty> {
         Some(match (name, arg) {
-            ("Equity", None) => Ty::Equity,
+            ("Equity" | "Future" | "Entity", None) => Ty::Entity,
             ("Timestamp", None) => Ty::Timestamp,
             ("Duration", None) => Ty::Duration,
             ("Count", None) => Ty::Count,
@@ -235,7 +341,7 @@ impl Ty {
             ("Label", None) => Ty::Label,
             ("Price", Some(code)) => Ty::Quantity(Dim::price(code)),
             ("Notional", Some(code)) => Ty::Quantity(Dim::notional(code)),
-            ("Quantity", Some("Shares")) => Ty::Quantity(Dim::shares()),
+            ("Quantity", Some(_)) => Ty::Quantity(Dim::shares()),
             _ => return None,
         })
     }
@@ -244,7 +350,7 @@ impl Ty {
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Ty::Equity => write!(f, "Equity"),
+            Ty::Entity => write!(f, "Entity"),
             Ty::Timestamp => write!(f, "Timestamp"),
             Ty::Duration => write!(f, "Duration"),
             Ty::Count => write!(f, "Count"),
@@ -253,15 +359,15 @@ impl fmt::Display for Ty {
             Ty::IntLit => write!(f, "integer literal"),
             Ty::Label => write!(f, "Label"),
             Ty::StrLit => write!(f, "string literal"),
+            Ty::DimVar(d) => write!(f, "{}", d),
         }
     }
 }
 
-/// Argument mode (section 3). The temporal key behaves as an output for
-/// binding purposes and is the argument causality is judged on.
+/// The role of an argument in a signature (Definition 4.1): the temporal
+/// key, or an identity or value argument. There are no binding modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    In,
     Out,
     Key,
 }
@@ -276,13 +382,15 @@ pub struct Arg {
 /// Who defines a relation (section 3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// Supplied by the named environment.
-    Primitive { env: String },
-    /// `position`, `cash`, `fill`: supplied by the executor at the decision resolution.
+    /// Supplied by the bundle for the program's class.
+    Primitive { class: String },
+    /// `position`, `cash`, `nav`, `capital`, `mark`, `fill`: supplied by the
+    /// executor at the decision calendar.
     Executor,
-    /// `decided`: supplied by the kernel from the strategy's own output.
+    /// `decided` and `clock`: supplied by the kernel.
     KernelState,
-    /// Defined by rules in the named unit.
+    /// Defined by rules in the named unit (a strategy, a library instance, a
+    /// bar view or the universe block).
     Derived { unit: String },
     /// `decide`.
     Output,
@@ -292,12 +400,17 @@ pub enum Kind {
 pub struct Signature {
     pub name: String,
     pub args: Vec<Arg>,
-    /// Native resolution; `None` in a declaration means "the unit's resolution".
-    pub res: Option<Resolution>,
-    /// Declared complete (meaningful on primitives only).
+    /// The calendar the relation is keyed on.
+    pub cal: Cal,
+    /// Declared complete (primitives: a reviewed store or a catalog
+    /// relation; derived: closed by construction, the universe).
     pub complete: bool,
     pub kind: Kind,
     pub span: Span,
+    /// The native resolution of a primitive that is read as of the bar when
+    /// the rule's calendar is finer (a series, a daily catalog relation in a
+    /// sub-daily program); `None` for a relation read at its own calendar.
+    pub native: Option<Resolution>,
 }
 
 impl Signature {
@@ -305,49 +418,76 @@ impl Signature {
         self.args.iter().position(|a| a.mode == Mode::Key)
     }
     /// Identity columns: entity-typed arguments plus the temporal key
-    /// (section 3; value outputs never identify). An entity-typed output is
-    /// counted too, so that a reduction over an enumerable relation still
-    /// has to name it as a tie-break.
+    /// (Definition 4.1); a label argument before the key identifies too (a
+    /// series' name).
     pub fn identity_positions(&self) -> Vec<usize> {
-        self.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::Key || a.ty.is_entity()).map(|(i, _)| i).collect()
+        let key = self.key_pos().unwrap_or(usize::MAX);
+        self.args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.mode == Mode::Key || a.ty.is_entity() || (a.ty == Ty::Label && *i < key))
+            .map(|(i, _)| i)
+            .collect()
+    }
+    pub fn is_primitive(&self) -> bool {
+        matches!(self.kind, Kind::Primitive { .. })
     }
 }
 
-/// A calendar duration (section 2): days (weeks are 7 days) and months (years are 12 months).
+/// A calendar duration: months (years are 12 months), days (weeks are 7
+/// days) and seconds (`30min`, `2h`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Duration {
     pub months: i64,
     pub days: i64,
+    #[serde(default)]
+    pub secs: i64,
 }
 
 impl Duration {
+    pub const fn days(d: i64) -> Duration {
+        Duration { months: 0, days: d, secs: 0 }
+    }
+    pub const fn months(m: i64) -> Duration {
+        Duration { months: m, days: 0, secs: 0 }
+    }
+    pub const fn secs(s: i64) -> Duration {
+        Duration { months: 0, days: 0, secs: s }
+    }
     pub fn is_zero(&self) -> bool {
-        self.months == 0 && self.days == 0
+        self.months == 0 && self.days == 0 && self.secs == 0
     }
     /// Approximate length in days, for ordering durations in the kernel.
     pub fn approx_days(&self) -> f64 {
-        self.months as f64 * 30.4375 + self.days as f64
+        self.months as f64 * 30.4375 + self.days as f64 + self.secs as f64 / 86_400.0
     }
-    /// The shortest calendar length in days this duration can take: a month
-    /// spans 28 to 31 days and twelve consecutive months 365 or 366, so a
-    /// parameter's range (section 3) rejects a default only when it falls
-    /// outside under every length.
+    /// The shortest calendar length in seconds this duration can take.
+    pub fn min_secs(&self) -> i64 {
+        ((self.months / 12) * 365 + (self.months % 12) * 28 + self.days) * 86_400 + self.secs
+    }
+    /// The longest calendar length in seconds this duration can take.
+    pub fn max_secs(&self) -> i64 {
+        ((self.months / 12) * 366 + (self.months % 12) * 31 + self.days) * 86_400 + self.secs
+    }
     pub fn min_days(&self) -> i64 {
-        (self.months / 12) * 365 + (self.months % 12) * 28 + self.days
+        self.min_secs() / 86_400
     }
-    /// The longest calendar length in days this duration can take.
     pub fn max_days(&self) -> i64 {
-        (self.months / 12) * 366 + (self.months % 12) * 31 + self.days
+        self.max_secs() / 86_400
     }
 }
 
 impl fmt::Display for Duration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.months, self.days) {
-            (0, d) => write!(f, "{}d", d),
-            (m, 0) if m % 12 == 0 => write!(f, "{}y", m / 12),
-            (m, 0) => write!(f, "{}mo", m),
-            (m, d) => write!(f, "{}mo+{}d", m, d),
+        match (self.months, self.days, self.secs) {
+            (0, 0, s) if s % 3600 == 0 && s != 0 => write!(f, "{}h", s / 3600),
+            (0, 0, s) if s % 60 == 0 && s != 0 => write!(f, "{}min", s / 60),
+            (0, 0, s) if s != 0 => write!(f, "{}s", s),
+            (0, d, 0) => write!(f, "{}d", d),
+            (m, 0, 0) if m % 12 == 0 => write!(f, "{}y", m / 12),
+            (m, 0, 0) => write!(f, "{}mo", m),
+            (m, d, 0) => write!(f, "{}mo+{}d", m, d),
+            (m, d, s) => write!(f, "{}mo+{}d+{}s", m, d, s),
         }
     }
 }
@@ -357,15 +497,20 @@ impl fmt::Display for Duration {
 pub enum Lit {
     Int(i64),
     Float(f64),
-    Shares(f64),
+    /// `100 shares`, `2 contracts`, `0 units`: a quantity in the class's
+    /// unit, with the word it was spelled with.
+    Quantity(f64, String),
+    /// `1_000_000 USD`: a notional.
     Money(f64, String),
-    /// `60 USD/share`: currency per share, Price<code>.
+    /// `60 USD/share`, `0 USD/contract`: currency per unit, Price<code>.
     Price(f64, String),
     Duration(Duration),
-    /// A string literal as parsed, `"SPY"` or `"bankruptcy"`; the checker
-    /// resolves it to `Equity` or `Label` by the type its context expects.
+    /// A date, `2000-01-01`; `i64::MIN` is "from the first bar".
+    Time(i64),
+    /// A string literal as parsed, `"SPY"` or `"SP500"`; the checker resolves
+    /// it to an entity or a label by the type its context expects.
     Str(String),
-    Equity(String),
+    Entity(String),
     Label(String),
 }
 
@@ -374,13 +519,22 @@ impl Lit {
         match self {
             Lit::Int(_) => Ty::IntLit,
             Lit::Float(_) => Ty::scalar(),
-            Lit::Shares(_) => Ty::Quantity(Dim::shares()),
+            Lit::Quantity(..) => Ty::Quantity(Dim::shares()),
             Lit::Money(_, c) => Ty::Quantity(Dim::notional(c)),
             Lit::Price(_, c) => Ty::Quantity(Dim::price(c)),
             Lit::Duration(_) => Ty::Duration,
+            Lit::Time(_) => Ty::Timestamp,
             Lit::Str(_) => Ty::StrLit,
-            Lit::Equity(_) => Ty::Equity,
+            Lit::Entity(_) => Ty::Entity,
             Lit::Label(_) => Ty::Label,
+        }
+    }
+    /// The numeric magnitude of a number, quantity, money or price literal.
+    pub fn magnitude(&self) -> Option<f64> {
+        match self {
+            Lit::Int(i) => Some(*i as f64),
+            Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => Some(*x),
+            _ => None,
         }
     }
 }
@@ -390,11 +544,13 @@ impl fmt::Display for Lit {
         match self {
             Lit::Int(i) => write!(f, "{}", i),
             Lit::Float(x) => write!(f, "{}", x),
-            Lit::Shares(x) => write!(f, "{} shares", x),
+            Lit::Quantity(x, u) => write!(f, "{} {}", x, u),
             Lit::Money(x, c) => write!(f, "{} {}", x, c),
-            Lit::Price(x, c) => write!(f, "{} {}/share", x, c),
+            Lit::Price(x, c) => write!(f, "{} {}/unit", x, c),
             Lit::Duration(d) => write!(f, "{}", d),
-            Lit::Str(s) | Lit::Equity(s) | Lit::Label(s) => write!(f, "\"{}\"", s),
+            Lit::Time(t) if *t == i64::MIN => write!(f, "first"),
+            Lit::Time(t) => write!(f, "{}", crate::kernel::time::format_timestamp(*t)),
+            Lit::Str(s) | Lit::Entity(s) | Lit::Label(s) => write!(f, "\"{}\"", s),
         }
     }
 }
@@ -406,7 +562,8 @@ pub enum Term {
     Wild(Span),
     Param(String, Span),
     Lit(Lit, Span),
-    /// A decision constructor such as `buy(A, Q)`.
+    /// A decision constructor such as `hold(A, W)` (with its order term
+    /// third), or an order with a price, `limit(P, gtc)`.
     Ctor(String, Vec<Term>, Span),
 }
 
@@ -458,7 +615,7 @@ impl fmt::Display for BinOp {
     }
 }
 
-/// A scalar-function expression (section 2).
+/// A scalar-function expression.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Var(String, Span),
@@ -532,6 +689,20 @@ pub enum CmpOp {
     Ge,
 }
 
+impl CmpOp {
+    /// The comparison that holds exactly when this one does not (on
+    /// defined values).
+    pub fn negate(self) -> CmpOp {
+        match self {
+            CmpOp::Lt => CmpOp::Ge,
+            CmpOp::Le => CmpOp::Gt,
+            CmpOp::Gt => CmpOp::Le,
+            CmpOp::Ge => CmpOp::Lt,
+            CmpOp::Eq => CmpOp::Eq,
+        }
+    }
+}
+
 impl fmt::Display for CmpOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -565,7 +736,8 @@ impl fmt::Display for Atom {
     }
 }
 
-/// The temporal builtins (section 4).
+/// The temporal builtins (section 4 of the semantic model, 3.5 of the
+/// second formulation).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Builtin {
     /// `prev(T, T1)`
@@ -576,16 +748,26 @@ pub enum Builtin {
     MonthStart { t: Term },
     /// `day_start(T)`
     DayStart { t: Term },
+    /// `session_of(A, T, S)`: S is the label of the session of base bar T.
+    SessionOf { a: Term, t: Term, s: Term },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The temporal constraints of an aggregation group (section 7.2, 3.3, 3.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowKind {
+    /// `T1 in window[D] min K`: the bars of the head's calendar in [T−D, T].
     Window,
+    /// `T1 in prior_window[D] min K`: the bars in [T−D, T).
     Prior,
-    /// `T1 in rows(T, N, min K)`: the N latest bars at or before T at which
-    /// the rest of the aggregation's conjunction holds for the group (a
-    /// count of the group's own rows, as a rolling window over a table).
+    /// `T1 in rows[N] [min K]`: the entity's last N rows at or before T.
     Rows,
+    /// `T1 in prior_rows[N] [min K]`: the entity's last N rows before T.
+    PriorRows,
+    /// `T1 in bucket(C, T)`: the base bars whose C bucket is T.
+    Bucket(Cal),
+    /// `T1 in session(X, [a, b))`: the base bars of X's session with offset
+    /// in [a, b), at or before X.
+    Session,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -603,20 +785,32 @@ pub enum Ties {
     Average,
 }
 
-/// The seven literal forms of section 4, plus the temporal builtins and the
-/// window literal that only occurs inside an aggregation.
+/// One branch of a case form: a guard (a conjunction of literals) and the
+/// expression the variable takes when the guard holds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Branch {
+    pub guard: Vec<Literal>,
+    pub value: Expr,
+    pub span: Span,
+}
+
+/// The literal forms of a body (section 5 and corpus-v2/README.md).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Literal {
     Atom(Atom),
     Neg(Atom),
     Builtin(Builtin, Span),
-    /// `T1 in window(T, N, min K)` / `T1 in prior_window(T, N, min K)`
+    /// A temporal constraint of an aggregation group: `var` ranges over the
+    /// bars the kind selects relative to `base`; `dur` is the duration, row
+    /// count or upper offset; `min` the minimum count; `lo` the lower offset
+    /// of a session constraint.
     Window {
         var: Term,
         kind: WindowKind,
         base: Term,
         dur: Expr,
         min: Expr,
+        lo: Option<Expr>,
         span: Span,
     },
     Cmp {
@@ -631,36 +825,42 @@ pub enum Literal {
         expr: Expr,
         span: Span,
     },
+    /// `X = agg(e, ...) over (conj) [within (vars)]`.
     Agg {
         var: String,
         agg: String,
         args: Vec<Expr>,
         conj: Vec<Literal>,
+        within: Option<Vec<String>>,
         span: Span,
     },
-    /// `top(N, R(...), by (...))` keeps at most N tuples per group;
-    /// `rank(R(...), by (...)[, ties average], as K)` keeps every tuple and
-    /// binds K to its 1-based rank in the group (`n` is then `None`).
+    /// `top[n](R(...) by (...)) within (vars)` keeps at most n tuples per
+    /// group; `K = rank(R(...) by (...)) within (vars)` keeps every tuple
+    /// and binds K to its 1-based rank in the group (`n` is then `None`).
     Top {
         n: Option<Expr>,
         atom: Atom,
         by: Option<Vec<(String, Dir, Span)>>,
         rank: Option<(String, Ties, Span)>,
-        span: Span,
-    },
-    Resample {
-        inner: Atom,
-        to: Resolution,
-        as_var: String,
-        min: Expr,
-        aggs: Vec<(String, String, Expr)>,
+        within: Option<Vec<String>>,
         span: Span,
     },
     /// `R(..., T0, ...) asof T`: the tuples of R at the latest key at or
-    /// before T (any resolution); binds R's outputs and T0 <= T.
+    /// before T; with `within_bucket`, only a key in T's bucket of that
+    /// calendar (a bar view of a finer series).
     AsOf {
         atom: Atom,
         at: Term,
+        within_bucket: Option<Cal>,
+        span: Span,
+    },
+    /// `X = case { G -> e ; ... ; else -> e }`: the first branch whose guard
+    /// holds binds X; with no `else`, an instance no guard admits is
+    /// excluded (Definition 5.9).
+    Case {
+        var: String,
+        branches: Vec<Branch>,
+        otherwise: Option<Expr>,
         span: Span,
     },
 }
@@ -675,8 +875,8 @@ impl Literal {
             | Literal::Assign { span, .. }
             | Literal::Agg { span, .. }
             | Literal::Top { span, .. }
-            | Literal::Resample { span, .. }
-            | Literal::AsOf { span, .. } => *span,
+            | Literal::AsOf { span, .. }
+            | Literal::Case { span, .. } => *span,
         }
     }
     pub fn describe(&self) -> String {
@@ -688,29 +888,61 @@ impl Literal {
                 Builtin::Lag { t, n, t1 } => format!("lag({}, {}, {})", t, n, t1),
                 Builtin::MonthStart { t } => format!("month_start({})", t),
                 Builtin::DayStart { t } => format!("day_start({})", t),
+                Builtin::SessionOf { a, t, s } => format!("session_of({}, {}, {})", a, t, s),
             },
-            Literal::Window { var, kind, base, dur, min, .. } => format!(
-                "{} in {}({}, {}, min {})",
-                var,
-                match kind {
-                    WindowKind::Window => "window",
-                    WindowKind::Prior => "prior_window",
-                    WindowKind::Rows => "rows",
-                },
-                base,
-                dur,
-                min
-            ),
+            Literal::Window { var, kind, base, dur, min, lo, .. } => match kind {
+                WindowKind::Window => format!("{} in window[{}] min {}", var, dur, min),
+                WindowKind::Prior => format!("{} in prior_window[{}] min {}", var, dur, min),
+                WindowKind::Rows => format!("{} in rows[{}] min {}", var, dur, min),
+                WindowKind::PriorRows => format!("{} in prior_rows[{}] min {}", var, dur, min),
+                WindowKind::Bucket(c) => format!("{} in bucket({}, {})", var, c, base),
+                WindowKind::Session => format!("{} in session({}, [{}, {}))", var, base, lo.as_ref().map(|e| e.to_string()).unwrap_or_default(), dur),
+            },
             Literal::Cmp { op, lhs, rhs, .. } => format!("{} {} {}", lhs, op, rhs),
             Literal::Assign { var, expr, .. } => format!("{} = {}", var, expr),
-            Literal::Agg { var, agg, args, .. } => {
+            Literal::Agg { var, agg, args, within, .. } => {
                 let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
-                format!("{} = {}({}) over (...)", var, agg, a.join(", "))
+                let w = within.as_ref().map(|w| format!(" within ({})", w.join(", "))).unwrap_or_default();
+                format!("{} = {}({}) over (...){}", var, agg, a.join(", "), w)
             }
-            Literal::Top { n: Some(n), atom, .. } => format!("top({}, {}, ...)", n, atom),
-            Literal::Top { atom, rank, .. } => format!("rank({}, ..., as {})", atom, rank.as_ref().map(|(k, _, _)| k.as_str()).unwrap_or("_")),
-            Literal::Resample { inner, to, as_var, .. } => format!("resample({} to {} as {}, ...)", inner, to, as_var),
+            Literal::Top { n: Some(n), atom, within, .. } => {
+                let w = within.as_ref().map(|w| format!(" within ({})", w.join(", "))).unwrap_or_default();
+                format!("top[{}]({} by ...){}", n, atom, w)
+            }
+            Literal::Top { atom, rank, within, .. } => {
+                let w = within.as_ref().map(|w| format!(" within ({})", w.join(", "))).unwrap_or_default();
+                format!(
+                    "{} = {}({} by ...){}",
+                    rank.as_ref().map(|(k, _, _)| k.as_str()).unwrap_or("_"),
+                    rank.as_ref().map(|(_, t, _)| if *t == Ties::Average { "rank_average" } else { "rank" }).unwrap_or("rank"),
+                    atom,
+                    w
+                )
+            }
             Literal::AsOf { atom, at, .. } => format!("{} asof {}", atom, at),
+            Literal::Case { var, branches, otherwise, .. } => {
+                let mut parts: Vec<String> = branches
+                    .iter()
+                    .map(|b| {
+                        let g: Vec<String> = b.guard.iter().map(|l| l.describe()).collect();
+                        format!("{} -> {}", g.join(", "), b.value)
+                    })
+                    .collect();
+                if let Some(e) = otherwise {
+                    parts.push(format!("else -> {}", e));
+                }
+                format!("{} = case {{ {} }}", var, parts.join(" ; "))
+            }
+        }
+    }
+    /// The literals nested in this one (an aggregation's conjunction, a case
+    /// form's guards), depth first, the literal itself first.
+    pub fn walk<'a>(&'a self, out: &mut Vec<&'a Literal>) {
+        out.push(self);
+        match self {
+            Literal::Agg { conj, .. } => conj.iter().for_each(|l| l.walk(out)),
+            Literal::Case { branches, .. } => branches.iter().for_each(|b| b.guard.iter().for_each(|l| l.walk(out))),
+            _ => {}
         }
     }
 }
@@ -720,7 +952,7 @@ pub struct Rule {
     pub head: Atom,
     pub body: Vec<Literal>,
     pub span: Span,
-    /// Name of the unit (library or strategy) the rule is written in.
+    /// Name of the unit (library instance or strategy) the rule is written in.
     pub unit: String,
 }
 
@@ -733,151 +965,123 @@ pub struct Param {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum DecisionMode {
-    Delta,
-    Target,
-}
+/// The decision constructors of the one decision algebra (section 4.4), as
+/// the checker resolves them: `hold(A, W)` with a Scalar is a target weight,
+/// with a quantity a target quantity; `trade(A, Q)` is a signed delta.
+pub const DECISION_CTORS: &[&str] = &["hold_weight", "hold_quantity", "trade"];
 
-impl DecisionMode {
-    pub fn ctors(self) -> &'static [&'static str] {
-        match self {
-            DecisionMode::Delta => &["buy", "sell", "short", "cover"],
-            DecisionMode::Target => &["target_weight", "target_quantity"],
-        }
-    }
-}
-
-impl fmt::Display for DecisionMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            DecisionMode::Delta => "delta",
-            DecisionMode::Target => "target",
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnitKind {
-    Environment,
-    Library,
-    Strategy,
-}
-
-impl fmt::Display for UnitKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            UnitKind::Environment => "environment",
-            UnitKind::Library => "library",
-            UnitKind::Strategy => "strategy",
-        })
-    }
-}
-
-/// A parsed environment, library or strategy.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Unit {
-    pub kind: UnitKind,
-    pub name: String,
-    pub span: Span,
-    pub env: Option<(String, Span)>,
-    /// The bundle version the unit is written against (`env name@2026.10`).
-    pub env_version: Option<String>,
-    /// The program hash this strategy declares itself a revision of
-    /// (`revises "0123abcd..."`, data-bundle doc, section 6: lineage).
-    pub revises: Option<String>,
-    pub uses: Vec<(String, Span)>,
-    pub resolution: Option<(Resolution, Span)>,
-    pub mode: Option<(DecisionMode, Span)>,
-    /// Header lines written more than once (`env`, `resolution` or `mode`):
-    /// the keyword and the span of each later line. The first stays in
-    /// effect; the checker reports the others.
-    pub redeclared: Vec<(String, Span)>,
-    pub params: Vec<Param>,
-    /// Primitive signatures (environment) or derived relation declarations (library, strategy).
-    pub rels: Vec<Signature>,
-    pub rules: Vec<Rule>,
-}
-
-/// Decision constructor field types (section 4).
+/// Decision constructor field types.
 pub fn ctor_fields(name: &str) -> Option<Vec<Ty>> {
     Some(match name {
-        "buy" | "sell" | "short" | "cover" | "target_quantity" => vec![Ty::Equity, Ty::Quantity(Dim::shares())],
-        "target_weight" => vec![Ty::Equity, Ty::scalar()],
+        "hold_quantity" | "trade" => vec![Ty::Entity, Ty::Quantity(Dim::shares())],
+        "hold_weight" => vec![Ty::Entity, Ty::scalar()],
         _ => return None,
     })
 }
 
-pub fn ctor_mode(name: &str) -> Option<DecisionMode> {
-    match name {
-        "buy" | "sell" | "short" | "cover" => Some(DecisionMode::Delta),
-        "target_weight" | "target_quantity" => Some(DecisionMode::Target),
-        _ => None,
-    }
-}
-
-/// The closed set of aggregates (section 1).
-pub const AGGREGATES: &[&str] = &["sum", "mean", "std", "median", "quantile", "max", "min", "count", "corr", "cov", "ols_beta", "first", "last"];
-/// Aggregates permitted inside a resample form (section 4).
-pub const RESAMPLE_AGGREGATES: &[&str] = &["first", "last", "max", "min", "sum", "mean", "count"];
-/// Scalar functions (section 2).
-pub const SCALAR_FUNCTIONS: &[&str] = &["log", "exp", "sqrt", "abs", "least", "greatest"];
+/// The closed set of aggregates.
+pub const AGGREGATES: &[&str] = &[
+    "sum",
+    "mean",
+    "std",
+    "var",
+    "median",
+    "quantile",
+    "max",
+    "min",
+    "count",
+    "corr",
+    "cov",
+    "ols_slope",
+    "ols_r",
+    "first",
+    "last",
+];
+/// Scalar functions (section 7.3).
+pub const SCALAR_FUNCTIONS: &[&str] = &["log", "exp", "sqrt", "abs", "least", "greatest", "sign", "floor", "ceil", "clamp", "decile"];
+/// The order kinds a decision term may end with.
+pub const ORDER_KINDS: &[&str] = &["market", "moo", "moc", "moo_moc"];
 
 /// Names a relation may not be declared with: the temporal builtins, the
-/// literal-form and unit keywords, the kernel's output and state relations
-/// and the decision constructors (section 4). The aggregates and scalar
-/// functions are reserved too, so that a body atom is never mistaken for one.
+/// literal-form and block keywords, the kernel's relations and the decision
+/// constructors. The aggregates and scalar functions are reserved too, so
+/// that a body atom is never mistaken for one.
 pub const RESERVED_NAMES: &[&str] = &[
     "prev",
     "lag",
     "month_start",
     "day_start",
+    "session_of",
     "window",
     "prior_window",
     "rows",
+    "prior_rows",
+    "bucket",
+    "session",
     "top",
     "rank",
-    "ties",
-    "resample",
+    "rank_average",
+    "case",
+    "else",
+    "within",
     "decide",
     "decided",
+    "position",
+    "cash",
+    "nav",
+    "capital",
+    "mark",
+    "fill",
+    "clock",
+    "universe",
+    "instruments",
     "not",
     "in",
     "min",
     "by",
     "over",
-    "as",
-    "to",
+    "asof",
     "asc",
     "desc",
-    "environment",
-    "library",
     "strategy",
-    "env",
+    "library",
+    "class",
+    "data",
     "uses",
-    "resolution",
-    "mode",
-    "param",
+    "calendars",
+    "params",
+    "rules",
+    "decisions",
+    "execution",
+    "report",
+    "observe",
     "rel",
     "complete",
-    "delta",
-    "target",
-    "buy",
-    "sell",
-    "short",
-    "cover",
-    "target_weight",
-    "target_quantity",
+    "need",
+    "require",
+    "prefer",
+    "silence",
+    "orders",
+    "hold",
+    "trade",
+    "market",
+    "moo",
+    "moc",
+    "moo_moc",
+    "limit",
+    "stop",
     "sum",
     "mean",
     "std",
+    "var",
     "median",
     "quantile",
     "max",
     "count",
     "corr",
     "cov",
-    "ols_beta",
+    "ols_slope",
+    "ols_r",
     "first",
     "last",
     "log",
@@ -886,69 +1090,78 @@ pub const RESERVED_NAMES: &[&str] = &[
     "abs",
     "least",
     "greatest",
+    "sign",
+    "floor",
+    "ceil",
+    "clamp",
+    "decile",
 ];
 
 pub fn is_reserved(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
+/// Names a parameter may not take: the keywords and temporal builtins that
+/// would be ambiguous as a bare identifier. A function, an aggregate, a
+/// decision constructor or an order kind is only ever written applied or
+/// inside a decision, so `floor`, `hold` and `stop` are admissible.
+pub fn is_reserved_param(name: &str) -> bool {
+    if name == "min" {
+        return true;
+    }
+    is_reserved(name) && !(name == "hold" || name == "trade" || name == "limit" || name == "stop" || ORDER_KINDS.contains(&name) || AGGREGATES.contains(&name) || SCALAR_FUNCTIONS.contains(&name))
+}
+
 /// The executor and kernel-state relations every strategy sees at its
-/// decision resolution (section 6).
-pub fn kernel_relations(res: Resolution) -> Vec<Signature> {
+/// decision calendar (corpus-v2/README.md, "Kernel relations").
+pub fn kernel_relations(cal: &Cal) -> Vec<Signature> {
     let arg = |name: &str, mode: Mode, ty: Ty| Arg { name: name.to_string(), mode, ty };
+    let sig = |name: &str, args: Vec<Arg>, kind: Kind| Signature {
+        name: name.to_string(),
+        args,
+        cal: cal.clone(),
+        complete: true,
+        kind,
+        span: Span::default(),
+        native: None,
+    };
     vec![
-        Signature {
-            name: "position".into(),
-            args: vec![arg("A", Mode::Out, Ty::Equity), arg("T", Mode::Key, Ty::Timestamp), arg("Q", Mode::Out, Ty::Quantity(Dim::shares()))],
-            res: Some(res),
-            complete: true,
-            kind: Kind::Executor,
-            span: Span::default(),
-        },
-        Signature {
-            name: "cash".into(),
-            args: vec![arg("T", Mode::Key, Ty::Timestamp), arg("C", Mode::Out, Ty::Quantity(Dim::notional("USD")))],
-            res: Some(res),
-            complete: true,
-            kind: Kind::Executor,
-            span: Span::default(),
-        },
-        Signature {
-            name: "nav".into(),
-            args: vec![arg("T", Mode::Key, Ty::Timestamp), arg("N", Mode::Out, Ty::Quantity(Dim::notional("USD")))],
-            res: Some(res),
-            complete: true,
-            kind: Kind::Executor,
-            span: Span::default(),
-        },
-        Signature {
-            name: "fill".into(),
-            args: vec![
-                arg("A", Mode::Out, Ty::Equity),
+        sig(
+            "position",
+            vec![arg("A", Mode::Out, Ty::Entity), arg("T", Mode::Key, Ty::Timestamp), arg("Q", Mode::Out, Ty::Quantity(Dim::shares()))],
+            Kind::Executor,
+        ),
+        sig(
+            "cash",
+            vec![arg("T", Mode::Key, Ty::Timestamp), arg("C", Mode::Out, Ty::Quantity(Dim::notional("USD")))],
+            Kind::Executor,
+        ),
+        sig("nav", vec![arg("T", Mode::Key, Ty::Timestamp), arg("N", Mode::Out, Ty::Quantity(Dim::notional("USD")))], Kind::Executor),
+        sig(
+            "capital",
+            vec![arg("T", Mode::Key, Ty::Timestamp), arg("C", Mode::Out, Ty::Quantity(Dim::notional("USD")))],
+            Kind::Executor,
+        ),
+        sig(
+            "mark",
+            vec![
+                arg("A", Mode::Out, Ty::Entity),
+                arg("T", Mode::Key, Ty::Timestamp),
+                arg("P", Mode::Out, Ty::Quantity(Dim::price("USD"))),
+            ],
+            Kind::Executor,
+        ),
+        sig(
+            "fill",
+            vec![
+                arg("A", Mode::Out, Ty::Entity),
                 arg("T", Mode::Key, Ty::Timestamp),
                 arg("Q", Mode::Out, Ty::Quantity(Dim::shares())),
                 arg("P", Mode::Out, Ty::Quantity(Dim::price("USD"))),
             ],
-            res: Some(res),
-            complete: true,
-            kind: Kind::Executor,
-            span: Span::default(),
-        },
-        Signature {
-            name: "decided".into(),
-            args: vec![arg("T0", Mode::Key, Ty::Timestamp), arg("D", Mode::Out, Ty::Decision)],
-            res: Some(res),
-            complete: true,
-            kind: Kind::KernelState,
-            span: Span::default(),
-        },
-        Signature {
-            name: "decide".into(),
-            args: vec![arg("T", Mode::Key, Ty::Timestamp), arg("D", Mode::Out, Ty::Decision)],
-            res: Some(res),
-            complete: true,
-            kind: Kind::Output,
-            span: Span::default(),
-        },
+            Kind::Executor,
+        ),
+        sig("decided", vec![arg("T0", Mode::Key, Ty::Timestamp), arg("D", Mode::Out, Ty::Decision)], Kind::KernelState),
+        sig("decide", vec![arg("T", Mode::Key, Ty::Timestamp), arg("D", Mode::Out, Ty::Decision)], Kind::Output),
     ]
 }

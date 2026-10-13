@@ -1,11 +1,12 @@
-//! Per-rule analysis: one left-to-right pass over the body in the order
-//! written (section 1, "literal order"), judging U, E, B, M, T, F, D, X and
-//! the per-rule part of C, and recording what the program-level judgments
-//! (R, N, S, W1, W2) need.
+//! The per-rule judgments on the elaborated rule (language-v2, section 10
+//! and the retained judgments of the semantic model): a well-moded order
+//! (Proposition 4.2; B, M), types (T), causality (F), deterministic
+//! reductions (D), explicit grouping (G), window sanity (W7), and the
+//! resolution of string literals and decision constructors.
 
 use std::collections::{HashMap, HashSet};
 
-use super::types::*;
+use super::types::{agg_type, bin_type, call_type, cmp_ok, compat, neg_type};
 use super::{AtomRef, Checker, Code, Polarity, RuleInfo, TimeProv};
 use crate::ir::*;
 
@@ -20,134 +21,130 @@ enum AtomCtx {
     Positive,
     Negative,
     InAgg,
-    Top,
-    ResampleInner,
-    /// The atom of `R(...) asof T`: its key is bound by the join.
-    AsOf,
+    AsOf(TimeProv),
 }
 
-struct AtomInfo {
-    sig: Signature,
-    fresh: Vec<String>,
+/// What `analyze` returns besides the info: the resolved constructor of a
+/// decide head (`hold` as `hold_weight` or `hold_quantity`).
+pub(crate) struct Analysis {
+    pub info: RuleInfo,
+    pub head_ctor: Option<String>,
+    /// The provenance of each head term relative to the head time: what a
+    /// Timestamp output of the relation carries to the rules that read it.
+    pub head_prov: Vec<TimeProv>,
+}
+
+pub(crate) fn analyze_full(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<Analysis> {
+    let label = super::rule_label(&cx.rules, idx);
+    let head_sig = cx.relations.get(&rule.head.name).cloned()?;
+    let cal = head_sig.cal.clone();
+    let cals = cx.var_cals.get(idx).cloned().unwrap_or_default();
+    let key_pos = head_sig.key_pos()?;
+    let head_key = match rule.head.terms.get(key_pos) {
+        Some(Term::Var(v, _)) => v.clone(),
+        _ => return None,
+    };
+    let mut an = Analyzer {
+        cx,
+        rule,
+        label,
+        cal,
+        head_key: head_key.clone(),
+        cals,
+        vars: HashMap::new(),
+        refs: vec![],
+        params_used: vec![],
+        str_types: vec![],
+        head_ctor: None,
+        errors: false,
+    };
+    an.bind(&head_key, Some(Ty::Timestamp), TimeProv::Head);
+    let order = an.schedule(&rule.body, false);
+    an.head(&head_sig);
+    if an.errors {
+        return None;
+    }
+    let head_prov: Vec<TimeProv> = rule
+        .head
+        .terms
+        .iter()
+        .map(|t| match t {
+            Term::Var(v, _) => an.prov_of(v),
+            _ => TimeProv::Other,
+        })
+        .collect();
+    Some(Analysis {
+        info: RuleInfo {
+            head: rule.head.name.clone(),
+            refs: an.refs,
+            params_used: an.params_used,
+            cal: an.cal,
+            order,
+            str_types: an.str_types,
+        },
+        head_ctor: an.head_ctor,
+        head_prov,
+    })
 }
 
 struct Analyzer<'c, 'a> {
     cx: &'c mut Checker<'a>,
     rule: &'c Rule,
     label: String,
-    res: Resolution,
-    head_time: Option<String>,
+    cal: Cal,
+    head_key: String,
+    cals: HashMap<String, Cal>,
     vars: HashMap<String, VarState>,
     refs: Vec<AtomRef>,
     params_used: Vec<String>,
     str_types: Vec<(Span, Ty)>,
-    key_vars_positive: HashSet<String>,
-    /// Inside an aggregation: window variables declared later in the same
-    /// conjunction, with the provenance they will have. An atom may bind such
-    /// a variable in its key position before the window literal is reached;
-    /// the window then acts as the constraint (the conjunction is commutative).
-    pending_windows: HashMap<String, TimeProv>,
-    /// The provenance an as-of join gives the key it binds, while its atom
-    /// is analysed.
-    asof_prov: TimeProv,
+    head_ctor: Option<String>,
+    errors: bool,
 }
 
-/// For a temporal builtin written where a relation is expected: how to get a
-/// relation that holds exactly when the builtin does.
-fn builtin_as_relation_hint(name: &str) -> Option<String> {
-    Some(match name {
-        "month_start" | "day_start" => {
-            let rel = if name == "month_start" { "mstart" } else { "dstart" };
-            format!("define `rel {rel}(@T: Timestamp)` with `{rel}(T) :- bar(T), {name}(T).` (a derived relation over the builtin is complete) and write `not {rel}(T)`")
-        }
-        "prev" | "lag" => {
-            let args = if name == "prev" { "T, T0" } else { "T, N, T0" };
-            format!("`{name}` binds its last argument; define `rel has_{name}(@T: Timestamp)` with `has_{name}(T) :- bar(T), {name}({args}).` and write `not has_{name}(T)`")
-        }
-        _ => return None,
-    })
-}
-
-/// A rule whose head or body names a relation declared with a reserved name
-/// is not judged: the declaration was already reported (U), and the parser
-/// has read every body occurrence as the builtin it names.
-fn mentions_reserved(cx: &Checker, rule: &Rule) -> bool {
-    fn lit(cx: &Checker, l: &Literal) -> bool {
-        match l {
-            Literal::Builtin(b, _) => cx.reserved_declared.contains(match b {
-                Builtin::Prev { .. } => "prev",
-                Builtin::Lag { .. } => "lag",
-                Builtin::MonthStart { .. } => "month_start",
-                Builtin::DayStart { .. } => "day_start",
-            }),
-            Literal::Atom(a) | Literal::Neg(a) => cx.reserved_declared.contains(&a.name),
-            Literal::Top { atom, .. } => cx.reserved_declared.contains(&atom.name),
-            Literal::Resample { inner, .. } => cx.reserved_declared.contains(&inner.name),
-            Literal::AsOf { atom, .. } => cx.reserved_declared.contains(&atom.name),
-            Literal::Agg { conj, .. } => conj.iter().any(|l| lit(cx, l)),
-            Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => false,
-        }
-    }
-    cx.reserved_declared.contains(&rule.head.name) || rule.body.iter().any(|l| lit(cx, l))
-}
-
-pub(crate) fn analyze(cx: &mut Checker, idx: usize, rule: &Rule) -> Option<RuleInfo> {
-    if mentions_reserved(cx, rule) {
-        return None;
-    }
-    let label = super::rule_label(&cx.rules, idx);
-    let unit_res = cx.unit_res.get(&rule.unit).copied().unwrap_or(cx.resolution);
-    let mut an = Analyzer {
-        cx,
-        rule,
-        label,
-        res: unit_res,
-        head_time: None,
-        vars: HashMap::new(),
-        refs: vec![],
-        params_used: vec![],
-        str_types: vec![],
-        key_vars_positive: HashSet::new(),
-        pending_windows: HashMap::new(),
-        asof_prov: TimeProv::Other,
-    };
-    let head_sig = an.cx.relations.get(&rule.head.name).cloned();
-    if let Some(sig) = &head_sig {
-        an.res = sig.res.unwrap_or(unit_res);
-        // WF-2: the caller binds every `+` argument, so a head input is bound
-        // on entry to the body; the key and the outputs must be bound by the body.
-        for (term, arg) in rule.head.terms.iter().zip(sig.args.iter()) {
-            if arg.mode == Mode::In {
-                if let Term::Var(v, _) = term {
-                    an.bind(v, Some(arg.ty.clone()), TimeProv::Other);
-                }
-            }
-        }
-        if let Some(k) = sig.key_pos() {
-            match rule.head.terms.get(k) {
-                Some(Term::Var(v, _)) => an.head_time = Some(v.clone()),
-                Some(t) => an.err(Code::F, t.span(), format!("the head's temporal key must be a variable, found `{}`", t)),
-                None => {}
+/// The variables a literal binds when it is evaluated with every other
+/// variable bound: its outputs.
+fn outputs(l: &Literal, out: &mut Vec<String>) {
+    fn terms(ts: &[Term], out: &mut Vec<String>) {
+        for t in ts {
+            match t {
+                Term::Var(v, _) => out.push(v.clone()),
+                Term::Ctor(_, subs, _) => terms(subs, out),
+                _ => {}
             }
         }
     }
-    for lit in &rule.body {
-        an.literal(lit, false);
+    match l {
+        Literal::Atom(a) | Literal::AsOf { atom: a, .. } => terms(&a.terms, out),
+        Literal::Neg(_) | Literal::Cmp { .. } => {}
+        Literal::Builtin(b, _) => match b {
+            Builtin::Prev { t1, .. } | Builtin::Lag { t1, .. } => terms(std::slice::from_ref(t1), out),
+            Builtin::SessionOf { s, .. } => terms(std::slice::from_ref(s), out),
+            Builtin::MonthStart { .. } | Builtin::DayStart { .. } => {}
+        },
+        Literal::Window { var, .. } => terms(std::slice::from_ref(var), out),
+        Literal::Assign { var, .. } | Literal::Agg { var, .. } | Literal::Case { var, .. } => out.push(var.clone()),
+        Literal::Top { atom, rank, .. } => {
+            terms(&atom.terms, out);
+            if let Some((k, _, _)) = rank {
+                out.push(k.clone());
+            }
+        }
     }
-    an.head();
-    head_sig.map(|_| RuleInfo {
-        head: rule.head.name.clone(),
-        refs: an.refs,
-        params_used: an.params_used,
-        resolution: an.res,
-        str_types: an.str_types,
-    })
+}
+
+/// Every variable a literal mentions.
+fn mentions(l: &Literal, out: &mut Vec<String>) {
+    crate::kernel::eval::literal_vars(l, out);
 }
 
 impl<'c, 'a> Analyzer<'c, 'a> {
     fn err(&mut self, code: Code, span: Span, msg: impl Into<String>) {
         let unit = self.rule.unit.clone();
         let label = self.label.clone();
+        if !code.is_warning() {
+            self.errors = true;
+        }
         self.cx.diag(code, &unit, Some(label), span, msg);
     }
 
@@ -172,6 +169,14 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             TimeProv::Other => TimeProv::Other,
             TimeProv::Unknown => TimeProv::Unknown,
             TimeProv::Strict => TimeProv::Strict,
+            // The session's earlier labels lie before the session opened, before T.
+            TimeProv::Future => {
+                if strict {
+                    TimeProv::Strict
+                } else {
+                    TimeProv::Future
+                }
+            }
             TimeProv::Head | TimeProv::Causal => {
                 if strict {
                     TimeProv::Strict
@@ -183,101 +188,66 @@ impl<'c, 'a> Analyzer<'c, 'a> {
     }
 
     fn param_ty(&mut self, name: &str, span: Span) -> Option<Ty> {
-        let unit = self.rule.unit.clone();
-        match self.cx.params.get(&unit).and_then(|m| m.get(name)) {
+        match self.cx.params.get(name) {
             Some(p) => {
                 self.params_used.push(name.to_string());
                 Some(p.ty.clone())
             }
             None => {
+                if ORDER_KINDS.contains(&name) || name == "gtc" || name == "day" {
+                    return None;
+                }
+                let strategy = self.cx.root.name.clone();
                 self.err(
                     Code::U,
                     span,
-                    format!("`{}` is neither a parameter of `{}` nor a variable (variables start with an uppercase letter)", name, unit),
+                    format!("`{}` is neither a parameter of `{}` nor a variable (variables start with an uppercase letter)", name, strategy),
                 );
                 None
             }
         }
     }
 
-    /// Name resolution (U) and environment membership (E).
-    ///
-    /// Returns `None` without a diagnostic when the root cause was already
-    /// reported at unit level: the environment or a used library is missing
-    /// from the workspace (the name may live there), or the name is a
-    /// primitive of a used library's own, mismatched environment.
-    fn resolve_rel(&mut self, name: &str, span: Span) -> Option<Signature> {
-        if let Some(sig) = self.cx.relations.get(name) {
-            return Some(sig.clone());
-        }
-        // A temporal builtin (section 4) is a constraint or a binder, not a
-        // relation: it has no tuples to negate or reduce. The parser accepts
-        // it as an atom only after `not` or inside `top`, so the idiom shown
-        // is a derived relation over the builtin, which is complete (WF-5).
-        if let Some(hint) = builtin_as_relation_hint(name) {
-            self.err(Code::U, span, format!("`{}` is a temporal builtin, not a relation, so it cannot be negated; {}", name, hint));
-            return None;
-        }
-        if self.cx.scope_incomplete {
-            return None;
-        }
-        let declared_env = self.cx.env_name.clone();
-        for env in self.cx.ws.units.iter().filter(|u| u.kind == UnitKind::Environment) {
-            if env.rels.iter().any(|s| s.name == name) {
-                if self.cx.foreign_envs.contains(&env.name) {
-                    return None;
-                }
-                self.err(
-                    Code::E,
-                    span,
-                    format!("`{}` is a primitive of environment `{}`, which is not the declared environment `{}`", name, env.name, declared_env),
-                );
-                return None;
-            }
-        }
-        for lib in self.cx.ws.units.iter().filter(|u| u.kind == UnitKind::Library) {
-            if lib.rels.iter().any(|s| s.name == name) && !self.cx.units.iter().any(|u| u.name == lib.name) {
-                self.err(
-                    Code::U,
-                    span,
-                    format!("`{}` is declared in library `{}`, which `{}` does not use; add `uses {}`", name, lib.name, self.cx.root.name, lib.name),
-                );
-                return None;
-            }
-        }
-        let libs: Vec<String> = self.cx.units.iter().filter(|u| u.kind == UnitKind::Library).map(|u| u.name.clone()).collect();
-        let where_ = if libs.is_empty() { String::new() } else { format!(", its libraries ({})", libs.join(", ")) };
-        self.err(
-            Code::U,
-            span,
-            format!("relation `{}` is not declared in `{}`{} or environment `{}`", name, self.cx.root.name, where_, declared_env),
-        );
-        None
-    }
-
     fn check_lit_type(&mut self, expected: &Ty, lit: &Lit, span: Span, what: &str) {
         let actual = lit.ty();
         if !compat(expected, &actual) {
-            let actual = if actual == Ty::StrLit {
-                "a string literal (an Equity or a Label)".to_string()
+            let actual_text = if actual == Ty::StrLit {
+                "a string literal (an entity or a label)".to_string()
             } else {
                 actual.to_string()
             };
-            self.err(Code::T, span, format!("{} expects {} but literal `{}` is {}", what, expected, lit, actual));
+            let hint = self.typed_hint(expected, lit);
+            self.err(Code::T, span, format!("{} expects {} but literal `{}` is {}{}", what, expected, lit, actual_text, hint));
         } else if let Lit::Str(_) = lit {
             self.resolve_str(span, expected);
         }
     }
 
-    /// Record what a string literal at `span` resolved to (Equity or Label).
+    /// The typed spelling a dimensioned literal should have (7.3).
+    fn typed_hint(&self, expected: &Ty, lit: &Lit) -> String {
+        let Ty::Quantity(d) = expected else { return String::new() };
+        let Some(x) = lit.magnitude() else { return String::new() };
+        let unit = self.cx.unit_word.clone();
+        let per = unit.trim_end_matches('s').to_string();
+        let cur = d.currency.clone().unwrap_or_else(|| "USD".into());
+        let spelling = if d.is_price() {
+            format!("{} {}/{}", x, cur, per)
+        } else if d.is_notional() {
+            format!("{} {}", x, cur)
+        } else if d.is_quantity() {
+            format!("{} {}", x, unit)
+        } else {
+            return String::new();
+        };
+        format!("; write the typed form `{}`", spelling)
+    }
+
     fn resolve_str(&mut self, span: Span, ty: &Ty) {
-        if matches!(ty, Ty::Equity | Ty::Label) {
+        if matches!(ty, Ty::Entity | Ty::Label) {
             self.str_types.push((span, ty.clone()));
         }
     }
 
-    /// In a comparison, a string literal on one side takes the other side's
-    /// type (Equity or Label); with no typed side it is an error.
     fn resolve_cmp_strs(&mut self, lhs: &Expr, tl: &Ty, rhs: &Expr, tr: &Ty) {
         if let Expr::Lit(Lit::Str(_), sp) = lhs {
             self.resolve_str(*sp, tr);
@@ -287,9 +257,6 @@ impl<'c, 'a> Analyzer<'c, 'a> {
         }
     }
 
-    /// A string literal where only its own type is available (an assignment
-    /// to a fresh variable, an aggregate argument, arithmetic): nothing says
-    /// Equity or Label.
     fn str_without_context(&mut self, e: &Expr) -> bool {
         fn find(e: &Expr) -> Option<Span> {
             match e {
@@ -304,7 +271,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             self.err(
                 Code::T,
                 sp,
-                "a string literal is an Equity or a Label from context: compare it with a typed variable, pass it to a typed argument, or declare a param",
+                "a string literal is an entity or a label from context: compare it with a typed variable, pass it to a typed argument, or declare a param",
             );
             true
         } else {
@@ -312,19 +279,687 @@ impl<'c, 'a> Analyzer<'c, 'a> {
         }
     }
 
-    fn atom(&mut self, atom: &Atom, ctx: AtomCtx) -> Option<AtomInfo> {
-        let Some(sig) = self.resolve_rel(&atom.name, atom.span) else {
-            // Bind the atom's fresh variables with unknown types and unknown
-            // time provenance, so that neither WF-3 nor WF-6 is judged on
-            // what this atom would have bound; parameters passed to it still
-            // count as used (W2).
-            for t in &atom.terms {
-                match t {
-                    Term::Var(v, _) if !self.is_bound(v) => self.bind(v, None, TimeProv::Unknown),
-                    Term::Param(p, sp) => {
-                        self.param_ty(p, *sp);
+    // ---- the schedule ----
+
+    /// A well-moded order of `body` (Proposition 4.2): the first literal in
+    /// written order whose requirements are met, repeatedly; each literal is
+    /// judged as it is scheduled. Literals that can never be scheduled are
+    /// an M error naming the variable no literal binds.
+    fn schedule(&mut self, body: &[Literal], in_agg: bool) -> Vec<usize> {
+        let mut remaining: Vec<usize> = (0..body.len()).collect();
+        let mut order: Vec<usize> = Vec::new();
+        let producers: Vec<Vec<String>> = body
+            .iter()
+            .map(|l| {
+                let mut o = Vec::new();
+                outputs(l, &mut o);
+                o
+            })
+            .collect();
+        let producible = |v: &str, except: usize| -> bool { producers.iter().enumerate().any(|(i, p)| i != except && p.iter().any(|x| x == v)) };
+        while !remaining.is_empty() {
+            let mut picked = None;
+            for &i in &remaining {
+                if self.ready(&body[i], i, &producible) {
+                    picked = Some(i);
+                    break;
+                }
+            }
+            let Some(i) = picked else {
+                // Nothing is ready: name the first blocked literal and the variable it needs.
+                let i = remaining[0];
+                let mut needed: Vec<String> = Vec::new();
+                mentions(&body[i], &mut needed);
+                let unbound = needed.iter().find(|v| !self.is_bound(v) && !producers[i].contains(v)).cloned().unwrap_or_default();
+                let span = body[i].span();
+                self.err(
+                    Code::M,
+                    span,
+                    format!(
+                        "no well-moded order: `{}` needs `{}` bound, and no literal of the rule binds it (bind it with an atom, an assignment or a temporal builtin, or lift it into `params`)",
+                        body[i].describe(),
+                        unbound
+                    ),
+                );
+                // Judge the rest in written order so later errors still show.
+                for &j in &remaining {
+                    self.judge(&body[j], in_agg);
+                    order.push(j);
+                }
+                return order;
+            };
+            self.judge(&body[i], in_agg);
+            order.push(i);
+            remaining.retain(|&j| j != i);
+        }
+        order
+    }
+
+    /// Whether a literal's requirements are met: its inputs are bound, or
+    /// could never be bound by another literal (then it binds them itself,
+    /// and the judgments below say what that means).
+    fn ready(&self, l: &Literal, i: usize, producible: &dyn Fn(&str, usize) -> bool) -> bool {
+        let bound_or_unproducible = |v: &str| self.is_bound(v) || !producible(v, i);
+        let term_ok = |t: &Term| match t {
+            Term::Var(v, _) => bound_or_unproducible(v),
+            _ => true,
+        };
+        let expr_ok = |e: &Expr| {
+            let mut vs = Vec::new();
+            e.vars(&mut vs);
+            vs.iter().all(|(v, _)| bound_or_unproducible(v))
+        };
+        match l {
+            Literal::Atom(a) => {
+                let key = self.cx.relations.get(&a.name).and_then(|s| s.key_pos()).and_then(|k| a.terms.get(k));
+                key.map(term_ok).unwrap_or(true)
+            }
+            Literal::Neg(a) => {
+                let mut vs = Vec::new();
+                for t in &a.terms {
+                    if let Term::Var(v, _) = t {
+                        vs.push(v.clone());
                     }
-                    _ => {}
+                    if let Term::Ctor(_, subs, _) = t {
+                        for s in subs {
+                            if let Term::Var(v, _) = s {
+                                vs.push(v.clone());
+                            }
+                        }
+                    }
+                }
+                vs.iter().all(|v| bound_or_unproducible(v))
+            }
+            Literal::Builtin(b, _) => match b {
+                Builtin::Prev { t, .. } | Builtin::MonthStart { t } | Builtin::DayStart { t } => term_ok(t),
+                Builtin::Lag { t, n, .. } => term_ok(t) && expr_ok(n),
+                Builtin::SessionOf { a, t, .. } => term_ok(a) && term_ok(t),
+            },
+            Literal::Window { base, dur, min, lo, .. } => term_ok(base) && expr_ok(dur) && expr_ok(min) && lo.as_ref().map(expr_ok).unwrap_or(true),
+            Literal::Cmp { lhs, rhs, .. } => expr_ok(lhs) && expr_ok(rhs),
+            Literal::Assign { expr, .. } => expr_ok(expr),
+            Literal::Agg { args, conj, within, .. } => {
+                let mut vs: Vec<String> = Vec::new();
+                for a in args {
+                    let mut t = Vec::new();
+                    a.vars(&mut t);
+                    vs.extend(t.into_iter().map(|(v, _)| v));
+                }
+                for c in conj {
+                    mentions(c, &mut vs);
+                }
+                let mut local: Vec<String> = Vec::new();
+                for c in conj {
+                    outputs(c, &mut local);
+                }
+                let within_ok = within.as_ref().map(|w| w.iter().all(|v| self.is_bound(v))).unwrap_or(true);
+                within_ok && vs.iter().all(|v| self.is_bound(v) || local.contains(v) || !producible(v, i))
+            }
+            Literal::Top { n, within, .. } => {
+                let within_ok = within.as_ref().map(|w| w.iter().all(|v| self.is_bound(v))).unwrap_or(true);
+                within_ok && n.as_ref().map(expr_ok).unwrap_or(true)
+            }
+            Literal::AsOf { at, .. } => term_ok(at),
+            Literal::Case { branches, otherwise, .. } => {
+                let mut ok = otherwise.as_ref().map(expr_ok).unwrap_or(true);
+                for b in branches {
+                    let mut local: Vec<String> = Vec::new();
+                    for g in &b.guard {
+                        outputs(g, &mut local);
+                    }
+                    let mut vs: Vec<String> = Vec::new();
+                    for g in &b.guard {
+                        mentions(g, &mut vs);
+                    }
+                    let mut ev = Vec::new();
+                    b.value.vars(&mut ev);
+                    vs.extend(ev.into_iter().map(|(v, _)| v));
+                    ok &= vs.iter().all(|v| self.is_bound(v) || local.contains(v) || !producible(v, i));
+                }
+                ok
+            }
+        }
+    }
+
+    // ---- literals ----
+
+    /// Judge a literal; when it fails, the variables it mentions are bound
+    /// as unknown, so that the failure is reported once and not again as
+    /// unbound variables or underived keys downstream.
+    fn judge(&mut self, lit: &Literal, in_agg: bool) {
+        let before = self.errors;
+        self.literal(lit, in_agg);
+        if self.errors && !before {
+            let mut vs = Vec::new();
+            mentions(lit, &mut vs);
+            for v in vs {
+                if !self.is_bound(&v) {
+                    self.bind(&v, None, TimeProv::Unknown);
+                }
+            }
+        }
+    }
+
+    fn literal(&mut self, lit: &Literal, in_agg: bool) {
+        match lit {
+            Literal::Atom(a) => {
+                self.atom(a, if in_agg { AtomCtx::InAgg } else { AtomCtx::Positive });
+            }
+            Literal::Neg(a) => {
+                if in_agg {
+                    self.err(
+                        Code::B,
+                        a.span,
+                        "an aggregation's group is a conjunction of positive atoms and temporal constraints; negation is not permitted inside it",
+                    );
+                }
+                self.atom(a, AtomCtx::Negative);
+            }
+            Literal::AsOf { atom, at, within_bucket, .. } => {
+                let head_t = self.head_key.clone();
+                let base = self.time_var_bound(at, "the time of an as-of read");
+                let prov = match base {
+                    None => TimeProv::Unknown,
+                    Some(b) => match self.prov_of(&b) {
+                        TimeProv::Other if b == head_t => TimeProv::Causal,
+                        TimeProv::Other => {
+                            self.err(
+                                Code::F,
+                                at.span(),
+                                format!(
+                                    "the as-of time `{}` of `{} asof {}` is not derived from the head time `{}`; bind it first with prev, lag, a window or a bucket of `{}`",
+                                    b, atom.name, b, head_t, head_t
+                                ),
+                            );
+                            TimeProv::Unknown
+                        }
+                        TimeProv::Future => {
+                            self.err(
+                                Code::F,
+                                at.span(),
+                                format!("`{}` is the label of the bar's own session, which closes after the bar; a relation cannot be read as of it", b),
+                            );
+                            TimeProv::Unknown
+                        }
+                        p => Self::derived_prov(p, false),
+                    },
+                };
+                let _ = within_bucket;
+                self.atom(atom, AtomCtx::AsOf(prov));
+            }
+            Literal::Builtin(b, _) => match b {
+                Builtin::Prev { t, t1 } => {
+                    let base = self.time_var_bound(t, "the first argument of prev");
+                    if matches!(t1, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(t1, "the second argument of prev") {
+                        let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), true)).unwrap_or(TimeProv::Other);
+                        self.bind(&v, Some(Ty::Timestamp), prov);
+                    }
+                }
+                Builtin::Lag { t, n, t1 } => {
+                    let base = self.time_var_bound(t, "the first argument of lag");
+                    self.expect_expr(n, |t| *t == Ty::Duration, "a Duration");
+                    let zero = match n {
+                        Expr::Lit(Lit::Duration(d), _) => d.is_zero(),
+                        Expr::Param(p, _) => matches!(self.cx.params.get(p).map(|p| &p.value), Some(Lit::Duration(d)) if d.is_zero()),
+                        _ => false,
+                    };
+                    if matches!(t1, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(t1, "the third argument of lag") {
+                        let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), !zero)).unwrap_or(TimeProv::Other);
+                        self.bind(&v, Some(Ty::Timestamp), prov);
+                    }
+                }
+                Builtin::MonthStart { t } => {
+                    self.time_var_bound(t, "the argument of month_start");
+                }
+                Builtin::DayStart { t } => {
+                    self.time_var_bound(t, "the argument of day_start");
+                }
+                Builtin::SessionOf { a, t, s } => {
+                    self.entity_term(a, "the first argument of session_of");
+                    let base = self.time_var_bound(t, "the second argument of session_of");
+                    if let Some(b) = &base {
+                        if self.cals.get(b).map(|c| *c != Cal::Base).unwrap_or(false) {
+                            self.err(
+                                Code::X,
+                                t.span(),
+                                format!("`session_of` takes a base bar, and `{}` is on `{}`", b, self.cx.cal_name(self.cals.get(b).unwrap())),
+                            );
+                        }
+                    }
+                    if matches!(s, Term::Wild(_)) {
+                        return;
+                    }
+                    if let Some(v) = self.time_var_fresh(s, "the third argument of session_of") {
+                        let prov = match base.map(|b| self.prov_of(&b)) {
+                            Some(TimeProv::Head) => TimeProv::Future,
+                            Some(TimeProv::Unknown) => TimeProv::Unknown,
+                            _ => TimeProv::Other,
+                        };
+                        self.bind(&v, Some(Ty::Timestamp), prov);
+                    }
+                }
+            },
+            Literal::Window { var, kind, base, dur, min, lo, span } => {
+                if !in_agg {
+                    self.err(
+                        Code::B,
+                        *span,
+                        "a temporal constraint binds its variable only inside an aggregation (`X = agg(e) over (...)`); outside one use prev or lag",
+                    );
+                }
+                let b = self.time_var_bound(base, "the base of the constraint");
+                match kind {
+                    WindowKind::Rows | WindowKind::PriorRows => {
+                        self.expect_expr(dur, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the number of rows)");
+                        self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum count)");
+                    }
+                    WindowKind::Window | WindowKind::Prior => {
+                        self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
+                        self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum count)");
+                        self.window_sanity(dur, min, *span);
+                    }
+                    WindowKind::Bucket(_) => {}
+                    WindowKind::Session => {
+                        self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration (the upper offset)");
+                        if let Some(lo) = lo {
+                            self.expect_expr(lo, |t| *t == Ty::Duration, "a Duration (the lower offset)");
+                        }
+                    }
+                }
+                let strict = matches!(kind, WindowKind::Prior | WindowKind::PriorRows);
+                let prov = b.map(|b| Self::derived_prov(self.prov_of(&b), strict)).unwrap_or(TimeProv::Other);
+                // A session label as the base of a session constraint: its bars are at or before it.
+                let prov = if matches!(kind, WindowKind::Session | WindowKind::Bucket(_)) && prov == TimeProv::Future {
+                    TimeProv::Causal
+                } else {
+                    prov
+                };
+                if let Some(v) = self.time_var_fresh(var, "a temporal constraint") {
+                    self.bind(&v, Some(Ty::Timestamp), prov);
+                }
+            }
+            Literal::Cmp { op, lhs, rhs, span } => {
+                let tl = self.expr_ty(lhs);
+                let tr = self.expr_ty(rhs);
+                if let (Some(tl), Some(tr)) = (tl, tr) {
+                    if let Err(m) = cmp_ok(*op, &tl, &tr) {
+                        let zero = [lhs, rhs]
+                            .iter()
+                            .any(|e| matches!(e, Expr::Lit(l, _) if l.magnitude() == Some(0.0) && matches!(l, Lit::Int(_) | Lit::Float(_))));
+                        let hint = if zero {
+                            let dimensioned = if matches!(tl, Ty::Quantity(ref d) if !d.is_scalar()) {
+                                Some(tl.clone())
+                            } else if matches!(tr, Ty::Quantity(ref d) if !d.is_scalar()) {
+                                Some(tr.clone())
+                            } else {
+                                None
+                            };
+                            dimensioned.map(|t| self.typed_hint(&t, &Lit::Int(0))).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        self.err(Code::T, *span, format!("in `{} {} {}`: {}{}", lhs, op, rhs, m, hint));
+                    } else {
+                        self.resolve_cmp_strs(lhs, &tl, rhs, &tr);
+                    }
+                }
+            }
+            Literal::Assign { var, expr, span } => {
+                let t = self.expr_ty(expr);
+                match self.vars.get(var).cloned() {
+                    Some(st) => {
+                        if let (Some(vt), Some(et)) = (st.ty, t) {
+                            if let Err(m) = cmp_ok(CmpOp::Eq, &vt, &et) {
+                                self.err(Code::T, *span, format!("in `{} = {}`: {}", var, expr, m));
+                            } else if let Expr::Lit(Lit::Str(_), sp) = expr {
+                                self.resolve_str(*sp, &vt);
+                            }
+                        }
+                    }
+                    None => {
+                        if self.str_without_context(expr) {
+                            return;
+                        }
+                        self.bind(var, t, TimeProv::Other);
+                    }
+                }
+            }
+            Literal::Agg { var, agg, args, conj, within, span } => {
+                if in_agg {
+                    self.err(Code::B, *span, "aggregations do not nest; compute the inner aggregate in its own relation");
+                    return;
+                }
+                if self.is_bound(var) {
+                    self.err(Code::B, *span, format!("aggregate result `{}` is already bound", var));
+                    return;
+                }
+                if let Some(w) = within {
+                    for v in w {
+                        if !self.is_bound(v) {
+                            self.err(Code::G, *span, format!("`{}` in `within (...)` is unbound; the group names bound variables", v));
+                        }
+                    }
+                }
+                // The conjunction in its own scope.
+                let saved = self.vars.clone();
+                self.schedule(conj, true);
+                // The group of an aggregation with no `within` is its free
+                // variables (4.2): what the conjunction binds that is
+                // neither a constraint's time nor aggregated over is a
+                // group key, bound by the aggregation with one result per
+                // group (`close@C(A, T, P) :- P = last(P1) over (...)`).
+                let mut aggregated: Vec<String> = Vec::new();
+                for c in conj {
+                    if let Literal::Window { var: Term::Var(v, _), .. } = c {
+                        aggregated.push(v.clone());
+                    }
+                }
+                for a in args {
+                    let mut vs = Vec::new();
+                    a.vars(&mut vs);
+                    aggregated.extend(vs.into_iter().map(|(v, _)| v));
+                }
+                let group_keys: Vec<(String, VarState)> = if within.is_none() {
+                    self.vars
+                        .iter()
+                        .filter(|(v, _)| !saved.contains_key(*v) && !aggregated.contains(v))
+                        .map(|(v, st)| (v.clone(), st.clone()))
+                        .collect()
+                } else {
+                    vec![]
+                };
+                // Every temporal key inside the group is the head's bar or bound by a constraint of it (WF-6).
+                let has_window = conj.iter().any(|l| matches!(l, Literal::Window { .. }));
+                if matches!(agg.as_str(), "first" | "last") && !has_window {
+                    self.err(
+                        Code::D,
+                        *span,
+                        format!(
+                            "`{}` is ordered by the temporal key of a rows, window or session constraint; over the entities of one bar the group has no order, so which value is {} is unspecified",
+                            agg, agg
+                        ),
+                    );
+                }
+                let mut tys = Vec::new();
+                for a in args {
+                    if self.str_without_context(a) {
+                        self.vars = saved;
+                        return;
+                    }
+                    match self.expr_ty(a) {
+                        Some(t) => tys.push(t),
+                        None => {
+                            self.vars = saved;
+                            return;
+                        }
+                    }
+                }
+                self.vars = saved;
+                for (v, st) in group_keys {
+                    self.vars.insert(v, st);
+                }
+                match agg_type(agg, &tys) {
+                    Ok(t) => self.bind(var, Some(t), TimeProv::Other),
+                    Err(m) => self.err(Code::T, *span, format!("in `{} = {}(...)`: {}", var, agg, m)),
+                }
+            }
+            Literal::Top { n, atom, by, rank, within, span } => {
+                if in_agg {
+                    self.err(Code::B, *span, "a reduction is not permitted inside an aggregation");
+                    return;
+                }
+                let what = if n.is_some() { "top" } else { "rank" };
+                if let Some(n) = n {
+                    self.expect_expr(n, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count");
+                }
+                let Some(w) = within else {
+                    self.err(
+                        Code::G,
+                        *span,
+                        format!(
+                            "`{}` names its group in `within (...)`: write `within (T)` to reduce the entities of one bar, or `within (A, T)` to rank one tuple",
+                            what
+                        ),
+                    );
+                    return;
+                };
+                for v in w {
+                    if !self.is_bound(v) {
+                        self.err(Code::G, *span, format!("`{}` in `within (...)` is unbound; the group names bound variables", v));
+                        return;
+                    }
+                }
+                let Some(sig) = self.cx.relations.get(&atom.name).cloned() else { return };
+                // Every variable of the reduced atom outside the group is fresh.
+                for (i, t) in atom.terms.iter().enumerate() {
+                    if let Term::Var(v, sp) = t {
+                        if !w.contains(v) && self.is_bound(v) {
+                            let arg = sig.args.get(i).map(|a| a.name.clone()).unwrap_or_default();
+                            self.err(
+                                Code::G,
+                                *sp,
+                                format!(
+                                    "`{}` is bound before the {} and is not in `within ({})`: a {} that varies over `{}` must not bind it; write `within ({}, {})` to rank one tuple, or remove the literal that binds `{}` and let the reduction bind it",
+                                    v,
+                                    what,
+                                    w.join(", "),
+                                    what,
+                                    v,
+                                    v,
+                                    w.join(", "),
+                                    v
+                                ),
+                            );
+                            let _ = arg;
+                            return;
+                        }
+                    }
+                }
+                // The atom's key must be in the group (one bar).
+                if let Some(k) = sig.key_pos() {
+                    match atom.terms.get(k) {
+                        Some(Term::Var(v, sp)) if !w.contains(v) => {
+                            self.err(
+                                Code::G,
+                                *sp,
+                                format!("the temporal key `{}` of `{}` is not in `within (...)`: a reduction ranges over one bar's tuples", v, atom.name),
+                            );
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                if self.atom(atom, AtomCtx::InAgg).is_none() {
+                    return;
+                }
+                if let Some(r) = self.refs.last_mut() {
+                    r.is_top = true;
+                    r.polarity = Polarity::Aggregate;
+                }
+                // The order: required, over the atom's variables, total for
+                // `top` and ordinal `rank` (the identity columns outside
+                // the group are among the keys).
+                let ties = rank.as_ref().map(|(_, t, _)| *t).unwrap_or(Ties::Ordinal);
+                match by {
+                    None => {
+                        self.err(
+                            Code::D,
+                            *span,
+                            format!(
+                                "`{}` has no `by (...)`: without a total order, which tuples survive is unspecified; order by a value and the identity, `by (M desc, A asc)`",
+                                what
+                            ),
+                        );
+                        return;
+                    }
+                    Some(keys) => {
+                        let atom_vars: Vec<String> = atom.terms.iter().filter_map(|t| if let Term::Var(v, _) = t { Some(v.clone()) } else { None }).collect();
+                        for (k, _, ksp) in keys {
+                            if !atom_vars.contains(k) {
+                                self.err(Code::D, *ksp, format!("order key `{}` is not a variable of `{}`", k, atom.name));
+                                return;
+                            }
+                        }
+                        if ties == Ties::Ordinal {
+                            for i in sig.identity_positions() {
+                                if let Some(Term::Var(v, _)) = atom.terms.get(i) {
+                                    if !w.contains(v) && !keys.iter().any(|(k, _, _)| k == v) {
+                                        self.err(
+                                            Code::D,
+                                            *span,
+                                            format!(
+                                                "the order keys omit the identity column `{}` of `{}`: two tuples with equal values would tie, and the order must be total; add `{} asc` as the last key",
+                                                v, atom.name, v
+                                            ),
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // W4: the group holds every identity of the atom.
+                let ids: Vec<String> = sig
+                    .identity_positions()
+                    .iter()
+                    .filter_map(|&i| if let Some(Term::Var(v, _)) = atom.terms.get(i) { Some(v.clone()) } else { None })
+                    .collect();
+                if !ids.is_empty() && ids.iter().all(|v| w.contains(v)) {
+                    self.err(
+                        Code::W4,
+                        *span,
+                        format!(
+                            "`within ({})` holds every identity of `{}`, so each group has one tuple and the {} ranks it first",
+                            w.join(", "),
+                            atom.name,
+                            what
+                        ),
+                    );
+                }
+                if let Some((k, _, ksp)) = rank {
+                    if self.is_bound(k) {
+                        self.err(Code::B, *ksp, format!("the rank `{}` must be a fresh variable", k));
+                    } else {
+                        self.bind(k, Some(Ty::Count), TimeProv::Other);
+                    }
+                }
+            }
+            Literal::Case { var, branches, otherwise, span } => {
+                if self.is_bound(var) {
+                    self.err(Code::B, *span, format!("case result `{}` is already bound", var));
+                    return;
+                }
+                let mut ty: Option<Ty> = None;
+                let saved = self.vars.clone();
+                let guarded = branches.len() > 1 || otherwise.is_some();
+                for b in branches {
+                    self.vars = saved.clone();
+                    for g in &b.guard {
+                        if matches!(g, Literal::Agg { .. } | Literal::Top { .. } | Literal::Case { .. }) {
+                            self.err(Code::B, g.span(), "a case guard is a conjunction of atoms, negations, comparisons and temporal builtins");
+                        }
+                    }
+                    let n0 = self.refs.len();
+                    self.schedule(&b.guard, in_agg);
+                    // Later branches negate this guard: its atoms must be closed.
+                    if guarded {
+                        for r in self.refs[n0..].iter_mut() {
+                            if r.polarity == Polarity::Positive {
+                                r.in_case_guard = true;
+                            }
+                        }
+                    }
+                    if let Some(t) = self.expr_ty(&b.value) {
+                        let t = if t == Ty::IntLit { Ty::scalar() } else { t };
+                        match &ty {
+                            None => ty = Some(t),
+                            Some(prev) => {
+                                if !compat(prev, &t) {
+                                    self.err(Code::T, b.span, format!("the branches of the case form give `{}` different types: {} and {}", var, prev, t));
+                                }
+                            }
+                        }
+                    }
+                }
+                self.vars = saved;
+                if let Some(e) = otherwise {
+                    if let Some(t) = self.expr_ty(e) {
+                        let t = if t == Ty::IntLit { Ty::scalar() } else { t };
+                        match &ty {
+                            None => ty = Some(t),
+                            Some(prev) => {
+                                if !compat(prev, &t) {
+                                    self.err(Code::T, e.span(), format!("the `else` branch gives `{}` type {}, and the branches give {}", var, t, prev));
+                                }
+                            }
+                        }
+                    }
+                }
+                self.bind(var, ty, TimeProv::Other);
+            }
+        }
+    }
+
+    /// W7: a calendar window's `min K` beyond the bars its duration can
+    /// hold on the rule's calendar.
+    fn window_sanity(&mut self, dur: &Expr, min: &Expr, span: Span) {
+        let d = match dur {
+            Expr::Lit(Lit::Duration(d), _) => Some(*d),
+            Expr::Param(p, _) => match self.cx.params.get(p).map(|p| &p.value) {
+                Some(Lit::Duration(d)) => Some(*d),
+                _ => None,
+            },
+            _ => None,
+        };
+        let k = match min {
+            Expr::Lit(Lit::Int(k), _) => Some(*k),
+            Expr::Param(p, _) => match self.cx.params.get(p).map(|p| &p.value) {
+                Some(Lit::Int(k)) => Some(*k),
+                _ => None,
+            },
+            _ => None,
+        };
+        let (Some(d), Some(k)) = (d, k) else { return };
+        let bar_secs: i64 = match &self.cal {
+            Cal::Base => self.cx.base.seconds().unwrap_or(86_400),
+            Cal::Days | Cal::Sessions | Cal::SessionsOf(_) => 86_400,
+            Cal::Weeks(n) => *n as i64 * 7 * 86_400,
+            Cal::Months(n) => *n as i64 * 28 * 86_400,
+            Cal::Years(n) => *n as i64 * 365 * 86_400,
+        };
+        let bars = d.max_secs() / bar_secs.max(1);
+        if k > bars {
+            self.err(
+                Code::W7,
+                span,
+                format!(
+                    "`min {}` exceeds the {} bars a window of {} can hold on calendar `{}`; the aggregate never has enough rows (use `rows[{}]` for a count of the entity's rows)",
+                    k,
+                    bars,
+                    d,
+                    self.cx.cal_name(&self.cal),
+                    k
+                ),
+            );
+        }
+    }
+
+    // ---- atoms ----
+
+    fn atom(&mut self, atom: &Atom, ctx: AtomCtx) -> Option<()> {
+        let Some(sig) = self.cx.relations.get(&atom.name).cloned() else {
+            for t in &atom.terms {
+                if let Term::Var(v, _) = t {
+                    if !self.is_bound(v) {
+                        self.bind(v, None, TimeProv::Unknown);
+                    }
                 }
             }
             return None;
@@ -333,11 +968,27 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             self.err(Code::T, atom.span, format!("`{}` takes {} arguments, {} given", atom.name, sig.args.len(), atom.terms.len()));
             return None;
         }
-        let mut fresh = Vec::new();
-        let mut key_prov = TimeProv::Other;
-        let head_time = self.head_time.clone();
-        for (term, arg) in atom.terms.iter().zip(sig.args.iter()) {
-            let is_key = arg.mode == Mode::Key;
+        let key_pos = sig.key_pos();
+        let mut key_prov = TimeProv::Unknown;
+        let negative = ctx == AtomCtx::Negative;
+        // The key's provenance first: the Timestamp outputs' derives from it.
+        let pre_key_prov: TimeProv = match key_pos.and_then(|k| atom.terms.get(k)) {
+            Some(Term::Var(v, _)) => match self.vars.get(v) {
+                Some(st) => st.prov,
+                None => match ctx {
+                    AtomCtx::AsOf(p) => p,
+                    _ => TimeProv::Other,
+                },
+            },
+            Some(Term::Wild(_)) => match ctx {
+                AtomCtx::AsOf(p) => p,
+                _ => TimeProv::Unknown,
+            },
+            _ => TimeProv::Unknown,
+        };
+        let out_prov: Vec<Option<TimeProv>> = self.cx.out_prov.get(&atom.name).cloned().unwrap_or_default();
+        for (i, (arg, term)) in sig.args.iter().zip(&atom.terms).enumerate() {
+            let is_key = Some(i) == key_pos;
             match term {
                 Term::Var(v, sp) => {
                     if let Some(st) = self.vars.get(v).cloned() {
@@ -346,87 +997,68 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 self.err(Code::T, *sp, format!("argument `{}` of `{}` is {} but `{}` is {}", arg.name, atom.name, arg.ty, v, t));
                             }
                         }
-                        if is_key && ctx == AtomCtx::AsOf {
-                            self.err(
-                                Code::X,
-                                *sp,
-                                format!(
-                                    "the temporal key `{}` of `{} asof ...` is bound by the join to the latest key at or before the as-of time; write a fresh variable or `_` there",
-                                    v, atom.name
-                                ),
-                            );
-                        }
                         if is_key {
                             key_prov = st.prov;
+                            // The calendar of the key against the relation's.
+                            if let Some(c) = self.cals.get(v) {
+                                if *c != sig.cal && !(c.is_sessions() && sig.cal.is_sessions()) && !matches!(ctx, AtomCtx::AsOf(_)) {
+                                    self.err(
+                                        Code::X,
+                                        *sp,
+                                        format!(
+                                            "`{}` is on calendar `{}`, and its key `{}` here is on `{}`",
+                                            atom.name,
+                                            self.cx.cal_name(&sig.cal),
+                                            v,
+                                            self.cx.cal_name(c)
+                                        ),
+                                    );
+                                }
+                            }
                         }
+                    } else if negative {
+                        self.err(
+                            Code::B,
+                            *sp,
+                            format!("variable `{}` in `not {}(...)` is unbound; a negated atom's variables are bound by positive literals", v, atom.name),
+                        );
+                        return None;
                     } else {
-                        if ctx == AtomCtx::Negative {
-                            self.err(
-                                Code::B,
-                                *sp,
-                                format!(
-                                    "variable `{}` is unbound in negated atom `not {}`; every variable of a negated atom must be bound before it",
-                                    v, atom.name
-                                ),
-                            );
-                        } else if arg.mode == Mode::In {
-                            // A resample groups a stored relation by its entity
-                            // columns (section 4), so a fresh entity variable in
-                            // a `+` position is bound by the grouping; a derived
-                            // relation is a call and must have its inputs bound.
-                            let grouped = ctx == AtomCtx::ResampleInner && arg.ty.is_entity();
-                            let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
-                            if grouped && !stored {
-                                self.err(
-                                    Code::M,
-                                    *sp,
-                                    format!(
-                                        "`+{}` of `{}` is an input, and `{}` is a derived relation, so `{}` must be bound before the resample; a resample groups only a stored relation by a fresh entity variable (or declare `{}` with `-{}`)",
-                                        arg.name, atom.name, atom.name, v, atom.name, arg.name
-                                    ),
-                                );
-                            } else if !grouped {
-                                self.err(
-                                    Code::M,
-                                    *sp,
-                                    format!("`+{}` of `{}` is an input and must be bound before the call, but `{}` is unbound here", arg.name, atom.name, v),
-                                );
-                            }
-                        }
                         let prov = if is_key {
-                            if ctx == AtomCtx::AsOf {
-                                self.asof_prov
-                            } else if head_time.as_deref() == Some(v.as_str()) && ctx != AtomCtx::ResampleInner {
-                                TimeProv::Head
-                            } else if let Some(p) = self.pending_windows.get(v) {
-                                *p
-                            } else {
-                                TimeProv::Other
+                            match ctx {
+                                AtomCtx::AsOf(p) => p,
+                                _ => TimeProv::Other,
                             }
+                        } else if arg.ty == Ty::Timestamp {
+                            Self::output_prov(pre_key_prov, out_prov.get(i).copied().flatten())
                         } else {
                             TimeProv::Other
                         };
                         self.bind(v, Some(arg.ty.clone()), prov);
-                        fresh.push(v.clone());
                         if is_key {
                             key_prov = prov;
                         }
                     }
                 }
                 Term::Wild(sp) => {
-                    if arg.mode == Mode::In {
-                        self.err(Code::M, *sp, format!("`_` is permitted only in `-` positions; `+{}` of `{}` is an input", arg.name, atom.name));
-                    } else if is_key && ctx == AtomCtx::AsOf {
-                        key_prov = self.asof_prov;
-                    } else if is_key && ctx != AtomCtx::ResampleInner {
+                    if is_key && !matches!(ctx, AtomCtx::AsOf(_)) {
+                        self.err(Code::F, *sp, format!("the temporal key of `{}` must be a variable derived from the head time, not `_`", atom.name));
+                    }
+                    if is_key {
+                        if let AtomCtx::AsOf(p) = ctx {
+                            key_prov = p;
+                        }
+                    }
+                }
+                Term::Lit(l, sp) => {
+                    if is_key {
                         self.err(
                             Code::F,
                             *sp,
-                            format!("the temporal key of `{}` may not be a wildcard; bind it to the head time or a causal builtin of it", atom.name),
+                            format!("the temporal key of `{}` must be a variable derived from the head time, not a literal", atom.name),
                         );
-                    }
-                    if ctx == AtomCtx::ResampleInner && is_key {
-                        self.err(Code::X, *sp, "the inner temporal key of a resample must be a fresh variable, not `_`");
+                    } else {
+                        self.check_lit_type(&arg.ty, l, *sp, &format!("argument `{}` of `{}`", arg.name, atom.name));
                     }
                 }
                 Term::Param(p, sp) => {
@@ -435,230 +1067,134 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                             self.err(Code::T, *sp, format!("argument `{}` of `{}` is {} but parameter `{}` is {}", arg.name, atom.name, arg.ty, p, pt));
                         }
                     }
-                    if is_key {
-                        self.err(Code::F, *sp, format!("the temporal key of `{}` must be a variable derived from the head time", atom.name));
-                    }
-                }
-                Term::Lit(l, sp) => {
-                    self.check_lit_type(&arg.ty, l, *sp, &format!("argument `{}` of `{}`", arg.name, atom.name));
-                    if is_key {
-                        self.err(Code::F, *sp, format!("the temporal key of `{}` must be a variable derived from the head time", atom.name));
-                    }
                 }
                 Term::Ctor(c, subs, sp) => {
                     if arg.ty != Ty::Decision {
                         self.err(Code::T, *sp, format!("argument `{}` of `{}` is {}, not a decision", arg.name, atom.name, arg.ty));
                         continue;
                     }
-                    self.ctor(c, subs, *sp, ctx == AtomCtx::Negative || arg.mode == Mode::In, arg.mode == Mode::In, false);
-                    // WF-9 (C): `decided` holds only this strategy's own
-                    // decisions, so a pattern with the other mode's
-                    // constructor can never match (adv-18). A library has no
-                    // mode: its patterns are judged by each strategy that
-                    // reaches them, in `Checker::program_checks`.
-                    if atom.name == "decided" && self.rule.unit == self.cx.root.name {
-                        if let (Some(mode), Some(m)) = (self.cx.mode, ctor_mode(c)) {
-                            if m != mode {
-                                self.err(
-                                    Code::C,
-                                    *sp,
-                                    format!(
-                                        "`{}` is a {} constructor but this strategy declares `mode {}`; `decided` holds only this strategy's own decisions, so `decided({}, {}(...))` can never match",
-                                        c, m, mode, atom.terms[0], c
-                                    ),
-                                );
-                            }
-                        }
-                    }
+                    self.ctor_pattern(c, subs, *sp, negative);
                 }
             }
         }
-        if ctx != AtomCtx::ResampleInner {
-            if let Some(k) = sig.key_pos() {
-                let kterm = &atom.terms[k];
-                if let Term::Var(v, sp) = kterm {
-                    let head_t = self.head_time.clone().unwrap_or_default();
-                    match key_prov {
-                        // The head time itself, bound somewhere other than a
-                        // key position: `head()` reports that once, so no
-                        // "`T` is not derived from `T`" here.
-                        TimeProv::Other if *v == head_t => {}
-                        TimeProv::Unknown => {}
-                        TimeProv::Other => self.err(
-                            Code::F,
-                            *sp,
-                            format!(
-                                "temporal key `{}` of `{}` is not derived from the head time `{}`; bind it first with prev, lag, window or prior_window of `{}`",
-                                v, atom.name, head_t, head_t
-                            ),
-                        ),
-                        TimeProv::Head | TimeProv::Causal if atom.name == "decided" => self.err(
-                            Code::F,
-                            *sp,
-                            format!(
-                                "`decided` must be read strictly before the head time; `decided({}, ...)` at the rule's own `{}` would let a decision see itself (use prev/lag/prior_window)",
-                                v, head_t
-                            ),
-                        ),
-                        _ => {}
-                    }
-                    if matches!(ctx, AtomCtx::Positive | AtomCtx::InAgg | AtomCtx::AsOf) {
-                        self.key_vars_positive.insert(v.clone());
-                    }
-                }
+        // WF-6: the key is derived from the head time.
+        match key_prov {
+            TimeProv::Other => {
+                let key_var = key_pos.and_then(|k| atom.terms.get(k)).map(|t| t.to_string()).unwrap_or_default();
+                let msg = if ctx == AtomCtx::InAgg {
+                    format!(
+                        "the group's temporal key `{}` of `{}` is unconstrained: the aggregate would run over the whole sample, including bars after the head time `{}`; every temporal key inside a group is the head's bar or bound by rows, window, prior_window, bucket or session of it",
+                        key_var, atom.name, self.head_key
+                    )
+                } else {
+                    format!(
+                        "the temporal key `{}` of `{}` is not derived from the head time `{}`; a rule reads the past through prev, lag, rows, window, bucket or session of `{}`",
+                        key_var, atom.name, self.head_key, self.head_key
+                    )
+                };
+                self.err(Code::F, atom.span, msg);
             }
-            // An as-of join is the one cross-resolution read (section 4):
-            // a tuple keyed at or before T is available by T whatever its
-            // resolution, so WF-10 is not applied to it.
-            if let Some(r) = sig.res.filter(|_| ctx != AtomCtx::AsOf) {
-                if r != self.res {
-                    let head_name = self.rule.head.name.clone();
-                    let kernel_supplied = matches!(sig.kind, Kind::Executor | Kind::KernelState | Kind::Output);
-                    let root = self.cx.root;
-                    let msg = if kernel_supplied && self.rule.unit != root.name {
-                        // An executor relation sits at the decision resolution of
-                        // the strategy being checked (section 6), which a library
-                        // rule cannot see from its own text.
-                        format!(
-                            "`{}` is at {}, the decision resolution of {} `{}`, but this rule (head `{}`) is at {}; library `{}` ({}) can only read executor relations from a {} that decides at {}",
-                            atom.name, r, root.kind, root.name, head_name, self.res, self.rule.unit, self.res, root.kind, self.res
-                        )
-                    } else if kernel_supplied {
-                        format!(
-                            "`{}` is at {}, the decision resolution of {} `{}`, but this rule (head `{}`) is at {}; executor relations are read at the decision resolution only",
-                            atom.name, r, root.kind, root.name, head_name, self.res
-                        )
-                    } else {
-                        format!(
-                            "`{}` is at {} but this rule (head `{}`) is at {}; two resolutions meet only through resample",
-                            atom.name, r, head_name, self.res
-                        )
-                    };
-                    self.err(Code::X, atom.span, msg);
-                }
+            TimeProv::Future => {
+                let key_var = key_pos.and_then(|k| atom.terms.get(k)).map(|t| t.to_string()).unwrap_or_default();
+                self.err(
+                    Code::F,
+                    atom.span,
+                    format!(
+                        "`{}` is the label of the bar's own session, which closes after the bar: it is a value, not a causal key, so `{}` cannot be read at it; read the previous session through `prev({}, S1)`",
+                        key_var, atom.name, key_var
+                    ),
+                );
             }
+            _ => {}
         }
-        let polarity = match ctx {
-            AtomCtx::Positive | AtomCtx::AsOf => Polarity::Positive,
-            AtomCtx::Negative => Polarity::Negative,
-            AtomCtx::InAgg | AtomCtx::Top | AtomCtx::ResampleInner => Polarity::Aggregate,
-        };
+        if atom.name == "decided" && !matches!(key_prov, TimeProv::Strict | TimeProv::Unknown | TimeProv::Other | TimeProv::Future) {
+            self.err(
+                Code::F,
+                atom.span,
+                format!(
+                    "`decided` must be read strictly before the head time `{}`: at the rule's own bar the decision would see itself; bind its time through prev, lag or a prior window",
+                    self.head_key
+                ),
+            );
+        }
         self.refs.push(AtomRef {
             name: atom.name.clone(),
-            polarity,
+            polarity: match ctx {
+                AtomCtx::Negative => Polarity::Negative,
+                AtomCtx::InAgg => Polarity::Aggregate,
+                _ => Polarity::Positive,
+            },
             key_prov,
             span: atom.span,
-            is_top: ctx == AtomCtx::Top,
+            is_top: false,
+            in_case_guard: false,
         });
-        Some(AtomInfo { sig, fresh })
+        Some(())
     }
 
-    /// A decision constructor term, in a head, a `decided` pattern or an atom.
-    /// `must_be_bound`: variables may not be fresh (head, input position,
-    /// negation). `no_wild`: `_` is not a pattern here (head, input position).
-    /// `order_ok`: a trailing order term is allowed (a `decide` head).
-    fn ctor(&mut self, name: &str, subs: &[Term], span: Span, must_be_bound: bool, no_wild: bool, order_ok: bool) {
-        let Some(fields) = ctor_fields(name) else {
-            self.err(
-                Code::C,
-                span,
-                format!("`{}` is not a decision constructor (buy, sell, short, cover, target_weight, target_quantity)", name),
-            );
-            return;
-        };
-        if order_ok && subs.len() == fields.len() + 1 {
-            self.order_term(name, &subs[fields.len()]);
-        } else if subs.len() != fields.len() {
-            let more = if order_ok { " (and an optional order)" } else { "" };
-            self.err(Code::T, span, format!("`{}` takes {} fields{}, {} given", name, fields.len(), more, subs.len()));
+    /// The provenance of a Timestamp output bound by an atom read at a key
+    /// of the given provenance: the relation's rules bind it at or before
+    /// (`out` Causal) or before (Strict) the key, so it is derived from
+    /// the head time through the key.
+    fn output_prov(key: TimeProv, out: Option<TimeProv>) -> TimeProv {
+        match (key, out) {
+            (TimeProv::Unknown, _) => TimeProv::Unknown,
+            (_, None) => TimeProv::Other,
+            (TimeProv::Strict, Some(_)) => TimeProv::Strict,
+            (TimeProv::Head | TimeProv::Causal, Some(TimeProv::Strict)) => TimeProv::Strict,
+            (TimeProv::Head | TimeProv::Causal, Some(_)) => TimeProv::Causal,
+            _ => TimeProv::Other,
+        }
+    }
+
+    /// A decision pattern inside `decided(T0, hold(A, Q))`: binds the
+    /// entity and the amount.
+    fn ctor_pattern(&mut self, name: &str, subs: &[Term], span: Span, negative: bool) {
+        if name != "hold" && name != "trade" {
+            self.err(Code::T, span, format!("`{}` is not a decision constructor (hold, trade)", name));
             return;
         }
-        for (sub, fty) in subs.iter().zip(fields.iter()) {
-            match sub {
+        if subs.len() < 2 || subs.len() > 3 {
+            self.err(Code::T, span, format!("`{}` takes an instrument and an amount, with an optional order", name));
+            return;
+        }
+        for (i, s) in subs.iter().enumerate().take(2) {
+            let ty = if i == 0 {
+                Some(Ty::Entity)
+            } else if name == "trade" {
+                Some(Ty::Quantity(Dim::shares()))
+            } else {
+                None
+            };
+            match s {
                 Term::Var(v, sp) => {
                     if let Some(st) = self.vars.get(v).cloned() {
-                        if let Some(t) = &st.ty {
-                            if !compat(fty, t) {
-                                self.err(Code::T, *sp, format!("field of `{}` is {} but `{}` is {}", name, fty, v, t));
+                        if let (Some(exp), Some(t)) = (&ty, &st.ty) {
+                            if !compat(exp, t) {
+                                self.err(Code::T, *sp, format!("field of `{}` is {} but `{}` is {}", name, exp, v, t));
                             }
                         }
-                    } else if must_be_bound {
-                        self.err(Code::B, *sp, format!("variable `{}` is unbound in `{}(...)`", v, name));
-                        self.bind(v, Some(fty.clone()), TimeProv::Other);
+                    } else if negative {
+                        self.err(Code::B, *sp, format!("variable `{}` is unbound in `{}(...)` under a negation", v, name));
                     } else {
-                        self.bind(v, Some(fty.clone()), TimeProv::Other);
+                        self.bind(v, ty.clone(), TimeProv::Other);
                     }
                 }
-                Term::Wild(sp) => {
-                    if no_wild {
-                        self.err(Code::B, *sp, format!("`_` is not permitted in a decision value here; every field of `{}` must be bound", name));
+                Term::Wild(_) => {}
+                Term::Lit(l, sp) => {
+                    if let Some(exp) = &ty {
+                        self.check_lit_type(exp, l, *sp, &format!("field of `{}`", name));
                     }
                 }
                 Term::Param(p, sp) => {
-                    if let Some(pt) = self.param_ty(p, *sp) {
-                        if !compat(fty, &pt) {
-                            self.err(Code::T, *sp, format!("field of `{}` is {} but parameter `{}` is {}", name, fty, p, pt));
+                    if let (Some(pt), Some(exp)) = (self.param_ty(p, *sp), &ty) {
+                        if !compat(exp, &pt) {
+                            self.err(Code::T, *sp, format!("field of `{}` is {} but parameter `{}` is {}", name, exp, p, pt));
                         }
                     }
                 }
-                Term::Lit(l, sp) => self.check_lit_type(fty, l, *sp, &format!("field of `{}`", name)),
                 Term::Ctor(_, _, sp) => self.err(Code::T, *sp, "decision constructors do not nest"),
             }
-        }
-    }
-
-    /// The order term of a decision in a `decide` head (section 6, order
-    /// types): `market`, `moo`, `moc`, or `limit(P[, TIF])` / `stop(P[, TIF])`
-    /// with P a bound price and TIF one of `day`, `gtc`, `bars(N)`.
-    fn order_term(&mut self, ctor: &str, term: &Term) {
-        let shape = "an order is `market`, `moo`, `moc`, `moo_moc`, `limit(P)`, `stop(P)`, or `limit`/`stop` with a time in force (`day`, `gtc`, `bars(N)`)";
-        match term {
-            Term::Param(p, _) if matches!(p.as_str(), "market" | "moo" | "moc" | "moo_moc") => {}
-            Term::Ctor(c, subs, sp) if c == "limit" || c == "stop" => {
-                if subs.is_empty() || subs.len() > 2 {
-                    self.err(Code::T, *sp, format!("`{}` takes a price and an optional time in force; {}", c, shape));
-                    return;
-                }
-                let price = Ty::Quantity(Dim::price("USD"));
-                match &subs[0] {
-                    Term::Var(v, vsp) => match self.vars.get(v).cloned() {
-                        Some(st) => {
-                            if let Some(t) = &st.ty {
-                                if !compat(&price, t) {
-                                    self.err(Code::T, *vsp, format!("the price of `{}` in `{}(...)` is {}, not a Price", c, ctor, t));
-                                }
-                            }
-                        }
-                        None => self.err(Code::B, *vsp, format!("variable `{}` is unbound in `{}(...)`", v, c)),
-                    },
-                    Term::Param(p, psp) => {
-                        if let Some(pt) = self.param_ty(p, *psp) {
-                            if !compat(&price, &pt) {
-                                self.err(Code::T, *psp, format!("the price of `{}` is {} but parameter `{}` is {}", c, price, p, pt));
-                            }
-                        }
-                    }
-                    Term::Lit(l, lsp) => self.check_lit_type(&price, l, *lsp, &format!("the price of `{}`", c)),
-                    other => self.err(Code::T, other.span(), format!("the price of `{}` must be a variable, a parameter or a literal", c)),
-                }
-                match subs.get(1) {
-                    None => {}
-                    Some(Term::Param(t, _)) if t == "day" || t == "gtc" => {}
-                    Some(Term::Ctor(b, n, bsp)) if b == "bars" => match n.as_slice() {
-                        [Term::Lit(l, lsp)] => self.check_lit_type(&Ty::Count, l, *lsp, "the bars of a time in force"),
-                        [Term::Param(p, psp)] => {
-                            if let Some(pt) = self.param_ty(p, *psp) {
-                                if !compat(&Ty::Count, &pt) {
-                                    self.err(Code::T, *psp, format!("`bars({})` takes a Count, and `{}` is {}", p, p, pt));
-                                }
-                            }
-                        }
-                        _ => self.err(Code::T, *bsp, "`bars(N)` takes a Count literal or parameter"),
-                    },
-                    Some(other) => self.err(Code::T, other.span(), format!("`{}` is not a time in force (`day`, `gtc`, `bars(N)`)", other)),
-                }
-            }
-            other => self.err(Code::T, other.span(), format!("`{}` in `{}(...)`: {}", other, ctor, shape)),
         }
     }
 
@@ -670,18 +1206,15 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     self.err(
                         Code::B,
                         *sp,
-                        format!(
-                            "variable `{}` is unbound at this point; body literals are read left to right, so bind it with a positive atom, an assignment or a temporal builtin before use",
-                            v
-                        ),
+                        format!("variable `{}` is unbound here; bind it with an atom, an assignment or a temporal builtin first", v),
                     );
                     None
                 }
             },
             Expr::Param(p, sp) => self.param_ty(p, *sp),
             Expr::Lit(l, _) => Some(l.ty()),
-            Expr::Neg(inner, sp) => {
-                let t = self.expr_ty(inner)?;
+            Expr::Neg(a, sp) => {
+                let t = self.expr_ty(a)?;
                 match neg_type(&t) {
                     Ok(t) => Some(t),
                     Err(m) => {
@@ -703,20 +1236,13 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 }
             }
             Expr::Call(f, args, sp) => {
-                let mut tys = Vec::new();
-                let mut ok = true;
-                for a in args {
-                    if self.str_without_context(a) {
-                        ok = false;
-                        continue;
-                    }
-                    match self.expr_ty(a) {
-                        Some(t) => tys.push(t),
-                        None => ok = false,
-                    }
-                }
-                if !ok {
+                if !SCALAR_FUNCTIONS.contains(&f.as_str()) {
+                    self.err(Code::U, *sp, format!("`{}` is not a function ({})", f, SCALAR_FUNCTIONS.join(", ")));
                     return None;
+                }
+                let mut tys = Vec::new();
+                for a in args {
+                    tys.push(self.expr_ty(a)?);
                 }
                 match call_type(f, &tys) {
                     Ok(t) => Some(t),
@@ -737,6 +1263,30 @@ impl<'c, 'a> Analyzer<'c, 'a> {
         }
     }
 
+    fn entity_term(&mut self, t: &Term, what: &str) {
+        match t {
+            Term::Var(v, sp) => match self.vars.get(v).cloned() {
+                Some(st) => {
+                    if let Some(ty) = st.ty {
+                        if !ty.is_entity() {
+                            self.err(Code::T, *sp, format!("{} must be an instrument, but `{}` is {}", what, v, ty));
+                        }
+                    }
+                }
+                None => self.err(Code::B, *sp, format!("variable `{}` is unbound; {} must be bound", v, what)),
+            },
+            Term::Param(p, sp) => {
+                if let Some(pt) = self.param_ty(p, *sp) {
+                    if !pt.is_entity() {
+                        self.err(Code::T, *sp, format!("{} must be an instrument, but parameter `{}` is {}", what, p, pt));
+                    }
+                }
+            }
+            Term::Lit(Lit::Str(_), sp) => self.resolve_str(*sp, &Ty::Entity),
+            other => self.err(Code::T, other.span(), format!("{} must be an instrument", what)),
+        }
+    }
+
     fn time_var_bound(&mut self, t: &Term, what: &str) -> Option<String> {
         match t {
             Term::Var(v, sp) => match self.vars.get(v).cloned() {
@@ -754,7 +1304,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                     None
                 }
             },
-            t => {
+            _ => {
                 self.err(Code::T, t.span(), format!("{} must be a Timestamp variable, found `{}`", what, t));
                 None
             }
@@ -770,442 +1320,25 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 }
                 Some(v.clone())
             }
-            t => {
+            _ => {
                 self.err(Code::T, t.span(), format!("{} is bound by the builtin and must be a fresh variable, found `{}`", what, t));
                 None
             }
         }
     }
 
-    fn literal(&mut self, lit: &Literal, in_agg: bool) {
-        match lit {
-            Literal::Atom(a) => {
-                self.atom(a, if in_agg { AtomCtx::InAgg } else { AtomCtx::Positive });
-            }
-            Literal::Neg(a) => {
-                if in_agg {
-                    self.err(
-                        Code::B,
-                        a.span,
-                        "an aggregation's group is a conjunction of positive atoms and temporal constraints; negation is not permitted inside it",
-                    );
-                }
-                self.atom(a, AtomCtx::Negative);
-            }
-            Literal::AsOf { atom, at, .. } => {
-                // WF-6: the key the join binds is at or before the as-of
-                // time, so it inherits that time's provenance (causal, or
-                // strict when the time is itself strictly before T).
-                let head_t = self.head_time.clone().unwrap_or_default();
-                let base = self.time_var_bound(at, "the time of an as-of join");
-                self.asof_prov = match base {
-                    None => TimeProv::Unknown,
-                    Some(b) => match self.prov_of(&b) {
-                        TimeProv::Other if b == head_t => TimeProv::Causal,
-                        TimeProv::Other => {
-                            self.err(
-                                Code::F,
-                                at.span(),
-                                format!(
-                                    "the as-of time `{}` of `{} asof {}` is not derived from the head time `{}`; bind it first with prev, lag, window or prior_window of `{}`",
-                                    b, atom.name, b, head_t, head_t
-                                ),
-                            );
-                            TimeProv::Unknown
-                        }
-                        p => Self::derived_prov(p, false),
-                    },
-                };
-                self.atom(atom, AtomCtx::AsOf);
-                self.asof_prov = TimeProv::Other;
-            }
-            Literal::Builtin(b, span) => match b {
-                // The last argument of prev and lag is an output (section 4,
-                // "Binds"): a fresh variable, or `_` when only the existence
-                // of the earlier bar matters (WF-2 permits `_` in `-` positions).
-                Builtin::Prev { t, t1 } => {
-                    let base = self.time_var_bound(t, "the first argument of prev");
-                    if matches!(t1, Term::Wild(_)) {
-                        return;
-                    }
-                    if let Some(v) = self.time_var_fresh(t1, "the second argument of prev") {
-                        let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), true)).unwrap_or(TimeProv::Other);
-                        self.bind(&v, Some(Ty::Timestamp), prov);
-                    }
-                    let _ = span;
-                }
-                Builtin::Lag { t, n, t1 } => {
-                    let base = self.time_var_bound(t, "the first argument of lag");
-                    self.expect_expr(n, |t| *t == Ty::Duration, "a Duration");
-                    // lag by a zero duration lands on T itself: causal, not strict.
-                    let zero = match n {
-                        Expr::Lit(Lit::Duration(d), _) => d.is_zero(),
-                        Expr::Param(p, _) => {
-                            let unit = self.rule.unit.clone();
-                            matches!(self.cx.params.get(&unit).and_then(|m| m.get(p)).map(|p| &p.value), Some(Lit::Duration(d)) if d.is_zero())
-                        }
-                        _ => false,
-                    };
-                    if matches!(t1, Term::Wild(_)) {
-                        return;
-                    }
-                    if let Some(v) = self.time_var_fresh(t1, "the third argument of lag") {
-                        let prov = base.map(|b| Self::derived_prov(self.prov_of(&b), !zero)).unwrap_or(TimeProv::Other);
-                        self.bind(&v, Some(Ty::Timestamp), prov);
-                    }
-                }
-                Builtin::MonthStart { t } => {
-                    self.time_var_bound(t, "the argument of month_start");
-                }
-                Builtin::DayStart { t } => {
-                    self.time_var_bound(t, "the argument of day_start");
-                }
-            },
-            Literal::Window { var, kind, base, dur, min, span } => {
-                if !in_agg {
-                    self.err(
-                        Code::B,
-                        *span,
-                        "`T1 in window(...)` binds T1 only inside an aggregation (`X = agg(e) over (...)`); outside one use prev or lag",
-                    );
-                }
-                let b = self.time_var_bound(base, "the base of the window");
-                if *kind == WindowKind::Rows {
-                    self.expect_expr(dur, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the number of rows)");
-                } else {
-                    self.expect_expr(dur, |t| *t == Ty::Duration, "a Duration");
-                }
-                self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum observation count)");
-                let strict = *kind == WindowKind::Prior;
-                let prov = b.map(|b| Self::derived_prov(self.prov_of(&b), strict)).unwrap_or(TimeProv::Other);
-                match var {
-                    // Already bound by an earlier atom of this conjunction: the window is its constraint.
-                    Term::Var(v, _) if self.pending_windows.contains_key(v) && self.is_bound(v) => {
-                        if let Some(st) = self.vars.get_mut(v) {
-                            st.prov = prov;
-                        }
-                    }
-                    _ => {
-                        if let Some(v) = self.time_var_fresh(var, "a window") {
-                            self.bind(&v, Some(Ty::Timestamp), prov);
-                        }
-                    }
-                }
-            }
-            Literal::Cmp { op, lhs, rhs, span } => {
-                let tl = self.expr_ty(lhs);
-                let tr = self.expr_ty(rhs);
-                if let (Some(tl), Some(tr)) = (tl, tr) {
-                    if let Err(m) = cmp_ok(*op, &tl, &tr) {
-                        self.err(Code::T, *span, format!("in `{} {} {}`: {}", lhs, op, rhs, m));
-                    } else {
-                        self.resolve_cmp_strs(lhs, &tl, rhs, &tr);
-                    }
-                }
-            }
-            Literal::Assign { var, expr, span } => {
-                if let Some(st) = self.vars.get(var).cloned() {
-                    // Already bound: a comparison on equality.
-                    if let (Some(tv), Some(te)) = (st.ty, self.expr_ty(expr)) {
-                        if let Err(m) = cmp_ok(CmpOp::Eq, &tv, &te) {
-                            self.err(Code::T, *span, format!("in `{} = {}`: {}", var, expr, m));
-                        } else if let Expr::Lit(Lit::Str(_), sp) = expr {
-                            self.resolve_str(*sp, &tv);
-                        }
-                    }
-                } else if self.str_without_context(expr) {
-                    self.bind(var, None, TimeProv::Other);
-                } else {
-                    let t = self.expr_ty(expr);
-                    // A bound time may be copied into a value column (`TE = T`,
-                    // section 2: non-key timestamps are ordinary values); it is
-                    // not computed, so anything else of type Timestamp is an
-                    // error. The copy has no provenance: using it as a key is F.
-                    if t == Some(Ty::Timestamp) && !matches!(expr, Expr::Var(..)) {
-                        self.err(
-                            Code::T,
-                            *span,
-                            "a Timestamp cannot be computed; copy a bound time with `X = T` or bind times with prev, lag, window or prior_window",
-                        );
-                    }
-                    self.bind(var, t, TimeProv::Other);
-                }
-            }
-            Literal::Agg { var, agg, args, conj, span } => {
-                if in_agg {
-                    self.err(Code::B, *span, "aggregations do not nest; compute the inner aggregate in its own relation");
-                }
-                if self.is_bound(var) {
-                    self.err(Code::B, *span, format!("aggregate result `{}` is already bound", var));
-                }
-                let saved = self.vars.clone();
-                // Register the conjunction's window variables up front, so that
-                // an atom written before its window (section 4's bivariate
-                // example) is judged by the window's provenance.
-                let saved_pending = std::mem::take(&mut self.pending_windows);
-                for l in conj {
-                    if let Literal::Window {
-                        var: Term::Var(v, _),
-                        kind,
-                        base: Term::Var(b, _),
-                        ..
-                    } = l
-                    {
-                        if !self.is_bound(v) {
-                            let prov = if self.is_bound(b) {
-                                Self::derived_prov(self.prov_of(b), *kind == WindowKind::Prior)
-                            } else {
-                                TimeProv::Other
-                            };
-                            self.pending_windows.insert(v.clone(), prov);
-                        }
-                    }
-                }
-                for l in conj {
-                    self.literal(l, true);
-                }
-                self.pending_windows = saved_pending;
-                let mut tys = Vec::new();
-                let mut ok = true;
-                for a in args {
-                    match self.expr_ty(a) {
-                        Some(t) => tys.push(t),
-                        None => ok = false,
-                    }
-                }
-                self.vars = saved;
-                let rty = if !ok {
-                    None
-                } else if agg == "first" || agg == "last" {
-                    self.err(
-                        Code::D,
-                        *span,
-                        format!(
-                            "`{}` is ordered only by the fine temporal key inside a resample; over an arbitrary group it is not deterministic, so name a total order (top with by) or use max/min",
-                            agg
-                        ),
-                    );
-                    None
-                } else {
-                    match agg_type(agg, &tys) {
-                        Ok(t) => Some(t),
-                        Err(m) => {
-                            self.err(Code::T, *span, format!("in `{} = {}(...)`: {}", var, agg, m));
-                            None
-                        }
-                    }
-                };
-                self.bind(var, rty, TimeProv::Other);
-            }
-            Literal::Top { n, atom, by, rank, span } => {
-                if in_agg {
-                    self.err(Code::B, *span, "a reduction is not permitted inside an aggregation");
-                }
-                if let Some(n) = n {
-                    self.expect_expr(n, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count");
-                }
-                if let Some(sig) = self.cx.relations.get(&atom.name).cloned() {
-                    if let Some(k) = sig.key_pos() {
-                        if let Term::Var(v, sp) = &atom.terms[k] {
-                            if !self.is_bound(v) {
-                                self.err(Code::D, *sp, format!("the temporal key `{}` of `{}` must be bound before the reduction: top keeps N tuples per group of bound outer variables, and the group is one bar (bind `{}` with a positive atom such as `bar({})` first)", v, atom.name, v, v));
-                            }
-                        }
-                    }
-                }
-                let info = self.atom(atom, AtomCtx::Top);
-                let Some(by) = by else {
-                    self.err(
-                        Code::D,
-                        *span,
-                        format!(
-                            "`top` over `{}` names no order; every reduction needs `by (k1 asc|desc, ..., tie-break)` so that evaluation is deterministic",
-                            atom.name
-                        ),
-                    );
-                    return;
-                };
-                let Some(info) = info else { return };
-                let atom_vars: HashSet<String> = atom.terms.iter().filter_map(|t| if let Term::Var(v, _) = t { Some(v.clone()) } else { None }).collect();
-                let key_names: HashSet<String> = by.iter().map(|(k, _, _)| k.clone()).collect();
-                for (k, _, ksp) in by {
-                    if !atom_vars.contains(k) {
-                        self.err(
-                            Code::D,
-                            *ksp,
-                            format!("order key `{}` is not bound by `{}`; every key must be a variable of the reduced atom", k, atom.name),
-                        );
-                    }
-                }
-                // W4: when no identity column is fresh, the group is one tuple
-                // per identity and the reduction keeps everything (section 4).
-                let identity = info.sig.identity_positions();
-                let none_fresh = identity.iter().all(|&pos| !matches!(&atom.terms[pos], Term::Var(v, _) if info.fresh.contains(v)));
-                if none_fresh {
-                    let head = self.rule.head.name.clone();
-                    self.err(
-                        Code::W4,
-                        *span,
-                        format!(
-                            "`top` over `{}` keeps every tuple: all of its identity columns are bound by the outer rule (the head `{}` declares its entity `+`, or an earlier literal binds it), so N and `by` have no effect; declare the entity `-` in the head or bind fewer columns before the reduction",
-                            atom.name, head
-                        ),
-                    );
-                }
-                if let Some((k, _, ksp)) = rank {
-                    if self.vars.contains_key(k) {
-                        self.err(Code::B, *ksp, format!("the rank `{}` must be a fresh variable", k));
-                    } else {
-                        self.bind(k, Some(Ty::scalar()), TimeProv::Other);
-                    }
-                }
-                // Averaged ties need no total order: the rank of a run of
-                // equal keys does not depend on how the run is ordered.
-                let identity = if matches!(rank, Some((_, Ties::Average, _))) { Vec::new() } else { identity };
-                for pos in identity {
-                    let arg = &info.sig.args[pos];
-                    match &atom.terms[pos] {
-                        Term::Var(v, _) if info.fresh.contains(v) && !key_names.contains(v) => {
-                            self.err(
-                                Code::D,
-                                *span,
-                                format!(
-                                    "the order is not total: identity column `{}` of `{}` (bound here as `{}`) is not among the keys; add `{} asc` as the tie-break",
-                                    arg.name, atom.name, v, v
-                                ),
-                            );
-                        }
-                        Term::Wild(sp) => {
-                            self.err(
-                                Code::D,
-                                *sp,
-                                format!("identity column `{}` of `{}` may not be `_` in a reduction; name it so the order can be total", arg.name, atom.name),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Literal::Resample { inner, to, as_var, min, aggs, span } => {
-                if in_agg {
-                    self.err(Code::B, *span, "a resample is not permitted inside an aggregation");
-                }
-                if *to != self.res {
-                    self.err(
-                        Code::X,
-                        *span,
-                        format!("resample targets {} but this rule is at {}; a resample produces tuples at the head's resolution", to, self.res),
-                    );
-                }
-                self.expect_expr(min, |t| matches!(t, Ty::Count | Ty::IntLit), "a Count (the minimum bucket count)");
-                let head_t = self.head_time.clone();
-                if head_t.as_deref() != Some(as_var.as_str()) {
-                    self.err(
-                        Code::X,
-                        *span,
-                        format!(
-                            "the bucket label `{}` must be the head's temporal key{}",
-                            as_var,
-                            head_t.map(|h| format!(" `{}`", h)).unwrap_or_default()
-                        ),
-                    );
-                }
-                // An already-bound label (from an earlier atom at the head's
-                // resolution) is an equality constraint on the bucket.
-                let before: HashSet<String> = self.vars.keys().cloned().collect();
-                let info = self.atom(inner, AtomCtx::ResampleInner);
-                let mut locals: Vec<String> = Vec::new();
-                if let Some(info) = &info {
-                    match info.sig.res {
-                        Some(r) if r.finer_than(*to) => {}
-                        Some(r) => self.err(
-                            Code::X,
-                            inner.span,
-                            format!("`{}` is at {}, which is not strictly finer than {}; resample only goes from fine to coarse", inner.name, r, to),
-                        ),
-                        None => {}
-                    }
-                    if let Some(k) = info.sig.key_pos() {
-                        match &inner.terms[k] {
-                            Term::Var(v, _) if info.fresh.contains(v) => locals.push(v.clone()),
-                            Term::Var(v, sp) => self.err(
-                                Code::X,
-                                *sp,
-                                format!("the inner temporal key `{}` of a resample must be a fresh variable; the bucket label `{}` replaces it", v, as_var),
-                            ),
-                            _ => {}
-                        }
-                    }
-                    for (i, arg) in info.sig.args.iter().enumerate() {
-                        if let Term::Var(v, _) = &inner.terms[i] {
-                            if info.fresh.contains(v) && !arg.ty.is_entity() && arg.mode != Mode::Key {
-                                locals.push(v.clone());
-                            }
-                        }
-                    }
-                }
-                let mut results: Vec<(String, Option<Ty>)> = Vec::new();
-                for (x, agg, e) in aggs {
-                    if !RESAMPLE_AGGREGATES.contains(&agg.as_str()) {
-                        self.err(Code::X, *span, format!("`{}` is not a resample aggregate (first, last, max, min, sum, mean, count)", agg));
-                    }
-                    if self.is_bound(x) || before.contains(x) {
-                        self.err(Code::B, *span, format!("resample result `{}` is already bound", x));
-                    }
-                    let t = self.expr_ty(e).and_then(|t| match agg_type(agg, &[t]) {
-                        Ok(t) => Some(t),
-                        Err(m) => {
-                            self.err(Code::T, *span, format!("in `{} = {}(...)`: {}", x, agg, m));
-                            None
-                        }
-                    });
-                    results.push((x.clone(), t));
-                }
-                for l in &locals {
-                    self.vars.remove(l);
-                }
-                self.bind(as_var, Some(Ty::Timestamp), TimeProv::Head);
-                for (x, t) in results {
-                    self.bind(&x, t, TimeProv::Other);
-                }
-            }
-        }
-    }
+    // ---- the head ----
 
-    fn head(&mut self) {
-        let head = self.rule.head.clone();
-        let Some(sig) = self.cx.relations.get(&head.name).cloned() else {
-            self.err(
-                Code::U,
-                head.span,
-                format!("rule defines `{}`, which is not declared; declare it with `rel {}(...)` in `{}`", head.name, head.name, self.rule.unit),
-            );
-            return;
-        };
-        match &sig.kind {
-            Kind::Primitive { env } => {
-                self.err(Code::U, head.span, format!("`{}` is a primitive of environment `{}` and cannot be defined by a rule", head.name, env));
-                return;
-            }
-            Kind::Executor | Kind::KernelState => {
-                self.err(Code::U, head.span, format!("`{}` is kernel-supplied and cannot be defined by a rule", head.name));
-                return;
-            }
-            Kind::Derived { unit } if *unit != self.rule.unit => {
-                self.err(Code::U, head.span, format!("`{}` is declared in `{}`; rules for it belong there", head.name, unit));
-                return;
-            }
-            _ => {}
-        }
-        if head.terms.len() != sig.args.len() {
-            self.err(
-                Code::T,
-                head.span,
-                format!("`{}` takes {} arguments, {} given in the head", head.name, sig.args.len(), head.terms.len()),
-            );
+    fn head(&mut self, sig: &Signature) {
+        let head = &self.rule.head;
+        if head.name == "decide" {
+            self.decide_head(head);
             return;
         }
-        for (term, arg) in head.terms.iter().zip(sig.args.iter()) {
+        // A body that failed a judgment bound its variables as unknown: an
+        // unbound head variable then is that failure, reported once.
+        let judged = !self.errors;
+        for (arg, term) in sig.args.iter().zip(&head.terms) {
             match term {
                 Term::Var(v, sp) => match self.vars.get(v).cloned() {
                     Some(st) => {
@@ -1214,13 +1347,15 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                                 self.err(Code::T, *sp, format!("head argument `{}` of `{}` is {} but `{}` is {}", arg.name, head.name, arg.ty, v, t));
                             }
                         }
-                        if arg.mode == Mode::Key && !matches!(st.prov, TimeProv::Head | TimeProv::Unknown) {
-                            self.err(Code::F, *sp, format!("head temporal key `{}` is not bound in a temporal-key position of a positive body atom (or as a resample bucket); its value would not be the time the tuple becomes available", v));
+                    }
+                    None => {
+                        if judged {
+                            self.err(Code::B, *sp, format!("head variable `{}` is unbound: every head variable must be bound by the body", v));
                         }
                     }
-                    None => self.err(Code::B, *sp, format!("head variable `{}` is unbound: every head variable must be bound by the body", v)),
                 },
                 Term::Wild(sp) => self.err(Code::B, *sp, "`_` is not permitted in a head"),
+                Term::Lit(l, sp) => self.check_lit_type(&arg.ty, l, *sp, &format!("head argument `{}` of `{}`", arg.name, head.name)),
                 Term::Param(p, sp) => {
                     if let Some(pt) = self.param_ty(p, *sp) {
                         if !compat(&arg.ty, &pt) {
@@ -1228,41 +1363,272 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         }
                     }
                 }
-                Term::Lit(l, sp) => self.check_lit_type(&arg.ty, l, *sp, &format!("head argument `{}` of `{}`", arg.name, head.name)),
-                Term::Ctor(c, subs, sp) => {
-                    if arg.ty != Ty::Decision {
-                        self.err(Code::T, *sp, format!("head argument `{}` of `{}` is {}, not a decision", arg.name, head.name, arg.ty));
-                        continue;
-                    }
-                    self.ctor(c, subs, *sp, true, true, head.name == "decide");
-                }
+                Term::Ctor(_, _, sp) => self.err(Code::T, *sp, format!("head argument `{}` of `{}` is {}, not a decision", arg.name, head.name, arg.ty)),
             }
-        }
-        if head.name == "decide" {
-            self.decide_head(&head);
         }
     }
 
-    /// WF-9 (C): decide heads use the declared mode's constructors, and T is
-    /// the temporal key of at least one positive body atom.
+    /// `decide(T, hold(A, W))`: the constructor resolved by the amount's
+    /// type, the order term admissible.
     fn decide_head(&mut self, head: &Atom) {
-        let Some(mode) = self.cx.mode else { return };
-        if let Some(Term::Ctor(c, _, sp)) = head.terms.get(1) {
-            match ctor_mode(c) {
-                Some(m) if m != mode => self.err(Code::C, *sp, format!("`{}` is a {} constructor but the strategy declares `mode {}`", c, m, mode)),
-                _ => {}
-            }
-        } else if let Some(t) = head.terms.get(1) {
+        let Some(Term::Ctor(c, subs, sp)) = head.terms.get(1) else {
+            self.err(Code::T, head.span, "decide's second argument is a decision, `hold(A, W)` or `trade(A, Q)`");
+            return;
+        };
+        if c != "hold" && c != "trade" {
             self.err(
-                Code::C,
-                t.span(),
-                format!("a decide rule's decision must be a constructor of the declared mode ({}), found `{}`", mode.ctors().join(", "), t),
+                Code::T,
+                *sp,
+                format!(
+                    "`{}` is not a decision constructor: write `hold(A, W)` (a target weight), `hold(A, Q)` (a target quantity) or `trade(A, Q)` (a signed delta)",
+                    c
+                ),
             );
+            return;
         }
-        if let Some(Term::Var(t, sp)) = head.terms.first() {
-            if !self.key_vars_positive.contains(t) && self.prov_of(t) != TimeProv::Unknown {
-                self.err(Code::C, *sp, format!("decide's time `{}` must be the temporal key of at least one positive body atom", t));
+        if subs.len() < 2 {
+            self.err(Code::T, *sp, format!("`{}` takes an instrument and an amount", c));
+            return;
+        }
+        self.entity_term(&subs[0], &format!("the instrument of `{}`", c));
+        let amount_ty: Option<Ty> = match &subs[1] {
+            Term::Var(v, vsp) => match self.vars.get(v).cloned() {
+                Some(st) => st.ty,
+                None => {
+                    self.err(Code::B, *vsp, format!("variable `{}` is unbound in `{}(...)`", v, c));
+                    return;
+                }
+            },
+            Term::Param(p, psp) => self.param_ty(p, *psp),
+            Term::Lit(l, _) => Some(l.ty()),
+            other => {
+                self.err(Code::T, other.span(), format!("the amount of `{}` must be a variable, a parameter or a literal", c));
+                return;
             }
+        };
+        let Some(amount_ty) = amount_ty else { return };
+        let resolved = match c.as_str() {
+            "trade" => {
+                if !compat(&Ty::Quantity(Dim::shares()), &amount_ty) {
+                    let hint = self.typed_hint(&Ty::Quantity(Dim::shares()), &Lit::Int(100));
+                    self.err(
+                        Code::T,
+                        subs[1].span(),
+                        format!("the delta of `trade` is a quantity in the class's unit, and `{}` is {}{}", subs[1], amount_ty, hint),
+                    );
+                    return;
+                }
+                "trade"
+            }
+            _ => match &amount_ty {
+                Ty::Quantity(d) if d.is_quantity() => "hold_quantity",
+                Ty::Quantity(d) if d.is_scalar() => "hold_weight",
+                Ty::IntLit | Ty::Count => "hold_weight",
+                other => {
+                    self.err(
+                        Code::T,
+                        subs[1].span(),
+                        format!("the amount of `hold` is a Scalar weight of capital or a quantity in the class's unit, and `{}` is {}", subs[1], other),
+                    );
+                    return;
+                }
+            },
+        };
+        if let Some(order) = subs.get(2) {
+            self.order_term(c, order);
+        }
+        if subs.len() > 3 {
+            self.err(Code::T, *sp, format!("`{}` takes an instrument, an amount and an optional order", c));
+        }
+        self.head_ctor = Some(resolved.to_string());
+    }
+
+    fn order_term(&mut self, ctor: &str, term: &Term) {
+        let shape = "an order is `market`, `moo`, `moc`, `moo_moc`, `limit(P[, TIF])` or `stop(P[, TIF])`";
+        match term {
+            Term::Param(p, sp) => {
+                if !ORDER_KINDS.contains(&p.as_str()) {
+                    self.err(Code::T, *sp, format!("`{}` in `{}(...)` is not an order; {}", p, ctor, shape));
+                }
+            }
+            Term::Ctor(c, args, sp) if c == "limit" || c == "stop" => {
+                if args.is_empty() || args.len() > 2 {
+                    self.err(Code::T, *sp, format!("`{}` takes a price and an optional time in force; {}", c, shape));
+                    return;
+                }
+                let price = Ty::Quantity(Dim::price("USD"));
+                match &args[0] {
+                    Term::Var(v, vsp) => match self.vars.get(v).cloned() {
+                        Some(st) => {
+                            if let Some(t) = st.ty {
+                                if !matches!(&t, Ty::Quantity(d) if d.is_price()) {
+                                    self.err(Code::T, *vsp, format!("the price of `{}` in `{}(...)` is {}, not a Price", c, ctor, t));
+                                }
+                            }
+                        }
+                        None => self.err(Code::B, *vsp, format!("variable `{}` is unbound in `{}(...)`", v, c)),
+                    },
+                    Term::Param(p, psp) => {
+                        if let Some(pt) = self.param_ty(p, *psp) {
+                            if !compat(&price, &pt) {
+                                self.err(Code::T, *psp, format!("the price of `{}` is {} but parameter `{}` is {}", c, price, p, pt));
+                            }
+                        }
+                    }
+                    Term::Lit(l, lsp) => self.check_lit_type(&price, l, *lsp, &format!("the price of `{}`", c)),
+                    other => self.err(Code::T, other.span(), format!("the price of `{}` must be a variable, a parameter or a literal", c)),
+                }
+                match args.get(1) {
+                    None => {}
+                    Some(Term::Param(p, _)) if p == "day" || p == "gtc" => {}
+                    Some(Term::Ctor(b, bargs, bsp)) if b == "bars" => match bargs.first() {
+                        Some(Term::Lit(Lit::Int(_), _)) => {}
+                        Some(Term::Param(p, psp)) => {
+                            if let Some(pt) = self.param_ty(p, *psp) {
+                                if pt != Ty::Count {
+                                    self.err(Code::T, *psp, format!("`bars({})` takes a Count, and `{}` is {}", p, p, pt));
+                                }
+                            }
+                        }
+                        _ => self.err(Code::T, *bsp, "`bars(N)` takes a Count literal or parameter"),
+                    },
+                    Some(other) => self.err(Code::T, other.span(), format!("`{}` is not a time in force (`day`, `gtc`, `bars(N)`)", other)),
+                }
+            }
+            other => self.err(Code::T, other.span(), format!("`{}` in `{}(...)`: {}", other, ctor, shape)),
         }
     }
 }
+
+/// Two rules of one relation are complementary (WF-11) when one holds a
+/// literal the other negates: an atom against `not` of it on the same
+/// identity, a comparison against its negation, an atom of a relation whose
+/// single rule negates an atom the other rule holds, or the recursion's
+/// common guard against its negation at the recursive bar.
+/// A rule's positive atoms, negated atoms and comparisons over variables.
+type RuleAtoms = (Vec<Atom>, Vec<Atom>, Vec<(CmpOp, String, String)>);
+
+pub(crate) fn complementary(cx: &Checker, a: &Rule, b: &Rule) -> bool {
+    let atoms = |r: &Rule| -> RuleAtoms {
+        let mut pos = Vec::new();
+        let mut neg = Vec::new();
+        let mut cmps = Vec::new();
+        for l in &r.body {
+            match l {
+                Literal::Atom(x) | Literal::AsOf { atom: x, .. } => pos.push(x.clone()),
+                Literal::Neg(x) => neg.push(x.clone()),
+                Literal::Cmp { op, lhs, rhs, .. } => cmps.push((*op, lhs.to_string(), rhs.to_string())),
+                _ => {}
+            }
+        }
+        (pos, neg, cmps)
+    };
+    let same_identity = |x: &Atom, y: &Atom| -> bool {
+        if x.name != y.name || x.terms.len() != y.terms.len() {
+            return false;
+        }
+        let Some(sig) = cx.relations.get(&x.name) else { return false };
+        sig.identity_positions().iter().all(|&i| match (&x.terms[i], &y.terms[i]) {
+            (Term::Var(p, _), Term::Var(q, _)) => p == q,
+            (Term::Lit(p, _), Term::Lit(q, _)) => p == q,
+            (Term::Param(p, _), Term::Param(q, _)) => p == q,
+            _ => false,
+        })
+    };
+    let (pa, na, ca) = atoms(a);
+    let (pb, nb, cb) = atoms(b);
+    // (a) an atom against its negation.
+    if pa.iter().any(|x| nb.iter().any(|y| same_identity(x, y))) || pb.iter().any(|x| na.iter().any(|y| same_identity(x, y))) {
+        return true;
+    }
+    // (b) a comparison against its negation.
+    for (op, l, r) in &ca {
+        if cb.iter().any(|(op2, l2, r2)| l2 == l && r2 == r && *op2 == op.negate() && *op != CmpOp::Eq) {
+            return true;
+        }
+    }
+    // (c) an atom of a single-rule relation whose body negates an atom the other holds.
+    let unfold = |pos: &[Atom], other_pos: &[Atom]| -> bool {
+        for x in pos {
+            let rules: Vec<&Rule> = cx.rules.iter().filter(|r| r.head.name == x.name).collect();
+            if rules.len() != 1 {
+                continue;
+            }
+            let r = rules[0];
+            // Map the rule's head variables to the atom's terms.
+            let map: HashMap<String, Term> = r
+                .head
+                .terms
+                .iter()
+                .zip(&x.terms)
+                .filter_map(|(h, t)| if let Term::Var(v, _) = h { Some((v.clone(), t.clone())) } else { None })
+                .collect();
+            for l in &r.body {
+                if let Literal::Neg(n) = l {
+                    let renamed = Atom {
+                        name: n.name.clone(),
+                        terms: n
+                            .terms
+                            .iter()
+                            .map(|t| if let Term::Var(v, _) = t { map.get(v).cloned().unwrap_or(t.clone()) } else { t.clone() })
+                            .collect(),
+                        span: n.span,
+                    };
+                    if other_pos.iter().any(|y| same_identity(&renamed, y)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+    if unfold(&pa, &pb) || unfold(&pb, &pa) {
+        return true;
+    }
+    // (d) the recursion's guard: every rule of the head holds G at the head
+    // time; one rule reads the head at T0 and the other `not G` at T0.
+    let head = &a.head.name;
+    let all_rules: Vec<&Rule> = cx.rules.iter().filter(|r| r.head.name == *head).collect();
+    let key_pos = cx.relations.get(head).and_then(|s| s.key_pos()).unwrap_or(1);
+    let head_key = |r: &Rule| match r.head.terms.get(key_pos) {
+        Some(Term::Var(v, _)) => v.clone(),
+        _ => String::new(),
+    };
+    let common: Vec<Atom> = atoms(all_rules[0])
+        .0
+        .into_iter()
+        .filter(|g| {
+            let hk = head_key(all_rules[0]);
+            let gsig = cx.relations.get(&g.name);
+            let at_head = gsig
+                .and_then(|s| s.key_pos())
+                .and_then(|k| g.terms.get(k))
+                .map(|t| matches!(t, Term::Var(v, _) if *v == hk))
+                .unwrap_or(false);
+            at_head && all_rules.iter().all(|r| atoms(r).0.iter().any(|y| y.name == g.name))
+        })
+        .collect();
+    let guard_pair = |rec: &Rule, neg_rule: &Rule| -> bool {
+        let (rp, _, _) = atoms(rec);
+        let (_, nn, _) = atoms(neg_rule);
+        for x in rp.iter().filter(|x| x.name == *head) {
+            let Some(Term::Var(t0, _)) = x.terms.get(key_pos) else { continue };
+            for g in &common {
+                let Some(gk) = cx.relations.get(&g.name).and_then(|s| s.key_pos()) else { continue };
+                if nn.iter().any(|n| n.name == g.name && matches!(n.terms.get(gk), Some(Term::Var(v, _)) if v == t0)) {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    if guard_pair(a, b) || guard_pair(b, a) {
+        return true;
+    }
+    // A single case form on one side is keyed by construction against an
+    // otherwise disjoint base case.
+    false
+}
+
+#[allow(dead_code)]
+fn _unused(_: &HashSet<String>) {}

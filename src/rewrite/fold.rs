@@ -22,12 +22,12 @@ fn closed_value(e: &Expr, prog: &Program, unit: &str) -> Option<Value> {
         Expr::Var(..) => None,
         Expr::Lit(l, _) => match l {
             Lit::Int(i) => Some(Value::Count(*i)),
-            Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Some(Value::Num(*x)),
+            Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => Some(Value::Num(*x)),
             _ => None,
         },
         Expr::Param(p, _) => match prog.param(unit, p).map(|p| &p.value) {
             Some(Lit::Int(i)) => Some(Value::Count(*i)),
-            Some(Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _)) => Some(Value::Num(*x)),
+            Some(Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _)) => Some(Value::Num(*x)),
             _ => None,
         },
         Expr::Neg(x, _) => match closed_value(x, prog, unit)? {
@@ -120,7 +120,7 @@ fn literal_of(v: &Value, ty: &Ty) -> Option<Lit> {
             if d.is_scalar() {
                 Some(Lit::Float(*x))
             } else if *d == Dim::shares() {
-                Some(Lit::Shares(*x))
+                Some(Lit::Quantity(*x, "shares".into()))
             } else if d.c2 == 2 && d.s2 == -2 && d.t2 == 0 {
                 Some(Lit::Price(*x, d.currency.clone()?))
             } else if d.c2 == 2 && d.s2 == 0 && d.t2 == 0 {
@@ -171,19 +171,25 @@ pub fn fold_literal(l: &Literal, prog: &Program, unit: &str, folds: &mut Vec<(St
             expr: fold_expr(expr, prog, unit, folds),
             span: *span,
         },
-        Literal::Agg { var, agg, args, conj, span } => Literal::Agg {
+        Literal::Agg { var, agg, args, conj, within, span } => Literal::Agg {
             var: var.clone(),
             agg: agg.clone(),
             args: args.iter().map(|a| fold_expr(a, prog, unit, folds)).collect(),
             conj: conj.iter().map(|c| fold_literal(c, prog, unit, folds)).collect(),
+            within: within.clone(),
             span: *span,
         },
-        Literal::Resample { inner, to, as_var, min, aggs, span } => Literal::Resample {
-            inner: inner.clone(),
-            to: *to,
-            as_var: as_var.clone(),
-            min: min.clone(),
-            aggs: aggs.iter().map(|(x, f, e)| (x.clone(), f.clone(), fold_expr(e, prog, unit, folds))).collect(),
+        Literal::Case { var, branches, otherwise, span } => Literal::Case {
+            var: var.clone(),
+            branches: branches
+                .iter()
+                .map(|b| crate::ir::Branch {
+                    guard: b.guard.iter().map(|g| fold_literal(g, prog, unit, folds)).collect(),
+                    value: fold_expr(&b.value, prog, unit, folds),
+                    span: b.span,
+                })
+                .collect(),
+            otherwise: otherwise.as_ref().map(|x| fold_expr(x, prog, unit, folds)),
             span: *span,
         },
         l => l.clone(),

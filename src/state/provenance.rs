@@ -75,7 +75,9 @@ fn head_bindings(prog: &Program, ri: usize, tuple: &[Value]) -> Vec<(String, Val
     let rule = &prog.rules[ri];
     let sig = prog.relations.get(&rule.head.name);
     let key = sig.and_then(|s| s.key_pos());
-    let inputs: Vec<usize> = sig.map(|s| s.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In).map(|(i, _)| i).collect()).unwrap_or_default();
+    let inputs: Vec<usize> = sig
+        .map(|s| s.args.iter().enumerate().filter(|(_, a)| false && a.mode == Mode::Key).map(|(i, _)| i).collect())
+        .unwrap_or_default();
     let mut out = Vec::new();
     for (i, term) in rule.head.terms.iter().enumerate() {
         if Some(i) == key || inputs.contains(&i) {
@@ -98,7 +100,14 @@ fn head_bindings(prog: &Program, ri: usize, tuple: &[Value]) -> Vec<(String, Val
 fn inputs_of(prog: &Program, rel: &str, tuple: &[Value]) -> Vec<Value> {
     prog.relations
         .get(rel)
-        .map(|s| s.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In).filter_map(|(i, _)| tuple.get(i).cloned()).collect())
+        .map(|s| {
+            s.args
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| false && a.mode == Mode::Key)
+                .filter_map(|(i, _)| tuple.get(i).cloned())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -162,10 +171,10 @@ fn body_ids(prog: &Program, ri: usize, solution: &[(String, String)]) -> Vec<Str
     let mut out = Vec::new();
     for l in &rule.body {
         match l {
-            Literal::Atom(a) | Literal::Top { atom: a, .. } | Literal::Resample { inner: a, .. } => out.push(atom_id(a)),
+            Literal::Atom(a) | Literal::Top { atom: a, .. } => out.push(atom_id(a)),
             Literal::AsOf { atom, .. } => out.push(format!("{} (asof)", atom_id(atom))),
             Literal::Neg(a) => out.push(format!("not {}", atom_id(a))),
-            Literal::Agg { .. } | Literal::Builtin(..) | Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } => {}
+            Literal::Agg { .. } | Literal::Builtin(..) | Literal::Window { .. } | Literal::Cmp { .. } | Literal::Assign { .. } | Literal::Case { .. } => {}
         }
     }
     out
@@ -245,17 +254,9 @@ fn derive_in(k: &mut Kernel, prog: &Program, id: &str, depth: usize, memo: &mut 
     if args.len() != sig.args.len() {
         return Ok(leaf(format!("{} argument(s) given, the signature has {}", args.len(), sig.args.len())));
     }
-    // The inputs, parsed by their types; the whole tuple is then found by
-    // its rendered text among the relation's tuples at the bar.
-    let mut inputs = Vec::new();
-    for (i, a) in sig.args.iter().enumerate() {
-        if a.mode == Mode::In {
-            match k.parse_input(&a.ty, &args[i]) {
-                Ok(v) => inputs.push(v),
-                Err(m) => return Ok(leaf(format!("input `{}`: {}", a.name, m))),
-            }
-        }
-    }
+    // Signatures carry no inputs (language-v2, 3.4): the whole tuple is
+    // found by its rendered text among the relation's tuples at the bar.
+    let inputs: Vec<Value> = Vec::new();
     let tuples = match k.query(&rel, bar, &inputs) {
         Ok(t) => t,
         Err(RunError::Arithmetic { message, .. }) => return Ok(leaf(format!("partial arithmetic: {}", message))),
@@ -362,7 +363,7 @@ pub fn failures(k: &mut Kernel, prog: &Program, rel: &str, bar: i64, inputs: Opt
     let Some(sig) = prog.relations.get(rel) else {
         return Err(RunError::Request(format!("`{}` is not a relation of {}", rel, prog.strategy)));
     };
-    let need: Vec<&crate::ir::Arg> = sig.args.iter().filter(|a| a.mode == Mode::In).collect();
+    let need: Vec<&crate::ir::Arg> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).collect();
     let input_sets: Vec<Vec<Value>> = match inputs {
         Some(v) => vec![v.to_vec()],
         None if need.is_empty() => vec![vec![]],

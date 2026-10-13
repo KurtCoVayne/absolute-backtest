@@ -63,10 +63,13 @@ impl Statistics {
         let mut decision_bars: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
         for (name, tuples) in &ds.facts {
             let Some(sig) = prog.relations.get(name) else { continue };
-            let Some(res) = sig.res else { continue };
+            if !sig.is_primitive() {
+                continue;
+            }
+            let res = sig.native.unwrap_or(prog.base);
             for tu in tuples {
                 if let Some(t) = key_of(sig, tu) {
-                    decision_bars.insert(if res == prog.resolution { t } else { time::bucket(prog.resolution, t) });
+                    decision_bars.insert(if res == prog.base { t } else { time::bucket(prog.base, t) });
                 }
             }
         }
@@ -153,10 +156,11 @@ impl Statistics {
             let mut bars: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
             for (name, tuples) in &ds.facts {
                 let Some(sig) = prog.relations.get(name) else { continue };
-                let (Some(k), Some(res)) = (sig.key_pos(), sig.res) else { continue };
+                let Some(k) = sig.key_pos() else { continue };
+                let res = sig.native.unwrap_or(prog.base);
                 for tu in tuples {
                     if let Some(t) = tu[k].as_time() {
-                        bars.insert(if res == prog.resolution { t } else { time::bucket(prog.resolution, t) });
+                        bars.insert(if res == prog.base { t } else { time::bucket(prog.base, t) });
                     }
                 }
             }
@@ -267,6 +271,7 @@ pub fn literal_costs(
                 Builtin::Lag { .. } => (1.0, 0.9, "time".to_string()),
                 Builtin::MonthStart { .. } => (1.0, 1.0 / 21.0, "time".to_string()),
                 Builtin::DayStart { .. } => (1.0, 1.0 / 390.0, "time".to_string()),
+                Builtin::SessionOf { .. } => (1.0, 1.0, "time".to_string()),
             },
             Literal::Window { .. } => (1.0, 1.0, "window".to_string()),
             Literal::Cmp { .. } => (1.0, cmp_selectivity(i).unwrap_or(RANGE_SELECTIVITY).clamp(0.0, 1.0), "comparison".to_string()),
@@ -278,7 +283,7 @@ pub fn literal_costs(
                 }
             }
             Literal::Agg { agg, conj, .. } => {
-                let window = conj.iter().find_map(|l| if let Literal::Window { kind, .. } = l { Some(*kind) } else { None });
+                let window = conj.iter().find_map(|l| if let Literal::Window { kind, .. } = l { Some(kind.clone()) } else { None });
                 let w = w_max(i).unwrap_or(20.0);
                 let class = aggregate_class(agg);
                 // A windowed aggregation costs the cache's lookup and its
@@ -301,10 +306,7 @@ pub fn literal_costs(
                 };
                 (group * group.log2().max(1.0), kept.max(1e-3), "reduction".to_string())
             }
-            Literal::Resample { inner, .. } => {
-                let rs = stats.relation(&inner.name);
-                (rs.rows_per_bar.max(1.0) * 20.0, 1.0, "resample".to_string())
-            }
+            Literal::Case { branches, .. } => (branches.len().max(1) as f64, 1.0, "case".to_string()),
         };
         out.push(LiteralCost { cost, factor, kind });
     }

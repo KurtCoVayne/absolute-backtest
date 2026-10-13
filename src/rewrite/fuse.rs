@@ -24,7 +24,6 @@ fn inner_class(prog: &Program, name: &str) -> Option<String> {
     }
     for l in &prog.rules[rules[0]].body {
         match l {
-            Literal::Resample { aggs, .. } => return aggs.first().map(|(_, f, _)| f.clone()),
             Literal::Agg { agg, conj, .. } if conj.iter().any(|c| matches!(c, Literal::Window { .. })) => return Some(agg.clone()),
             _ => {}
         }

@@ -1,5 +1,13 @@
 # Strategy DSL Semantic Model
 
+> **Status.** This document specifies the first formulation of the language. The
+> crate implements the second formulation, `docs/language-v2.md` (grammar in
+> `corpus-v2/README.md`, acceptance corpus in `corpus-v2/`); what that document
+> marks as retained unchanged (WF-3 types, WF-5 closedness, WF-6 causality, WF-7
+> total orders, WF-8 stratification, W5 and W6, the kernel's semantics of section
+> 7) is specified here. The syntax, the environments and the corpus this document
+> cites are gone.
+
 Oct 3, 2026 · John Gonzalez
 
 This model fixes the v1 semantics of the strategy DSL (equities, bar data at one

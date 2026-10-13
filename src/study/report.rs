@@ -101,7 +101,7 @@ pub const BIASES: [Bias; 40] = [
     Bias {
         name: "bid-ask spread",
         audit: 'B',
-        status: "modeled (v1 proxy); data (target)",
+        status: "modeled (a volatility proxy); data (target)",
     },
     Bias {
         name: "execution timing",
@@ -131,7 +131,7 @@ pub const BIASES: [Bias; 40] = [
     Bias {
         name: "cash-management",
         audit: 'B',
-        status: "modeled (v2); warned (v1)",
+        status: "modeled (the financing field); warned when zero",
     },
     Bias {
         name: "leverage",

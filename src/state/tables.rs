@@ -357,7 +357,7 @@ pub fn binding(prog: &Program, ds: &Dataset) -> Table {
     for (name, tuples) in &ds.facts {
         let sig = prog.relations.get(name);
         let kind = match sig.map(|s| &s.kind) {
-            Some(Kind::Primitive { env }) => format!("primitive ({})", env),
+            Some(Kind::Primitive { class: env }) => format!("primitive ({})", env),
             Some(Kind::Executor) => "executor".into(),
             Some(Kind::KernelState) => "kernel".into(),
             Some(Kind::Derived { .. }) => "derived".into(),
@@ -389,7 +389,7 @@ fn input_sets(k: &Kernel, prog: &Program, rel: &str, inputs: Option<&[Value]>) -
     let Some(sig) = prog.relations.get(rel) else {
         return Err(RunError::Request(format!("`{}` is not a relation of {}", rel, prog.strategy)));
     };
-    let need: Vec<&crate::ir::Arg> = sig.args.iter().filter(|a| a.mode == Mode::In).collect();
+    let need: Vec<&crate::ir::Arg> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).collect();
     match inputs {
         Some(v) if v.len() == need.len() => Ok(vec![v.to_vec()]),
         Some(v) => Err(RunError::Request(format!("`{}` takes {} input(s), {} given", rel, need.len(), v.len()))),
@@ -420,8 +420,8 @@ pub fn tuples_at(k: &mut Kernel, prog: &Program, rel: &str, t: i64, inputs: Opti
 /// The bars of a relation's own time domain inside a run's window.
 pub fn own_bars(k: &Kernel, prog: &Program, rel: &str, bars: &[i64]) -> Vec<i64> {
     let (Some(&first), Some(&last)) = (bars.first(), bars.last()) else { return Vec::new() };
-    let res = prog.relations.get(rel).and_then(|s| s.res).unwrap_or(prog.resolution);
-    k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect()
+    let cal = prog.cal_of(rel);
+    k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect()
 }
 
 fn signature_columns(prog: &Program, rel: &str) -> Vec<(String, ColType)> {

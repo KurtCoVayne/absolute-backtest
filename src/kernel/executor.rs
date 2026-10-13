@@ -225,10 +225,9 @@ impl SimExecutor {
             let reducing = |d: &Decision| -> bool {
                 let pos = positions.get(&d.equity).copied().unwrap_or(0.0);
                 match d.ctor {
-                    Ctor::Sell | Ctor::Cover => pos != 0.0,
-                    Ctor::Buy | Ctor::Short => false,
-                    Ctor::TargetQuantity => pos != 0.0 && d.amount.abs() < pos.abs() && d.amount * pos >= 0.0,
-                    Ctor::TargetWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
+                    Ctor::Trade => pos != 0.0 && d.amount * pos < 0.0,
+                    Ctor::HoldQuantity => pos != 0.0 && d.amount.abs() < pos.abs() && d.amount * pos >= 0.0,
+                    Ctor::HoldWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
                 }
             };
             pending.sort_by_key(|(d, _, _, _)| !reducing(d));
@@ -253,7 +252,7 @@ impl SimExecutor {
         let mut day_exits: Vec<(Sym, i64, usize)> = Vec::new();
         for (d, rule, reissued, away) in &pending {
             let sym = d.equity;
-            let is_target = matches!(d.ctor, Ctor::TargetWeight | Ctor::TargetQuantity);
+            let is_target = d.ctor.is_target();
             let name = k.symbols.name(sym).to_string();
             let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
             // The bar the order executes at, and its base price: this bar's
@@ -279,14 +278,14 @@ impl SimExecutor {
             };
             let m = k.multiplier(sym);
             let mut qty = match (d.ctor, bar_price) {
-                (Ctor::Buy | Ctor::Cover, _) => round(d.amount),
-                (Ctor::Sell | Ctor::Short, _) => -round(d.amount),
-                (Ctor::TargetQuantity, _) => round(d.amount) - pos,
+                // A signed delta: its sign is the side.
+                (Ctor::Trade, _) => round(d.amount),
+                (Ctor::HoldQuantity, _) => round(d.amount) - pos,
                 // A long that is bought is sized at the price it will fill at,
                 // so the cash it spends is the weight of equity; any other
                 // target (a reduction, a short) is sized at the bar price,
                 // which is what the position is marked at.
-                (Ctor::TargetWeight, Some(p)) => {
+                (Ctor::HoldWeight, Some(p)) => {
                     let target = round(d.amount * sizing_equity / (p * m));
                     let target = if target > pos && target > 0.0 {
                         round(d.amount * sizing_equity / (slipped(p, true) * m))
@@ -296,8 +295,8 @@ impl SimExecutor {
                     target - pos
                 }
                 // Without a price a weight cannot be sized, except the flat target.
-                (Ctor::TargetWeight, None) if d.amount == 0.0 => -pos,
-                (Ctor::TargetWeight, None) => {
+                (Ctor::HoldWeight, None) if d.amount == 0.0 => -pos,
+                (Ctor::HoldWeight, None) => {
                     self.open_targets.remove(&sym);
                     result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
                     continue;
@@ -309,15 +308,9 @@ impl SimExecutor {
                 continue;
             }
             // Oversize: a delta order that would carry the position across zero.
-            let crosses = matches!(d.ctor, Ctor::Sell | Ctor::Cover) && pos != 0.0 && (pos + qty) * pos < 0.0;
+            let crosses = d.ctor == Ctor::Trade && pos != 0.0 && (pos + qty) * pos < 0.0;
             if crosses {
-                let message = format!(
-                    "{} {} of {} shares {}: the order would cross zero",
-                    d.ctor.name(),
-                    qty.abs(),
-                    pos.abs(),
-                    if pos > 0.0 { "held" } else { "short" }
-                );
+                let message = format!("trade of {} against {} {}: the order would cross zero", qty, pos.abs(), if pos > 0.0 { "held" } else { "short" });
                 match self.cfg.on_oversize {
                     OnOversize::Halt => {
                         return Err(RunError::Risk {
@@ -550,7 +543,7 @@ impl SimExecutor {
                 }
             }
             let exit = Decision {
-                ctor: Ctor::TargetQuantity,
+                ctor: Ctor::HoldQuantity,
                 equity: sym,
                 amount: 0.0,
                 order: super::value::Order { kind: OrderKind::Moc, tif: Tif::Day },
@@ -619,10 +612,9 @@ impl SimExecutor {
                 // from where the book is against it at the open.
                 let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
                 let buying = match w.d.ctor {
-                    Ctor::Buy | Ctor::Cover => true,
-                    Ctor::Sell | Ctor::Short => false,
-                    Ctor::TargetQuantity => w.d.amount > pos,
-                    Ctor::TargetWeight => {
+                    Ctor::Trade => w.d.amount > 0.0,
+                    Ctor::HoldQuantity => w.d.amount > pos,
+                    Ctor::HoldWeight => {
                         let base = if self.cfg.compounding { self.cash.max(0.0) } else { self.cfg.initial_cash };
                         w.d.amount * base > pos * o * k.multiplier(sym)
                     }
@@ -936,6 +928,18 @@ impl Executor for SimExecutor {
         // (data-bundle doc, section 7: what the metrics library reads).
         let nav_rel = k.rel_id("nav");
         k.stores[nav_rel].insert(t, vec![Value::Time(t), Value::Num(equity)]);
+        // `capital(T, C)`: what a weight is a fraction of (the fixed base or
+        // the equity); `mark(A, T, P)`: the price each holding is marked at.
+        let capital_rel = k.rel_id("capital");
+        let base = if self.cfg.compounding { equity.max(0.0) } else { self.cfg.initial_cash };
+        k.stores[capital_rel].insert(t, vec![Value::Time(t), Value::Num(base)]);
+        let mark_rel = k.rel_id("mark");
+        let syms: Vec<Sym> = self.positions.keys().copied().collect();
+        for sym in syms {
+            if let Some(p) = k.price_at(sym, t) {
+                k.stores[mark_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
+            }
+        }
         Ok(())
     }
 
@@ -1084,32 +1088,82 @@ impl Kernel<'_> {
     pub fn decide_at(&mut self, t: i64, result: &mut RunResult) -> Result<BTreeMap<Sym, Vec<(Decision, usize)>>, RunError> {
         let decide = self.rel_id("decide");
         let decided = self.rel_id("decided");
-        let delta = self.prog.mode == DecisionMode::Delta;
+        // With a session-offset clock, decisions are taken at the clock
+        // bars only; a bar at which no instrument's clock strikes decides nothing.
+        let clock_syms: Option<Vec<Sym>> = self.clock_rel.map(|cid| {
+            let epos = self.rels[cid].entity_positions.first().copied().unwrap_or(0);
+            self.stores[cid]
+                .by_time
+                .get(&t)
+                .map(|tus| tus.iter().filter_map(|tu| tu[epos].as_equity()).collect())
+                .unwrap_or_default()
+        });
+        if clock_syms.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
+            return Ok(BTreeMap::new());
+        }
         let tuples = self.call(decide, &[Some(Value::Time(t)), None])?;
         let mut by_equity: BTreeMap<Sym, Vec<(Decision, usize)>> = BTreeMap::new();
         for (tu, rule) in tuples.iter() {
             let Value::Decision(d) = &tu[1] else {
                 return Err(RunError::Internal("decide tuple without a decision".into()));
             };
-            if delta && d.amount.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            if !d.amount.is_finite() {
                 return Err(RunError::BadDecision {
                     t,
                     rule: self.prog.rule_label(*rule),
                     decision: result.describe_decision(d),
-                    message: "delta decisions require a positive quantity".into(),
+                    message: "the amount is not a finite number".into(),
                 });
             }
             by_equity.entry(d.equity).or_default().push(((**d).clone(), *rule));
+        }
+        // `silence flat`: an instrument held with no decision at its clock
+        // bar is closed (language-v2, 4.4).
+        if self.cfg.silence_flat {
+            let position = self.rel_id("position");
+            let held: Vec<Sym> = self.stores[position]
+                .by_time
+                .get(&t)
+                .map(|tus| tus.iter().filter(|tu| tu[2].as_f64().map(|q| q != 0.0).unwrap_or(false)).filter_map(|tu| tu[0].as_equity()).collect())
+                .unwrap_or_default();
+            for sym in held {
+                if by_equity.contains_key(&sym) {
+                    continue;
+                }
+                if let Some(cs) = &clock_syms {
+                    if !cs.contains(&sym) {
+                        continue;
+                    }
+                }
+                let order = super::value::Order {
+                    kind: match self.prog.default_order.as_str() {
+                        "moo" => OrderKind::Moo,
+                        "moc" => OrderKind::Moc,
+                        _ => OrderKind::Market,
+                    },
+                    tif: Tif::Day,
+                };
+                by_equity.entry(sym).or_default().push((
+                    Decision {
+                        ctor: Ctor::HoldQuantity,
+                        equity: sym,
+                        amount: 0.0,
+                        order,
+                    },
+                    usize::MAX,
+                ));
+            }
         }
         for (sym, ds) in &by_equity {
             if ds.len() > 1 {
                 let (a, ra) = &ds[0];
                 let (b, rb) = &ds[1];
+                let label = |r: usize| if r == usize::MAX { "silence".to_string() } else { self.prog.rule_label(r) };
                 return Err(RunError::Conflict {
                     t,
                     equity: self.symbols.name(*sym).to_string(),
-                    first: (result.describe_decision(a), self.prog.rule_label(*ra)),
-                    second: (result.describe_decision(b), self.prog.rule_label(*rb)),
+                    first: (result.describe_decision(a), label(*ra)),
+                    second: (result.describe_decision(b), label(*rb)),
                 });
             }
         }

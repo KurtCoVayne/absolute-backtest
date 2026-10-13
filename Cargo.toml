@@ -2,7 +2,7 @@
 name = "absolute-backtest"
 version = "0.1.0"
 edition = "2021"
-description = "Strategy DSL v1: typed IR, well-formedness checker, and backtesting kernel"
+description = "A strategy language (the second formulation): typed IR, well-formedness checker, and backtesting kernel"
 license = "MIT"
 
 [lib]

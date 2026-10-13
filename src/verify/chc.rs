@@ -161,7 +161,7 @@ fn clause(prog: &Program, analysis: &Analysis, preds: &[Pred], ri: usize, nonlin
                     }
                 }
             }
-            Literal::Neg(_) | Literal::Top { .. } | Literal::Resample { .. } | Literal::AsOf { .. } => {}
+            Literal::Neg(_) | Literal::Top { .. } | Literal::AsOf { .. } | Literal::Case { .. } => {}
         }
     }
     let mut args = vec![b];

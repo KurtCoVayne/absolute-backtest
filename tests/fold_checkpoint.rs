@@ -3,22 +3,12 @@
 //! fresh kernel and continues produces the run the unbroken fold and the
 //! batch kernel produce, to the bit.
 
-mod corpus;
+mod common;
 
-use std::fs;
-
-use absolute_backtest::check::{check_program, Program};
+use absolute_backtest::check::Program;
 use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::time::{format_timestamp, month_key};
 use absolute_backtest::kernel::{run, run_fold, Checkpoint, CheckpointEvery, Event, EventLog, ExecConfig, Fold, Kernel, RunError, RunResult, SimExecutor};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
@@ -49,17 +39,14 @@ fn digest(r: &RunResult) -> Vec<String> {
 }
 
 fn momentum() -> Program {
-    program(
-        &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/momentum_top_n.dsl")).unwrap(),
-        "momentum_top_n",
-    )
+    common::corpus_program("momentum_top_n")
 }
 
 #[test]
 fn a_replay_resumed_from_a_checkpoint_is_the_unbroken_run() {
     let p = momentum();
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 320, 7);
-    let cfg = ExecConfig::default();
+    let cfg = ExecConfig::from_program(&p);
     let reference = run(&p, &ds, cfg.clone()).unwrap();
     let unbroken = run_fold(&p, &ds, cfg.clone()).unwrap();
     assert_eq!(digest(&reference), digest(&unbroken));
@@ -121,7 +108,7 @@ fn a_replay_resumed_from_a_checkpoint_is_the_unbroken_run() {
 fn a_checkpoint_of_another_program_or_configuration_is_refused() {
     let p = momentum();
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 120, 7);
-    let cfg = ExecConfig::default();
+    let cfg = ExecConfig::from_program(&p);
     let kernel = Kernel::new_streaming(&p, &ds, cfg.clone()).unwrap();
     let log = EventLog::from_dataset(&kernel, &ds).unwrap();
     let mut exec = SimExecutor::new(cfg.clone());
@@ -150,10 +137,7 @@ fn a_checkpoint_of_another_program_or_configuration_is_refused() {
     let err = Fold::restore(kernel, &mut exec, cp.clone()).err().unwrap();
     assert!(err.to_string().contains("symbols"), "{}", err);
     // Another program.
-    let sma = program(
-        &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/sma_crossover.dsl")).unwrap(),
-        "sma_crossover",
-    );
+    let sma = common::corpus_program("sma_crossover");
     let kernel = Kernel::new_streaming(&sma, &ds, cfg.clone()).unwrap();
     let mut exec = SimExecutor::new(cfg);
     assert!(Fold::restore(kernel, &mut exec, cp).is_err());

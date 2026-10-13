@@ -2,46 +2,33 @@
 //! to the bit, and a fold stopped early is the batch run on the truncated
 //! dataset: the causality theorem, operationally.
 
-mod corpus;
+mod common;
 
-use std::fs;
-use std::path::Path;
-
-use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{synthetic_daily, synthetic_daily_v2, synthetic_minute};
-use absolute_backtest::kernel::{run, run_fold, Dataset, Event, EventLog, ExecConfig, Fold, Kernel, RunResult, SimExecutor, Value};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
+use absolute_backtest::check::Program;
+use absolute_backtest::data::{synthetic_daily, synthetic_minute};
+use absolute_backtest::kernel::{run, run_fold, Dataset, Event, EventLog, ExecConfig, Fold, Kernel, RunResult, SimExecutor};
+use absolute_backtest::Kind;
 
 fn corpus_strategies() -> Vec<(String, Program)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies");
-    let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    files.sort();
-    files
+    common::dsl_files("strategies")
         .into_iter()
         .map(|f| {
             let name = f.file_stem().unwrap().to_string_lossy().to_string();
-            let src = fs::read_to_string(&f).unwrap();
-            (name.clone(), program(&src, &name))
+            (name.clone(), common::corpus_program(&name))
         })
         .collect()
 }
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
+/// The synthetic market of a program's base: minute bars for a sub-daily
+/// base, else the daily market with its catalog. Four hundred daily bars,
+/// so that every strategy, the twelve-month momentum included, decides.
 fn dataset_for(p: &Program, seed: u64) -> Dataset {
-    if p.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1)) {
+    if p.base.is_sub_daily() {
         synthetic_minute(&SYMS, (2024, 1, 2), 30, 320, seed)
-    } else if p.relations.contains_key("split") {
-        synthetic_daily_v2(&SYMS, (2022, 1, 3), 320, seed)
     } else {
-        synthetic_daily(&SYMS, (2022, 1, 3), 320, seed)
+        synthetic_daily(&SYMS, (2022, 1, 3), 400, seed)
     }
 }
 
@@ -117,58 +104,58 @@ fn assert_same(name: &str, a: &RunResult, b: &RunResult) {
 fn the_fold_equals_the_batch_kernel_on_every_corpus_strategy() {
     for (name, p) in corpus_strategies() {
         let ds = dataset_for(&p, 11);
-        let a = run(&p, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{}: {}", name, e));
-        let b = run_fold(&p, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{} (fold): {}", name, e));
+        let cfg = ExecConfig::from_program(&p);
+        let a = run(&p, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let b = run_fold(&p, &ds, cfg).unwrap_or_else(|e| panic!("{} (fold): {}", name, e));
         assert_same(&name, &a, &b);
-        assert!(!b.decisions.is_empty() || name == "volume_spike" || name == "breakout_52w", "{} decided nothing", name);
+        assert!(!b.decisions.is_empty(), "{} decided nothing", name);
     }
 }
 
 #[test]
 fn the_fold_equals_the_batch_kernel_on_crafted_markets() {
     // Missing prices, a liquidation at the last price, a delisting, a split
-    // and a dividend: the crafted cases of the executor tests.
-    let round_trip = r#"
-strategy round_trip {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q).
-}
-"#;
-    let p = program(round_trip, "round_trip");
+    // and a dividend: the crafted cases of the executor tests. The name is
+    // in the universe while listed, so that a bar with no price is still a
+    // bar at which its position is decided on.
+    let round_trip = common::StrategyParts {
+        name: "round_trip".into(),
+        universe: "universe(A, T) :- listed(A, T).".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), Q = -Q0.".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&round_trip, "round_trip");
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
+    let x = ds.add_security("X", "X", common::day("2024-01-08"), None);
     for (d, price) in [("2024-01-08", Some(10.0)), ("2024-01-09", Some(12.0)), ("2024-01-10", None), ("2024-01-11", None), ("2024-01-12", None)] {
-        let t = absolute_backtest::kernel::time::parse_timestamp(d).unwrap();
-        if let Some(p) = price {
-            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(p)]);
+        let t = common::day(d);
+        match price {
+            Some(p) => common::add_bar(&mut ds, x, t, p, 1000.0),
+            None => ds.add("listed", vec![absolute_backtest::kernel::Value::Equity(x), absolute_backtest::kernel::Value::Time(t)]),
         }
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
     }
     ds.derive_tickers();
     let cfg = ExecConfig {
         initial_cash: 1000.0,
         ..ExecConfig::frictionless()
     };
-    assert_same("round_trip", &run(&p, &ds, cfg.clone()).unwrap(), &run_fold(&p, &ds, cfg).unwrap());
-    // The catalog market under every default, with a margin preset too.
-    let p = program(
-        &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/total_return_momentum.dsl")).unwrap(),
-        "total_return_momentum",
-    );
-    let ds = synthetic_daily_v2(&SYMS, (2022, 1, 3), 400, 5);
+    let batch = run(&p, &ds, cfg.clone()).unwrap();
+    assert_same("round_trip", &batch, &run_fold(&p, &ds, cfg).unwrap());
+    assert_eq!(batch.decisions.len(), 2, "a buy, then the sale of the held lot");
+    // The catalog market under the execution block, with a margin preset
+    // and a tight participation cap too.
+    let p = common::corpus_program("total_return_momentum");
+    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 400, 5);
+    let block = ExecConfig::from_program(&p);
     for cfg in [
-        ExecConfig::default(),
+        block.clone(),
         ExecConfig::reg_t(),
         ExecConfig {
             participation_cap: 0.001,
             on_leverage: absolute_backtest::kernel::OnLeverage::Reject,
-            ..ExecConfig::default()
+            ..block
         },
     ] {
         assert_same("total_return_momentum", &run(&p, &ds, cfg.clone()).unwrap(), &run_fold(&p, &ds, cfg).unwrap());
@@ -177,15 +164,15 @@ strategy round_trip {
 
 #[test]
 fn a_fold_stopped_early_is_the_batch_run_on_the_truncated_data() {
-    let src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/momentum_top_n.dsl")).unwrap();
-    let p = program(&src, "momentum_top_n");
+    let p = common::corpus_program("momentum_top_n");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 200, 7);
-    let kernel = Kernel::new_streaming(&p, &ds, ExecConfig::default()).unwrap();
+    let cfg = ExecConfig::from_program(&p);
+    let kernel = Kernel::new_streaming(&p, &ds, cfg.clone()).unwrap();
     let log = EventLog::from_dataset(&kernel, &ds).unwrap();
-    let bars: Vec<i64> = Kernel::new(&p, &ds, ExecConfig::default()).unwrap().decision_bars();
+    let bars: Vec<i64> = Kernel::new(&p, &ds, cfg.clone()).unwrap().decision_bars();
     for &cut in &[bars[60], bars[133], bars[199]] {
-        let kernel = Kernel::new_streaming(&p, &ds, ExecConfig::default()).unwrap();
-        let mut exec = SimExecutor::new(ExecConfig::default());
+        let kernel = Kernel::new_streaming(&p, &ds, cfg.clone()).unwrap();
+        let mut exec = SimExecutor::new(cfg.clone());
         let mut fold = Fold::new(kernel, &mut exec);
         for ev in &log.events {
             if let Event::Tuple { avail, .. } = ev {
@@ -196,31 +183,40 @@ fn a_fold_stopped_early_is_the_batch_run_on_the_truncated_data() {
             fold.step(ev.clone()).unwrap();
         }
         let (early, _) = fold.finish().unwrap();
-        let truncated = run(&p, &ds.truncated(&p, cut), ExecConfig::default()).unwrap();
+        let truncated = run(&p, &ds.truncated(&p, cut), cfg.clone()).unwrap();
         assert_same(&format!("cut at {}", cut), &truncated, &early);
     }
 }
 
 #[test]
 fn the_event_log_is_ordered_by_availability_then_relation() {
-    let p = program(
-        &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/sma_crossover.dsl")).unwrap(),
-        "sma_crossover",
-    );
+    let p = common::corpus_program("sma_crossover");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 20, 1);
-    let kernel = Kernel::new_streaming(&p, &ds, ExecConfig::default()).unwrap();
+    let cfg = ExecConfig::from_program(&p);
+    let kernel = Kernel::new_streaming(&p, &ds, cfg).unwrap();
     let log = EventLog::from_dataset(&kernel, &ds).unwrap();
     let keys: Vec<(i64, usize)> = log
         .events
         .iter()
         .map(|e| match e {
             Event::Tuple { avail, rel, .. } => (*avail, *rel),
-            _ => unreachable!(),
+            Event::Barrier { .. } => unreachable!("a dataset's log holds tuples only"),
         })
         .collect();
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
-    assert_eq!(log.events.len(), 20 * 5 * 4, "close, volume, universe and ticker for five names over twenty bars");
+    // Every tuple of a primitive the program reads (the bars, the listing
+    // and the tickers of five names over twenty bars), once; the catalog
+    // the demand does not ask for is not in the log.
+    let expected: usize = ds
+        .facts
+        .iter()
+        .filter(|(name, _)| matches!(p.relations.get(name.as_str()).map(|s| &s.kind), Some(Kind::Primitive { .. })))
+        .map(|(_, tuples)| tuples.len())
+        .sum();
+    assert!(ds.facts.contains_key("split") && !p.relations.contains_key("split"), "the market has actions the demand does not read");
+    assert_eq!(log.events.len(), expected);
+    assert!(expected >= 7 * 5 * 16, "open, high, low, close, volume, listed and ticker: {}", expected);
     assert!(kernel.decision_bars().is_empty(), "a streaming kernel starts with no bars");
 }

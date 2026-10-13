@@ -86,7 +86,7 @@ pub struct Ingested {
     pub exceptions: Vec<crate::bundle::Exception>,
 }
 
-/// The Norgate-style daily layout (catalog v1, `equities_1d_v2`), one
+/// The Norgate-style daily layout of the `equity` class, one
 /// Parquet file per table in `dir`; dates are date or timestamp columns (or
 /// `YYYY-MM-DD` text):
 ///
@@ -106,8 +106,8 @@ pub struct Ingested {
 /// delisted by T; `delisted` holds from the delisting date through the
 /// last trading day of the data.
 pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
-    if prog.environment != "equities_1d_v2" {
-        return Err(format!("the Norgate adapter produces `equities_1d_v2`; the program is written against `{}`", prog.environment));
+    if prog.class != "equity" || prog.base.is_sub_daily() {
+        return Err(format!("the Norgate adapter produces daily equities; the program reads class `{}` at {}", prog.class, prog.base));
     }
     let mut ds = Dataset::new();
     let history = SymbolHistory::load(&file(dir, "symbols"))?;
@@ -185,7 +185,7 @@ pub fn norgate_daily(dir: &Path, prog: &Program) -> Result<Ingested, String> {
             if gone.get(&sym).map(|g| t >= *g).unwrap_or(false) {
                 continue;
             }
-            ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
+            ds.add("listed", vec![Value::Equity(sym), Value::Time(t)]);
         }
     }
     if let Some(t) = optional(dir, "membership")? {
@@ -269,8 +269,8 @@ fn optional(dir: &Path, stem: &str) -> Result<Option<Table>, String> {
 /// close plus the delay. The bars are taken as consolidated (section 10,
 /// item 3) and the manifest says so.
 pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Result<Ingested, String> {
-    if prog.environment != "equities_1m" {
-        return Err(format!("the Databento adapter produces `equities_1m`; the program is written against `{}`", prog.environment));
+    if prog.class != "equity" || !prog.base.is_sub_daily() {
+        return Err(format!("the Databento adapter produces minute equities; the program reads class `{}` at {}", prog.class, prog.base));
     }
     let mut ds = Dataset::new();
     let history = SymbolHistory::load(&file(dir, "symbology"))?;
@@ -300,11 +300,11 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
         if recorded || processing_delay > 0 {
             ds.add_available("close_m", close_tuple, avail);
             ds.add_available("volume_m", volume_tuple, avail);
-            ds.add_available("universe_m", universe_tuple, avail);
+            ds.add_available("listed", universe_tuple, avail);
         } else {
             ds.add("close_m", close_tuple);
             ds.add("volume_m", volume_tuple);
-            ds.add("universe_m", universe_tuple);
+            ds.add("listed", universe_tuple);
         }
     }
     ds.derive_tickers();

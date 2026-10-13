@@ -1,61 +1,44 @@
-//! Row windows and ranks (semantic model, section 4): `T1 in rows(T, N, min
-//! K)` aggregates over the group's own last N rows, as a rolling window over
-//! a table does, skipping bars where the group has none; `rank(R(...), by
-//! (...), as K)` binds each tuple's 1-based rank in its group, with ties by
-//! position (`ordinal`) or shared as the mean position (`ties average`).
+//! Row windows and ranks (semantic model, section 4; language-v2, 7.2):
+//! `T1 in rows[N] min K` aggregates over the entity's own last N rows, as a
+//! rolling window over a table does, skipping bars where the entity has
+//! none; `K = rank(R(...) by (...)) within (T)` binds each tuple's 1-based
+//! rank in its group, with ties by position (`rank`) or shared as the mean
+//! position (`rank_average`).
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
 use absolute_backtest::data::business_days;
 use absolute_backtest::kernel::{run, run_fold, Dataset, ExecConfig, Kernel, Value};
 
-fn checked(src: &str, name: &str) -> (Option<Program>, Vec<String>) {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    (p, diags.iter().map(|d| d.to_string()).collect())
+fn rolling() -> String {
+    common::strategy(
+        "rolling",
+        "",
+        "    rel avg3(A: Equity, @T, M: Price<USD>)
+    avg3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[3], close(A, T1, P)).
+    rel px(A: Equity, @T, P: Price<USD>)
+    px(A, T, P) :- universe(A, T), close(A, T, P).
+    rel rk(A: Equity, @T, K: Scalar)
+    rk(A, T, K) :- bar(T), K = rank_average(px(A, T, P) by (P desc)) within (T).
+    rel ordk(A: Equity, @T, K: Count)
+    ordk(A, T, K) :- bar(T), K = rank(px(A, T, P) by (P desc, A asc)) within (T).",
+        "    decide(T, hold(A, 0.1)) :- rk(A, T, K), ordk(A, T, K2), avg3(A, T, _), K <= 1.5, K2 <= 3.",
+    )
 }
-
-fn program(src: &str, name: &str) -> Program {
-    let (p, diags) = checked(src, name);
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, diags.join("\n")))
-}
-
-const ROLLING: &str = r#"
-strategy rolling {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  rel avg3(+A: Equity, @T: Timestamp, -M: Price<USD>)
-  avg3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows(T, 3, min 3), close(A, T1, P)).
-  rel px(-A: Equity, @T: Timestamp, -P: Price<USD>)
-  px(A, T, P) :- universe(A, T), close(A, T, P).
-  rel rk(-A: Equity, @T: Timestamp, -K: Scalar)
-  rk(A, T, K) :- bar(T), rank(px(A, T, P), by (P desc), ties average, as K).
-  rel ordk(-A: Equity, @T: Timestamp, -K: Scalar)
-  ordk(A, T, K) :- bar(T), rank(px(A, T, P), by (P desc, A asc), as K).
-  decide(T, target_weight(A, 0.1)) :- rk(A, T, K), ordk(A, T, K2), avg3(A, T, _), K <= 1.5, K2 <= 3.
-}
-"#;
 
 /// AAA every day; BBB missing on days 3 and 4 (no bar at all).
 fn market() -> (Dataset, Vec<i64>) {
     let days = business_days((2024, 1, 8), 6);
     let mut ds = Dataset::new();
-    let (a, b, c) = (ds.intern("AAA"), ds.intern("BBB"), ds.intern("CCC"));
-    let pa = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
-    let pb = [20.0, 21.0, 0.0, 0.0, 24.0, 25.0];
-    let pc = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
-    for (i, t) in days.iter().enumerate() {
-        for (s, p) in [(a, pa[i]), (b, pb[i]), (c, pc[i])] {
+    let names: [(&str, [f64; 6]); 3] =
+        [("AAA", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]), ("BBB", [20.0, 21.0, 0.0, 0.0, 24.0, 25.0]), ("CCC", [10.0, 11.0, 12.0, 13.0, 14.0, 15.0])];
+    for (name, closes) in names {
+        let s = ds.add_security(name, name, days[0], None);
+        for (t, p) in days.iter().zip(closes) {
             if p == 0.0 {
                 continue;
             }
-            ds.add("close", vec![Value::Equity(s), Value::Time(*t), Value::Num(p)]);
-            ds.add("volume", vec![Value::Equity(s), Value::Time(*t), Value::Num(1e6)]);
-            ds.add("universe", vec![Value::Equity(s), Value::Time(*t)]);
+            common::add_bar(&mut ds, s, *t, p, 1e6);
         }
     }
     ds.derive_tickers();
@@ -64,15 +47,13 @@ fn market() -> (Dataset, Vec<i64>) {
 
 fn query(k: &mut Kernel, rel: &str, t: i64, sym: &str) -> Option<f64> {
     let id = k.symbol_names().iter().position(|n| n == sym).unwrap() as u32;
-    // `avg3` takes the equity as an input; the ranks enumerate it.
-    let inputs = if rel == "avg3" { vec![Value::Equity(id)] } else { vec![] };
-    let tus = k.query(rel, t, &inputs).unwrap();
+    let tus = k.query(rel, t, &[]).unwrap();
     tus.iter().find(|tu| tu[0] == Value::Equity(id)).and_then(|tu| tu[2].as_f64())
 }
 
 #[test]
 fn a_rows_window_counts_the_groups_own_bars_and_skips_its_gaps() {
-    let p = program(ROLLING, "rolling");
+    let p = common::program(&rolling(), "rolling");
     let (ds, days) = market();
     let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
     k.run().unwrap();
@@ -88,7 +69,7 @@ fn a_rows_window_counts_the_groups_own_bars_and_skips_its_gaps() {
 
 #[test]
 fn rank_numbers_each_tuple_with_average_or_ordinal_ties() {
-    let p = program(ROLLING, "rolling");
+    let p = common::program(&rolling(), "rolling");
     let (ds, days) = market();
     let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
     k.run().unwrap();
@@ -105,7 +86,7 @@ fn rank_numbers_each_tuple_with_average_or_ordinal_ties() {
 
 #[test]
 fn the_fold_and_the_uncached_evaluation_agree_with_the_batch_kernel() {
-    let p = program(ROLLING, "rolling");
+    let p = common::program(&rolling(), "rolling");
     let (ds, _) = market();
     let a = run(&p, &ds, ExecConfig::frictionless()).unwrap();
     let b = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
@@ -127,49 +108,42 @@ fn the_fold_and_the_uncached_evaluation_agree_with_the_batch_kernel() {
 
 #[test]
 fn the_checker_judges_rows_and_rank() {
-    let bad_len = ROLLING.replace("rows(T, 3, min 3)", "rows(T, 3d, min 3)");
-    let (p, diags) = checked(&bad_len, "rolling");
-    assert!(p.is_none() && diags.iter().any(|d| d.contains("a Count (the number of rows)")), "{:?}", diags);
+    let src = rolling();
+    let bad_len = src.replace("rows[3]", "rows[3d]");
+    let (p, diags) = common::check(&bad_len, "rolling");
+    assert!(p.is_none() && common::text(&diags).contains("a Count (the number of rows)"), "{}", common::text(&diags));
     // Ordinal ties need a total order; averaged ones do not.
-    let partial = ROLLING.replace("by (P desc, A asc), as K", "by (P desc), as K");
-    let (p, diags) = checked(&partial, "rolling");
-    assert!(p.is_none() && diags.iter().any(|d| d.contains("not total")), "{:?}", diags);
-    let rebound = ROLLING.replace("rank(px(A, T, P), by (P desc), ties average, as K)", "rank(px(A, T, P), by (P desc), ties average, as P)");
-    let (p, diags) = checked(&rebound, "rolling");
-    assert!(p.is_none() && diags.iter().any(|d| d.contains("fresh")), "{:?}", diags);
+    let partial = src.replace("by (P desc, A asc)) within (T)", "by (P desc)) within (T)");
+    let (p, diags) = common::check(&partial, "rolling");
+    assert!(p.is_none() && diags.iter().any(|d| d.code == absolute_backtest::check::Code::D), "{}", common::text(&diags));
+    let rebound = src.replace("K = rank_average(px(A, T, P) by (P desc)) within (T)", "P = rank_average(px(A, T, P) by (P desc)) within (T)");
+    let (p, diags) = common::check(&rebound, "rolling");
+    assert!(p.is_none() && common::text(&diags).contains("fresh"), "{}", common::text(&diags));
 }
 
-/// A rows window counts the group's rows by the conjunction's first atom
-/// and aggregates the rows where the whole conjunction holds, as a rolling
-/// window with a minimum of periods: a row without a value still takes a
-/// place in the window.
+/// A rows window counts the entity's own rows (the bars at which it is in
+/// the universe) and aggregates the rows where the whole conjunction holds,
+/// as a rolling window with a minimum of periods: a row without a value
+/// still takes a place in the window.
 #[test]
 fn a_rows_window_counts_the_anchors_rows_and_aggregates_the_valid_ones() {
-    let src = r#"
-strategy sparse {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  # A value only on days with a close above 11.
-  rel high_close(+A: Equity, @T: Timestamp, -P: Price<USD>)
-  high_close(A, T, P) :- close(A, T, P), P > 11 USD/share.
-  rel last3(+A: Equity, @T: Timestamp, -M: Price<USD>)
-  last3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows(T, 3, min 1), universe(A, T1), high_close(A, T1, P)).
-  decide(T, target_weight(A, 0.1)) :- universe(A, T), last3(A, T, _).
-}
-"#;
-    let p = program(src, "sparse");
+    let src = common::strategy(
+        "sparse",
+        "    floor : Price<USD> = 11 USD/share",
+        "    # A value only on days with a close above the floor.
+    rel high_close(A: Equity, @T, P: Price<USD>)
+    high_close(A, T, P) :- close(A, T, P), P > floor.
+    rel last3(A: Equity, @T, M: Price<USD>)
+    last3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[3] min 1, high_close(A, T1, P)).",
+        "    decide(T, hold(A, 0.1)) :- universe(A, T), last3(A, T, _).",
+    );
+    let p = common::program(&src, "sparse");
     let (ds, days) = market();
     let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
     k.run().unwrap();
-    let get = |k: &mut Kernel, t: i64| {
-        let id = k.symbol_names().iter().position(|n| n == "AAA").unwrap() as u32;
-        k.query("last3", t, &[Value::Equity(id)]).unwrap().first().and_then(|tu| tu[2].as_f64())
-    };
     // AAA closes 10, 11, 12, 13: on day 4 the window is days 2 to 4 and only
     // 12 and 13 have values.
-    assert_eq!(get(&mut k, days[3]), Some(12.5));
+    assert_eq!(query(&mut k, "last3", days[3], "AAA"), Some(12.5));
     // Day 2: the window is days 1 and 2, neither above 11: no value at all.
-    assert_eq!(get(&mut k, days[1]), None);
+    assert_eq!(query(&mut k, "last3", days[1], "AAA"), None);
 }

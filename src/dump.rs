@@ -36,9 +36,9 @@ pub fn write_dump(prog: &Program, ds: &Dataset, cfg: &ExecConfig, result: &RunRe
     write_parquet_dir(prog, ds, &dir.join("data"))?;
     let config = serde_json::json!({
         "strategy": prog.strategy,
-        "environment": prog.environment,
-        "resolution": prog.resolution.to_string(),
-        "mode": prog.mode.to_string(),
+        "class": prog.class,
+        "base": prog.base.to_string(),
+        "decision_calendar": prog.cal_name(&prog.decision_cal),
         "symbols": result.symbols,
         "price_relation": result.price_relation,
         "volume_relation": result.volume_relation,

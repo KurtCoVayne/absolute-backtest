@@ -3,38 +3,28 @@
 //! default, liquidations fill at the last known price, and every order is
 //! rounded to whole shares unless configured otherwise.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
+use absolute_backtest::kernel::time::format_timestamp;
 use absolute_backtest::kernel::{run, Dataset, ExecConfig, Lot, OnLeverage, OnOversize, OnRuin, RunError, Value};
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
-fn day(s: &str) -> i64 {
-    parse_timestamp(s).unwrap()
-}
-
-/// One symbol X over five weekdays; `None` leaves the close out (the bar
-/// still exists through universe and volume).
+/// One symbol X over five weekdays; `None` leaves the bar's prices out (the
+/// bar still exists through the listing and the volume).
 fn market(prices: &[Option<f64>]) -> Dataset {
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
     let days = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"];
+    let x = ds.add_security("X", "X", common::day(days[0]), None);
     for (d, p) in days.iter().zip(prices) {
-        let t = day(d);
-        if let Some(p) = p {
-            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(*p)]);
+        let t = common::day(d);
+        match p {
+            Some(p) => common::add_bar(&mut ds, x, t, *p, 1000.0),
+            None => {
+                ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
+                ds.add("listed", vec![Value::Equity(x), Value::Time(t)]);
+            }
         }
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
     }
+    ds.derive_tickers();
     ds
 }
 
@@ -55,20 +45,14 @@ fn risk_message(r: Result<absolute_backtest::kernel::RunResult, RunError>) -> St
 
 // ---- lot rounding (#19) ----
 
-const FRACTIONAL: &str = r#"
-strategy fractional {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param q : Quantity<Shares> = 10.5 shares
-  decide(T, buy(A, q)) :- universe(A, T), flat(A, T).
+/// Buy 10.5 shares once, when flat.
+fn fractional() -> String {
+    common::strategy("fractional", "    q : Quantity<Shares> = 10.5 shares", "", "    decide(T, trade(A, q)) :- universe(A, T), flat(A, T).")
 }
-"#;
 
 #[test]
 fn orders_round_to_whole_shares_by_default_and_fractional_on_request() {
-    let prog = program(FRACTIONAL, "fractional");
+    let prog = common::program(&fractional(), "fractional");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     let r = run(&prog, &ds, cfg(1000.0)).unwrap();
     assert_eq!(r.fills[0].quantity, 10.0, "{:?}", r.fills);
@@ -80,17 +64,8 @@ fn orders_round_to_whole_shares_by_default_and_fractional_on_request() {
 
 #[test]
 fn target_quantity_rounds_like_the_other_orders() {
-    let src = r#"
-strategy tq {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param q : Quantity<Shares> = 10.5 shares
-  decide(T, target_quantity(A, q)) :- universe(A, T).
-}
-"#;
-    let prog = program(src, "tq");
+    let src = common::strategy("tq", "    q : Quantity<Shares> = 10.5 shares", "", "    decide(T, hold(A, q)) :- universe(A, T).");
+    let prog = common::program(&src, "tq");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     let r = run(&prog, &ds, cfg(1000.0)).unwrap();
     // One fill of 10, then the target 10.5 rounds to 10 again: no drift trade.
@@ -99,30 +74,28 @@ strategy tq {
 
 // ---- oversize delta orders (#6, #33) ----
 
-const OVERSELL: &str = r#"
-strategy oversell {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 100 shares
-  param big : Quantity<Shares> = 150 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T), not bought_within(A, T, 30d).
-  decide(T, sell(A, big)) :- held(A, T, _).
+/// Buy 100 when flat (once a month), then sell 150 of them.
+fn oversell() -> String {
+    common::strategy(
+        "oversell",
+        "    qty : Quantity<Shares> = 100 shares\n    big : Quantity<Shares> = 150 shares",
+        "",
+        "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T), not bought_within[30d](A, T).\n    decide(T, trade(A, Q)) :- held(A, T, _), Q = -big.",
+    )
 }
-"#;
 
 #[test]
 fn a_sell_beyond_the_position_halts_by_default() {
-    let prog = program(OVERSELL, "oversell");
+    let prog = common::program(&oversell(), "oversell");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     let m = risk_message(run(&prog, &ds, cfg(10_000.0)));
-    assert!(m.contains("150") && m.contains("100") && m.contains("sell"), "{}", m);
+    // The one constructor names the sale by its sign: a trade of -150 against 100 held.
+    assert!(m.contains("-150") && m.contains("100") && m.contains("trade") && m.contains("held"), "{}", m);
 }
 
 #[test]
 fn a_sell_beyond_the_position_is_clamped_or_allowed_on_request() {
-    let prog = program(OVERSELL, "oversell");
+    let prog = common::program(&oversell(), "oversell");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     let r = run(
         &prog,
@@ -151,20 +124,14 @@ fn a_sell_beyond_the_position_is_clamped_or_allowed_on_request() {
 
 // ---- leverage (#17, #33) ----
 
-const LEVERED: &str = r#"
-strategy levered {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = 2.4
-  decide(T, target_weight(A, w)) :- universe(A, T).
+/// Target 2.4 times the book, every bar.
+fn levered() -> String {
+    common::strategy("levered", "    w : Scalar = 2.4", "", "    decide(T, hold(A, w)) :- universe(A, T).")
 }
-"#;
 
 #[test]
 fn borrowing_to_buy_halts_by_default() {
-    let prog = program(LEVERED, "levered");
+    let prog = common::program(&levered(), "levered");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     let m = risk_message(run(&prog, &ds, cfg(1000.0)));
     assert!(m.contains("equity"), "{}", m);
@@ -172,7 +139,7 @@ fn borrowing_to_buy_halts_by_default() {
 
 #[test]
 fn borrowing_is_rejected_or_allowed_on_request() {
-    let prog = program(LEVERED, "levered");
+    let prog = common::program(&levered(), "levered");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     let r = run(
         &prog,
@@ -201,47 +168,38 @@ fn borrowing_is_rejected_or_allowed_on_request() {
 
 #[test]
 fn a_short_beyond_equity_halts_by_default() {
-    let src = r#"
-strategy naked {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 150 shares
-  decide(T, short(A, qty)) :- universe(A, T), flat(A, T).
-}
-"#;
-    let prog = program(src, "naked");
+    let src = common::strategy(
+        "naked",
+        "    qty : Quantity<Shares> = 150 shares",
+        "",
+        "    decide(T, trade(A, Q)) :- universe(A, T), flat(A, T), Q = -qty.",
+    );
+    let prog = common::program(&src, "naked");
     let ds = market(&[Some(10.0), Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
     // Equity 1000 against 1500 of short exposure.
     let m = risk_message(run(&prog, &ds, cfg(1000.0)));
     assert!(m.contains("equity"), "{}", m);
     // 50 shares short is within equity.
-    let prog = program(&src.replace("150 shares", "50 shares"), "naked");
+    let prog = common::program(&src.replace("150 shares", "50 shares"), "naked");
     run(&prog, &ds, cfg(1000.0)).unwrap();
 }
 
 // ---- ruin (#15, #33) ----
 
-const RUINED: &str = r#"
-strategy ruined {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param q : Quantity<Shares> = -100 shares
-  param w : Scalar = 0.5
-  param trigger : Price<USD> = 20 USD/share
-  rel has_prev(@T: Timestamp)
-  has_prev(T) :- bar(T), prev(T, _).
-  decide(T, target_quantity(A, q)) :- universe(A, T), not has_prev(T).
-  decide(T, target_weight(A, w)) :- position(A, T, Q), Q < 0 shares, close(A, T, P), P > trigger.
+/// Short 100 on the first bar; once the price is above the trigger, target
+/// half the book long.
+fn ruined() -> String {
+    common::strategy(
+        "ruined",
+        "    q : Quantity<Shares> = -100 shares\n    w : Scalar = 0.5\n    trigger : Price<USD> = 20 USD/share",
+        "    rel has_prev(@T)\n    has_prev(T) :- bar(T), prev(T, _).",
+        "    decide(T, hold(A, q)) :- universe(A, T), not has_prev(T).\n    decide(T, hold(A, w)) :- position(A, T, Q), Q < 0 shares, close(A, T, P), P > trigger.",
+    )
 }
-"#;
 
 #[test]
 fn a_ruined_book_halts_by_default_and_targets_flat_on_request() {
-    let prog = program(RUINED, "ruined");
+    let prog = common::program(&ruined(), "ruined");
     // Short 100 at 10 (cash 2000), then the price triples: equity is -1000
     // when the re-weighting order comes to be filled.
     let ds = market(&[Some(10.0), Some(10.0), Some(30.0), Some(30.0), Some(30.0)]);
@@ -266,22 +224,23 @@ fn a_ruined_book_halts_by_default_and_targets_flat_on_request() {
 
 // ---- liquidation at the last price (#16) ----
 
-const ROUND_TRIP: &str = r#"
-strategy round_trip {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  decide(T, buy(A, qty)) :- universe(A, T), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q).
+/// Buy 10 when flat and sell them the bar after, over a universe of the
+/// listed bars (an unpriced bar is still a row of the name).
+fn round_trip() -> String {
+    common::StrategyParts {
+        name: "round_trip".into(),
+        universe: "universe(A, T) :- listed(A, T).".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), Q = -Q0.".into(),
+        ..Default::default()
+    }
+    .render()
 }
-"#;
 
 #[test]
 fn a_liquidation_without_a_bar_price_fills_at_the_last_price() {
-    let prog = program(ROUND_TRIP, "round_trip");
-    // Priced on the first two days only; universe and volume rows continue.
+    let prog = common::program(&round_trip(), "round_trip");
+    // Priced on the first two days only; listing and volume rows continue.
     let ds = market(&[Some(10.0), Some(12.0), None, None, None]);
     let r = run(&prog, &ds, cfg(1000.0)).unwrap();
     // Buy decided day 1, filled day 2 at 12; sell decided day 2, filled day 3

@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use super::time;
 use super::value::{Ctor, Decision, Order, OrderKind, Tif, Value};
-use super::{CompiledRule, Env, Kernel, RunError, Tuple};
+use super::{CompiledRule, Env, Kernel, RunError, Sym, Tuple};
 use crate::ir::*;
 
 /// The rows of one bar of a windowed group, each with the aggregate's
@@ -26,6 +26,8 @@ pub(crate) struct RowsPlan {
     dur: Expr,
     outer: Vec<usize>,
     shareable: bool,
+    /// `prior_rows`: the bar itself is excluded.
+    prior: bool,
     order: Vec<Literal>,
     anchor: Vec<Literal>,
     /// Every slot the conjunction mentions, ascending.
@@ -198,7 +200,8 @@ impl RunningSums {
             "std" if !flat(caa, saa) => Some((caa / (n - 1.0)).sqrt()),
             "cov" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (n - 1.0)),
             "corr" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (caa * cbb).sqrt()),
-            "ols_beta" if !flat(cbb, sbb) => Some(cab / cbb),
+            "ols_slope" if !flat(cbb, sbb) => Some(cab / cbb),
+            "ols_r" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (caa * cbb).sqrt()),
             _ => None,
         }
     }
@@ -206,7 +209,7 @@ impl RunningSums {
 
 /// The aggregates running sums answer.
 fn moment_aggregate(agg: &str) -> bool {
-    matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_beta")
+    matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_slope" | "ols_r")
 }
 
 /// An instance that met a partial operation while a body was solved: its
@@ -300,7 +303,18 @@ impl<'p> Kernel<'p> {
                 Rc::new(slice.iter().filter(|(tu, _)| matches(tu)).cloned().collect())
             }
         };
+        // A stuck instance the pattern meets halts the call (Kleene: a ⊥
+        // instance a decision demands); one it does not meet is not read.
+        let compatible = |partial: &[Option<Value>]| {
+            pattern.iter().zip(partial.iter()).all(|(p, v)| match (p, v) {
+                (Some(p), Some(v)) => p == v,
+                _ => true,
+            })
+        };
         if let Some(hit) = self.memo.get(&memo_key) {
+            if let Some((_, e)) = self.memo_stuck.get(&memo_key).and_then(|st| st.iter().find(|(p, _)| compatible(p))) {
+                return Err(e.clone());
+            }
             return Ok(narrow(hit));
         }
         // A call that halted on a stuck instance (Kleene conjunction: a
@@ -322,7 +336,7 @@ impl<'p> Kernel<'p> {
         if cfg!(debug_assertions) {
             self.in_progress.remove(&memo_key);
         }
-        let mut results = match derived {
+        let (mut results, stucks) = match derived {
             Ok(r) => r,
             Err(e) => {
                 if matches!(e, RunError::Arithmetic { .. }) {
@@ -331,6 +345,9 @@ impl<'p> Kernel<'p> {
                 return Err(e);
             }
         };
+        if !stucks.is_empty() {
+            self.memo_stuck.insert(memo_key.clone(), Rc::new(stucks));
+        }
         if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
             results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
         }
@@ -339,15 +356,21 @@ impl<'p> Kernel<'p> {
         cov.1 += usize::from(!results.is_empty());
         cov.2 += results.len();
         let rc = Rc::new(results);
-        self.memo.insert(memo_key, rc.clone());
+        self.memo.insert(memo_key.clone(), rc.clone());
+        if let Some((_, e)) = self.memo_stuck.get(&memo_key).and_then(|st| st.iter().find(|(p, _)| compatible(p))) {
+            return Err(e.clone());
+        }
         Ok(narrow(&rc))
     }
 
     /// Every tuple the rules of a derived relation yield for a pattern, with
-    /// the rule that derived each (the first, when several do), or the halt
-    /// of an instance left stuck.
-    fn derive_rules(&mut self, info: &super::RelInfo, pattern: &[Option<Value>]) -> Result<Vec<(Tuple, usize)>, RunError> {
+    /// the rule that derived each (the first, when several do), and the
+    /// instances left stuck on a partial operation as partial head tuples
+    /// with their errors (`call` halts a reader whose pattern meets one).
+    #[allow(clippy::type_complexity)]
+    fn derive_rules(&mut self, info: &super::RelInfo, pattern: &[Option<Value>]) -> Result<(Vec<(Tuple, usize)>, Vec<(Vec<Option<Value>>, RunError)>), RunError> {
         let mut results: Vec<(Tuple, usize)> = Vec::new();
+        let mut stucks: Vec<(Vec<Option<Value>>, RunError)> = Vec::new();
         // Duplicates are found by a scan while the set is small, by a hash
         // set once it grows (most calls derive at most a tuple or two).
         let mut seen: Option<super::hash::FxHashSet<Tuple>> = None;
@@ -384,8 +407,16 @@ impl<'p> Kernel<'p> {
             // run here, where a decision demanded it (section 7).
             let order = self.plan_order(ri);
             let (sols, stuck) = self.solve_kleene(&cr, &rule.body, &order, vec![env], Some(ri))?;
-            if let Some(s) = stuck.into_iter().next() {
-                return Err(s.error);
+            for s in stuck {
+                let mut partial = Vec::with_capacity(rule.head.terms.len());
+                for term in &rule.head.terms {
+                    partial.push(match term {
+                        Term::Var(v, _) => s.env[cr.slots[v]].clone(),
+                        Term::Wild(_) | Term::Ctor(..) => None,
+                        t => self.term_value(&cr, t, &s.env).ok(),
+                    });
+                }
+                stucks.push((partial, s.error));
             }
             for sol in sols {
                 let mut tu = Vec::with_capacity(rule.head.terms.len());
@@ -407,7 +438,7 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
-        Ok(results)
+        Ok((results, stucks))
     }
 
     /// The index of a body literal in its rule, mapped to the literal whose
@@ -684,17 +715,19 @@ impl<'p> Kernel<'p> {
     /// as-of join). A stored relation is answered from its index; a derived
     /// one by calling it at its own resolution's bars backwards from T,
     /// with the answer memoised for every bar walked.
-    fn asof_matches(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, env: &Env) -> Result<Vec<Env>, RunError> {
+    fn asof_matches(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, within: Option<&Cal>, env: &Env) -> Result<Vec<Env>, RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
-        let at_t = self.time_of(cr, at, env)?;
+        let t = self.time_of(cr, at, env)?;
         let info = self.rels[rel].clone();
-        // A tuple is available at its bar's close (section 3): a daily bar is
-        // labelled by its date, so read from a finer rule it counts only once
-        // its day has ended by T (an intraday label is already the close).
-        let rule_res = self.prog.relations.get(&self.prog.rules[cr.idx].head.name).and_then(|s| s.res);
-        let t = match (info.res, rule_res) {
-            (Resolution::D1, Some(r)) if r.finer_than(Resolution::D1) => at_t - time::DAY + 1,
-            _ => at_t,
+        // A bar view of a finer relation (3.4): only a key within the bucket
+        // of the as-of bar on that calendar is read.
+        let floor: i64 = match within {
+            Some(c) => {
+                let entity = cr.entity_slot.and_then(|sl| env.get(sl)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
+                let dom = self.domain_for(c, entity)?;
+                dom.range(..t).next_back().map(|p| p + 1).unwrap_or(i64::MIN)
+            }
+            None => i64::MIN,
         };
         let mut pat = self.atom_pattern(cr, atom, env)?;
         pat[info.key_pos] = None;
@@ -703,7 +736,7 @@ impl<'p> Kernel<'p> {
             let mut found: Vec<(Tuple, usize)> = Vec::new();
             let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
             let mut cur = t;
-            while let Some(k) = self.stores[rel].by_time.range(..=cur).next_back().map(|(k, _)| *k) {
+            while let Some(k) = self.stores[rel].by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
                 found.extend(self.stores[rel].lookup(k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)));
                 if !found.is_empty() || k == i64::MIN {
                     break;
@@ -719,9 +752,11 @@ impl<'p> Kernel<'p> {
                     None => return Err(RunError::Internal(format!("`{}` requested as of {} with its input #{} unbound", info.name, t, i + 1))),
                 }
             }
+            let entity = info.entity_positions.first().and_then(|&e| pat[e].as_ref()).and_then(|v| v.as_equity());
+            let rel_dom: Vec<i64> = self.domain_for(&info.cal, entity)?.range(floor..=t).rev().copied().collect();
             // The common case: the latest bar itself has a tuple (a relation
             // read at its previous row). Answered directly, nothing memoised.
-            if let Some(k) = self.domains.get(&info.res).and_then(|d| d.range(..=t).next_back().copied()) {
+            if let Some(k) = rel_dom.first().copied() {
                 pat[info.key_pos] = Some(Value::Time(k));
                 let first = self.call(rel, &pat)?;
                 if !first.is_empty() {
@@ -730,8 +765,7 @@ impl<'p> Kernel<'p> {
             }
             let mut walked: Vec<i64> = Vec::new();
             let mut found: Option<i64> = None;
-            let mut cur = t;
-            while let Some(k) = self.domains.get(&info.res).and_then(|d| d.range(..=cur).next_back().copied()) {
+            for k in rel_dom {
                 if let Some(hit) = self.asof_memo.get(&(rel, mkey.clone(), k)) {
                     found = *hit;
                     break;
@@ -742,7 +776,6 @@ impl<'p> Kernel<'p> {
                     found = Some(k);
                     break;
                 }
-                cur = k - 1;
             }
             for k in walked {
                 self.asof_memo.insert((rel, mkey.clone(), k), found);
@@ -786,7 +819,7 @@ impl<'p> Kernel<'p> {
 
     fn match_ctor(&mut self, cr: &CompiledRule, name: &str, subs: &[Term], val: &Value, env: &mut Env) -> Result<bool, RunError> {
         let Value::Decision(d) = val else { return Ok(false) };
-        if Ctor::parse(name) != Some(d.ctor) {
+        if !d.ctor.matches(name) {
             return Ok(false);
         }
         let fields = [Value::Equity(d.equity), Value::Num(d.amount)];
@@ -846,15 +879,156 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    fn domain(&self, cr: &CompiledRule) -> Result<&std::collections::BTreeSet<i64>, RunError> {
-        let res = self.prog.infos[cr.idx].resolution;
-        self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))
+    /// The calendar of a time variable: what the elaborator inferred for
+    /// it (3.4, 3.5), else the rule's.
+    fn term_cal(&self, cr: &CompiledRule, term: &Term) -> Cal {
+        if let Term::Var(v, _) = term {
+            if let Some(c) = self.prog.var_cals.get(cr.idx).and_then(|m| m.get(v)) {
+                return c.clone();
+            }
+        }
+        self.prog.infos[cr.idx].cal.clone()
+    }
+
+    /// The domain a builtin or a calendar window steps in: the domain of
+    /// its argument's calendar, per instrument on the sessions calendar
+    /// (`prev(S, S1)` on a session label is the instrument's previous
+    /// session, whether or not the label coincides with a base bar).
+    fn domain_of_term(&self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<&std::collections::BTreeSet<i64>, RunError> {
+        let cal = self.term_cal(cr, term);
+        let entity = cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
+        self.domain_for(&cal, entity)
+    }
+
+    /// The time domain of a rule: its calendar's, and for the per-instrument
+    /// sessions calendar the sessions of the head's instrument.
+    fn domain(&self, cr: &CompiledRule, env: &Env) -> Result<&std::collections::BTreeSet<i64>, RunError> {
+        let cal = &self.prog.infos[cr.idx].cal;
+        let entity = cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
+        self.domain_for(cal, entity)
+    }
+
+    /// The domain of a calendar, per instrument when it is the sessions calendar.
+    pub(crate) fn domain_for(&self, cal: &Cal, entity: Option<Sym>) -> Result<&std::collections::BTreeSet<i64>, RunError> {
+        if cal.per_entity() {
+            if let Some(d) = entity.and_then(|s| self.session_domains.get(&s)) {
+                return Ok(d);
+            }
+        }
+        self.domains.get(cal).ok_or_else(|| RunError::Internal(format!("no time domain at {}", cal)))
+    }
+
+    /// The base bars a temporal constraint of a bucket or a session selects
+    /// (3.3, 3.5): the bars of `t`'s bucket on the calendar; the bars of the
+    /// instrument's session holding `t` (or labelled `t`) with offset in
+    /// [lo, hi), at or before `t`.
+    fn window_times(&mut self, cr: &CompiledRule, kind: &WindowKind, base: &Term, dur: &Expr, lo: Option<&Expr>, env: &Env) -> Result<Vec<i64>, RunError> {
+        let t = self.time_of(cr, base, env)?;
+        match kind {
+            WindowKind::Window | WindowKind::Prior => {
+                let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
+                    return Err(RunError::Internal("window length is not a Duration".into()));
+                };
+                let lo_t = time::sub_duration(t, *d);
+                Ok(match kind {
+                    WindowKind::Window => self.domain_of_term(cr, base, env)?.range(lo_t..=t).copied().collect(),
+                    _ => self.domain_of_term(cr, base, env)?.range(lo_t..t).copied().collect(),
+                })
+            }
+            WindowKind::Bucket(c) => {
+                let entity = cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
+                if c.per_entity() {
+                    // The instrument's session labelled t.
+                    let Some(sym) = entity else { return Ok(vec![]) };
+                    let Some((open, label)) = self.sessions.get(&sym).and_then(|v| {
+                        let i = v.partition_point(|(_, l)| *l < t);
+                        v.get(i).copied().filter(|(_, l)| *l == t)
+                    }) else {
+                        return Ok(vec![]);
+                    };
+                    return Ok(self.domains.get(&Cal::Base).map(|d| d.range(open + 1..=label).copied().collect()).unwrap_or_default());
+                }
+                let start = self.domain_for(c, entity)?.range(..t).next_back().map(|p| p + 1).unwrap_or(i64::MIN);
+                Ok(self.domains.get(&Cal::Base).map(|d| d.range(start..=t).copied().collect()).unwrap_or_default())
+            }
+            WindowKind::Session => {
+                let entity = cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
+                let Some(sym) = entity else { return Ok(vec![]) };
+                let Value::Dur(hi) = self.eval_expr(cr, dur, env)? else {
+                    return Err(RunError::Internal("session offset is not a Duration".into()));
+                };
+                let lo_d = match lo {
+                    Some(e) => match self.eval_expr(cr, e, env)? {
+                        Value::Dur(d) => *d,
+                        _ => return Err(RunError::Internal("session offset is not a Duration".into())),
+                    },
+                    None => Duration::default(),
+                };
+                let Some(v) = self.sessions.get(&sym) else { return Ok(vec![]) };
+                let i = v.partition_point(|(_, l)| *l < t);
+                let Some(&(open, label)) = v.get(i) else { return Ok(vec![]) };
+                if !(open < t && t <= label) {
+                    return Ok(vec![]);
+                }
+                // A bar's offset in its session is its start less the open
+                // (minute 0 is the first bar of a session; bars are labelled
+                // at their close), so labels in [open + lo + res, open + hi + res).
+                let res = self.prog.base.seconds().unwrap_or(0);
+                let from = time::add_duration(open, lo_d) + res;
+                let to = time::add_duration(open, *hi) + res;
+                let end = label.min(t);
+                Ok(self
+                    .domains
+                    .get(&Cal::Base)
+                    .map(|d| d.range(from..to.min(end + 1)).filter(|b| **b > open && **b <= end).copied().collect())
+                    .unwrap_or_default())
+            }
+            WindowKind::Rows | WindowKind::PriorRows => Err(RunError::Internal("a `rows` window is solved by its aggregation".into())),
+        }
+    }
+
+    /// A constraint whose bars depend on the instrument: a session, or a
+    /// bucket of the per-instrument sessions calendar.
+    fn per_entity_window(&self, kind: &WindowKind) -> bool {
+        match kind {
+            WindowKind::Session => true,
+            WindowKind::Bucket(c) => c.per_entity(),
+            _ => false,
+        }
+    }
+
+    /// `session_of(A, T, S)`: the label of A's session holding base bar T.
+    fn session_label(&self, sym: Sym, t: i64) -> Option<i64> {
+        let v = self.sessions.get(&sym)?;
+        let i = v.partition_point(|(_, l)| *l < t);
+        let (open, label) = *v.get(i)?;
+        (open < t && t <= label).then_some(label)
+    }
+
+    /// The value of a case form on one binding: the first branch whose
+    /// guard holds binds the variable to its value (Definition 5.9); with
+    /// no branch and no `else` the instance is excluded.
+    fn case_value(&mut self, cr: &Rc<CompiledRule>, branches: &[Branch], otherwise: Option<&Expr>, env: &Env) -> Result<Option<Value>, RunError> {
+        for b in branches {
+            let order: Vec<usize> = (0..b.guard.len()).collect();
+            let (sols, stuck) = self.solve_kleene(cr, &b.guard, &order, vec![env.clone()], None)?;
+            if let Some(sol) = sols.into_iter().next() {
+                return Ok(Some(self.eval_expr(cr, &b.value, &sol)?));
+            }
+            if let Some(s) = stuck.into_iter().next() {
+                return Err(s.error);
+            }
+        }
+        match otherwise {
+            Some(e) => Ok(Some(self.eval_expr(cr, e, env)?)),
+            None => Ok(None),
+        }
     }
 
     pub(crate) fn step(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &Env, out: &mut Vec<Env>) -> Result<(), RunError> {
         match lit {
             Literal::Atom(a) => out.extend(self.atom_matches(cr, a, env)?),
-            Literal::AsOf { atom, at, .. } => out.extend(self.asof_matches(cr, atom, at, env)?),
+            Literal::AsOf { atom, at, within_bucket, .. } => out.extend(self.asof_matches(cr, atom, at, within_bucket.as_ref(), env)?),
             Literal::Neg(a) => {
                 if self.atom_matches(cr, a, env)?.is_empty() {
                     out.push(env.clone());
@@ -862,51 +1036,104 @@ impl<'p> Kernel<'p> {
             }
             Literal::Builtin(b, _) => match b {
                 Builtin::Prev { t, t1 } => {
-                    let t = self.time_of(cr, t, env)?;
-                    if let Some(&p) = self.domain(cr)?.range(..t).next_back() {
+                    let at = self.time_of(cr, t, env)?;
+                    // The argument's calendar: a session label's previous
+                    // label is the instrument's previous session.
+                    let dom = self.domain_of_term(cr, t, env)?;
+                    if let Some(&p) = dom.range(..at).next_back() {
                         self.bind_time(cr, t1, env, p, out);
                     }
                 }
                 Builtin::Lag { t, n, t1 } => {
-                    let t = self.time_of(cr, t, env)?;
+                    let at = self.time_of(cr, t, env)?;
                     let Value::Dur(d) = self.eval_expr(cr, n, env)? else {
                         return Err(RunError::Internal("lag length is not a Duration".into()));
                     };
-                    let bound = time::sub_duration(t, *d);
-                    if let Some(&p) = self.domain(cr)?.range(..=bound).next_back() {
+                    let bound = time::sub_duration(at, *d);
+                    if let Some(&p) = self.domain_of_term(cr, t, env)?.range(..=bound).next_back() {
                         self.bind_time(cr, t1, env, p, out);
                     }
                 }
                 Builtin::MonthStart { t } => {
-                    let t = self.time_of(cr, t, env)?;
-                    let prev = self.domain(cr)?.range(..t).next_back().copied();
-                    if prev.map(|p| time::month_key(p) != time::month_key(t)).unwrap_or(true) {
+                    let at = self.time_of(cr, t, env)?;
+                    let prev = self.domain_of_term(cr, t, env)?.range(..at).next_back().copied();
+                    if prev.map(|p| time::month_key(p) != time::month_key(at)).unwrap_or(true) {
                         out.push(env.clone());
                     }
                 }
                 Builtin::DayStart { t } => {
-                    let t = self.time_of(cr, t, env)?;
-                    let prev = self.domain(cr)?.range(..t).next_back().copied();
-                    if prev.map(|p| time::day_key(p) != time::day_key(t)).unwrap_or(true) {
+                    let at = self.time_of(cr, t, env)?;
+                    let prev = self.domain_of_term(cr, t, env)?.range(..at).next_back().copied();
+                    if prev.map(|p| time::day_key(p) != time::day_key(at)).unwrap_or(true) {
                         out.push(env.clone());
                     }
                 }
+                Builtin::SessionOf { a, t, s } => {
+                    let sym = match self.term_value(cr, a, env)? {
+                        Value::Equity(x) => x,
+                        _ => return Err(RunError::Internal("session_of needs an instrument".into())),
+                    };
+                    let t = self.time_of(cr, t, env)?;
+                    if let Some(label) = self.session_label(sym, t) {
+                        self.bind_time(cr, s, env, label, out);
+                    }
+                }
             },
-            Literal::Window { kind: WindowKind::Rows, .. } => {
+            Literal::Window {
+                kind: WindowKind::Rows | WindowKind::PriorRows,
+                ..
+            } => {
                 return Err(RunError::Internal("a `rows` window is solved by its aggregation".into()));
             }
-            Literal::Window { var, kind, base, dur, .. } => {
-                let t = self.time_of(cr, base, env)?;
-                let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
-                    return Err(RunError::Internal("window length is not a Duration".into()));
-                };
-                let lo = time::sub_duration(t, *d);
-                let times: Vec<i64> = match kind {
-                    WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
-                    WindowKind::Prior | WindowKind::Rows => self.domain(cr)?.range(lo..t).copied().collect(),
-                };
+            Literal::Window { var, kind, base, dur, lo, .. } => {
+                // A session constraint, or a bucket of the per-instrument
+                // sessions calendar, with the instrument unbound: the bars
+                // of every instrument's session there, each with the
+                // instrument bound (the group keys of a view rule).
+                if self.per_entity_window(kind) {
+                    if let Some(slot) = cr.entity_slot.filter(|&s| env[s].is_none()) {
+                        let t = self.time_of(cr, base, env)?;
+                        let mut syms: Vec<Sym> = self
+                            .sessions
+                            .iter()
+                            .filter(|(_, v)| {
+                                let i = v.partition_point(|(_, l)| *l < t);
+                                v.get(i).map(|(o, l)| *o < t && t <= *l).unwrap_or(false)
+                            })
+                            .map(|(s, _)| *s)
+                            .collect();
+                        syms.sort_unstable();
+                        for sym in syms {
+                            let mut e = env.clone();
+                            e[slot] = Some(Value::Equity(sym));
+                            let times = self.window_times(cr, kind, base, dur, lo.as_ref(), &e)?;
+                            for t1 in times {
+                                self.bind_time(cr, var, &e, t1, out);
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+                let times = self.window_times(cr, kind, base, dur, lo.as_ref(), env)?;
                 for t1 in times {
                     self.bind_time(cr, var, env, t1, out);
+                }
+            }
+            Literal::Case { var, branches, otherwise, .. } => {
+                if let Some(v) = self.case_value(cr, branches, otherwise.as_ref(), env)? {
+                    let slot = cr.slots[var];
+                    match &env[slot] {
+                        Some(x) => {
+                            if values_equal(x, &v) {
+                                out.push(env.clone());
+                            }
+                        }
+                        None => {
+                            let mut e = env.clone();
+                            e[slot] = Some(v);
+                            out.push(e);
+                        }
+                    }
                 }
             }
             Literal::Cmp { op, lhs, rhs, .. } => {
@@ -932,7 +1159,7 @@ impl<'p> Kernel<'p> {
                     }
                 }
             }
-            Literal::Agg { var, agg, args, conj, .. } => {
+            Literal::Agg { var, agg, args, conj, within, .. } => {
                 let mut min_count: i64 = 0;
                 for l in conj {
                     if let Literal::Window { min, .. } = l {
@@ -941,17 +1168,56 @@ impl<'p> Kernel<'p> {
                     }
                 }
                 self.stats.window_calls += 1;
+                // The group keys (language-v2, 4.2): the variables the
+                // conjunction binds that are unbound outside it and neither
+                // a constraint's time nor aggregated over; one result per
+                // distinct binding of them (`close@C(A, T, P)` groups by A).
+                let mut aggregated: Vec<String> = Vec::new();
+                for l in conj {
+                    if let Literal::Window { var: Term::Var(v, _), .. } = l {
+                        aggregated.push(v.clone());
+                    }
+                }
+                for a in args {
+                    let mut vs = Vec::new();
+                    a.vars(&mut vs);
+                    aggregated.extend(vs.into_iter().map(|(v, _)| v));
+                }
+                if let Some(w) = within {
+                    aggregated.extend(w.iter().cloned());
+                }
+                let mut mentioned: Vec<String> = Vec::new();
+                for l in conj {
+                    literal_vars(l, &mut mentioned);
+                }
+                let mut group_slots: Vec<usize> = mentioned
+                    .iter()
+                    .filter(|v| !aggregated.contains(v))
+                    .filter_map(|v| cr.slots.get(v).copied())
+                    .filter(|&s| env[s].is_none())
+                    .collect();
+                group_slots.sort_unstable();
+                group_slots.dedup();
+                let grouped = !group_slots.is_empty();
                 // The rows of the group with the aggregate's arguments evaluated
                 // on each: a `rows` window walks back over the group's own
                 // bars; otherwise from the per-bar cache when the group has
                 // exactly one window (the common case), else solved whole.
-                let has_rows = conj.iter().any(|l| matches!(l, Literal::Window { kind: WindowKind::Rows, .. }));
+                let has_rows = conj.iter().any(|l| {
+                    matches!(
+                        l,
+                        Literal::Window {
+                            kind: WindowKind::Rows | WindowKind::PriorRows,
+                            ..
+                        }
+                    )
+                });
                 // A rows window whose time variable is the first slot the
                 // conjunction binds yields rows already in the order the
                 // environments sort to (time order, one row a bar): no
                 // environments are materialised and nothing is sorted.
                 let mut in_order = false;
-                if has_rows && self.cfg.window_cache {
+                if has_rows && self.cfg.window_cache && !grouped {
                     if let Some((count, cols, running)) = self.rows_columns(cr, lit, conj, agg, args, env)? {
                         if (count as i64) < min_count {
                             return Ok(());
@@ -976,7 +1242,9 @@ impl<'p> Kernel<'p> {
                         return Ok(());
                     }
                 }
-                let cached = if has_rows {
+                let cached = if grouped {
+                    None
+                } else if has_rows {
                     let ordered = self.time_ordered(cr, lit, conj, env);
                     let (rows, sorted) = self.rows_window(cr, lit, conj, agg, args, env, !ordered)?;
                     in_order = sorted;
@@ -995,16 +1263,12 @@ impl<'p> Kernel<'p> {
                                 kind,
                                 base: base @ Term::Var(..),
                                 dur,
+                                lo,
                                 ..
                             } = l
                             {
-                                let t = self.time_of(cr, base, env)?;
-                                if let Value::Dur(d) = self.eval_expr(cr, dur, env)? {
-                                    let lo = time::sub_duration(t, *d);
-                                    self.stats.window_bars_solved += match kind {
-                                        WindowKind::Window => self.domain(cr)?.range(lo..=t).count(),
-                                        WindowKind::Prior | WindowKind::Rows => self.domain(cr)?.range(lo..t).count(),
-                                    };
+                                if !matches!(kind, WindowKind::Rows | WindowKind::PriorRows) {
+                                    self.stats.window_bars_solved += self.window_times(cr, kind, base, dur, lo.as_ref(), env)?.len();
                                 }
                             }
                         }
@@ -1023,6 +1287,43 @@ impl<'p> Kernel<'p> {
                 }
                 if !in_order {
                     rows.sort_by(|a, b| a.0.cmp(&b.0));
+                }
+                if grouped {
+                    let mut groups: BTreeMap<Vec<Option<Value>>, Vec<usize>> = BTreeMap::new();
+                    for (i, (row, _)) in rows.iter().enumerate() {
+                        let key: Vec<Option<Value>> = group_slots.iter().map(|&s| row[s].clone()).collect();
+                        groups.entry(key).or_default().push(i);
+                    }
+                    for (key, idx) in groups {
+                        if (idx.len() as i64) < min_count {
+                            continue;
+                        }
+                        let value = if agg == "count" {
+                            Value::Count(idx.len() as i64)
+                        } else {
+                            let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(idx.len()); args.len()];
+                            for &i in &idx {
+                                for (j, v) in rows[i].1.iter().enumerate() {
+                                    cols[j].push(*v);
+                                }
+                            }
+                            match aggregate(agg, &cols) {
+                                Ok(Some(v)) => v,
+                                Ok(None) => continue,
+                                Err(m) => {
+                                    let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+                                    return Err(self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), &m));
+                                }
+                            }
+                        };
+                        let mut e = env.clone();
+                        for (s, v) in group_slots.iter().zip(key) {
+                            e[*s] = v;
+                        }
+                        e[cr.slots[var]] = Some(value);
+                        out.push(e);
+                    }
+                    return Ok(());
                 }
                 if agg == "count" {
                     let mut e = env.clone();
@@ -1087,71 +1388,6 @@ impl<'p> Kernel<'p> {
                 }
                 out.extend(rows);
             }
-            Literal::Resample { inner, to, as_var, min, aggs, .. } => {
-                let label = env[cr.slots[as_var]]
-                    .as_ref()
-                    .and_then(|v| v.as_time())
-                    .ok_or_else(|| RunError::Internal("resample bucket label unbound".into()))?;
-                let k = self.eval_expr(cr, min, env)?.as_f64().unwrap_or(0.0) as i64;
-                let rel = self.rel_ids.get(&inner.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", inner.name)))?;
-                let info = self.rels[rel].clone();
-                let (lo, hi) = time::bucket_range(*to, label);
-                let fine: Vec<i64> = self.domains.get(&info.res).map(|d| d.range(lo..=hi).copied().collect()).unwrap_or_default();
-                let mut pat = self.atom_pattern(cr, inner, env)?;
-                // Grouping columns: entity positions whose term is a fresh variable.
-                let group_pos: Vec<(usize, usize)> = info
-                    .entity_positions
-                    .iter()
-                    .filter_map(|&i| match &inner.terms[i] {
-                        Term::Var(v, _) if env[cr.slots[v]].is_none() => Some((i, cr.slots[v])),
-                        _ => None,
-                    })
-                    .collect();
-                let mut groups: BTreeMap<Vec<Value>, Vec<Tuple>> = BTreeMap::new();
-                for t1 in fine {
-                    pat[info.key_pos] = Some(Value::Time(t1));
-                    let tuples = self.call(rel, &pat)?;
-                    for (tu, _) in tuples.iter() {
-                        let gk: Vec<Value> = group_pos.iter().map(|(i, _)| tu[*i].clone()).collect();
-                        groups.entry(gk).or_default().push(tu.clone());
-                    }
-                }
-                for (gk, tuples) in groups {
-                    if (tuples.len() as i64) < k {
-                        continue;
-                    }
-                    let mut e = env.clone();
-                    for ((_, slot), v) in group_pos.iter().zip(gk.iter()) {
-                        e[*slot] = Some(v.clone());
-                    }
-                    let mut ok = true;
-                    for (x, agg, expr) in aggs {
-                        if agg == "count" {
-                            e[cr.slots[x]] = Some(Value::Count(tuples.len() as i64));
-                            continue;
-                        }
-                        let mut col = Vec::with_capacity(tuples.len());
-                        for tu in &tuples {
-                            let mut local = e.clone();
-                            for (term, val) in inner.terms.iter().zip(tu.iter()) {
-                                if let Term::Var(v, _) = term {
-                                    local[cr.slots[v]] = Some(val.clone());
-                                }
-                            }
-                            let v = self.eval_expr(cr, expr, &local)?;
-                            col.push(v.as_f64().ok_or_else(|| self.arith(cr, &local, expr, "resample argument is not numeric"))?);
-                        }
-                        match aggregate(agg, &[col]) {
-                            Ok(Some(v)) => e[cr.slots[x]] = Some(v),
-                            Ok(None) => ok = false,
-                            Err(m) => return Err(self.arith_text(cr, &e, format!("{}({})", agg, expr), &m)),
-                        }
-                    }
-                    if ok {
-                        out.push(e);
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -1184,6 +1420,7 @@ impl<'p> Kernel<'p> {
             base: base @ Term::Var(bvar, _),
             dur,
             min,
+            lo: lo_off,
             ..
         } = &conj[windows[0]]
         else {
@@ -1193,16 +1430,17 @@ impl<'p> Kernel<'p> {
         if env[wslot].is_some() {
             return Ok(None);
         }
+        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) {
+            return Ok(None);
+        }
+        // A per-instrument constraint with the instrument unbound enumerates
+        // the instruments: solved whole.
+        if self.per_entity_window(kind) && cr.entity_slot.map(|s| env[s].is_none()).unwrap_or(true) {
+            return Ok(None);
+        }
         let t = self.time_of(cr, base, env)?;
-        let Value::Dur(d) = self.eval_expr(cr, dur, env)? else {
-            return Err(RunError::Internal("window length is not a Duration".into()));
-        };
-        let lo = time::sub_duration(t, *d);
-        let times: Vec<i64> = match kind {
-            WindowKind::Window => self.domain(cr)?.range(lo..=t).copied().collect(),
-            WindowKind::Prior => self.domain(cr)?.range(lo..t).copied().collect(),
-            WindowKind::Rows => return Ok(None),
-        };
+        let times: Vec<i64> = self.window_times(cr, kind, base, dur, lo_off.as_ref(), env)?;
+        let lo = times.first().copied().unwrap_or(t);
         // The outer bindings the conjunction reads (not the window variable):
         // the rows of a bar are a function of them and the bar.
         let mut refs: Vec<String> = Vec::new();
@@ -1332,6 +1570,7 @@ impl<'p> Kernel<'p> {
                 var: Term::Var(wvar, _),
                 base: Term::Var(bvar, _),
                 dur,
+                kind,
                 ..
             }),
             1,
@@ -1339,6 +1578,7 @@ impl<'p> Kernel<'p> {
         else {
             return Err(RunError::Internal("a `rows` window needs one window, a variable and a bound base time".into()));
         };
+        let prior = *kind == WindowKind::PriorRows;
         let mut refs: Vec<String> = Vec::new();
         for (i, l) in conj.iter().enumerate() {
             if i != windows[0] {
@@ -1365,6 +1605,7 @@ impl<'p> Kernel<'p> {
             dur: dur.clone(),
             outer,
             shareable,
+            prior,
             order: conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect(),
             anchor: conj.iter().find(|l| matches!(l, Literal::Atom(_))).cloned().into_iter().collect(),
             conj_slots: {
@@ -1390,7 +1631,7 @@ impl<'p> Kernel<'p> {
     /// call earlier than the group's last): the general path answers then.
     fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<Columns>, RunError> {
         let plan = self.rows_plan(cr, lit, conj, args)?;
-        if !plan.shareable || env[plan.wslot].is_some() {
+        if !plan.shareable || plan.prior || env[plan.wslot].is_some() {
             return Ok(None);
         }
         let t = self.time_of(cr, &plan.base, env)?;
@@ -1413,7 +1654,7 @@ impl<'p> Kernel<'p> {
             let mut upper = t;
             st.from_start = true;
             'walk: loop {
-                let chunk: Vec<i64> = self.domain(cr)?.range(..=upper).rev().take(64).copied().collect();
+                let chunk: Vec<i64> = self.domain(cr, env)?.range(..=upper).rev().take(64).copied().collect();
                 if chunk.is_empty() {
                     break;
                 }
@@ -1437,7 +1678,7 @@ impl<'p> Kernel<'p> {
             bars.reverse();
             bars
         } else if t > st.upto {
-            self.domain(cr)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied().collect()
+            self.domain(cr, env)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied().collect()
         } else {
             Vec::new()
         };
@@ -1579,11 +1820,13 @@ impl<'p> Kernel<'p> {
             var: Term::Var(wvar, _),
             base: base @ Term::Var(bvar, _),
             dur,
+            kind,
             ..
         }) = windows.first().map(|&i| &conj[i])
         else {
             return Err(RunError::Internal("a `rows` window needs a variable and a bound base time".into()));
         };
+        let prior = *kind == WindowKind::PriorRows;
         if windows.len() != 1 {
             return Err(RunError::Internal("a `rows` window cannot share its aggregation with another window".into()));
         }
@@ -1623,10 +1866,10 @@ impl<'p> Kernel<'p> {
         let floor = if shareable { self.rows_floor.get(&key).copied() } else { None };
         let mut found: Vec<i64> = Vec::new();
         let mut reached_start = true;
-        let mut upper = t;
+        let mut upper = if prior { t - 1 } else { t };
         'walk: while found.len() < n {
             // The domain in chunks, latest first, so that solving can borrow the kernel.
-            let chunk: Vec<i64> = self.domain(cr)?.range(..=upper).rev().take(64).copied().collect();
+            let chunk: Vec<i64> = self.domain(cr, env)?.range(..=upper).rev().take(64).copied().collect();
             if chunk.is_empty() {
                 break;
             }
@@ -1823,6 +2066,36 @@ impl<'p> Kernel<'p> {
                         Value::Count(c) => Ok(Value::Count(c.abs())),
                         v => Ok(Value::Num(num(v).ok_or_else(|| self.arith(cr, env, e, "abs of a non-numeric value"))?.abs())),
                     },
+                    "sign" => {
+                        let x = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "sign of a non-numeric value"))?;
+                        Ok(Value::Num(if x > 0.0 {
+                            1.0
+                        } else if x < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        }))
+                    }
+                    "floor" => Ok(Value::Num(num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "floor of a non-numeric value"))?.floor())),
+                    "ceil" => Ok(Value::Num(num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "ceil of a non-numeric value"))?.ceil())),
+                    "clamp" => {
+                        let x = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "clamp of a non-numeric value"))?;
+                        let lo = num(&vals[1]).ok_or_else(|| self.arith(cr, env, e, "clamp of a non-numeric value"))?;
+                        let hi = num(&vals[2]).ok_or_else(|| self.arith(cr, env, e, "clamp of a non-numeric value"))?;
+                        if lo > hi {
+                            return Err(self.arith(cr, env, e, &format!("clamp with lo {} above hi {}", lo, hi)));
+                        }
+                        Ok(Value::Num(x.max(lo).min(hi)))
+                    }
+                    "decile" => {
+                        // ceil(rank / n * 10): 1 for the smallest tenth, 10 the largest.
+                        let r = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "decile of a non-numeric rank"))?;
+                        let n = num(&vals[1]).ok_or_else(|| self.arith(cr, env, e, "decile of a non-numeric count"))?;
+                        if n <= 0.0 {
+                            return Err(self.arith(cr, env, e, "decile over an empty group"));
+                        }
+                        Ok(Value::Count(((r / n) * 10.0).ceil().clamp(1.0, 10.0) as i64))
+                    }
                     "least" | "greatest" => {
                         // An integer literal is a Count and a Scalar is a Num; the
                         // checker admits the mix (`least(1, W)`), so the comparison
@@ -1898,12 +2171,20 @@ pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {
                 term(t1, out);
             }
             Builtin::MonthStart { t } | Builtin::DayStart { t } => term(t, out),
+            Builtin::SessionOf { a, t, s } => {
+                term(a, out);
+                term(t, out);
+                term(s, out);
+            }
         },
-        Literal::Window { var, base, dur, min, .. } => {
+        Literal::Window { var, base, dur, min, lo, .. } => {
             term(var, out);
             term(base, out);
             expr(dur, out);
             expr(min, out);
+            if let Some(lo) = lo {
+                expr(lo, out);
+            }
         }
         Literal::Cmp { lhs, rhs, .. } => {
             expr(lhs, out);
@@ -1930,18 +2211,19 @@ pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {
                 out.push(k.clone());
             }
         }
-        Literal::Resample { inner, as_var, min, aggs, .. } => {
-            inner.terms.iter().for_each(|t| term(t, out));
-            out.push(as_var.clone());
-            expr(min, out);
-            for (x, _, e) in aggs {
-                out.push(x.clone());
-                expr(e, out);
-            }
-        }
         Literal::AsOf { atom, at, .. } => {
             atom.terms.iter().for_each(|t| term(t, out));
             term(at, out);
+        }
+        Literal::Case { var, branches, otherwise, .. } => {
+            out.push(var.clone());
+            for b in branches {
+                b.guard.iter().for_each(|c| literal_vars(c, out));
+                expr(&b.value, out);
+            }
+            if let Some(e) = otherwise {
+                expr(e, out);
+            }
         }
     }
 }
@@ -2071,14 +2353,24 @@ pub fn aggregate(name: &str, cols: &[Vec<f64>]) -> Result<Option<Value>, String>
             c / (sx * sy)
         }
         "cov" => sample_cov(xs, &cols[1])?,
-        "ols_beta" => {
+        "var" => sample_cov(xs, xs)?,
+        "ols_slope" => {
             let ys = xs;
             let x = &cols[1];
             let vx = sample_cov(x, x)?;
             if vx == 0.0 {
-                return Err("ols_beta against a constant regressor".into());
+                return Err("ols_slope against a constant regressor".into());
             }
             sample_cov(ys, x)? / vx
+        }
+        "ols_r" => {
+            let ys = &cols[1];
+            let c = sample_cov(xs, ys)?;
+            let (sx, sy) = (sample_cov(xs, xs)?.sqrt(), sample_cov(ys, ys)?.sqrt());
+            if sx == 0.0 || sy == 0.0 {
+                return Err("ols_r of a constant series".into());
+            }
+            c / (sx * sy)
         }
         _ => return Err(format!("unknown aggregate `{}`", name)),
     };
@@ -2118,7 +2410,7 @@ mod running_tests {
             st.sums = None;
             for hi in n..rows.len() {
                 let lo = hi - n;
-                for agg in ["mean", "sum", "std", "cov", "corr", "ols_beta"] {
+                for agg in ["mean", "sum", "std", "cov", "corr", "ols_slope"] {
                     let got = running_value(&mut st, agg, lo, hi, n).unwrap_or_else(|| panic!("{} n={} hi={}: no running value", agg, n, hi));
                     let cols = vec![rows[lo..hi].iter().map(|r| r.0).collect::<Vec<f64>>(), rows[lo..hi].iter().map(|r| r.1).collect()];
                     let Some(Value::Num(want)) = aggregate(agg, &cols).unwrap() else { panic!() };
@@ -2134,7 +2426,7 @@ mod running_tests {
         let flat = vec![(5.0, 1.0); 30];
         let mut st = state(&flat);
         assert_eq!(running_value(&mut st, "mean", 0, 20, 20), Some(5.0));
-        for agg in ["std", "corr", "ols_beta"] {
+        for agg in ["std", "corr", "ols_slope"] {
             assert_eq!(running_value(&mut st, agg, 0, 20, 20), None, "{}", agg);
         }
         let mut rows: Vec<(f64, f64)> = (0..30).map(|i| (i as f64, 2.0 * i as f64)).collect();

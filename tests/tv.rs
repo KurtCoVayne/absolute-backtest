@@ -8,49 +8,35 @@
 //! the two company books run when `ABT_MW14_BUNDLE` and `ABT_R8L_BUNDLE`
 //! name their bundles, and are skipped with a note otherwise.
 
-mod corpus;
+mod common;
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
-use absolute_backtest::check::{check_program, Program};
+use absolute_backtest::check::Program;
 use absolute_backtest::compiler::{compile, CompileOptions};
-use absolute_backtest::data::{synthetic_daily, synthetic_daily_v2, synthetic_minute};
-use absolute_backtest::kernel::time::parse_timestamp;
+use absolute_backtest::data::{synthetic_daily, synthetic_minute};
 use absolute_backtest::kernel::{run, run_fold, run_fold_planned, run_planned, Dataset, ExecConfig, Kernel, RunError, RunResult, Value};
 use absolute_backtest::lower::{Lowered, Numerics};
-use absolute_backtest::{Kind, Mode};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
+use absolute_backtest::Kind;
 
 fn corpus_strategies() -> Vec<(String, Program)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies");
-    let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    files.sort();
-    files
+    common::dsl_files("strategies")
         .into_iter()
         .map(|f| {
             let name = f.file_stem().unwrap().to_string_lossy().to_string();
-            let src = fs::read_to_string(&f).unwrap();
-            (name.clone(), program(&src, &name))
+            (name.clone(), common::corpus_program(&name))
         })
         .collect()
 }
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
+/// The synthetic market of a program's base: minute bars for a sub-daily
+/// base, else the daily market with its catalog.
 fn dataset_for(p: &Program, seed: u64) -> Dataset {
-    if p.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1)) {
+    if p.base.is_sub_daily() {
         synthetic_minute(&SYMS, (2024, 1, 2), 30, 320, seed)
-    } else if p.relations.contains_key("split") {
-        synthetic_daily_v2(&SYMS, (2022, 1, 3), 320, seed)
     } else {
         synthetic_daily(&SYMS, (2022, 1, 3), 320, seed)
     }
@@ -105,8 +91,9 @@ fn digest(r: &RunResult) -> Vec<String> {
     out
 }
 
-/// The ledgers of every demanded derived relation whose inputs are at most
-/// its entity: every tuple at every bar, as text with bits.
+/// The ledgers of every derived relation (a bracketed input is substituted
+/// at link time, so every instance is enumerable): every tuple at every bar
+/// of its calendar, as text with bits.
 fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
     let first = bars[0];
@@ -119,36 +106,13 @@ fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> BTreeMap<String, Vec
         .collect();
     for rel in names {
         let sig = &prog.relations[&rel];
-        let inputs: Vec<&absolute_backtest::Arg> = sig.args.iter().filter(|a| a.mode == Mode::In).collect();
-        let per_symbol = matches!(inputs.as_slice(), [a] if a.ty.is_entity());
-        if !inputs.is_empty() && !per_symbol {
-            continue;
-        }
-        let res = sig.res.unwrap_or(prog.resolution);
-        let own: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
-        let symbols: Vec<Value> = if per_symbol {
-            (0..k.symbol_names().len()).map(|i| Value::Equity(i as u32)).collect()
-        } else {
-            vec![]
-        };
+        let own: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
         let mut rows = Vec::new();
         for t in own {
-            let found: Vec<Vec<Value>> = if per_symbol {
-                let mut all = Vec::new();
-                for s in &symbols {
-                    match k.query(&rel, t, std::slice::from_ref(s)) {
-                        Ok(tus) => all.extend(tus),
-                        Err(RunError::Arithmetic { .. }) => all.push(vec![Value::Count(-1)]),
-                        Err(e) => panic!("{}", e),
-                    }
-                }
-                all
-            } else {
-                match k.query(&rel, t, &[]) {
-                    Ok(tus) => tus,
-                    Err(RunError::Arithmetic { .. }) => vec![vec![Value::Count(-1)]],
-                    Err(e) => panic!("{}", e),
-                }
+            let found: Vec<Vec<Value>> = match k.query(&rel, t, &[]) {
+                Ok(tus) => tus,
+                Err(RunError::Arithmetic { .. }) => vec![vec![Value::Count(-1)]],
+                Err(e) => panic!("{}: {}", rel, e),
             };
             for tu in found {
                 let cells: Vec<String> = tu
@@ -185,12 +149,13 @@ fn assert_same(name: &str, what: &str, a: &[String], b: &[String]) {
 fn the_written_plan_equals_the_plain_kernel() {
     for (name, p) in corpus_strategies() {
         let ds = dataset_for(&p, 11);
-        let plain = run(&p, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{}: {}", name, e));
-        let written = Lowered::written(&p, Numerics::Running);
-        let planned = run_planned(&p, &written, &ds, ExecConfig::default()).unwrap_or_else(|e| panic!("{} (planned): {}", name, e));
+        let cfg = ExecConfig::from_program(&p);
+        let plain = run(&p, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let written = Lowered::written(&p, Numerics::from_running_sums(cfg.running_sums));
+        let planned = run_planned(&p, &written, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{} (planned): {}", name, e));
         assert_same(&name, "batch runs", &digest(&plain), &digest(&planned));
-        let fold_plain = run_fold(&p, &ds, ExecConfig::default()).unwrap();
-        let fold_planned = run_fold_planned(&p, &written, &ds, ExecConfig::default()).unwrap();
+        let fold_plain = run_fold(&p, &ds, cfg.clone()).unwrap();
+        let fold_planned = run_fold_planned(&p, &written, &ds, cfg).unwrap();
         assert_same(&name, "fold runs", &digest(&fold_plain), &digest(&fold_planned));
     }
 }
@@ -223,10 +188,18 @@ fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfi
 fn the_optimised_plan_equals_the_written_plan_on_the_corpus() {
     for (name, p) in corpus_strategies() {
         let ds = dataset_for(&p, 11);
-        let compiled = compile(&p, &CompileOptions::default());
-        let written = Lowered::written(&p, Numerics::Running);
-        let a = run_with_ledgers(&p, &written, &ds, ExecConfig::default());
-        let b = run_with_ledgers(&p, &compiled.lowered, &ds, ExecConfig::default());
+        let cfg = ExecConfig::from_program(&p);
+        let numerics = Numerics::from_running_sums(cfg.running_sums);
+        let compiled = compile(
+            &p,
+            &CompileOptions {
+                numerics,
+                ..CompileOptions::default()
+            },
+        );
+        let written = Lowered::written(&p, numerics);
+        let a = run_with_ledgers(&p, &written, &ds, cfg.clone());
+        let b = run_with_ledgers(&p, &compiled.lowered, &ds, cfg);
         match (a, b) {
             (Ok((da, la)), Ok((db, lb))) => {
                 assert_same(&name, "runs", &da, &db);
@@ -241,52 +214,18 @@ fn the_optimised_plan_equals_the_written_plan_on_the_corpus() {
     }
 }
 
-/// The two company books under their documented run configurations, when
-/// their bundles are present.
+/// The two company books under the run configurations their execution
+/// blocks write, when their bundles are present.
 #[test]
 fn the_optimised_plan_equals_the_written_plan_on_the_books() {
-    let books = [
-        (
-            "mw14",
-            "ABT_MW14_BUNDLE",
-            ExecConfig {
-                initial_cash: 1_000_000.0,
-                compounding: false,
-                lot: absolute_backtest::kernel::Lot::Fractional,
-                commission_bps: 10.0,
-                margin_rate: 0.0,
-                on_leverage: absolute_backtest::kernel::OnLeverage::Allow,
-                delist_at_last_price: true,
-                actions_in_prices: true,
-                price_relation: Some("trclose".into()),
-                start: parse_timestamp("1991-01-01"),
-                ..ExecConfig::frictionless()
-            },
-        ),
-        (
-            "r8l",
-            "ABT_R8L_BUNDLE",
-            ExecConfig {
-                initial_cash: 1_000_000.0,
-                compounding: false,
-                lot: absolute_backtest::kernel::Lot::Fractional,
-                margin_rate: 0.0,
-                on_leverage: absolute_backtest::kernel::OnLeverage::Allow,
-                on_margin_call: absolute_backtest::kernel::OnMarginCall::Allow,
-                price_relation: Some("close_m".into()),
-                running_sums: false,
-                ..ExecConfig::frictionless()
-            },
-        ),
-    ];
-    for (name, var, cfg) in books {
+    for (name, var) in [("mw14", "ABT_MW14_BUNDLE"), ("r8l", "ABT_R8L_BUNDLE")] {
         let Ok(dir) = std::env::var(var) else {
             eprintln!("note: {} not set; the {} book is not validated", var, name);
             continue;
         };
-        let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/company/{}.dsl", name))).unwrap();
-        let p = program(&src, name);
+        let p = common::program(&common::corpus_source("company", name), name);
         let (ds, _) = absolute_backtest::bundle::load_bundle(&p, Path::new(&dir), true).unwrap_or_else(|e| panic!("{}: {}", var, e));
+        let cfg = ExecConfig::from_program(&p);
         let numerics = Numerics::from_running_sums(cfg.running_sums);
         let compiled = compile(
             &p,

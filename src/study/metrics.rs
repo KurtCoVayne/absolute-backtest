@@ -34,7 +34,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::ir::Resolution;
 use crate::kernel::time;
 use crate::kernel::RunResult;
 
@@ -42,15 +41,8 @@ use crate::kernel::RunResult;
 pub const MAX_LAG: usize = 10;
 
 /// Bars per year at a resolution: 252 trading days of 6.5 hours.
-pub fn periods_per_year(res: Resolution) -> f64 {
-    match res {
-        Resolution::D1 => 252.0,
-        Resolution::H1 => 252.0 * 6.5,
-        Resolution::M30 => 252.0 * 13.0,
-        Resolution::M15 => 252.0 * 26.0,
-        Resolution::M5 => 252.0 * 78.0,
-        Resolution::M1 => 252.0 * 390.0,
-    }
+pub fn periods_per_year(prog: &crate::check::Program) -> f64 {
+    prog.report.periods_per_year
 }
 
 /// Per-bar simple returns of an equity curve, with the bar timestamps of

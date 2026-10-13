@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 
 use crate::check::{check_program, Severity, Workspace};
 use crate::data::{synthetic_daily, synthetic_daily_v2, synthetic_minute};
-use crate::ir::UnitKind;
 use crate::kernel::{run, ExecConfig, RunError};
 
 use super::metrics::{periods_per_year, return_metrics};
@@ -114,7 +113,7 @@ fn attempt(ws: &Workspace, path: &Path) -> (AttemptRecord, Option<Verdict>) {
             None,
         );
     }
-    let Some(name) = ws.units.iter().rev().find(|u| u.kind == UnitKind::Strategy).map(|u| u.name.clone()) else {
+    let Some(name) = ws.units.iter().rev().find(|u| matches!(u, crate::syntax::ast::Unit::Strategy(_))).map(|u| u.name().to_string()) else {
         return (
             AttemptRecord {
                 file,
@@ -140,7 +139,7 @@ fn attempt(ws: &Workspace, path: &Path) -> (AttemptRecord, Option<Verdict>) {
     };
     let Some(prog) = prog else { return (record, None) };
     let syms = ["AAA", "BBB", "CCC", "DDD", "SPY"];
-    let minute = prog.relations.values().any(|s| s.res == Some(crate::ir::Resolution::M1));
+    let minute = prog.base.is_sub_daily();
     let ds = if minute {
         synthetic_minute(&syms, (2024, 1, 2), 30, 390, 11)
     } else if prog.relations.contains_key("split") {
@@ -173,7 +172,7 @@ fn attempt(ws: &Workspace, path: &Path) -> (AttemptRecord, Option<Verdict>) {
             verdict: format!("failed: {}", e),
         },
         Ok(r) => {
-            let m = return_metrics(&r.metric_curve(), periods_per_year(prog.resolution));
+            let m = return_metrics(&r.metric_curve(), periods_per_year(&prog));
             let verdict = if r.fills.is_empty() {
                 "does not trade"
             } else if m.cagr <= 0.0 {

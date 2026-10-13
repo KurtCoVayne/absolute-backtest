@@ -91,6 +91,12 @@ pub enum NirLit {
         dur: NirExpr,
         min: NirExpr,
     },
+    /// A case form (language-v2, 5.3): the guards in order with their values.
+    Case {
+        var: String,
+        branches: Vec<(Vec<NirLit>, NirExpr)>,
+        otherwise: Option<NirExpr>,
+    },
 }
 
 /// A core literal with the surface literal it came from (its index in the
@@ -134,7 +140,7 @@ pub struct NirSig {
     pub unit: Option<String>,
     pub kind: String,
     pub signature: String,
-    pub resolution: String,
+    pub calendar: String,
     pub complete: bool,
 }
 
@@ -149,10 +155,17 @@ pub struct NirParam {
 #[derive(Clone, Debug, Serialize)]
 pub struct Nir {
     pub strategy: String,
-    pub environment: String,
-    pub environment_version: Option<String>,
-    pub resolution: String,
-    pub mode: String,
+    pub class: String,
+    pub base: String,
+    pub decision_calendar: String,
+    pub clock_offset: Option<String>,
+    /// The demand (3.11), the decisions block and the execution block: part
+    /// of the program's identity (Propositions 3.13 and 4.3); the report
+    /// block is not (4.5).
+    pub demand: serde_json::Value,
+    pub silence: String,
+    pub orders: String,
+    pub execution: serde_json::Value,
     pub data: Vec<NirSig>,
     pub relations: Vec<NirSig>,
     pub params: Vec<NirParam>,
@@ -226,7 +239,6 @@ fn bindable(prog: &Program, head_key: Option<&str>, lit: &Literal) -> Vec<String
         for (i, t) in a.terms.iter().enumerate() {
             let mode = sig.and_then(|s| s.args.get(i)).map(|x| x.mode);
             match mode {
-                Some(Mode::In) => {}
                 Some(Mode::Key) => {
                     if key_fresh || matches!((head_key, t), (Some(h), Term::Var(v, _)) if v == h) {
                         ctor_vars(t, out);
@@ -245,7 +257,7 @@ fn bindable(prog: &Program, head_key: Option<&str>, lit: &Literal) -> Vec<String
             _ => {}
         },
         Literal::Window { var, .. } => out.extend(var_of(var)),
-        Literal::Assign { var, .. } | Literal::Agg { var, .. } => out.push(var.clone()),
+        Literal::Assign { var, .. } | Literal::Agg { var, .. } | Literal::Case { var, .. } => out.push(var.clone()),
         Literal::Top { atom, rank, .. } => {
             for t in &atom.terms {
                 ctor_vars(t, &mut out);
@@ -253,13 +265,6 @@ fn bindable(prog: &Program, head_key: Option<&str>, lit: &Literal) -> Vec<String
             if let Some((k, _, _)) = rank {
                 out.push(k.clone());
             }
-        }
-        Literal::Resample { inner, as_var, aggs, .. } => {
-            for t in &inner.terms {
-                ctor_vars(t, &mut out);
-            }
-            out.push(as_var.clone());
-            out.extend(aggs.iter().map(|(x, _, _)| x.clone()));
         }
     }
     out
@@ -329,7 +334,6 @@ fn deps(prog: &Program, head_key: Option<&str>, lit: &Literal, bound_before: &Ha
                 ctor_vars(t, &mut vs);
                 for v in vs {
                     match mode {
-                        Some(Mode::In) => push(v, &mut reads),
                         Some(Mode::Key) if head_key != Some(v.as_str()) => push(v, &mut reads),
                         _ => push(v, &mut binds),
                     }
@@ -343,10 +347,8 @@ fn deps(prog: &Program, head_key: Option<&str>, lit: &Literal, bound_before: &Ha
                 let mut vs = Vec::new();
                 ctor_vars(t, &mut vs);
                 for v in vs {
-                    match mode {
-                        Some(Mode::In) => push(v, &mut reads),
-                        _ => push(v, &mut binds),
-                    }
+                    let _ = mode;
+                    push(v, &mut binds);
                 }
             }
             if let Some(v) = var_of(at) {
@@ -371,13 +373,48 @@ fn deps(prog: &Program, head_key: Option<&str>, lit: &Literal, bound_before: &Ha
                 binds.extend(var_of(t1));
             }
             Builtin::MonthStart { t } | Builtin::DayStart { t } => reads.extend(var_of(t)),
+            Builtin::SessionOf { a, t, s } => {
+                reads.extend(var_of(a));
+                reads.extend(var_of(t));
+                binds.extend(var_of(s));
+            }
         },
-        Literal::Window { var, base, dur, min, .. } => {
+        Literal::Window { var, base, dur, min, lo, .. } => {
             reads.extend(var_of(base));
-            for v in expr_vars(dur).into_iter().chain(expr_vars(min)) {
+            for v in expr_vars(dur).into_iter().chain(expr_vars(min)).chain(lo.as_ref().map(expr_vars).unwrap_or_default()) {
                 push(v, &mut reads);
             }
             binds.extend(var_of(var));
+        }
+        Literal::Case { var, branches, otherwise, .. } => {
+            // The guards bind their own locals; everything else they mention
+            // (and the values' variables) is read.
+            let mut local: Vec<String> = Vec::new();
+            for b in branches {
+                for g in &b.guard {
+                    local.extend(bindable(prog, head_key, g));
+                }
+            }
+            for b in branches {
+                for g in &b.guard {
+                    for v in mentioned(g) {
+                        if bound_before.contains(&v) || !local.contains(&v) {
+                            push(v, &mut reads);
+                        }
+                    }
+                }
+                for v in expr_vars(&b.value) {
+                    if bound_before.contains(&v) || !local.contains(&v) {
+                        push(v, &mut reads);
+                    }
+                }
+            }
+            if let Some(e) = otherwise {
+                for v in expr_vars(e) {
+                    push(v, &mut reads);
+                }
+            }
+            binds.push(var.clone());
         }
         Literal::Assign { var, expr: e, .. } => {
             for v in expr_vars(e) {
@@ -389,7 +426,7 @@ fn deps(prog: &Program, head_key: Option<&str>, lit: &Literal, bound_before: &Ha
                 binds.push(var.clone());
             }
         }
-        Literal::Agg { .. } | Literal::Top { .. } | Literal::Resample { .. } => {
+        Literal::Agg { .. } | Literal::Top { .. } => {
             let can = bindable(prog, head_key, lit);
             for v in mentioned(lit) {
                 if bound_before.contains(&v) {
@@ -413,9 +450,6 @@ fn bound_before_written(prog: &Program, rule: &Rule) -> (Vec<HashSet<String>>, H
         for (t, arg) in rule.head.terms.iter().zip(sig.args.iter()) {
             if let Term::Var(v, _) = t {
                 match arg.mode {
-                    Mode::In => {
-                        bound.insert(v.clone());
-                    }
                     Mode::Key => head_key = Some(v.clone()),
                     Mode::Out => {}
                 }
@@ -484,21 +518,23 @@ fn reduce(prog: &Program, lit: &Literal, bound_before: &HashSet<String>, fresh: 
                     var: None,
                     expr: NirExpr::Time("day_start".into(), vec![term_expr(t)]),
                 },
+                Builtin::SessionOf { a, t, s } => NirLit::Assign {
+                    var: var_of(s),
+                    expr: NirExpr::Time("session_of".into(), vec![term_expr(a), term_expr(t)]),
+                },
             };
             (lit.clone(), vec![core])
         }
-        Literal::Window { var, kind, base, dur, min, .. } => (
+        Literal::Window { var, kind, base, dur, min, lo, .. } => (
             lit.clone(),
             vec![NirLit::Window {
                 var: var_of(var).unwrap_or_else(|| "_".into()),
-                kind: match kind {
-                    WindowKind::Window => "window",
-                    WindowKind::Prior => "prior_window",
-                    WindowKind::Rows => "rows",
-                }
-                .into(),
+                kind: window_kind_name(kind),
                 base: var_of(base).unwrap_or_else(|| "_".into()),
-                dur: expr(dur),
+                dur: match (kind, lo) {
+                    (WindowKind::Session, Some(l)) => NirExpr::Keys(vec![(expr(l), "lo".into()), (expr(dur), "hi".into())]),
+                    _ => expr(dur),
+                },
                 min: expr(min),
             }],
         ),
@@ -507,7 +543,7 @@ fn reduce(prog: &Program, lit: &Literal, bound_before: &HashSet<String>, fresh: 
             let key_pos = sig.and_then(|s| s.key_pos());
             let mut keys: Vec<NirExpr> = vec![NirExpr::Lit(a.name.clone())];
             for (i, t) in a.terms.iter().enumerate() {
-                let identity = sig.and_then(|s| s.args.get(i)).map(|x| x.mode == Mode::In || x.ty.is_entity()).unwrap_or(false);
+                let identity = sig.and_then(|s| s.args.get(i)).map(|x| x.ty.is_entity()).unwrap_or(false);
                 if identity && Some(i) != key_pos {
                     keys.push(term_expr(t));
                 }
@@ -525,13 +561,14 @@ fn reduce(prog: &Program, lit: &Literal, bound_before: &HashSet<String>, fresh: 
                 ],
             )
         }
-        Literal::Agg { var, agg, args, conj, span } => {
+        Literal::Agg { var, agg, args, conj, within, span } => {
             let (ordered, group, anchor, min) = canonical_group(prog, conj, bound_before, fresh);
             let surface = Literal::Agg {
                 var: var.clone(),
                 agg: agg.clone(),
                 args: args.clone(),
                 conj: ordered,
+                within: within.clone(),
                 span: *span,
             };
             (
@@ -541,7 +578,7 @@ fn reduce(prog: &Program, lit: &Literal, bound_before: &HashSet<String>, fresh: 
                     agg: agg.clone(),
                     args: args.iter().map(expr).collect(),
                     group,
-                    by: vec![],
+                    by: within.clone().unwrap_or_default(),
                     min,
                     anchor,
                 }],
@@ -632,46 +669,24 @@ fn reduce(prog: &Program, lit: &Literal, bound_before: &HashSet<String>, fresh: 
             }
             (lit.clone(), core)
         }
-        Literal::Resample { inner, to, as_var, min, aggs, .. } => {
-            // One aggregation per aggregate, grouped by the inner relation's
-            // fresh entity variables, over the tuples whose key falls in
-            // the bucket labelled `as_var`.
-            let sig = prog.relations.get(&inner.name);
-            let key_pos = sig.and_then(|s| s.key_pos());
-            let by: Vec<String> = inner
-                .terms
-                .iter()
-                .enumerate()
-                .filter_map(|(i, t)| {
-                    let entity = sig.and_then(|s| s.args.get(i)).map(|x| x.ty.is_entity()).unwrap_or(false);
-                    match t {
-                        Term::Var(v, _) if entity && !bound_before.contains(v) => Some(v.clone()),
-                        _ => None,
-                    }
-                })
-                .collect();
-            let inner_key = key_pos.and_then(|k| inner.terms.get(k)).map(term_expr).unwrap_or(NirExpr::Lit("_".into()));
-            let group = vec![
-                NirLit::Atom(atom(inner)),
-                NirLit::Cmp {
-                    op: "=".into(),
-                    lhs: NirExpr::Time("bucket".into(), vec![NirExpr::Lit(to.to_string()), inner_key]),
-                    rhs: NirExpr::Var(as_var.clone()),
-                },
-            ];
-            let core = aggs
-                .iter()
-                .map(|(x, f, e)| NirLit::Agg {
-                    var: x.clone(),
-                    agg: f.clone(),
-                    args: vec![expr(e)],
-                    group: group.clone(),
-                    by: by.clone(),
-                    min: Some(expr(min)),
-                    anchor: None,
-                })
-                .collect();
-            (lit.clone(), core)
+        Literal::Case { var, branches, otherwise, .. } => {
+            let mut bs = Vec::new();
+            for b in branches {
+                let mut guard = Vec::new();
+                for g in &b.guard {
+                    let (_, core) = reduce(prog, g, bound_before, fresh);
+                    guard.extend(core);
+                }
+                bs.push((guard, expr(&b.value)));
+            }
+            (
+                lit.clone(),
+                vec![NirLit::Case {
+                    var: var.clone(),
+                    branches: bs,
+                    otherwise: otherwise.as_ref().map(expr),
+                }],
+            )
         }
     }
 }
@@ -766,6 +781,18 @@ fn canonical_group(prog: &Program, conj: &[Literal], outer: &HashSet<String>, fr
 
 /// A rendering of a core literal with variables through `names`; the
 /// name-free key renders them by first occurrence within the literal.
+/// The text of a window kind in the core forms.
+pub fn window_kind_name(kind: &WindowKind) -> String {
+    match kind {
+        WindowKind::Window => "window".into(),
+        WindowKind::Prior => "prior_window".into(),
+        WindowKind::Rows => "rows".into(),
+        WindowKind::PriorRows => "prior_rows".into(),
+        WindowKind::Bucket(c) => format!("bucket({})", c),
+        WindowKind::Session => "session".into(),
+    }
+}
+
 pub fn render_core(l: &NirLit, names: &mut dyn FnMut(&str) -> String) -> String {
     fn t(x: &NirTerm, names: &mut dyn FnMut(&str) -> String) -> String {
         match x {
@@ -823,6 +850,16 @@ pub fn render_core(l: &NirLit, names: &mut dyn FnMut(&str) -> String) -> String 
         },
         NirLit::Cmp { op, lhs, rhs } => format!("{} {} {}", e(lhs, names), op, e(rhs, names)),
         NirLit::Window { var, kind, base, dur, min } => format!("{} in {}({}, {}, min {})", names(var), kind, names(base), e(dur, names), e(min, names)),
+        NirLit::Case { var, branches, otherwise } => {
+            let mut parts: Vec<String> = branches
+                .iter()
+                .map(|(g, v)| format!("{} -> {}", g.iter().map(|x| render_core(x, names)).collect::<Vec<_>>().join(", "), e(v, names)))
+                .collect();
+            if let Some(o) = otherwise {
+                parts.push(format!("else -> {}", e(o, names)));
+            }
+            format!("{} = case {{ {} }}", names(var), parts.join(" ; "))
+        }
     }
 }
 
@@ -834,6 +871,7 @@ fn kind_rank(l: &NirLit) -> u8 {
         NirLit::Assign { .. } => 3,
         NirLit::Cmp { .. } => 4,
         NirLit::Neg(_) => 5,
+        NirLit::Case { .. } => 3,
     }
 }
 
@@ -865,6 +903,7 @@ fn name_of(l: &NirLit) -> String {
         NirLit::Assign { expr, .. } => head(expr),
         NirLit::Cmp { op, .. } => op.clone(),
         NirLit::Window { kind, .. } => kind.clone(),
+        NirLit::Case { .. } => "case".into(),
     }
 }
 
@@ -934,15 +973,21 @@ pub fn rename_literal(l: &Literal, m: &HashMap<String, String>) -> Literal {
                 },
                 Builtin::MonthStart { t } => Builtin::MonthStart { t: rename_term(t, m) },
                 Builtin::DayStart { t } => Builtin::DayStart { t: rename_term(t, m) },
+                Builtin::SessionOf { a, t, s } => Builtin::SessionOf {
+                    a: rename_term(a, m),
+                    t: rename_term(t, m),
+                    s: rename_term(s, m),
+                },
             },
             *s,
         ),
-        Literal::Window { var, kind, base, dur, min, span } => Literal::Window {
+        Literal::Window { var, kind, base, dur, min, lo, span } => Literal::Window {
             var: rename_term(var, m),
-            kind: *kind,
+            kind: kind.clone(),
             base: rename_term(base, m),
             dur: rename_expr(dur, m),
             min: rename_expr(min, m),
+            lo: lo.as_ref().map(|x| rename_expr(x, m)),
             span: *span,
         },
         Literal::Cmp { op, lhs, rhs, span } => Literal::Cmp {
@@ -956,31 +1001,39 @@ pub fn rename_literal(l: &Literal, m: &HashMap<String, String>) -> Literal {
             expr: rename_expr(expr, m),
             span: *span,
         },
-        Literal::Agg { var, agg, args, conj, span } => Literal::Agg {
+        Literal::Agg { var, agg, args, conj, within, span } => Literal::Agg {
             var: rn(var, m),
             agg: agg.clone(),
             args: args.iter().map(|a| rename_expr(a, m)).collect(),
             conj: conj.iter().map(|c| rename_literal(c, m)).collect(),
+            within: within.as_ref().map(|w| w.iter().map(|v| rn(v, m)).collect()),
             span: *span,
         },
-        Literal::Top { n, atom, by, rank, span } => Literal::Top {
+        Literal::Top { n, atom, by, rank, within, span } => Literal::Top {
             n: n.as_ref().map(|x| rename_expr(x, m)),
             atom: rename_atom(atom, m),
             by: by.as_ref().map(|b| b.iter().map(|(k, d, s)| (rn(k, m), *d, *s)).collect()),
             rank: rank.as_ref().map(|(k, t, s)| (rn(k, m), *t, *s)),
+            within: within.as_ref().map(|w| w.iter().map(|v| rn(v, m)).collect()),
             span: *span,
         },
-        Literal::Resample { inner, to, as_var, min, aggs, span } => Literal::Resample {
-            inner: rename_atom(inner, m),
-            to: *to,
-            as_var: rn(as_var, m),
-            min: rename_expr(min, m),
-            aggs: aggs.iter().map(|(x, f, e)| (rn(x, m), f.clone(), rename_expr(e, m))).collect(),
-            span: *span,
-        },
-        Literal::AsOf { atom, at, span } => Literal::AsOf {
+        Literal::AsOf { atom, at, within_bucket, span } => Literal::AsOf {
             atom: rename_atom(atom, m),
             at: rename_term(at, m),
+            within_bucket: within_bucket.clone(),
+            span: *span,
+        },
+        Literal::Case { var, branches, otherwise, span } => Literal::Case {
+            var: rn(var, m),
+            branches: branches
+                .iter()
+                .map(|b| Branch {
+                    guard: b.guard.iter().map(|g| rename_literal(g, m)).collect(),
+                    value: rename_expr(&b.value, m),
+                    span: b.span,
+                })
+                .collect(),
+            otherwise: otherwise.as_ref().map(|x| rename_expr(x, m)),
             span: *span,
         },
     }
@@ -1047,6 +1100,11 @@ fn rename_core(l: &NirLit, m: &HashMap<String, String>) -> NirLit {
             dur: e(dur, m),
             min: e(min, m),
         },
+        NirLit::Case { var, branches, otherwise } => NirLit::Case {
+            var: rn(var, m),
+            branches: branches.iter().map(|(g, v)| (g.iter().map(|x| rename_core(x, m)).collect(), e(v, m))).collect(),
+            otherwise: otherwise.as_ref().map(|o| e(o, m)),
+        },
     }
 }
 
@@ -1098,6 +1156,16 @@ fn core_vars(l: &NirLit, out: &mut Vec<String>) {
             out.push(base.clone());
             e(dur, out);
             e(min, out);
+        }
+        NirLit::Case { var, branches, otherwise } => {
+            out.push(var.clone());
+            for (g, v) in branches {
+                g.iter().for_each(|x| core_vars(x, out));
+                e(v, out);
+            }
+            if let Some(o) = otherwise {
+                e(o, out);
+            }
         }
     }
 }
@@ -1322,12 +1390,12 @@ pub fn normalise(prog: &Program) -> Nir {
         name: s.name.clone(),
         unit: match &s.kind {
             Kind::Derived { unit } => Some(unit.clone()),
-            Kind::Primitive { env } => Some(env.clone()),
+            Kind::Primitive { class: env } => Some(env.clone()),
             _ => None,
         },
         kind: super::print::kind_name(&s.kind).to_string(),
         signature: render_signature(s, true),
-        resolution: s.res.map(|r| r.to_string()).unwrap_or_default(),
+        calendar: s.cal.to_string(),
         complete: prog.complete.contains(&s.name),
     };
     let data: Vec<NirSig> = prog.relations.values().filter(|s| matches!(s.kind, Kind::Primitive { .. })).map(sig).collect();
@@ -1345,10 +1413,14 @@ pub fn normalise(prog: &Program) -> Nir {
         .collect();
     let mut nir = Nir {
         strategy: prog.strategy.clone(),
-        environment: prog.environment.clone(),
-        environment_version: prog.environment_version.clone(),
-        resolution: prog.resolution.to_string(),
-        mode: prog.mode.to_string(),
+        class: prog.class.clone(),
+        base: prog.base.to_string(),
+        decision_calendar: prog.decision_cal.to_string(),
+        clock_offset: prog.clock.offset.map(|d| d.to_string()),
+        demand: serde_json::to_value(&prog.demand).unwrap_or(serde_json::Value::Null),
+        silence: if prog.silence_flat { "flat".into() } else { "hold".into() },
+        orders: prog.default_order.clone(),
+        execution: serde_json::to_value(&prog.exec).unwrap_or(serde_json::Value::Null),
         data,
         relations,
         params,
@@ -1387,10 +1459,14 @@ pub fn hash_view(nir: &Nir) -> serde_json::Value {
         .collect();
     rules.sort_by_key(|v| v.to_string());
     serde_json::json!({
-        "environment": nir.environment,
-        "environment_version": nir.environment_version,
-        "resolution": nir.resolution,
-        "mode": nir.mode,
+        "class": nir.class,
+        "base": nir.base,
+        "decision_calendar": nir.decision_calendar,
+        "clock_offset": nir.clock_offset,
+        "demand": nir.demand,
+        "silence": nir.silence,
+        "orders": nir.orders,
+        "execution": nir.execution,
         "data": data,
         "relations": relations,
         "params": params,

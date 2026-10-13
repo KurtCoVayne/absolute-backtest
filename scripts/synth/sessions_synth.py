@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A synthetic market in the layout of `corpus/env/futures_sessions.dsl`, for
+"""A synthetic market in the first formulation's `futures_sessions` layout (kept
+for the record; `abt synth --class future` writes the catalog's layout), for
 running the R8L book and the usability experiment without the company's
 TradeStation data. Nothing here is real; the shapes follow
 `scripts/ingest/tradestation_sessions.py`:

@@ -64,7 +64,7 @@ fn cross_sectional(prog: &Program, rule: usize) -> bool {
     let deps = literal_deps(prog, rule);
     let r = &prog.rules[rule];
     r.body.iter().enumerate().any(|(i, lit)| match lit {
-        Literal::Top { atom, .. } | Literal::Resample { inner: atom, .. } => {
+        Literal::Top { atom, .. } => {
             let sig = prog.relations.get(&atom.name);
             atom.terms.iter().enumerate().any(|(k, t)| {
                 let entity = sig.and_then(|s| s.args.get(k)).map(|a| a.ty.is_entity()).unwrap_or(false);
@@ -211,19 +211,22 @@ pub fn plan_program(prog: &Program, inputs: &PlanInputs, stats: &Statistics, num
         totals.written_cost += written_cost;
         for (li, lit) in r.body.iter().enumerate() {
             if let Literal::Agg { agg, conj, .. } = lit {
-                let window = conj.iter().find_map(|l| if let Literal::Window { kind, .. } = l { Some(*kind) } else { None });
+                let window = conj.iter().find_map(|l| if let Literal::Window { kind, .. } = l { Some(kind.clone()) } else { None });
                 aggregates.push(AggPlan {
                     rule: ri,
                     literal: li,
                     agg: agg.clone(),
                     class: aggregate_class(agg).into(),
-                    window: match window {
+                    window: match &window {
                         Some(WindowKind::Window) => "calendar window".into(),
                         Some(WindowKind::Prior) => "prior calendar window".into(),
                         Some(WindowKind::Rows) => "rows window".into(),
+                        Some(WindowKind::PriorRows) => "prior rows window".into(),
+                        Some(WindowKind::Bucket(c)) => format!("bucket window on {}", c),
+                        Some(WindowKind::Session) => "session window".into(),
                         None => "no window (the group at the bar)".into(),
                     },
-                    implementation: implementation(agg, window, numerics == Numerics::Running),
+                    implementation: implementation(agg, window.clone(), numerics == Numerics::Running),
                     numerics,
                     shares_state_of: shared.get(&(ri, li)).copied(),
                 });

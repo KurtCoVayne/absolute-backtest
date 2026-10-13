@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """NDLake daily bars -> the weekly Parquet inputs of `abt bundle build --from DIR
---env equities_1w` (corpus/env/equities_1w.dsl), mirroring the data layer of the
+--env equities_1w` of the first formulation (its weekly `equities_1w` layout is
+no longer a class of the catalog: the current path is `abt bundle build
+--from-norgate DIR --class equity`, src/ingest.rs), mirroring the data layer of the
 MW14 research book (stageanalyst strategy/ivmom/data.py, `load_daily`, `to_weekly`,
 `add_membership_and_universe`, `attach_gate_index`) so that abt reads the same
 weekly facts. Only raw facts are written; every signal is computed by the strategy.

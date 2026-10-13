@@ -51,7 +51,7 @@ impl Embargo {
 }
 
 fn add_months(t: i64, months: i64) -> i64 {
-    time::sub_duration(t, Duration { months: -months, days: 0 })
+    time::sub_duration(t, Duration { months: -months, days: 0, secs: 0 })
 }
 
 /// The start of the month containing `t`.

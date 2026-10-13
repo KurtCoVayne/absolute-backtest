@@ -63,7 +63,7 @@ pub struct ColumnFacts {
 pub struct RelationFacts {
     pub name: String,
     pub kind: String,
-    pub resolution: String,
+    pub calendar: String,
     pub stratum: Option<usize>,
     pub component: usize,
     pub recursive: bool,
@@ -212,7 +212,7 @@ impl Stage for Analysis {
         ));
         out.push_str("\nrelations:\n");
         for r in &self.relations {
-            let mut tags = vec![r.kind.clone(), r.resolution.clone()];
+            let mut tags = vec![r.kind.clone(), r.calendar.clone()];
             if let Some(s) = r.stratum {
                 tags.push(format!("stratum {}", s));
             }

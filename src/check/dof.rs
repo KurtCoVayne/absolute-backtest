@@ -1,9 +1,10 @@
 //! Degrees of freedom (data-bundle doc, section 6 "Degrees of freedom are
 //! known exactly", and section 9 item 3): the literals a program hides in
-//! its rules, counted alongside its parameters and rule count. The checker
-//! warns on each one in a strategy's own rules (W5) and on every ticker
-//! literal (W6, a snapshot of the bundle date); the study report reads the
-//! counts.
+//! its rules, counted alongside its parameters, its rule count and its
+//! `instruments` table. The checker warns on each one in a strategy's own
+//! rules (W5), on every ticker literal (W6, a snapshot of the bundle date)
+//! and on an instruments table (W9, a hindsight constant); the study report
+//! reads the counts.
 
 use crate::ir::*;
 
@@ -19,19 +20,27 @@ pub struct DegreesOfFreedom {
     pub rules: usize,
     /// The same, for the library rules the strategy's decisions reach.
     pub library_literals: Vec<(String, Lit)>,
+    /// The names and dates of an `instruments` table (language-v2, 3.7).
+    pub instruments: usize,
 }
 
 impl DegreesOfFreedom {
     pub fn summary(&self) -> String {
         let plural = |n: usize, s: &str| if n == 1 { s.to_string() } else { format!("{}s", s) };
+        let instruments = if self.instruments > 0 {
+            format!(", {} in the instruments table", self.instruments)
+        } else {
+            String::new()
+        };
         format!(
-            "degrees of freedom: {} {}, {} {}, {} {} (+ {} library {})",
+            "degrees of freedom: {} {}, {} {}, {} {}{} (+ {} library {})",
             self.params,
             plural(self.params, "param"),
             self.literals.len(),
             plural(self.literals.len(), "literal"),
             self.rules,
             plural(self.rules, "rule"),
+            instruments,
             self.library_literals.len(),
             plural(self.library_literals.len(), "literal"),
         )
@@ -44,9 +53,9 @@ impl DegreesOfFreedom {
 pub fn is_structural(lit: &Lit) -> bool {
     match lit {
         Lit::Int(i) => *i == 0 || *i == 1,
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => *x == 0.0 || *x == 1.0,
+        Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => *x == 0.0 || *x == 1.0,
         Lit::Duration(d) => d.is_zero(),
-        Lit::Str(_) | Lit::Equity(_) | Lit::Label(_) => true,
+        Lit::Time(_) | Lit::Str(_) | Lit::Entity(_) | Lit::Label(_) => true,
     }
 }
 
@@ -79,9 +88,12 @@ pub fn literals_in_rule_mut(rule: &mut Rule, f: &mut dyn FnMut(&mut Lit, Span)) 
             Literal::Atom(a) | Literal::Neg(a) => terms(&mut a.terms, f),
             Literal::Builtin(Builtin::Lag { n, .. }, _) => expr(n, f),
             Literal::Builtin(..) => {}
-            Literal::Window { dur, min, .. } => {
+            Literal::Window { dur, min, lo, .. } => {
                 expr(dur, f);
                 expr(min, f);
+                if let Some(lo) = lo {
+                    expr(lo, f);
+                }
             }
             Literal::Cmp { lhs, rhs, .. } => {
                 expr(lhs, f);
@@ -98,12 +110,16 @@ pub fn literals_in_rule_mut(rule: &mut Rule, f: &mut dyn FnMut(&mut Lit, Span)) 
                 }
                 terms(&mut atom.terms, f);
             }
-            Literal::Resample { inner, min, aggs, .. } => {
-                terms(&mut inner.terms, f);
-                expr(min, f);
-                aggs.iter_mut().for_each(|(_, _, e)| expr(e, f));
-            }
             Literal::AsOf { atom, .. } => terms(&mut atom.terms, f),
+            Literal::Case { branches, otherwise, .. } => {
+                for b in branches.iter_mut() {
+                    b.guard.iter_mut().for_each(|c| literal(c, f));
+                    expr(&mut b.value, f);
+                }
+                if let Some(e) = otherwise {
+                    expr(e, f);
+                }
+            }
         }
     }
     terms(&mut rule.head.terms, f);
@@ -128,9 +144,12 @@ fn literal(l: &Literal, out: &mut Vec<(Lit, Span)>) {
                 expr(n, out);
             }
         }
-        Literal::Window { dur, min, .. } => {
+        Literal::Window { dur, min, lo, .. } => {
             expr(dur, out);
             expr(min, out);
+            if let Some(lo) = lo {
+                expr(lo, out);
+            }
         }
         Literal::Cmp { lhs, rhs, .. } => {
             expr(lhs, out);
@@ -151,14 +170,18 @@ fn literal(l: &Literal, out: &mut Vec<(Lit, Span)>) {
             }
             terms(&atom.terms, out);
         }
-        Literal::Resample { inner, min, aggs, .. } => {
-            terms(&inner.terms, out);
-            expr(min, out);
-            for (_, _, e) in aggs {
+        Literal::AsOf { atom, .. } => terms(&atom.terms, out),
+        Literal::Case { branches, otherwise, .. } => {
+            for b in branches {
+                for c in &b.guard {
+                    literal(c, out);
+                }
+                expr(&b.value, out);
+            }
+            if let Some(e) = otherwise {
                 expr(e, out);
             }
         }
-        Literal::AsOf { atom, .. } => terms(&atom.terms, out),
     }
 }
 

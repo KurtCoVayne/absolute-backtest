@@ -1,13 +1,13 @@
 //! Printable stage results (compiler design, section 2.3): every stage
 //! result renders as text for a reader and as JSON for tools. This module
-//! also holds the renderer of the typed IR back to source text, which the
-//! Normalise stage uses for its re-parseable rendering, and the rendering
-//! of a checked program as written (`ir --stage checked`).
-
-use std::collections::BTreeMap;
+//! also holds the renderer of the core IR back to the surface syntax of the
+//! second formulation, which the Normalise stage uses for its re-parseable
+//! rendering, and the rendering of a checked program as written
+//! (`ir --stage checked`).
 
 use crate::check::Program;
 use crate::ir::*;
+use crate::syntax::ast;
 
 /// A stage result: text for a reader, JSON for tools.
 pub trait Stage {
@@ -38,11 +38,13 @@ pub fn render_lit(l: &Lit) -> String {
     match l {
         Lit::Int(i) => format!("{}", i),
         Lit::Float(x) => float(*x),
-        Lit::Shares(x) => format!("{} shares", amount(*x)),
+        Lit::Quantity(x, u) => format!("{} {}", amount(*x), u),
         Lit::Money(x, c) => format!("{} {}", amount(*x), c),
-        Lit::Price(x, c) => format!("{} {}/share", amount(*x), c),
+        Lit::Price(x, c) => format!("{} {}/unit", amount(*x), c),
         Lit::Duration(d) => d.to_string(),
-        Lit::Str(s) | Lit::Equity(s) | Lit::Label(s) => format!("\"{}\"", s),
+        Lit::Time(t) if *t == i64::MIN => "1970-01-01".to_string(),
+        Lit::Time(t) => crate::kernel::time::format_timestamp(*t),
+        Lit::Str(s) | Lit::Entity(s) | Lit::Label(s) => format!("\"{}\"", s),
     }
 }
 
@@ -78,6 +80,13 @@ fn render_order(by: &[(String, Dir, Span)], names: NameMap) -> String {
         .join(", ")
 }
 
+fn render_within(w: &Option<Vec<String>>, names: NameMap) -> String {
+    match w {
+        Some(vs) => format!(" within ({})", vs.iter().map(|v| names(v)).collect::<Vec<_>>().join(", ")),
+        None => String::new(),
+    }
+}
+
 /// A literal in the surface syntax, every variable through `names`.
 pub fn render_literal(l: &Literal, names: NameMap) -> String {
     match l {
@@ -88,51 +97,64 @@ pub fn render_literal(l: &Literal, names: NameMap) -> String {
             Builtin::Lag { t, n, t1 } => format!("lag({}, {}, {})", render_term(t, names), render_expr(n, names), render_term(t1, names)),
             Builtin::MonthStart { t } => format!("month_start({})", render_term(t, names)),
             Builtin::DayStart { t } => format!("day_start({})", render_term(t, names)),
+            Builtin::SessionOf { a, t, s } => format!("session_of({}, {}, {})", render_term(a, names), render_term(t, names), render_term(s, names)),
         },
-        Literal::Window { var, kind, base, dur, min, .. } => format!(
-            "{} in {}({}, {}, min {})",
-            render_term(var, names),
-            match kind {
-                WindowKind::Window => "window",
-                WindowKind::Prior => "prior_window",
-                WindowKind::Rows => "rows",
-            },
-            render_term(base, names),
-            render_expr(dur, names),
-            render_expr(min, names)
-        ),
+        Literal::Window { var, kind, base, dur, min, lo, .. } => match kind {
+            WindowKind::Window => format!("{} in window[{}] min {}", render_term(var, names), render_expr(dur, names), render_expr(min, names)),
+            WindowKind::Prior => format!("{} in prior_window[{}] min {}", render_term(var, names), render_expr(dur, names), render_expr(min, names)),
+            WindowKind::Rows => format!("{} in rows[{}] min {}", render_term(var, names), render_expr(dur, names), render_expr(min, names)),
+            WindowKind::PriorRows => format!("{} in prior_rows[{}] min {}", render_term(var, names), render_expr(dur, names), render_expr(min, names)),
+            WindowKind::Bucket(c) => format!("{} in bucket({}, {})", render_term(var, names), c, render_term(base, names)),
+            WindowKind::Session => format!(
+                "{} in session({}, [{}, {}))",
+                render_term(var, names),
+                render_term(base, names),
+                lo.as_ref().map(|e| render_expr(e, names)).unwrap_or_else(|| "0min".into()),
+                render_expr(dur, names)
+            ),
+        },
         Literal::Cmp { op, lhs, rhs, .. } => format!("{} {} {}", render_expr(lhs, names), op, render_expr(rhs, names)),
         Literal::Assign { var, expr, .. } => format!("{} = {}", names(var), render_expr(expr, names)),
-        Literal::Agg { var, agg, args, conj, .. } => format!(
-            "{} = {}({}) over ({})",
+        Literal::Agg { var, agg, args, conj, within, .. } => format!(
+            "{} = {}({}) over ({}){}",
             names(var),
             agg,
             args.iter().map(|a| render_expr(a, names)).collect::<Vec<_>>().join(", "),
-            conj.iter().map(|c| render_literal(c, names)).collect::<Vec<_>>().join(", ")
+            conj.iter().map(|c| render_literal(c, names)).collect::<Vec<_>>().join(", "),
+            render_within(within, names)
         ),
-        Literal::Top { n, atom, by, rank, .. } => {
-            let order = by.as_ref().map(|b| render_order(b, names)).unwrap_or_default();
+        Literal::Top { n, atom, by, rank, within, .. } => {
+            let order = by.as_ref().map(|b| format!(" by ({})", render_order(b, names))).unwrap_or_default();
             match (n, rank) {
-                (Some(n), _) => format!("top({}, {}, by ({}))", render_expr(n, names), render_atom(atom, names), order),
+                (Some(n), _) => format!("top[{}]({}{}){}", render_expr(n, names), render_atom(atom, names), order, render_within(within, names)),
                 (None, Some((k, ties, _))) => format!(
-                    "rank({}, by ({}), {}as {})",
+                    "{} = {}({}{}){}",
+                    names(k),
+                    if *ties == Ties::Average { "rank_average" } else { "rank" },
                     render_atom(atom, names),
                     order,
-                    if *ties == Ties::Average { "ties average, " } else { "" },
-                    names(k)
+                    render_within(within, names)
                 ),
-                (None, None) => format!("top(0, {}, by ({}))", render_atom(atom, names), order),
+                (None, None) => format!("top[0]({}{}){}", render_atom(atom, names), order, render_within(within, names)),
             }
         }
-        Literal::Resample { inner, to, as_var, min, aggs, .. } => format!(
-            "resample({} to {} as {}, min {}, {})",
-            render_atom(inner, names),
-            to,
-            names(as_var),
-            render_expr(min, names),
-            aggs.iter().map(|(x, f, e)| format!("{} = {}({})", names(x), f, render_expr(e, names))).collect::<Vec<_>>().join(", ")
-        ),
         Literal::AsOf { atom, at, .. } => format!("{} asof {}", render_atom(atom, names), render_term(at, names)),
+        Literal::Case { var, branches, otherwise, .. } => {
+            let mut parts: Vec<String> = branches
+                .iter()
+                .map(|b| {
+                    format!(
+                        "{} -> {}",
+                        b.guard.iter().map(|g| render_literal(g, names)).collect::<Vec<_>>().join(", "),
+                        render_expr(&b.value, names)
+                    )
+                })
+                .collect();
+            if let Some(e) = otherwise {
+                parts.push(format!("else -> {}", render_expr(e, names)));
+            }
+            format!("{} = case {{ {} }}", names(var), parts.join(" ; "))
+        }
     }
 }
 
@@ -143,28 +165,29 @@ pub fn render_rule(rule: &Rule, names: NameMap, order: Option<&[usize]>) -> Stri
         Some(o) => o.iter().map(|&i| render_literal(&rule.body[i], names)).collect(),
         None => rule.body.iter().map(|l| render_literal(l, names)).collect(),
     };
+    if body.is_empty() {
+        return format!("{}.", render_atom(&rule.head, names));
+    }
     format!("{} :- {}.", render_atom(&rule.head, names), body.join(", "))
 }
 
-pub fn render_signature(sig: &Signature, with_res: bool) -> String {
+/// A signature in the surface syntax: `name(A: Entity, @T: cal, X: Ty)`.
+pub fn render_signature(sig: &Signature, with_cal: bool) -> String {
     let args: Vec<String> = sig
         .args
         .iter()
-        .map(|a| {
-            let m = match a.mode {
-                Mode::In => "+",
-                Mode::Out => "-",
-                Mode::Key => "@",
-            };
-            format!("{}{}: {}", m, a.name, a.ty)
+        .map(|a| match a.mode {
+            Mode::Key => {
+                if with_cal {
+                    format!("@{}: {}", a.name, sig.cal)
+                } else {
+                    format!("@{}", a.name)
+                }
+            }
+            Mode::Out => format!("{}: {}", a.name, a.ty),
         })
         .collect();
     let mut s = format!("{}({})", sig.name, args.join(", "));
-    if with_res {
-        if let Some(r) = sig.res {
-            s.push_str(&format!(" {}", r));
-        }
-    }
     if sig.complete && matches!(sig.kind, Kind::Primitive { .. }) {
         s.push_str(" complete");
     }
@@ -172,17 +195,18 @@ pub fn render_signature(sig: &Signature, with_res: bool) -> String {
 }
 
 pub fn render_param(p: &Param) -> String {
-    let mut s = format!("param {} : {} = {}", p.name, p.ty, render_lit(&p.value));
+    let mut s = format!("{} : {} = {}", p.name, p.ty, render_lit(&p.value));
     if let Some((lo, hi)) = &p.range {
         s.push_str(&format!(" in {}..{}", render_lit(lo), render_lit(hi)));
     }
     s
 }
 
-/// A rendering of a checked program as source: one environment unit, one
-/// library unit per library whose rules or declarations the program
-/// carries, and the strategy. `rule_text` renders each rule by its index;
-/// `rule_order` gives the order rules are emitted in per unit.
+/// A rendering of a checked, linked program as source in the second
+/// formulation: the nine blocks of the strategy with every instantiated
+/// relation and view written out as a rule of the program (the linked
+/// program is first order). `rule_text` renders each rule by its index;
+/// `rule_order` gives the order rules are emitted in.
 pub struct SourceRendering<'a> {
     pub prog: &'a Program,
     pub strategy_name: &'a str,
@@ -194,132 +218,125 @@ impl<'a> SourceRendering<'a> {
     pub fn render(&self) -> String {
         let prog = self.prog;
         let mut out = String::new();
-        // The environment.
-        let prims: Vec<&Signature> = prog.relations.values().filter(|s| matches!(s.kind, Kind::Primitive { .. })).collect();
-        out.push_str(&format!("environment {} {{\n", prog.environment));
-        for s in prims {
-            out.push_str(&format!("  {}\n", render_signature(s, true)));
-        }
-        out.push_str("}\n\n");
-        // Libraries, in the order their first declaration or rule appears.
-        let mut libs: Vec<String> = Vec::new();
-        for s in prog.relations.values() {
-            if let Kind::Derived { unit } = &s.kind {
-                if unit != &prog.strategy && !libs.contains(unit) {
-                    libs.push(unit.clone());
-                }
-            }
-        }
-        for r in &prog.rules {
-            if r.unit != prog.strategy && !libs.contains(&r.unit) {
-                libs.push(r.unit.clone());
-            }
-        }
-        for unit in prog.params.keys() {
-            if unit != &prog.strategy && !libs.contains(unit) {
-                libs.push(unit.clone());
-            }
-        }
-        let unit_of = |name: &str| -> Option<String> {
-            match prog.relations.get(name).map(|s| &s.kind) {
-                Some(Kind::Derived { unit }) => Some(unit.clone()),
-                _ => None,
-            }
-        };
-        for lib in &libs {
+        out.push_str(&format!("strategy {} {{\n", self.strategy_name));
+        // data
+        let d = &prog.demand;
+        out.push_str(&format!("  data {{\n    class {}\n", d.class));
+        if let Some(r) = d.bars {
             out.push_str(&format!(
-                "library {} {{\n  env {}{}\n",
-                lib,
-                prog.environment,
-                prog.environment_version.as_ref().map(|v| format!("@{}", v)).unwrap_or_default()
+                "    need bars {}{}{}\n",
+                r,
+                d.bars_from.map(|t| format!(" from {}", crate::kernel::time::format_timestamp(t))).unwrap_or_default(),
+                if d.bars_complete { " complete" } else { "" }
             ));
-            // Libraries this one reads.
-            let mut uses: Vec<String> = Vec::new();
-            for (i, r) in prog.rules.iter().enumerate() {
-                if r.unit != *lib {
-                    continue;
-                }
-                for rf in &prog.infos[i].refs {
-                    if let Some(u) = unit_of(&rf.name) {
-                        if u != *lib && !uses.contains(&u) {
-                            uses.push(u);
-                        }
-                    }
-                }
-            }
-            if !uses.is_empty() {
-                out.push_str(&format!("  uses {}\n", uses.join(", ")));
-            }
-            let res = unit_resolution(prog, lib);
-            out.push_str(&format!("  resolution {}\n", res));
-            if let Some(ps) = prog.params.get(lib) {
-                for p in ps.values() {
-                    out.push_str(&format!("  {}\n", render_param(p)));
-                }
-            }
-            for s in prog.relations.values() {
-                if matches!(&s.kind, Kind::Derived { unit } if unit == lib) {
-                    out.push_str(&format!("  rel {}\n", render_signature(s, true)));
-                }
-            }
-            for &i in &self.rule_order {
-                if prog.rules[i].unit == *lib {
-                    out.push_str(&format!("  {}\n", (self.rule_text)(i)));
-                }
-            }
-            out.push_str("}\n\n");
         }
-        // The strategy.
+        let mut words: Vec<&str> = Vec::new();
+        if d.actions {
+            words.push("actions");
+        }
+        if d.listing {
+            words.push("listing");
+        }
+        if d.sessions {
+            words.push("sessions");
+        }
+        if d.point_value {
+            words.push("point_value");
+        }
+        if d.commission {
+            words.push("commission");
+        }
+        if !words.is_empty() {
+            out.push_str(&format!("    need {}\n", words.join(", ")));
+        }
+        if !d.lists.is_empty() {
+            out.push_str(&format!("    need lists {}\n", d.lists.iter().map(|l| format!("\"{}\"", l)).collect::<Vec<_>>().join(", ")));
+        }
+        if !d.series.is_empty() {
+            let items: Vec<String> = d.series.iter().map(|(n, r)| format!("\"{}\"{}", n, r.map(|r| format!(" {}", r)).unwrap_or_default())).collect();
+            out.push_str(&format!("    need series {}{}\n", items.join(", "), if d.series_complete { " complete" } else { "" }));
+        }
+        out.push_str(&format!("    {}\n    prefer {}\n  }}\n", if d.require_tested { "require tested" } else { "allow untested" }, d.prefer));
+        // calendars, clock
+        let declared: Vec<String> = prog.calendars.iter().filter(|(n, _)| n.as_str() != "base").map(|(n, c)| format!("{} = {}", n, c)).collect();
+        if !declared.is_empty() {
+            out.push_str(&format!("  calendars {{ {} }}\n", declared.join("   ")));
+        }
         out.push_str(&format!(
-            "strategy {} {{\n  env {}{}\n",
-            self.strategy_name,
-            prog.environment,
-            prog.environment_version.as_ref().map(|v| format!("@{}", v)).unwrap_or_default()
+            "  clock {{ decide on {}{} }}\n",
+            prog.clock.calendar,
+            prog.clock.offset.map(|d| format!(" at session + {}", d)).unwrap_or_default()
         ));
-        if let Some(h) = &prog.revises {
-            out.push_str(&format!("  revises \"{}\"\n", h));
-        }
-        if !libs.is_empty() {
-            out.push_str(&format!("  uses {}\n", libs.join(", ")));
-        }
-        out.push_str(&format!("  resolution {}\n  mode {}\n", prog.resolution, prog.mode));
-        if let Some(ps) = prog.params.get(&prog.strategy) {
-            for p in ps.values() {
-                out.push_str(&format!("  {}\n", render_param(p)));
-            }
-        }
-        for s in prog.relations.values() {
-            if matches!(&s.kind, Kind::Derived { unit } if *unit == prog.strategy) {
-                out.push_str(&format!("  rel {}\n", render_signature(s, true)));
-            }
+        // universe
+        out.push_str("  universe {\n");
+        if !prog.instruments.is_empty() {
+            let rows: Vec<String> = prog
+                .instruments
+                .iter()
+                .map(|(n, f)| format!("{}{}", n, f.map(|t| format!(" from {}", crate::kernel::time::format_timestamp(t))).unwrap_or_default()))
+                .collect();
+            out.push_str(&format!("    instruments {{ {} }}\n", rows.join("; ")));
         }
         for &i in &self.rule_order {
-            if prog.rules[i].unit == prog.strategy {
-                out.push_str(&format!("  {}\n", (self.rule_text)(i)));
+            if prog.rules[i].head.name == "universe" {
+                out.push_str(&format!("    {}\n", (self.rule_text)(i)));
             }
         }
+        out.push_str("  }\n");
+        // params
+        out.push_str("  params {\n");
+        if let Some(ps) = prog.params.get(&prog.strategy) {
+            for p in ps.values() {
+                out.push_str(&format!("    {}\n", render_param(p)));
+            }
+        }
+        out.push_str("  }\n");
+        // rules: every derived relation but the universe, the instruments
+        // table and decide, with its rules.
+        out.push_str("  rules {\n");
+        let mut rels: Vec<&Signature> = prog
+            .relations
+            .values()
+            .filter(|s| matches!(s.kind, Kind::Derived { .. }) && !matches!(s.name.as_str(), "universe" | "instruments"))
+            .collect();
+        rels.sort_by(|a, b| a.name.cmp(&b.name));
+        for s in rels {
+            out.push_str(&format!("    rel {}\n", render_signature(s, true)));
+            for &i in &self.rule_order {
+                if prog.rules[i].head.name == s.name {
+                    out.push_str(&format!("    {}\n", (self.rule_text)(i)));
+                }
+            }
+        }
+        for o in &prog.observes {
+            let wheres = if o.wheres.is_empty() {
+                String::new()
+            } else {
+                format!(" where {}", o.wheres.iter().map(|(v, l)| format!("{} = {}", v, render_lit(l))).collect::<Vec<_>>().join(", "))
+            };
+            out.push_str(&format!("    observe {}{}{}\n", o.rel, wheres, if o.trace_instances { " trace instances" } else { "" }));
+        }
+        out.push_str("  }\n");
+        // decisions
+        out.push_str(&format!(
+            "  decisions {{\n    silence {}\n    orders {}\n",
+            if prog.silence_flat { "flat" } else { "hold" },
+            prog.default_order
+        ));
+        for &i in &self.rule_order {
+            if prog.rules[i].head.name == "decide" {
+                out.push_str(&format!("    {}\n", (self.rule_text)(i)));
+            }
+        }
+        out.push_str("  }\n");
+        // execution, report
+        for line in prog.exec.to_string().lines() {
+            out.push_str(&format!("  {}\n", line));
+        }
+        out.push_str(&format!("  {}\n", prog.report));
         out.push_str("}\n");
         out
     }
-}
-
-/// The resolution a unit declares: the one most of its relations carry,
-/// else the program's.
-pub fn unit_resolution(prog: &Program, unit: &str) -> Resolution {
-    let mut counts: BTreeMap<Resolution, usize> = BTreeMap::new();
-    for s in prog.relations.values() {
-        if matches!(&s.kind, Kind::Derived { unit: u } if u == unit) {
-            if let Some(r) = s.res {
-                *counts.entry(r).or_default() += 1;
-            }
-        }
-    }
-    for (i, r) in prog.rules.iter().enumerate() {
-        if r.unit == unit {
-            *counts.entry(prog.infos[i].resolution).or_default() += 1;
-        }
-    }
-    counts.into_iter().max_by_key(|(_, n)| *n).map(|(r, _)| r).unwrap_or(prog.resolution)
 }
 
 /// The checked program as written (`ir --stage checked`).
@@ -342,18 +359,20 @@ pub fn checked_json(prog: &Program) -> serde_json::Value {
     serde_json::json!({
         "stage": "checked",
         "strategy": prog.strategy,
-        "environment": prog.environment,
-        "environment_version": prog.environment_version,
-        "resolution": prog.resolution.to_string(),
-        "mode": prog.mode.to_string(),
+        "class": prog.class,
+        "base": prog.base.to_string(),
+        "decision_calendar": prog.cal_name(&prog.decision_cal),
+        "clock_offset": prog.clock.offset.map(|d| d.to_string()),
+        "demand": prog.demand,
         "relations": prog.relations.values().map(|s| serde_json::json!({
             "name": s.name,
             "kind": kind_name(&s.kind),
-            "unit": match &s.kind { Kind::Derived { unit } => Some(unit.clone()), Kind::Primitive { env } => Some(env.clone()), _ => None },
+            "unit": match &s.kind { Kind::Derived { unit } => Some(unit.clone()), Kind::Primitive { class } => Some(class.clone()), _ => None },
+            "calendar": prog.cal_name(&s.cal),
             "signature": render_signature(s, true),
             "complete": prog.complete.contains(&s.name),
         })).collect::<Vec<_>>(),
-        "params": prog.params.iter().flat_map(|(u, ps)| ps.values().map(move |p| serde_json::json!({"unit": u, "text": render_param(p)}))).collect::<Vec<_>>(),
+        "params": prog.params.get(&prog.strategy).map(|ps| ps.values().map(|p| serde_json::json!({"unit": prog.strategy, "text": render_param(p)})).collect::<Vec<_>>()).unwrap_or_default(),
         "rules": prog.rules.iter().enumerate().map(|(i, r)| serde_json::json!({
             "label": prog.rule_label(i),
             "unit": r.unit,
@@ -361,6 +380,8 @@ pub fn checked_json(prog: &Program) -> serde_json::Value {
             "text": render_rule(r, &identity, None),
         })).collect::<Vec<_>>(),
         "strata": prog.strata,
+        "execution": prog.exec,
+        "report": prog.report,
         "degrees_of_freedom": prog.degrees_of_freedom.summary(),
     })
 }
@@ -375,39 +396,34 @@ pub fn kind_name(k: &Kind) -> &'static str {
     }
 }
 
-/// The parsed units as source (`ir --stage parsed`): the same renderer over
-/// the units of a workspace, in the order given.
-pub fn render_parsed(units: &[Unit]) -> String {
-    let identity = |v: &str| v.to_string();
+/// The parsed units as a listing (`ir --stage parsed`): each unit's kind,
+/// name and blocks, in the order given.
+pub fn render_parsed(units: &[ast::Unit]) -> String {
     let mut out = String::new();
     for u in units {
-        out.push_str(&format!("{} {} {{\n", u.kind, u.name));
-        if let Some((e, _)) = &u.env {
-            out.push_str(&format!("  env {}{}\n", e, u.env_version.as_ref().map(|v| format!("@{}", v)).unwrap_or_default()));
+        match u {
+            ast::Unit::Strategy(s) => {
+                let blocks: Vec<&str> = s.blocks.iter().map(|(b, _)| b.as_str()).collect();
+                out.push_str(&format!("strategy {} at {}: blocks {}\n", s.name, s.span, blocks.join(", ")));
+                if let Some(r) = &s.rules {
+                    for d in &r.rels {
+                        out.push_str(&format!("  rel {}\n", d.name));
+                    }
+                }
+            }
+            ast::Unit::Library(l) => {
+                let rels: Vec<&str> = l.rules.rels.iter().map(|d| d.name.as_str()).collect();
+                out.push_str(&format!("library {} at {}: {}\n", l.name, l.span, rels.join(", ")));
+            }
+            ast::Unit::Class(c) => {
+                let rels: Vec<&str> = c.rels.iter().map(|d| d.name.as_str()).collect();
+                let base = c.base.map(|r| format!("base {}, ", r)).unwrap_or_default();
+                out.push_str(&format!("class {} at {}: {}{}\n", c.name, c.span, base, rels.join(", ")));
+            }
+            ast::Unit::Execution(e) => {
+                out.push_str(&format!("execution {} at {}: {} fields\n", e.name, e.span, e.fields.len()));
+            }
         }
-        if let Some(h) = &u.revises {
-            out.push_str(&format!("  revises \"{}\"\n", h));
-        }
-        if !u.uses.is_empty() {
-            out.push_str(&format!("  uses {}\n", u.uses.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>().join(", ")));
-        }
-        if let Some((r, _)) = u.resolution {
-            out.push_str(&format!("  resolution {}\n", r));
-        }
-        if let Some((m, _)) = u.mode {
-            out.push_str(&format!("  mode {}\n", m));
-        }
-        for p in &u.params {
-            out.push_str(&format!("  {}\n", render_param(p)));
-        }
-        for s in &u.rels {
-            let prefix = if u.kind == UnitKind::Environment { "" } else { "rel " };
-            out.push_str(&format!("  {}{}\n", prefix, render_signature(s, true)));
-        }
-        for r in &u.rules {
-            out.push_str(&format!("  {}\n", render_rule(r, &identity, None)));
-        }
-        out.push_str("}\n\n");
     }
     out
 }

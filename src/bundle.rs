@@ -33,7 +33,7 @@ pub struct RelationEntry {
     /// The signature as declared, for the reader.
     pub signature: String,
     pub resolution: String,
-    /// When a tuple is available: `bar_close` for every v1 relation (the
+    /// When a tuple is available: `bar_close` for every relation of the catalog (the
     /// fold kernel's availability column, M3, materialises it).
     pub availability: String,
     pub rows: usize,
@@ -142,7 +142,7 @@ fn today() -> String {
 
 fn arrow_type(ty: &Ty) -> Result<DataType, String> {
     Ok(match ty {
-        Ty::Equity | Ty::Label => DataType::Utf8,
+        Ty::Entity | Ty::Label => DataType::Utf8,
         Ty::Timestamp | Ty::Count => DataType::Int64,
         Ty::Quantity(_) => DataType::Float64,
         t => return Err(format!("a {} column cannot be stored in a bundle", t)),
@@ -164,7 +164,6 @@ fn signature_text(sig: &Signature) -> String {
         .iter()
         .map(|a| {
             let mode = match a.mode {
-                Mode::In => "+",
                 Mode::Out => "-",
                 Mode::Key => "@",
             };
@@ -175,7 +174,7 @@ fn signature_text(sig: &Signature) -> String {
         "{}({}){}{}",
         sig.name,
         args.join(", "),
-        sig.res.map(|r| format!(" @{}", r)).unwrap_or_default(),
+        sig.native.map(|r| format!(" {}", r)).unwrap_or_else(|| format!(" @{}", sig.cal)),
         if sig.complete { " complete" } else { "" }
     )
 }
@@ -187,8 +186,8 @@ fn month_label(t: i64) -> String {
 /// Write `ds` as a bundle of environment `name` at `version` into `dir`
 /// (created or overwritten), untested.
 pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, version: &str) -> Result<Manifest, String> {
-    if name != prog.environment {
-        return Err(format!("the program is written against `{}`, not `{}`", prog.environment, name));
+    if name != prog.class {
+        return Err(format!("the program reads class `{}`, not `{}`", prog.class, name));
     }
     fs::create_dir_all(dir.join("log")).map_err(|e| format!("{}: {}", dir.display(), e))?;
     crate::data::write_securities(ds, &dir.join("securities.parquet"))?;
@@ -199,7 +198,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         }
         let Some(tuples) = ds.facts.get(rel) else { continue };
         let key_pos = sig.key_pos().ok_or_else(|| format!("`{}` has no temporal key", rel))?;
-        let res = sig.res.ok_or_else(|| format!("`{}` has no resolution", rel))?;
+        let res = sig.native.unwrap_or(prog.base);
         let records = ds.availability_of(rel).is_some();
         let schema = Arc::new(schema_of(sig, records)?);
         let mut by_month: BTreeMap<String, Vec<(usize, &Vec<Value>)>> = BTreeMap::new();
@@ -214,7 +213,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
             let mut columns: Vec<ArrayRef> = Vec::new();
             for (i, arg) in sig.args.iter().enumerate() {
                 let col: ArrayRef = match &arg.ty {
-                    Ty::Equity => Arc::new(StringArray::from(rows.iter().map(|(_, tu)| tu[i].as_equity().map(|s| ds.symbols.name(s))).collect::<Vec<_>>())),
+                    Ty::Entity => Arc::new(StringArray::from(rows.iter().map(|(_, tu)| tu[i].as_equity().map(|s| ds.symbols.name(s))).collect::<Vec<_>>())),
                     Ty::Label => Arc::new(StringArray::from(rows.iter().map(|(_, tu)| ds.label_name(&tu[i])).collect::<Vec<_>>())),
                     Ty::Timestamp => Arc::new(Int64Array::from(rows.iter().map(|(_, tu)| tu[i].as_time()).collect::<Vec<_>>())),
                     Ty::Count => Arc::new(Int64Array::from(
@@ -243,7 +242,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         relations.push(RelationEntry {
             name: rel.clone(),
             signature: signature_text(sig),
-            resolution: sig.res.map(|r| r.to_string()).unwrap_or_default(),
+            resolution: res.to_string(),
             availability: if records { "recorded".into() } else { "bar_close".into() },
             rows: tuples.len(),
             partitions,
@@ -322,11 +321,15 @@ fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, Strin
                     for (i, arg) in sig.args.iter().enumerate() {
                         let col = batch.column(i);
                         let v = match &arg.ty {
-                            Ty::Equity => Value::Equity(ds.intern(string_at(col, row, &path)?)),
+                            Ty::Entity => Value::Equity(ds.intern(string_at(col, row, &path)?)),
                             Ty::Label => Value::Label(ds.intern_label(string_at(col, row, &path)?)),
                             Ty::Timestamp => {
                                 let t = int_at(col, row, &path)?;
-                                Value::Time(if i == key_pos { sig.res.map(|r| bucket(r, t)).unwrap_or(t) } else { t })
+                                Value::Time(if i == key_pos && !sig.native.unwrap_or(prog.base).is_sub_daily() {
+                                    bucket(sig.native.unwrap_or(prog.base), t)
+                                } else {
+                                    t
+                                })
                             }
                             Ty::Count => Value::Count(int_at(col, row, &path)?),
                             Ty::Quantity(_) => Value::Num(
@@ -377,18 +380,12 @@ fn int_at(col: &ArrayRef, row: usize, path: &Path) -> Result<i64, String> {
 /// have passed unless `allow_untested`.
 pub fn load_bundle(prog: &Program, dir: &Path, allow_untested: bool) -> Result<(Dataset, Manifest), String> {
     let m = read_manifest(dir)?;
-    if m.name != prog.environment {
-        return Err(format!(
-            "bundle {} is `{}@{}`, but the strategy is written against environment `{}`",
-            dir.display(),
-            m.name,
-            m.version,
-            prog.environment
-        ));
+    if m.name != prog.class {
+        return Err(format!("bundle {} is `{}@{}`, but the strategy reads class `{}`", dir.display(), m.name, m.version, prog.class));
     }
-    if let Some(v) = &prog.environment_version {
-        if *v != m.version {
-            return Err(format!("bundle {} is `{}@{}`, but the strategy names `{}@{}`", dir.display(), m.name, m.version, prog.environment, v));
+    if let Some(v) = prog.demand.prefer.strip_prefix("version ") {
+        if v != m.version {
+            return Err(format!("bundle {} is `{}@{}`, but the strategy prefers version `{}`", dir.display(), m.name, m.version, v));
         }
     }
     if m.tests.is_none() && !allow_untested {
@@ -407,14 +404,8 @@ pub fn load_bundle(prog: &Program, dir: &Path, allow_untested: bool) -> Result<(
 /// manifest (a failing bundle stays unmarked).
 pub fn test_bundle(prog: &Program, dir: &Path) -> Result<(Manifest, Vec<TestResult>), String> {
     let mut m = read_manifest(dir)?;
-    if m.name != prog.environment {
-        return Err(format!(
-            "bundle {} is `{}@{}`, but the program is written against `{}`",
-            dir.display(),
-            m.name,
-            m.version,
-            prog.environment
-        ));
+    if m.name != prog.class {
+        return Err(format!("bundle {} is `{}@{}`, but the program is written against `{}`", dir.display(), m.name, m.version, prog.class));
     }
     let ds = read_facts(prog, dir, &m)?;
     let results = run_tests_with(prog, &ds, &read_exceptions(dir)?);
@@ -461,7 +452,7 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
     // Bar labels: every temporal key is the label of its bucket at the relation's resolution.
     let mut problems = Vec::new();
     for (rel, sig) in &prog.relations {
-        let (Some(k), Some(res), Some(tuples)) = (sig.key_pos(), sig.res, ds.facts.get(rel)) else {
+        let (Some(k), res, Some(tuples)) = (sig.key_pos(), sig.native.unwrap_or(prog.base), ds.facts.get(rel)) else {
             continue;
         };
         for tu in tuples {

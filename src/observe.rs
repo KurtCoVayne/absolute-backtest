@@ -171,7 +171,6 @@ pub fn program_graph(prog: &Program) -> ProgramGraph {
                 .iter()
                 .map(|a| {
                     let m = match a.mode {
-                        Mode::In => "+",
                         Mode::Out => "-",
                         Mode::Key => "@",
                     };
@@ -182,7 +181,7 @@ pub fn program_graph(prog: &Program) -> ProgramGraph {
                 name: name.clone(),
                 kind: kind_text(&sig.kind),
                 signature: format!("{}({})", name, args.join(", ")),
-                resolution: sig.res.map(|r| r.to_string()).unwrap_or_else(|| prog.resolution.to_string()),
+                resolution: prog.cal_name(&sig.cal),
                 complete: prog.complete.contains(name),
                 stratum: stratum_of(name),
                 recursive: scc_size[&sccs.id[i]] > 1 || self_edge[i],
@@ -283,11 +282,11 @@ fn render_program(prog: &Program, facts: Option<GraphFacts>) -> String {
     let mut out = String::new();
     let count = |k: &str| g.nodes.iter().filter(|x| x.kind == k).count();
     out.push_str(&format!(
-        "program {}: env {}, decision resolution {}, mode {}; {} relations reachable from decide ({} primitive, {} executor, {} kernel, {} derived, 1 output), {} rules, depth {}\n",
+        "program {}: class {}, base {}, decisions on {}; {} relations reachable from decide ({} primitive, {} executor, {} kernel, {} derived, 1 output), {} rules, depth {}\n",
         prog.strategy,
-        prog.environment,
-        prog.resolution,
-        prog.mode,
+        prog.class,
+        prog.base,
+        prog.cal_name(&prog.decision_cal),
         g.nodes.len(),
         count("primitive"),
         count("executor"),

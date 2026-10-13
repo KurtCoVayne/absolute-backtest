@@ -1,7 +1,7 @@
 //! Calendar arithmetic over Unix timestamps (seconds, naive wall clock):
 //! civil dates, calendar-duration subtraction and resolution buckets.
 
-use crate::ir::{Duration, Resolution};
+use crate::ir::{Cal, Duration, Resolution};
 
 pub const DAY: i64 = 86_400;
 
@@ -59,7 +59,7 @@ pub fn weekday(t: i64) -> u32 {
 }
 
 /// `t − d` in calendar terms: months move the civil date (day clamped to
-/// the target month), then days subtract whole days.
+/// the target month), then days subtract whole days, then seconds.
 pub fn sub_duration(t: i64, d: Duration) -> i64 {
     let mut t = t;
     if d.months != 0 {
@@ -72,13 +72,58 @@ pub fn sub_duration(t: i64, d: Duration) -> i64 {
         let nd = dd.min(days_in_month(ny, nm));
         t = days_from_civil(ny, nm, nd) * DAY + secs;
     }
-    t - d.days * DAY
+    t - d.days * DAY - d.secs
+}
+
+/// `t + d` in calendar terms (the inverse of `sub_duration` for whole days
+/// and seconds; months move the civil date forward, day clamped).
+pub fn add_duration(t: i64, d: Duration) -> i64 {
+    let mut t = t;
+    if d.months != 0 {
+        let days = floor_div(t, DAY);
+        let secs = t - days * DAY;
+        let (y, m, dd) = civil_from_days(days);
+        let total = y * 12 + (m as i64 - 1) + d.months;
+        let ny = floor_div(total, 12);
+        let nm = (total - ny * 12) as u32 + 1;
+        let nd = dd.min(days_in_month(ny, nm));
+        t = days_from_civil(ny, nm, nd) * DAY + secs;
+    }
+    t + d.days * DAY + d.secs
+}
+
+/// The civil week of `t` (Monday-based), as a count of weeks since the epoch's Monday.
+pub fn week_key(t: i64) -> i64 {
+    // 1970-01-01 was a Thursday: shift so that Mondays start weeks.
+    floor_div(floor_div(t, DAY) + 3, 7)
+}
+
+pub fn year_key(t: i64) -> i64 {
+    civil_from_days(floor_div(t, DAY)).0
+}
+
+/// The period of a civil calendar that holds `t` (Definition 3.2): equal
+/// keys are one class of the calendar. Periods of `n` weeks, months or
+/// years are counted from the epoch.
+pub fn period_key(cal: &Cal, t: i64) -> i64 {
+    match cal {
+        Cal::Base => t,
+        Cal::Days => day_key(t),
+        Cal::Weeks(n) => floor_div(week_key(t), (*n).max(1) as i64),
+        Cal::Months(n) => {
+            let (y, m) = month_key(t);
+            floor_div(y * 12 + m as i64 - 1, (*n).max(1) as i64)
+        }
+        Cal::Years(n) => floor_div(year_key(t), (*n).max(1) as i64),
+        Cal::Sessions | Cal::SessionsOf(_) => day_key(t),
+    }
 }
 
 /// The label of the `res` bucket containing `t`: the civil date for @1d,
 /// otherwise the bar's close instant (the ceiling to the bar length).
 pub fn bucket(res: Resolution, t: i64) -> i64 {
     match res.seconds() {
+        None if res == Resolution::W1 => (week_key(t) * 7 - 3 + 6) * DAY,
         None => floor_div(t, DAY) * DAY,
         Some(s) => {
             let r = t.rem_euclid(s);
@@ -94,6 +139,7 @@ pub fn bucket(res: Resolution, t: i64) -> i64 {
 /// Inclusive instant range covered by the bucket with `label`.
 pub fn bucket_range(res: Resolution, label: i64) -> (i64, i64) {
     match res.seconds() {
+        None if res == Resolution::W1 => (label - 6 * DAY, label + DAY - 1),
         None => (label, label + DAY - 1),
         Some(s) => (label - s + 1, label),
     }
@@ -162,11 +208,15 @@ mod tests {
     #[test]
     fn durations_are_calendar() {
         let t = parse_timestamp("2024-03-31").unwrap();
-        assert_eq!(format_timestamp(sub_duration(t, Duration { months: 1, days: 0 })), "2024-02-29");
-        assert_eq!(format_timestamp(sub_duration(t, Duration { months: 12, days: 0 })), "2023-03-31");
-        assert_eq!(format_timestamp(sub_duration(t, Duration { months: 0, days: 7 })), "2024-03-24");
+        assert_eq!(format_timestamp(sub_duration(t, Duration::months(1))), "2024-02-29");
+        assert_eq!(format_timestamp(sub_duration(t, Duration::months(12))), "2023-03-31");
+        assert_eq!(format_timestamp(sub_duration(t, Duration::days(7))), "2024-03-24");
         let m = parse_timestamp("2024-03-04T09:31:00").unwrap();
-        assert_eq!(format_timestamp(sub_duration(m, Duration { months: 0, days: 1 })), "2024-03-03T09:31:00");
+        assert_eq!(format_timestamp(sub_duration(m, Duration::days(1))), "2024-03-03T09:31:00");
+        assert_eq!(format_timestamp(sub_duration(m, Duration::secs(1800))), "2024-03-04T09:01:00");
+        assert_eq!(format_timestamp(add_duration(m, Duration::secs(1800))), "2024-03-04T10:01:00");
+        assert_eq!(week_key(parse_timestamp("2024-03-04").unwrap()), week_key(parse_timestamp("2024-03-10").unwrap()));
+        assert_ne!(week_key(parse_timestamp("2024-03-04").unwrap()), week_key(parse_timestamp("2024-03-11").unwrap()));
     }
 
     #[test]

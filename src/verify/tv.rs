@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use super::{Obligation, TierReport, Verdict};
 use crate::check::Program;
 use crate::compiler::Compiled;
-use crate::ir::{Kind, Mode};
+use crate::ir::Kind;
 use crate::kernel::{Dataset, ExecConfig, Kernel, RunError, RunResult, Value};
 use crate::lower::Lowered;
 
@@ -79,13 +79,8 @@ pub fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> Ledgers {
         .collect();
     for rel in names {
         let sig = &prog.relations[&rel];
-        let inputs: Vec<&crate::ir::Arg> = sig.args.iter().filter(|a| a.mode == Mode::In).collect();
-        let per_symbol = matches!(inputs.as_slice(), [a] if a.ty.is_entity());
-        if !inputs.is_empty() && !per_symbol {
-            continue;
-        }
-        let res = sig.res.unwrap_or(prog.resolution);
-        let own: Vec<i64> = k.bars_at(res).into_iter().filter(|&b| b >= first && b <= last).collect();
+        let per_symbol = false;
+        let own: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
         let symbols: Vec<Value> = if per_symbol {
             (0..k.symbol_names().len()).map(|i| Value::Equity(i as u32)).collect()
         } else {

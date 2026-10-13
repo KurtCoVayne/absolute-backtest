@@ -42,7 +42,7 @@ struct Interp<'a> {
 fn magnitude(l: &Lit) -> Option<f64> {
     match l {
         Lit::Int(i) => Some(*i as f64),
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Some(*x),
+        Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => Some(*x),
         _ => None,
     }
 }
@@ -346,8 +346,8 @@ impl<'a> Interp<'a> {
                                 continue;
                             }
                             let val = if k == 0 {
-                                AbsVal::non_numeric(&Ty::Equity)
-                            } else if ctor_mode(c) == Some(DecisionMode::Delta) {
+                                AbsVal::non_numeric(&Ty::Entity)
+                            } else if crate::kernel::value::Ctor::parse(c).is_some_and(|k| !k.is_target()) {
                                 AbsVal {
                                     sign: Sign::Pos,
                                     ..AbsVal::top(Some(&Ty::Quantity(Dim::shares())))
@@ -606,7 +606,7 @@ impl<'a> Interp<'a> {
                     }
                 }
             }
-            Literal::Agg { var, agg, args, conj, span } => {
+            Literal::Agg { var, agg, args, conj, span, .. } => {
                 let mut sub = state.clone();
                 for c in conj {
                     self.literal(ri, None, c, unit, &mut sub, col);
@@ -637,27 +637,33 @@ impl<'a> Interp<'a> {
                     let _ = self.eval(n, unit, state, col);
                 }
             }
-            Literal::Resample { inner, as_var, aggs, min, .. } => {
-                let mut sub = state.clone();
-                self.atom(inner, &mut sub);
-                state.insert(as_var.clone(), AbsVal::non_numeric(&Ty::Timestamp));
-                // The grouping entities of the inner atom are bound outside too.
-                if let Some(sig) = self.prog.relations.get(&inner.name) {
-                    for (t, arg) in inner.terms.iter().zip(sig.args.iter()) {
-                        if let Term::Var(v, _) = t {
-                            if arg.ty.is_entity() {
-                                state.entry(v.clone()).or_insert_with(|| AbsVal::non_numeric(&Ty::Equity));
-                            }
-                        }
+            Literal::Case { var, branches, otherwise, .. } => {
+                // The value is the join of the branch values (each evaluated
+                // under its guards) and the otherwise value.
+                let mut acc: Option<AbsVal> = None;
+                for b in branches {
+                    let mut sub = state.clone();
+                    for g in &b.guard {
+                        self.literal(ri, None, g, unit, &mut sub, col);
                     }
+                    let v = self.eval(&b.value, unit, &sub, col);
+                    acc = Some(match acc {
+                        Some(a) => a.join(&v),
+                        None => v,
+                    });
                 }
-                let k = self.eval(min, unit, state, col).interval.lo.max(0.0);
-                let n = Interval::new(if k.is_finite() { k } else { 0.0 }, f64::INFINITY);
-                for (x, f, e) in aggs {
-                    let v = self.eval(e, unit, &sub, col);
-                    let r = self.aggregate(f, &[v], n, col, lit.span(), std::slice::from_ref(e));
-                    state.insert(x.clone(), r);
+                if let Some(o) = otherwise {
+                    let v = self.eval(o, unit, state, col);
+                    acc = Some(match acc {
+                        Some(a) => a.join(&v),
+                        None => v,
+                    });
                 }
+                let mut v = acc.unwrap_or_else(|| AbsVal::top(None));
+                if otherwise.is_none() {
+                    v.may_undef = true;
+                }
+                state.insert(var.clone(), v);
             }
         }
         (verdict, selectivity)
@@ -674,35 +680,10 @@ impl<'a> Interp<'a> {
         // values, narrowed by the demand set when it is static.
         if let Some(sig) = sig {
             let cols = self.columns.get(&rule.head.name).cloned().unwrap_or_default();
-            let demand = self.st.demand.get(&rule.head.name);
-            let parametric: Vec<usize> = sig.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In && !a.ty.is_entity()).map(|(i, _)| i).collect();
-            for (i, (t, arg)) in rule.head.terms.iter().zip(sig.args.iter()).enumerate() {
+            let _ = &cols;
+            for (t, arg) in rule.head.terms.iter().zip(sig.args.iter()) {
                 if let Term::Var(v, _) = t {
                     match arg.mode {
-                        Mode::In => {
-                            let mut val = if numeric_ty(&arg.ty) { AbsVal::top(Some(&arg.ty)) } else { AbsVal::non_numeric(&arg.ty) };
-                            if let (Some(DemandSet::Static(ts)), Some(k)) = (demand, parametric.iter().position(|&p| p == i)) {
-                                if val.numeric && !ts.is_empty() {
-                                    let mut hull = Interval::BOTTOM;
-                                    let mut all = true;
-                                    for t in ts {
-                                        match t.get(k).and_then(|s| crate::parser::parse_lit(s).ok()).and_then(|l| magnitude(&l)) {
-                                            Some(x) => hull = hull.join(Interval::point(x)),
-                                            None => all = false,
-                                        }
-                                    }
-                                    if all {
-                                        val = val.with_interval(hull);
-                                    }
-                                }
-                            }
-                            if let Some(c) = cols.get(i) {
-                                if c.numeric && val.numeric && c.sign != Sign::Bot {
-                                    val = val.meet(c);
-                                }
-                            }
-                            state.insert(v.clone(), val);
-                        }
                         Mode::Key => {
                             state.insert(v.clone(), AbsVal::non_numeric(&Ty::Timestamp));
                         }
@@ -737,7 +718,7 @@ impl<'a> Interp<'a> {
                 Term::Lit(l, _) => self.lit_val(l),
                 Term::Wild(_) => AbsVal::top(ty.as_ref()),
                 Term::Ctor(c, subs, span) => {
-                    if ctor_mode(c) == Some(DecisionMode::Delta) {
+                    if crate::kernel::value::Ctor::parse(c).is_some_and(|k| !k.is_target()) {
                         if let Some(amount) = subs.get(1) {
                             let q = match amount {
                                 Term::Var(v, _) => state.get(v).cloned(),
@@ -824,7 +805,7 @@ fn thresholds(prog: &Program) -> Vec<f64> {
 /// Run the abstract interpretation (3.9) and assemble the analysis.
 pub fn interpret(prog: &Program, st: Structure, stats: Option<&Statistics>, margin_log2: i32) -> Analysis {
     let mut columns: BTreeMap<String, Vec<AbsVal>> = BTreeMap::new();
-    let futures = prog.environment.to_lowercase().contains("future");
+    let futures = prog.class == "future";
     let interp_seed = Interp {
         prog,
         st: &st,
@@ -1003,7 +984,7 @@ pub fn interpret(prog: &Program, st: Structure, stats: Option<&Statistics>, marg
             RelationFacts {
                 name: name.clone(),
                 kind: crate::compiler::print::kind_name(&sig.kind).into(),
-                resolution: sig.res.map(|r| r.to_string()).unwrap_or_default(),
+                calendar: prog.cal_name(&sig.cal),
                 stratum: stratum_of(name),
                 component: st.components.get(name).copied().unwrap_or(0),
                 recursive: st.recursive.contains(name),

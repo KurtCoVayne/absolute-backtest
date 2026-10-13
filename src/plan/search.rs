@@ -43,6 +43,11 @@ fn bindable(lit: &Literal) -> Vec<String> {
                 }
             }
             Builtin::MonthStart { .. } | Builtin::DayStart { .. } => {}
+            Builtin::SessionOf { s, .. } => {
+                if let Term::Var(v, _) = s {
+                    vars.push(v.clone());
+                }
+            }
         },
         Literal::Assign { var, .. } => vars.push(var.clone()),
         Literal::Agg { var, .. } => vars.push(var.clone()),
@@ -59,13 +64,7 @@ fn bindable(lit: &Literal) -> Vec<String> {
                 vars.push(k.clone());
             }
         }
-        Literal::Resample { inner, as_var, aggs, .. } => {
-            for t in &inner.terms {
-                term_vars(t, &mut vars);
-            }
-            vars.push(as_var.clone());
-            vars.extend(aggs.iter().map(|(x, _, _)| x.clone()));
-        }
+        Literal::Case { var, .. } => vars.push(var.clone()),
         Literal::Window { var, .. } => {
             if let Term::Var(v, _) = var {
                 vars.push(v.clone());
@@ -90,7 +89,7 @@ pub fn literal_deps(prog: &Program, rule: usize) -> RuleDeps {
     if let Some(sig) = prog.relations.get(&r.head.name) {
         for (term, arg) in r.head.terms.iter().zip(sig.args.iter()) {
             if let Term::Var(v, _) = term {
-                if arg.mode == Mode::In || arg.mode == Mode::Key {
+                if arg.mode == Mode::Key {
                     bound.push(v.clone());
                 }
             }
@@ -110,6 +109,28 @@ pub fn literal_deps(prog: &Program, rule: usize) -> RuleDeps {
                 for a in args {
                     let mut vs = Vec::new();
                     a.vars(&mut vs);
+                    inner.extend(vs.into_iter().map(|(v, _)| v));
+                }
+                let mut m: Vec<String> = inner.into_iter().filter(|v| bound.contains(v)).collect();
+                m.push(var.clone());
+                m
+            }
+            // A case form's guards bind their own locals (the branch values
+            // read them): at the rule's level it reads what is bound outside
+            // and binds its variable.
+            Literal::Case { var, branches, otherwise, .. } => {
+                let mut inner = Vec::new();
+                for b in branches {
+                    for g in &b.guard {
+                        literal_vars(g, &mut inner);
+                    }
+                    let mut vs = Vec::new();
+                    b.value.vars(&mut vs);
+                    inner.extend(vs.into_iter().map(|(v, _)| v));
+                }
+                if let Some(e) = otherwise {
+                    let mut vs = Vec::new();
+                    e.vars(&mut vs);
                     inner.extend(vs.into_iter().map(|(v, _)| v));
                 }
                 let mut m: Vec<String> = inner.into_iter().filter(|v| bound.contains(v)).collect();

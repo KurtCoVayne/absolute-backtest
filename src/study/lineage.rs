@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::check::Program;
-use crate::ir::{Builtin, Literal, Rule, WindowKind};
+use crate::ir::{Builtin, Literal, Rule};
 
 /// Jaccard similarity at or above which a new strategy is attached to an
 /// existing lineage (section 10, open question 5: 0.8 by default).
@@ -30,10 +30,12 @@ fn render_literal(l: &Literal) -> String {
             Builtin::Lag { t, n, t1 } => format!("lag({}, {}, {})", t, n, t1),
             Builtin::MonthStart { t } => format!("month_start({})", t),
             Builtin::DayStart { t } => format!("day_start({})", t),
+            Builtin::SessionOf { a, t, s } => format!("session_of({}, {}, {})", a, t, s),
         },
-        Literal::Window { var, kind, base, dur, min, .. } => {
-            format!("{} in {}({}, {}, min {})", var, if *kind == WindowKind::Window { "window" } else { "prior_window" }, base, dur, min)
-        }
+        Literal::Window { var, kind, base, dur, min, lo, .. } => match lo {
+            Some(lo) => format!("{} in {}({}, [{}, {}), min {})", var, crate::compiler::normalise::window_kind_name(kind), base, lo, dur, min),
+            None => format!("{} in {}({}, {}, min {})", var, crate::compiler::normalise::window_kind_name(kind), base, dur, min),
+        },
         Literal::Cmp { op, lhs, rhs, .. } => format!("{} {} {}", lhs, op, rhs),
         Literal::Assign { var, expr, .. } => format!("{} = {}", var, expr),
         Literal::Agg { var, agg, args, conj, .. } => {
@@ -55,11 +57,20 @@ fn render_literal(l: &Literal) -> String {
                 (None, None) => format!("top(?, {}, by ({}))", atom, order),
             }
         }
-        Literal::Resample { inner, to, as_var, min, aggs, .. } => {
-            let a: Vec<String> = aggs.iter().map(|(x, f, e)| format!("{} = {}({})", x, f, e)).collect();
-            format!("resample({} to {} as {}, min {}, {})", inner, to, as_var, min, a.join(", "))
+        Literal::Case { var, branches, otherwise, .. } => {
+            let mut parts: Vec<String> = branches
+                .iter()
+                .map(|b| format!("{} -> {}", b.guard.iter().map(render_literal).collect::<Vec<_>>().join(", "), b.value))
+                .collect();
+            if let Some(o) = otherwise {
+                parts.push(format!("else -> {}", o));
+            }
+            format!("{} = case {{ {} }}", var, parts.join("; "))
         }
-        Literal::AsOf { atom, at, .. } => format!("{} asof {}", atom, at),
+        Literal::AsOf { atom, at, within_bucket, .. } => match within_bucket {
+            Some(c) => format!("{} asof {} within bucket({})", atom, at, c),
+            None => format!("{} asof {}", atom, at),
+        },
     }
 }
 
@@ -124,11 +135,7 @@ pub fn normalized_rules(prog: &Program) -> Vec<String> {
 /// The normalised text the program hash is over.
 pub fn normalized_text(prog: &Program) -> String {
     let mut out = String::new();
-    out.push_str(&format!("env {}", prog.environment));
-    if let Some(v) = &prog.environment_version {
-        out.push_str(&format!("@{}", v));
-    }
-    out.push_str(&format!("\nresolution {}\nmode {}\n", prog.resolution, prog.mode));
+    out.push_str(&format!("class {}\nbase {}\ndecisions on {}\n", prog.class, prog.base, prog.cal_name(&prog.decision_cal)));
     for (unit, params) in &prog.params {
         let label = if *unit == prog.strategy { "self" } else { unit.as_str() };
         for (name, p) in params {
@@ -254,26 +261,6 @@ impl Lineages {
                 hash,
                 attachment: m.attachment.clone(),
                 existing: true,
-                warning: None,
-            });
-        }
-        if let Some(target) = &prog.revises {
-            let Some(l) = self.lineages.iter_mut().find(|l| l.members.iter().any(|m| &m.hash == target)) else {
-                return Err(format!("`revises \"{}\"`: no lineage holds that program hash", target));
-            };
-            let attachment = Attachment::Revises(target.clone());
-            l.members.push(Member {
-                hash: hash.clone(),
-                strategy: prog.strategy.clone(),
-                rules,
-                attachment: attachment.clone(),
-                at: now,
-            });
-            return Ok(Opened {
-                lineage: l.id.clone(),
-                hash,
-                attachment,
-                existing: false,
                 warning: None,
             });
         }

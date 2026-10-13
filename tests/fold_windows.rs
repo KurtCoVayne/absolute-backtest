@@ -3,30 +3,19 @@
 //! rolling feature solves each bar once and only evicts; the result is the
 //! uncached evaluation to the bit, on both drivers.
 
-mod corpus;
+mod common;
 
-use std::fs;
-use std::path::Path;
-
-use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{synthetic_daily, synthetic_daily_v2, synthetic_minute};
+use absolute_backtest::check::Program;
+use absolute_backtest::data::{synthetic_daily, synthetic_minute};
 use absolute_backtest::kernel::{run, run_fold, Dataset, ExecConfig, RunResult};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
+/// The synthetic market of a program's base: minute bars for a sub-daily
+/// base, else the daily market with its catalog.
 fn dataset_for(p: &Program, seed: u64) -> Dataset {
-    if p.relations.values().any(|s| s.res == Some(absolute_backtest::Resolution::M1)) {
+    if p.base.is_sub_daily() {
         synthetic_minute(&SYMS, (2024, 1, 2), 30, 320, seed)
-    } else if p.relations.contains_key("split") {
-        synthetic_daily_v2(&SYMS, (2022, 1, 3), 320, seed)
     } else {
         synthetic_daily(&SYMS, (2022, 1, 3), 320, seed)
     }
@@ -49,21 +38,20 @@ fn digest(r: &RunResult) -> Vec<String> {
 
 #[test]
 fn the_window_cache_is_exact_on_every_corpus_strategy_on_both_drivers() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/strategies");
-    let mut files: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
-    files.sort();
-    for f in files {
+    for f in common::dsl_files("strategies") {
         let name = f.file_stem().unwrap().to_string_lossy().to_string();
-        let p = program(&fs::read_to_string(&f).unwrap(), &name);
+        let p = common::corpus_program(&name);
         let ds = dataset_for(&p, 11);
-        // Exact window sums: the cache (and its sorted windows) must not move a bit.
+        // Exact window sums on both sides (the execution block's `numerics
+        // running` is off): the cache (and its sorted windows) must not
+        // move a bit.
         let cached = ExecConfig {
             running_sums: false,
-            ..ExecConfig::default()
+            ..ExecConfig::from_program(&p)
         };
         let uncached = ExecConfig {
             window_cache: false,
-            ..ExecConfig::default()
+            ..cached.clone()
         };
         let a = run(&p, &ds, uncached.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
         let b = run(&p, &ds, cached.clone()).unwrap_or_else(|e| panic!("{} (cached): {}", name, e));
@@ -76,35 +64,34 @@ fn the_window_cache_is_exact_on_every_corpus_strategy_on_both_drivers() {
 
 #[test]
 fn a_rolling_feature_solves_each_bar_once() {
-    // sma over 60 days with min 40, for five names over 320 bars: the cache
-    // solves about one bar per name per bar; without it, every call solves
-    // the whole window again.
-    let src = r#"
-strategy rolling {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param n : Duration = 60d
-  param k : Count = 40
-  param w : Scalar = 0.1
-  rel above(-A: Equity, @T: Timestamp)
-  above(A, T) :- universe(A, T), sma(A, T, n, k, M), close(A, T, P), P > M.
-  rel below(-A: Equity, @T: Timestamp)
-  below(A, T) :- universe(A, T), sma(A, T, n, k, M), close(A, T, P), P <= M.
-  decide(T, target_weight(A, w)) :- above(A, T).
-  decide(T, target_weight(A, 0)) :- held(A, T, _), below(A, T).
-}
-"#;
-    let p = program(src, "rolling");
+    // A mean over 60 days with min 40, for five names over 320 bars: the
+    // cache solves about one bar per name per bar; without it, every call
+    // solves the whole window again.
+    let src = common::StrategyParts {
+        name: "rolling".into(),
+        uses: "calendar, stat, book".into(),
+        params: "    n : Duration = 60d\n    k : Count = 40\n    w : Scalar = 0.1".into(),
+        rules: r#"
+    rel above(A: Equity, @T)
+    above(A, T) :- universe(A, T), mean_window[n, k, close](A, T, M), close(A, T, P), P > M.
+    rel below(A: Equity, @T)
+    below(A, T) :- universe(A, T), mean_window[n, k, close](A, T, M), close(A, T, P), P <= M.
+"#
+        .into(),
+        decides: "    decide(T, hold(A, w)) :- above(A, T).\n    decide(T, hold(A, 0)) :- held(A, T, _), below(A, T).".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "rolling");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 320, 3);
-    let cached = run(&p, &ds, ExecConfig::default()).unwrap();
+    let cfg = ExecConfig::from_program(&p);
+    let cached = run(&p, &ds, cfg.clone()).unwrap();
     let uncached = run(
         &p,
         &ds,
         ExecConfig {
             window_cache: false,
-            ..ExecConfig::default()
+            ..cfg
         },
     )
     .unwrap();
@@ -123,36 +110,33 @@ strategy rolling {
 
 #[test]
 fn a_group_is_keyed_by_the_outer_bindings_the_conjunction_reads() {
-    // Two sma lengths on one name are two groups; a feature read at prev(T)
-    // reuses the group's rows.
-    let src = r#"
-strategy two_lengths {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param fast : Duration = 20d
-  param slow : Duration = 50d
-  param kf : Count = 12
-  param ks : Count = 30
-  param qty : Quantity<Shares> = 10 shares
-  rel above(-A: Equity, @T: Timestamp)
-  above(A, T) :- universe(A, T), sma(A, T, fast, kf, F), sma(A, T, slow, ks, S), F > S.
-  rel below(-A: Equity, @T: Timestamp)
-  below(A, T) :- universe(A, T), sma(A, T, fast, kf, F), sma(A, T, slow, ks, S), F <= S.
-  decide(T, buy(A, qty)) :- above(A, T), prev(T, T0), below(A, T0), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), below(A, T).
-}
-"#;
-    let p = program(src, "two_lengths");
+    // Two mean lengths on one name are two groups; a feature read at
+    // prev(T) reuses the group's rows.
+    let src = common::StrategyParts {
+        name: "two_lengths".into(),
+        uses: "calendar, stat, book".into(),
+        params: "    fast : Duration = 20d\n    slow : Duration = 50d\n    kf : Count = 12\n    ks : Count = 30\n    qty : Quantity<Shares> = 10 shares".into(),
+        rules: r#"
+    rel above(A: Equity, @T)
+    above(A, T) :- universe(A, T), mean_window[fast, kf, close](A, T, F), mean_window[slow, ks, close](A, T, S), F > S.
+    rel below(A: Equity, @T)
+    below(A, T) :- universe(A, T), mean_window[fast, kf, close](A, T, F), mean_window[slow, ks, close](A, T, S), F <= S.
+"#
+        .into(),
+        decides: "    decide(T, trade(A, qty)) :- above(A, T), prev(T, T0), below(A, T0), flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), below(A, T), Q = -Q0.".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "two_lengths");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 200, 9);
-    let cached = run(&p, &ds, ExecConfig::default()).unwrap();
+    let cfg = ExecConfig::from_program(&p);
+    let cached = run(&p, &ds, cfg.clone()).unwrap();
     let uncached = run(
         &p,
         &ds,
         ExecConfig {
             window_cache: false,
-            ..ExecConfig::default()
+            ..cfg
         },
     )
     .unwrap();

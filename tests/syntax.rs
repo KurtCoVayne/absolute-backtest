@@ -2,21 +2,17 @@
 //! optional fraction with digits on both sides of the point, an optional
 //! exponent, and a leading `-`; no leading point and no leading `+`.
 
+mod common;
+
 use absolute_backtest::parse_units;
 
+/// The skeleton strategy with a Scalar parameter whose default is `default`.
 fn strategy_with(default: &str) -> String {
-    format!(
-        r#"
-strategy pn {{
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param a : Scalar = {}
-  decide(T, buy(A, 100 shares)) :- universe(A, T), momentum(A, T, 3mo, 0d, M), M > a, flat(A, T).
-}}
-"#,
-        default
+    common::strategy(
+        "pn",
+        &format!("    a : Scalar = {}\n    qty : Quantity<Shares> = 100 shares", default),
+        "",
+        "    decide(T, trade(A, qty)) :- price_return(A, T, R), R > a, flat(A, T).",
     )
 }
 

@@ -3,30 +3,22 @@
 //! cash management). The default stays at 1x gross, halting, by the owner's
 //! ruling; Reg T (2x initial, 25% maintenance, reject and log) is a preset.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
 use absolute_backtest::data::business_days;
 use absolute_backtest::kernel::time::format_timestamp;
-use absolute_backtest::kernel::{run, BorrowBucket, Dataset, ExecConfig, OnLeverage, OnMarginCall, RunError, Value};
+use absolute_backtest::kernel::{run, BorrowBucket, Dataset, ExecConfig, OnLeverage, OnMarginCall, RunError};
 
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
-/// One symbol X over consecutive weekdays from 2024-01-08 (Monday).
+/// One symbol X over consecutive weekdays from 2024-01-08 (Monday), with a
+/// volume per bar.
 fn market(prices: &[f64], volume: f64) -> Dataset {
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
-    for (t, p) in business_days((2024, 1, 8), prices.len()).into_iter().zip(prices) {
-        ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(*p)]);
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(volume)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
+    let bars = business_days((2024, 1, 8), prices.len());
+    let x = ds.add_security("X", "X", bars[0], None);
+    for (t, p) in bars.iter().zip(prices) {
+        common::add_bar(&mut ds, x, *t, *p, volume);
     }
+    ds.derive_tickers();
     ds
 }
 
@@ -47,52 +39,36 @@ fn bare(cash: f64) -> ExecConfig {
     }
 }
 
+/// The first bar of the run, and every bar after it.
+const OPENING: &str = "    rel opening(@T)
+    opening(T) :- bar(T), not has_prev(T).
+    rel has_prev(@T)
+    has_prev(T) :- bar(T), prev(T, _).";
+
+/// Target the weight `w` of the book on the first bar.
 fn levered(w: &str) -> String {
-    format!(
-        r#"
-strategy levered {{
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = {w}
-  rel opening(@T: Timestamp)
-  opening(T) :- bar(T), not has_prev(T).
-  rel has_prev(@T: Timestamp)
-  has_prev(T) :- bar(T), prev(T, _).
-  decide(T, target_weight(A, w)) :- universe(A, T), opening(T).
-}}
-"#
+    common::strategy("levered", &format!("    w : Scalar = {w}"), OPENING, "    decide(T, hold(A, w)) :- universe(A, T), opening(T).")
+}
+
+/// Never trades: a decision whose body never holds.
+fn hold_cash() -> String {
+    common::strategy(
+        "hold_cash",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    rel never(@T)\n    never(T) :- bar(T), prev(T, T0), T0 > T.",
+        "    decide(T, trade(A, qty)) :- universe(A, T), never(T).",
     )
 }
 
-const HOLD_CASH: &str = r#"
-strategy hold_cash {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel never(@T: Timestamp)
-  never(T) :- bar(T), prev(T, T0), T0 > T.
-  decide(T, buy(A, qty)) :- universe(A, T), never(T).
+/// Short 50 on the first bar and hold.
+fn short_once() -> String {
+    common::strategy(
+        "short_once",
+        "    qty : Quantity<Shares> = 50 shares",
+        OPENING,
+        "    decide(T, trade(A, Q)) :- universe(A, T), opening(T), Q = -qty.",
+    )
 }
-"#;
-
-const SHORT_ONCE: &str = r#"
-strategy short_once {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 50 shares
-  rel opening(@T: Timestamp)
-  opening(T) :- bar(T), not has_prev(T).
-  rel has_prev(@T: Timestamp)
-  has_prev(T) :- bar(T), prev(T, _).
-  decide(T, short(A, qty)) :- universe(A, T), opening(T).
-}
-"#;
 
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
@@ -126,14 +102,14 @@ fn reg_t_admits_one_and_a_half_times_and_rejects_beyond_two() {
         on_leverage: OnLeverage::Reject,
         ..bare(1000.0)
     };
-    let r = run(&program(&levered("1.5"), "levered"), &ds, cfg.clone()).unwrap();
+    let r = run(&common::program(&levered("1.5"), "levered"), &ds, cfg.clone()).unwrap();
     assert_eq!(r.fills.iter().map(|f| f.quantity).collect::<Vec<_>>(), vec![150.0]);
     assert!(close(r.final_cash, -500.0));
-    let r = run(&program(&levered("2.4"), "levered"), &ds, cfg).unwrap();
+    let r = run(&common::program(&levered("2.4"), "levered"), &ds, cfg).unwrap();
     assert!(r.fills.is_empty(), "{:?}", r.fills);
     assert!(r.dropped.iter().any(|(_, _, why)| why.contains("rejected") && why.contains("2")), "{:?}", r.dropped);
     // The default admits neither.
-    let err = run(&program(&levered("1.5"), "levered"), &ds, bare(1000.0)).err().unwrap();
+    let err = run(&common::program(&levered("1.5"), "levered"), &ds, bare(1000.0)).err().unwrap();
     assert!(matches!(err, RunError::Risk { .. }), "{}", err);
 }
 
@@ -143,13 +119,13 @@ fn a_maintenance_call_halts_liquidates_or_is_allowed() {
     // 200 against gross 1200 is below 25% maintenance.
     let ds = market(&[10.0, 10.0, 6.0, 6.0, 6.0], 1e6);
     let cfg = ExecConfig { max_gross: 2.0, ..bare(1000.0) };
-    let err = run(&program(&levered("2.0"), "levered"), &ds, cfg.clone()).err().unwrap();
+    let err = run(&common::program(&levered("2.0"), "levered"), &ds, cfg.clone()).err().unwrap();
     match &err {
         RunError::Risk { message, .. } => assert!(message.contains("margin call") && message.contains("25%"), "{}", message),
         e => panic!("expected a margin call halt, got {}", e),
     }
     let r = run(
-        &program(&levered("2.0"), "levered"),
+        &common::program(&levered("2.0"), "levered"),
         &ds,
         ExecConfig {
             on_margin_call: OnMarginCall::Liquidate,
@@ -165,7 +141,7 @@ fn a_maintenance_call_halts_liquidates_or_is_allowed() {
     assert!(close(r.final_cash, -1000.0 + 67.0 * 6.0));
     assert!(r.warnings.iter().any(|w| w.bias == "leverage" && w.message.contains("margin call")), "{:?}", r.warnings);
     let r = run(
-        &program(&levered("2.0"), "levered"),
+        &common::program(&levered("2.0"), "levered"),
         &ds,
         ExecConfig {
             on_margin_call: OnMarginCall::Allow,
@@ -182,14 +158,14 @@ fn cash_earns_the_cash_rate_and_a_debit_pays_the_margin_rate() {
     // Five weekdays: four one-day accrual periods at 3.65% a year is a basis
     // point a day.
     let ds = market(&[10.0; 5], 1e6);
-    let r = run(&program(HOLD_CASH, "hold_cash"), &ds, ExecConfig { cash_rate: 0.0365, ..bare(1000.0) }).unwrap();
+    let r = run(&common::program(&hold_cash(), "hold_cash"), &ds, ExecConfig { cash_rate: 0.0365, ..bare(1000.0) }).unwrap();
     assert!(r.fills.is_empty());
     let expected = 1000.0 * 1.0001f64.powi(4);
     assert!(close(r.final_cash, expected), "{} vs {}", r.final_cash, expected);
     assert!(close(r.funding.cash_interest, expected - 1000.0));
     // A weekend is three days of accrual.
     let ds6 = market(&[10.0; 6], 1e6);
-    let r = run(&program(HOLD_CASH, "hold_cash"), &ds6, ExecConfig { cash_rate: 0.0365, ..bare(1000.0) }).unwrap();
+    let r = run(&common::program(&hold_cash(), "hold_cash"), &ds6, ExecConfig { cash_rate: 0.0365, ..bare(1000.0) }).unwrap();
     assert!(close(r.final_cash, 1000.0 * 1.0001f64.powi(4) * 1.0003), "{}", r.final_cash);
     // Borrowed cash pays the margin rate: 2x long leaves -1000 of cash.
     let cfg = ExecConfig {
@@ -197,7 +173,7 @@ fn cash_earns_the_cash_rate_and_a_debit_pays_the_margin_rate() {
         margin_rate: 0.0365,
         ..bare(1000.0)
     };
-    let r = run(&program(&levered("2.0"), "levered"), &ds, cfg).unwrap();
+    let r = run(&common::program(&levered("2.0"), "levered"), &ds, cfg).unwrap();
     // Filled on day 2; three accrual periods on -1000.
     assert!(close(r.final_cash, -1000.0 * 1.0001f64.powi(3)), "{}", r.final_cash);
     assert!(close(r.funding.margin_interest, 1000.0 * (1.0001f64.powi(3) - 1.0)), "{}", r.funding.margin_interest);
@@ -216,7 +192,7 @@ fn a_short_pays_the_borrow_fee_of_its_adv_bucket_or_is_not_shortable() {
         }],
         ..bare(1000.0)
     };
-    let r = run(&program(SHORT_ONCE, "short_once"), &ds, cfg).unwrap();
+    let r = run(&common::program(&short_once(), "short_once"), &ds, cfg).unwrap();
     assert_eq!(r.fills.iter().map(|f| f.quantity).collect::<Vec<_>>(), vec![-50.0]);
     // Shorted on day 2; three days of fee.
     assert!(close(r.funding.borrow_fees, 3.0 * 0.05), "{}", r.funding.borrow_fees);
@@ -224,7 +200,7 @@ fn a_short_pays_the_borrow_fee_of_its_adv_bucket_or_is_not_shortable() {
     assert!(r.warnings.iter().any(|w| w.bias == "shorting"), "fees are modeled, not observed: {:?}", r.warnings);
     // The short rebate is credited on the same notional.
     let r = run(
-        &program(SHORT_ONCE, "short_once"),
+        &common::program(&short_once(), "short_once"),
         &ds,
         ExecConfig {
             short_rebate: 0.0365,
@@ -241,7 +217,7 @@ fn a_short_pays_the_borrow_fee_of_its_adv_bucket_or_is_not_shortable() {
     // Under the default buckets a 1000-share ADV is not shortable.
     let thin = market(&[10.0; 5], 1000.0);
     let r = run(
-        &program(SHORT_ONCE, "short_once"),
+        &common::program(&short_once(), "short_once"),
         &thin,
         ExecConfig {
             initial_cash: 1000.0,
@@ -257,7 +233,7 @@ fn a_short_pays_the_borrow_fee_of_its_adv_bucket_or_is_not_shortable() {
 #[test]
 fn exposure_is_recorded_at_every_bar() {
     let ds = market(&[10.0, 10.0, 12.0, 12.0, 12.0], 1e6);
-    let r = run(&program(&levered("0.5"), "levered"), &ds, bare(1000.0)).unwrap();
+    let r = run(&common::program(&levered("0.5"), "levered"), &ds, bare(1000.0)).unwrap();
     assert_eq!(r.exposure.len(), 5);
     let day3 = &r.exposure[2];
     assert_eq!(format_timestamp(day3.t), "2024-01-10");
@@ -272,7 +248,7 @@ fn exposure_is_recorded_at_every_bar() {
 fn a_zero_cash_rate_is_warned_as_cash_management() {
     let ds = market(&[10.0; 5], 1e6);
     let r = run(
-        &program(HOLD_CASH, "hold_cash"),
+        &common::program(&hold_cash(), "hold_cash"),
         &ds,
         ExecConfig {
             initial_cash: 1000.0,
@@ -282,7 +258,7 @@ fn a_zero_cash_rate_is_warned_as_cash_management() {
     .unwrap();
     assert!(r.warnings.iter().any(|w| w.bias == "cash-management"), "{:?}", r.warnings);
     let r = run(
-        &program(HOLD_CASH, "hold_cash"),
+        &common::program(&hold_cash(), "hold_cash"),
         &ds,
         ExecConfig {
             initial_cash: 1000.0,

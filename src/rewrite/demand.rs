@@ -56,15 +56,21 @@ fn subst_literal(l: &Literal, m: &HashMap<String, Lit>) -> Literal {
                 },
                 Builtin::MonthStart { t } => Builtin::MonthStart { t: term(t, m) },
                 Builtin::DayStart { t } => Builtin::DayStart { t: term(t, m) },
+                Builtin::SessionOf { a, t, s: sv } => Builtin::SessionOf {
+                    a: term(a, m),
+                    t: term(t, m),
+                    s: term(sv, m),
+                },
             },
             *s,
         ),
-        Literal::Window { var, kind, base, dur, min, span } => Literal::Window {
+        Literal::Window { var, kind, base, dur, min, lo, span } => Literal::Window {
             var: term(var, m),
-            kind: *kind,
+            kind: kind.clone(),
             base: term(base, m),
             dur: expr(dur, m),
             min: expr(min, m),
+            lo: lo.as_ref().map(|x| expr(x, m)),
             span: *span,
         },
         Literal::Cmp { op, lhs, rhs, span } => Literal::Cmp {
@@ -78,31 +84,39 @@ fn subst_literal(l: &Literal, m: &HashMap<String, Lit>) -> Literal {
             expr: expr(e, m),
             span: *span,
         },
-        Literal::Agg { var, agg, args, conj, span } => Literal::Agg {
+        Literal::Agg { var, agg, args, conj, within, span } => Literal::Agg {
             var: var.clone(),
             agg: agg.clone(),
             args: args.iter().map(|a| expr(a, m)).collect(),
             conj: conj.iter().map(|c| subst_literal(c, m)).collect(),
+            within: within.clone(),
             span: *span,
         },
-        Literal::Top { n, atom: a, by, rank, span } => Literal::Top {
+        Literal::Top { n, atom: a, by, rank, within, span } => Literal::Top {
             n: n.as_ref().map(|x| expr(x, m)),
             atom: atom(a, m),
             by: by.clone(),
             rank: rank.clone(),
+            within: within.clone(),
             span: *span,
         },
-        Literal::Resample { inner, to, as_var, min, aggs, span } => Literal::Resample {
-            inner: atom(inner, m),
-            to: *to,
-            as_var: as_var.clone(),
-            min: expr(min, m),
-            aggs: aggs.iter().map(|(x, f, e)| (x.clone(), f.clone(), expr(e, m))).collect(),
-            span: *span,
-        },
-        Literal::AsOf { atom: a, at, span } => Literal::AsOf {
+        Literal::AsOf { atom: a, at, within_bucket, span } => Literal::AsOf {
             atom: atom(a, m),
             at: term(at, m),
+            within_bucket: within_bucket.clone(),
+            span: *span,
+        },
+        Literal::Case { var, branches, otherwise, span } => Literal::Case {
+            var: var.clone(),
+            branches: branches
+                .iter()
+                .map(|b| crate::ir::Branch {
+                    guard: b.guard.iter().map(|g| subst_literal(g, m)).collect(),
+                    value: expr(&b.value, m),
+                    span: b.span,
+                })
+                .collect(),
+            otherwise: otherwise.as_ref().map(|x| expr(x, m)),
             span: *span,
         },
     }
@@ -172,6 +186,11 @@ fn subst_core(l: &NirLit, m: &HashMap<String, String>) -> NirLit {
             dur: e(dur, m),
             min: e(min, m),
         },
+        NirLit::Case { var, branches, otherwise } => NirLit::Case {
+            var: var.clone(),
+            branches: branches.iter().map(|(g, v)| (g.iter().map(|x| subst_core(x, m)).collect(), e(v, m))).collect(),
+            otherwise: otherwise.as_ref().map(|x| e(x, m)),
+        },
     }
 }
 
@@ -219,7 +238,10 @@ pub fn specialise(prog: &Program, nir: &mut Nir, analysis: &Analysis, elided: &m
             continue;
         }
         let Some(sig) = prog.relations.get(&r.head.name) else { continue };
-        let positions: Vec<usize> = sig.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In && !a.ty.is_entity()).map(|(i, _)| i).collect();
+        let positions: Vec<usize> = {
+            let _ = sig;
+            Vec::new()
+        };
         if positions.is_empty() {
             continue;
         }
@@ -229,7 +251,7 @@ pub fn specialise(prog: &Program, nir: &mut Nir, analysis: &Analysis, elided: &m
             let mut subs: Vec<(String, String)> = Vec::new();
             for (p, value) in positions.iter().zip(tuple.iter()) {
                 if let NirTerm::Var(v) = &r.head.terms[*p] {
-                    if let Ok(l) = crate::parser::parse_lit(value) {
+                    if let Ok(l) = crate::syntax::parse_lit(value) {
                         by_name.insert(v.clone(), l);
                     }
                     by_text.insert(v.clone(), value.clone());

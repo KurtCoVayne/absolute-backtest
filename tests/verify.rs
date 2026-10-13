@@ -7,42 +7,32 @@
 //! the refinement a proved invariant makes; tiers 5 and 6 on a synthetic
 //! binding; the report's text and JSON.
 
-mod corpus;
+mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use absolute_backtest::analysis::Keyedness;
-use absolute_backtest::check::{check_program, Diagnostic, Program};
+use absolute_backtest::check::{Diagnostic, Program};
 use absolute_backtest::compiler::{compile, CompileOptions, Stage};
 use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::ExecConfig;
 use absolute_backtest::verify::{verify, Verdict, VerifyInputs};
 
 fn program(src: &str, name: &str) -> (Program, Vec<Diagnostic>) {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    (p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n"))), diags)
+    let (p, diags) = common::check(src, name);
+    (p.unwrap_or_else(|| panic!("{} should check:\n{}", name, common::text(&diags))), diags)
 }
 
 fn corpus_program(sub: &str, name: &str) -> (Program, Vec<Diagnostic>) {
-    let src = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("corpus/{}/{}.dsl", sub, name))).unwrap();
-    program(&src, name)
+    program(&common::corpus_source(sub, name), name)
 }
 
-const HEAD: &str = r#"
-strategy v {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-"#;
-
-fn with_rules(rules: &str) -> String {
-    format!("{}{}\n}}\n", HEAD, rules)
+/// A daily strategy named `v` with ten-share lots around the given
+/// parameters, rules and decide rules.
+fn with_rules(params: &str, rules: &str, decides: &str) -> String {
+    let params = format!("    qty : Quantity<Shares> = 10 shares\n{}", params);
+    common::strategy("v", &params, rules, decides)
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -59,12 +49,12 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn tier2_decides_the_example_of_section_6_3_and_licenses_r2() {
     let src = with_rules(
+        "    delta : Scalar = 0.05 in 0.01..0.1",
         r#"
-  param delta : Scalar = 0.05 in 0.01..0.1
-  rel dead(-A: Equity, @T: Timestamp)
-  dead(A, T) :- universe(A, T), logret(A, T, R), R > R + delta.
-  decide(T, buy(A, qty)) :- dead(A, T), flat(A, T).
+    rel dead(A: Equity, @T)
+    dead(A, T) :- universe(A, T), log_price_return(A, T, R), R > R + delta.
 "#,
+        "    decide(T, trade(A, qty)) :- dead(A, T), flat(A, T).",
     );
     let (p, _) = program(&src, "v");
     let ri = (0..p.rules.len()).find(|&i| p.rule_label(i) == "v::dead#1").unwrap();
@@ -109,22 +99,21 @@ fn tier2_decides_the_example_of_section_6_3_and_licenses_r2() {
 #[test]
 fn tier2_margin_feasible_ranges_and_nonlinear_parts() {
     let src = with_rules(
+        "    delta : Scalar = 0.05 in 0.01..0.1",
         r#"
-  param delta : Scalar = 0.05 in 0.01..0.1
-  rel touching(-A: Equity, @T: Timestamp)
-  touching(A, T) :- universe(A, T), logret(A, T, R), R > R.
-  rel open(-A: Equity, @T: Timestamp)
-  open(A, T) :- universe(A, T), logret(A, T, R), R > delta.
-  rel ranged(-A: Equity, @T: Timestamp)
-  ranged(A, T) :- universe(A, T), delta < 0.
-  rel curved(-A: Equity, @T: Timestamp)
-  curved(A, T) :- universe(A, T), logret(A, T, R), R * R < 0, R > 1.
-  decide(T, buy(A, qty)) :- touching(A, T), open(A, T), flat(A, T).
-  decide(T, sell(A, qty)) :- ranged(A, T), curved(A, T), held(A, T, _).
+    rel touching(A: Equity, @T)
+    touching(A, T) :- universe(A, T), log_price_return(A, T, R), R > R.
+    rel open(A: Equity, @T)
+    open(A, T) :- universe(A, T), log_price_return(A, T, R), R > delta.
+    rel ranged(A: Equity, @T)
+    ranged(A, T) :- universe(A, T), delta < 0.
+    rel curved(A: Equity, @T)
+    curved(A, T) :- universe(A, T), log_price_return(A, T, R), R * R < 0, R > 1.
 "#,
+        "    decide(T, trade(A, qty)) :- touching(A, T), open(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- ranged(A, T), curved(A, T), held(A, T, Q0), Q = -Q0.",
     );
-    let (p, _) = program(&src, "v");
-    let compiled = compile(&p, &CompileOptions::default());
+    let (p, diags) = program(&src, "v");
+    let mut compiled = compile(&p, &CompileOptions::default());
     let t2 = compiled.tiers.iter().find(|t| t.tier == 2).unwrap();
     let by = |label: &str| {
         let ri = (0..p.rules.len()).find(|&i| p.rule_label(i) == label).unwrap();
@@ -144,8 +133,6 @@ fn tier2_margin_feasible_ranges_and_nonlinear_parts() {
     assert_eq!(o.verdict, Verdict::Feasible, "the linear part `R > 1` alone is feasible: {:?}", o);
     assert!(o.logic.as_deref().unwrap_or("").contains("1 nonlinear left to tier 3"), "{:?}", o.logic);
     // Without a solver the tier 3 obligation is undecided, and the rule stays.
-    let (mut compiled, _) = (compiled, ());
-    let (_, diags) = program(&src, "v");
     let opts = CompileOptions::default();
     let report = verify(
         &VerifyInputs {
@@ -203,6 +190,9 @@ fn the_scripts_of_tiers_3_and_4_replay_from_their_files() {
         &mut compiled,
     );
     let t3 = report.tier(3).unwrap();
+    for o in &t3.obligations {
+        eprintln!("t3 {} {} {:?} {:?} {}", o.id, o.kind, o.rule, o.logic, o.statement);
+    }
     let pair = t3.obligations.iter().find(|o| o.kind == "guard disjointness").expect("a pair obligation");
     assert_eq!(pair.verdict, Verdict::Undecided);
     let text = fs::read_to_string(pair.replay_file.as_ref().expect("a replay file")).unwrap();
@@ -226,10 +216,13 @@ fn the_scripts_of_tiers_3_and_4_replay_from_their_files() {
         .expect("the nonlinear guard of decide#2");
     assert_eq!(feas.logic.as_deref(), Some("QF_NRA"));
     assert!(
-        !t3.obligations.iter().any(|o| o.kind == "rule feasibility" && o.rule.as_deref() == Some("features::logret#1")),
+        !t3.obligations.iter().any(|o| o.kind == "rule feasibility" && o.rule.as_deref() == Some("trailing_stop::momentum#1")),
         "an assignment alone is no guard"
     );
     let t4 = report.tier(4).unwrap();
+    for o in &t4.obligations {
+        eprintln!("t4 {} {} {:?} {}", o.id, o.kind, o.rule, o.statement);
+    }
     let inv = t4.obligations.iter().find(|o| o.id == "t4-high_since_entry-H-ge-1").expect("the lower-bound candidate");
     assert!(inv.statement.contains("`high_since_entry.H ≥ 0`"), "{}", inv.statement);
     assert_eq!(inv.verdict, Verdict::Undecided);
@@ -267,6 +260,9 @@ fn a_solver_subprocess_settles_the_obligations() {
     };
     let mut compiled = compile(&p, &opts);
     let t3c = compiled.tiers.iter().find(|t| t.tier == 3).expect("tier 3 feasibility runs in compile with a solver");
+    for o in &t3c.obligations {
+        eprintln!("t3c {} {} {:?} {:?} {:?}", o.id, o.kind, o.rule, o.verdict, o.replay_file);
+    }
     assert!(
         t3c.obligations.iter().all(|o| o.verdict == Verdict::Feasible),
         "{:?}",
@@ -284,6 +280,9 @@ fn a_solver_subprocess_settles_the_obligations() {
         &mut compiled,
     );
     let t3 = report.tier(3).unwrap();
+    for o in &t3.obligations {
+        eprintln!("t3 {} {} {:?} {:?} {:?}", o.id, o.kind, o.rule, o.verdict, o.replay_file);
+    }
     let pair = t3.obligations.iter().find(|o| o.kind == "guard disjointness").unwrap();
     assert_eq!(pair.verdict, Verdict::Proved, "{:?}", pair);
     assert!(pair.elapsed_ms <= pair.budget_ms + 500);
@@ -306,24 +305,52 @@ fn a_solver_subprocess_settles_the_obligations() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A z-score mean reversion whose two aggregations share one window state
+/// in the lowered plan (R3), which the comparison of the plans exercises.
+/// The library's `zscore_window` splits the mean and the deviation into
+/// two relations, so the rule is written out here.
+fn zscore_strategy() -> String {
+    common::StrategyParts {
+        name: "zscore".into(),
+        uses: "calendar, book".into(),
+        params: "    n : Duration = 20d in 10d..60d\n    k : Count = 12\n    entry : Scalar = -2.0 in -4.0..-1.0\n    exit : Scalar = 0.0\n    qty : Quantity<Shares> = 100 shares".into(),
+        rules: r#"
+    rel zscore(A: Equity, @T, Z: Scalar)
+    zscore(A, T, Z) :- universe(A, T), close(A, T, P),
+        M = mean(P1) over (T1 in window[n] min k, close(A, T1, P1)),
+        S = std(P1) over (T1 in window[n] min k, close(A, T1, P1)),
+        Z = (P - M) / S.
+    rel oversold(A: Equity, @T)
+    oversold(A, T) :- zscore(A, T, Z), Z < entry.
+    rel recovered(A: Equity, @T)
+    recovered(A, T) :- zscore(A, T, Z), Z > exit.
+"#
+        .into(),
+        decides: "    decide(T, trade(A, qty)) :- oversold(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- recovered(A, T), held(A, T, Q0), Q = -Q0.".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
 /// Tiers 5 and 6 on a synthetic binding: the written and the optimised
 /// plan agree on `decide`, the ledgers and the book, and the runtime tier
 /// reports coverage. The zscore rule's two aggregations share one window
 /// state in the lowered plan (R3), which the comparison exercises.
 #[test]
 fn tiers_5_and_6_run_the_two_plans_on_a_binding() {
-    let (p, diags) = corpus_program("strategies", "mean_reversion_zscore");
+    let (p, diags) = program(&zscore_strategy(), "zscore");
     let opts = CompileOptions::default();
     let mut compiled = compile(&p, &opts);
     assert_eq!(compiled.lowered.shared_windows.len(), 1, "{:?}", compiled.lowered.notes);
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 120, 7);
+    let cfg = ExecConfig::from_program(&p);
     let report = verify(
         &VerifyInputs {
             prog: &p,
             diags: &diags,
             opts: &opts,
             max_tier: 6,
-            data: Some((&ds, ExecConfig::default())),
+            data: Some((&ds, cfg)),
         },
         &mut compiled,
     );
@@ -356,11 +383,8 @@ fn tiers_5_and_6_run_the_two_plans_on_a_binding() {
 /// corpus rule is dead.
 #[test]
 fn every_corpus_program_verifies() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     for sub in ["strategies", "company"] {
-        let mut files: Vec<_> = fs::read_dir(root.join(sub)).unwrap().map(|e| e.unwrap().path()).collect();
-        files.sort();
-        for f in files {
+        for f in common::dsl_files(sub) {
             let name = f.file_stem().unwrap().to_string_lossy().to_string();
             let (p, diags) = corpus_program(sub, &name);
             let opts = CompileOptions::default();

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """TradeStation 1-minute continuous futures -> the Parquet inputs of `abt bundle
-build --from DIR --env futures_sessions` (corpus/env/futures_sessions.dsl) for the
+build --from DIR --env futures_sessions` of the first formulation (its session
+layout is no longer a class of the catalog: the current path is `abt bundle build
+--from-databento DIR --class future`, src/ingest.rs) for the
 MORNIGHT-R8L book (d20-research scripts/r31_return.py `load`, r37_book.py,
 d20research/data/tradestation.py `build_panel_ts` / `daily_frame`, sessions.py).
 

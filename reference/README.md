@@ -7,7 +7,7 @@ frames from the model's text and sharing nothing with the kernel
 through its own book and `diff.py` compares the two:
 
 ```
-abt run --strategy sma_crossover --synthetic --quiet --dump /tmp/sma corpus/
+abt run --strategy sma_crossover --synthetic --quiet --dump /tmp/sma corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 python3 reference/diff.py /tmp/sma
 ```
 

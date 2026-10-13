@@ -1,17 +1,18 @@
-//! Environment instances from Parquet files, and a deterministic synthetic
-//! market for tests and demos.
+//! Bundles from Parquet files, and deterministic synthetic markets for the
+//! three classes (equity, future, series) for tests and demos.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use crate::check::Program;
 use crate::ir::*;
+use crate::kernel::time::week_key;
 use crate::kernel::time::{bucket, days_from_civil, format_timestamp, weekday, DAY};
 use crate::kernel::{Dataset, Security, Sym, Value};
 use crate::table::{write_table, Col, Table};
 
-/// Load one Parquet file per primitive relation of the program's environment
-/// from `dir` (`<relation>.parquet`, columns named after the signature's
+/// Load one Parquet file per primitive relation of the program's class from
+/// `dir` (`<relation>.parquet`, columns named after the signature's
 /// arguments; typed or text columns, see `table`).
 ///
 /// A row is identified by its inputs, its key and its entity-typed outputs
@@ -67,9 +68,10 @@ pub fn load_parquet_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<Stri
         // the tuple could be acted on, at or after its own bar's close.
         let avail_col = t.col("available_at").ok();
         let key_pos = sig.key_pos();
-        // Inputs, the key and entity-typed outputs identify a row (section 3:
-        // `universe(-A, @T)` enumerates A); the value outputs are a function of them.
-        let identity: Vec<usize> = sig.args.iter().enumerate().filter(|(_, a)| a.mode != Mode::Out || a.ty.is_entity()).map(|(i, _)| i).collect();
+        // The key and the identity columns identify a row; the value outputs
+        // are a function of them.
+        let identity: Vec<usize> = sig.identity_positions();
+        let native = sig.native.unwrap_or(prog.base);
         // The identity columns of every row kept so far, with its row and tuple.
         let mut seen: HashMap<Vec<Value>, (usize, Vec<Value>)> = HashMap::new();
         for row in 0..t.len() {
@@ -81,8 +83,8 @@ pub fn load_parquet_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<Stri
                         return Err(format!("{}: `{}` is not a security id of securities.parquet", t.at(row), ds.symbols.name(*s)));
                     }
                 }
-                if let (Some(res), Value::Time(tt)) = (sig.res.filter(|_| key_pos == Some(i)), &v) {
-                    v = Value::Time(bucket(res, *tt));
+                if let (true, Value::Time(tt)) = (key_pos == Some(i) && !native.is_sub_daily(), &v) {
+                    v = Value::Time(bucket(native, *tt));
                 }
                 tuple.push(v);
             }
@@ -249,7 +251,7 @@ fn field(ds: &Dataset, v: &Value) -> String {
 /// A cell of a table as a value of the argument's type.
 fn cell_value(ds: &mut Dataset, ty: &Ty, t: &Table, c: usize, row: usize) -> Result<Value, String> {
     Ok(match ty {
-        Ty::Equity => Value::Equity(ds.intern(&t.string(c, row)?)),
+        Ty::Entity => Value::Equity(ds.intern(&t.string(c, row)?)),
         Ty::Label => Value::Label(ds.intern_label(&t.string(c, row)?)),
         Ty::Timestamp => Value::Time(t.time(c, row)?),
         Ty::Count => Value::Count(t.integer(c, row)?),
@@ -272,7 +274,7 @@ pub fn write_parquet_dir(prog: &Program, ds: &Dataset, dir: &Path) -> Result<(),
         let mut cols: Vec<(&str, Col)> = Vec::new();
         for (i, arg) in sig.args.iter().enumerate() {
             let col = match &arg.ty {
-                Ty::Equity | Ty::Label => Col::Str(tuples.iter().map(|tu| Some(field(ds, &tu[i]))).collect()),
+                Ty::Entity | Ty::Label => Col::Str(tuples.iter().map(|tu| Some(field(ds, &tu[i]))).collect()),
                 Ty::Timestamp => Col::Time(tuples.iter().map(|tu| tu[i].as_time()).collect()),
                 Ty::Count => Col::Int(tuples.iter().map(|tu| if let Value::Count(c) = tu[i] { Some(c) } else { None }).collect()),
                 Ty::Quantity(_) => Col::Float(tuples.iter().map(|tu| tu[i].as_f64()).collect()),
@@ -325,49 +327,27 @@ pub fn business_days(start: (i64, u32, u32), count: usize) -> Vec<i64> {
     out
 }
 
-/// Synthetic daily market for the `equities_1d` environment: random-walk
-/// closes with per-symbol drift and volatility, log-normal volumes, and a
-/// universe holding every symbol on every day.
+/// A synthetic daily equity market for the `equity` class: stable ids
+/// `E1..` carrying the given tickers (the second name changes ticker
+/// halfway), prices as traded with a 2:1 split of the second name at two
+/// fifths of the sample, quarterly dividends on the first name (announced
+/// ten bars before the ex-date, paid fifteen after; the as-traded price
+/// drops by the dividend), the last name delisted for bankruptcy at four
+/// fifths (its rows stop; `delisted` holds from then on), open, high and
+/// low around the close, every name listed and a member of `SPX` (and of
+/// `SP500`), a `sector` classification cycling over three codes, and two
+/// series: a daily `SPXTR` index level and a weekly `VIX`.
 pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Dataset {
     let mut ds = Dataset::new();
     let mut rng = Rng::new(seed);
     let bars = business_days(start, days);
-    for (i, s) in symbols.iter().enumerate() {
-        let sym = ds.intern(s);
-        let mut price = 50.0 + 10.0 * i as f64;
-        let drift = 0.0002 * (i as f64 - symbols.len() as f64 / 2.0);
-        let vol = 0.01 + 0.004 * i as f64;
-        for &t in &bars {
-            let spike = rng.uniform() < 0.03;
-            let shock = if spike { 0.03 * if rng.uniform() < 0.5 { 1.0 } else { -1.0 } } else { 0.0 };
-            price *= (drift + shock + vol * rng.normal()).exp();
-            let volume = (1_000_000.0 * (0.3 * rng.normal()).exp() * if spike { 3.0 } else { 1.0 }).round();
-            ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num((price * 100.0).round() / 100.0)]);
-            ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
-            ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
-        }
-    }
-    ds.derive_tickers();
-    ds
-}
-
-/// Synthetic daily market for the `equities_1d_v2` catalog environment:
-/// stable ids `E1..` with the given tickers (the second name changes ticker
-/// halfway), prices as traded with a 2:1 split of the second name at two
-/// fifths of the sample, quarterly dividends on the first name (announced
-/// ten bars before the ex-date, paid fifteen after; the as-traded price drops
-/// by the dividend), the last name delisted for bankruptcy at four fifths
-/// (its rows stop; `delisted` holds from then on), open/high/low around the
-/// close, every listed name a member of `SPX`, and a `sector` classification
-/// cycling over three codes.
-pub fn synthetic_daily_v2(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Dataset {
-    let mut ds = Dataset::new();
-    let mut rng = Rng::new(seed);
-    let bars = business_days(start, days);
     let spx = ds.intern_label("SPX");
+    let sp500 = ds.intern_label("SP500");
     let scheme = ds.intern_label("sector");
     let sectors: Vec<Sym> = ["tech", "fin", "energy"].iter().map(|s| ds.intern_label(s)).collect();
     let bankrupt = ds.intern_label("bankruptcy");
+    let spxtr = ds.intern_label("SPXTR");
+    let vix = ds.intern_label("VIX");
     let n = symbols.len();
     let split_bar = days * 2 / 5;
     let rename_bar = days / 2;
@@ -429,21 +409,45 @@ pub fn synthetic_daily_v2(symbols: &[&str], start: (i64, u32, u32), days: usize,
             ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
             ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
             ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
-            ds.add("universe", vec![Value::Equity(sym), Value::Time(t)]);
+            ds.add("listed", vec![Value::Equity(sym), Value::Time(t)]);
             ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
+            ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(sp500)]);
             ds.add("classification", vec![Value::Equity(sym), Value::Time(t), Value::Label(scheme), Value::Label(sectors[i % 3])]);
+        }
+    }
+    // The series: a daily index level, and a weekly volatility index keyed
+    // at the week's last business day.
+    let mut level = 1000.0;
+    let mut vix_level = 18.0;
+    let mut last_week: Option<i64> = None;
+    for (k, &t) in bars.iter().enumerate() {
+        level *= (0.0003 + 0.009 * rng.normal()).exp();
+        ds.add("value", vec![Value::Label(spxtr), Value::Time(t), Value::Num((level * 100.0).round() / 100.0)]);
+        let wk = week_key(t);
+        let ends_week = bars.get(k + 1).map(|&n| week_key(n) != wk).unwrap_or(true);
+        if ends_week && last_week != Some(wk) {
+            vix_level = (vix_level * (0.03 * rng.normal()).exp()).clamp(9.0, 80.0);
+            ds.add("value", vec![Value::Label(vix), Value::Time(t), Value::Num((vix_level * 100.0).round() / 100.0)]);
+            last_week = Some(wk);
         }
     }
     ds.derive_tickers();
     ds
 }
 
-/// Synthetic minute market for the `equities_1m` environment: `bars_per_day`
-/// one-minute bars from 09:31 on each business day.
+/// The daily market with the catalog (an alias kept for its callers).
+pub fn synthetic_daily_v2(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Dataset {
+    synthetic_daily(symbols, start, days, seed)
+}
+
+/// A synthetic minute equity market: `bars_per_day` one-minute bars from
+/// 09:31 on each business day (open, high, low, close, volume), with the
+/// daily catalog (listing and membership) keyed at the date.
 pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, bars_per_day: usize, seed: u64) -> Dataset {
     let mut ds = Dataset::new();
     let mut rng = Rng::new(seed);
     let day_starts = business_days(start, days);
+    let spx = ds.intern_label("SPX");
     for (i, s) in symbols.iter().enumerate() {
         let sym = ds.intern(s);
         let mut price = 50.0 + 10.0 * i as f64;
@@ -451,16 +455,86 @@ pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, b
             // An overnight move, occasionally a sizeable gap.
             let gap = 0.01 * rng.normal() + if rng.uniform() < 0.1 { -0.03 } else { 0.0 };
             price *= (gap).exp();
+            ds.add("listed", vec![Value::Equity(sym), Value::Time(d)]);
+            ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(spx)]);
             for b in 0..bars_per_day {
                 let t = d + 9 * 3600 + 31 * 60 + (b as i64) * 60;
+                let o = (price * 100.0).round() / 100.0;
                 price *= (0.0006 * rng.normal()).exp();
-                ds.add("close_m", vec![Value::Equity(sym), Value::Time(t), Value::Num((price * 100.0).round() / 100.0)]);
-                ds.add("volume_m", vec![Value::Equity(sym), Value::Time(t), Value::Num((3000.0 * (0.3 * rng.normal()).exp()).round())]);
-                ds.add("universe_m", vec![Value::Equity(sym), Value::Time(t)]);
+                let c = (price * 100.0).round() / 100.0;
+                let h = c.max(o) * (1.0 + 0.0005 * rng.uniform());
+                let l = c.min(o) * (1.0 - 0.0005 * rng.uniform());
+                ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+                ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+                ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+                ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+                ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num((3000.0 * (0.3 * rng.normal()).exp()).round())]);
             }
         }
     }
+    ds.derive_tickers();
     ds
+}
+
+/// A synthetic minute futures market for the `future` class: per root,
+/// `bars_per_session` one-minute bars from 09:31 on each business day, a
+/// `session(A, S, Open)` row per day labelled at the session's last bar
+/// with the open at 09:30, a daily `point_value`, `commission` and
+/// `usable`, membership of `HOME-26`, and contract terms in the security
+/// table (a back-adjusted price that may cross zero for the last root).
+pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, bars_per_session: usize, seed: u64) -> Dataset {
+    let mut ds = Dataset::new();
+    let mut rng = Rng::new(seed);
+    let day_starts = business_days(start, days);
+    let home = ds.intern_label("HOME-26");
+    for (i, r) in roots.iter().enumerate() {
+        let sym = ds.add_security(r, r, day_starts[0], None);
+        ds.contracts.insert(
+            sym,
+            crate::kernel::Contract {
+                multiplier: 50.0 - 10.0 * (i % 4) as f64,
+                future: true,
+                commission_per_contract: Some(2.0 + 0.5 * i as f64),
+            },
+        );
+        let mut price = if i + 1 == roots.len() && roots.len() > 1 { 2.0 } else { 100.0 + 25.0 * i as f64 };
+        for &d in &day_starts {
+            let open_t = d + 9 * 3600 + 30 * 60;
+            let gap = 0.004 * rng.normal();
+            price += price.abs().max(1.0) * gap;
+            ds.add("point_value", vec![Value::Equity(sym), Value::Time(d), Value::Num(50.0 - 10.0 * (i % 4) as f64)]);
+            ds.add("commission", vec![Value::Equity(sym), Value::Time(d), Value::Num(2.0 + 0.5 * i as f64)]);
+            ds.add("usable", vec![Value::Equity(sym), Value::Time(d)]);
+            ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(home)]);
+            let mut last = open_t;
+            for b in 0..bars_per_session {
+                let t = open_t + 60 + (b as i64) * 60;
+                let o = (price * 100.0).round() / 100.0;
+                price += price.abs().max(1.0) * 0.0008 * rng.normal();
+                let c = (price * 100.0).round() / 100.0;
+                let h = c.max(o) + 0.01 * rng.uniform();
+                let l = c.min(o) - 0.01 * rng.uniform();
+                ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+                ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+                ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+                ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+                ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num((500.0 * (0.3 * rng.normal()).exp()).round())]);
+                last = t;
+            }
+            ds.add("session", vec![Value::Equity(sym), Value::Time(last), Value::Time(open_t)]);
+        }
+    }
+    ds
+}
+
+/// The synthetic market of a program's class: daily or minute equities, or
+/// minute futures with sessions, as the demand asks.
+pub fn synthetic_for_program(prog: &Program, symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Dataset {
+    match prog.class.as_str() {
+        "future" => synthetic_futures(symbols, start, days, 60, seed),
+        _ if prog.base.is_sub_daily() => synthetic_minute(symbols, start, days, 60, seed),
+        _ => synthetic_daily(symbols, start, days, seed),
+    }
 }
 
 /// Summary statistics of an equity curve, for the command line.

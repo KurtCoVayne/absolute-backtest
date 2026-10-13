@@ -37,7 +37,7 @@ pub(crate) struct Memo {
 }
 
 impl Memo {
-    fn time_of(key: &MemoKey) -> i64 {
+    pub(crate) fn time_of(key: &MemoKey) -> i64 {
         key.1.first().and_then(|v| v.as_time()).unwrap_or(i64::MAX)
     }
 
@@ -95,6 +95,8 @@ impl Memo {
     }
 }
 pub(crate) type Derived = Rc<Vec<(Tuple, usize)>>;
+/// The instances a call left stuck: partial head tuples with their errors.
+pub(crate) type StuckSet = Vec<(Vec<Option<Value>>, RunError)>;
 
 /// One row of the bundle's security table (data-bundle doc, section 3,
 /// "Identity"): the security `id` carried `ticker` from `from` (inclusive)
@@ -131,7 +133,7 @@ pub struct Dataset {
     pub facts: BTreeMap<String, Vec<Tuple>>,
     /// Availability time per tuple, parallel to `facts` (data-bundle doc,
     /// section 2): absent for a relation whose tuples are available at their
-    /// own bar's close, the v1 convention.
+    /// own bar's close, the labelling convention.
     pub available_at: BTreeMap<String, Vec<i64>>,
     /// The security table: stable ids and their ticker history. Empty for
     /// a dataset without one, where the ticker is the id.
@@ -300,8 +302,8 @@ impl Dataset {
             _ => time::bucket_range(res, key).1.max(key),
         }
     }
-    /// The dataset restricted to tuples whose temporal key falls in a
-    /// decision-resolution bucket at or before `t` (E|ₜ of section 7).
+    /// The dataset restricted to tuples available at or before the close of
+    /// decision bar `t` (E|ₜ of section 7).
     pub fn truncated(&self, prog: &Program, t: i64) -> Dataset {
         let mut out = Dataset {
             symbols: self.symbols.clone(),
@@ -312,11 +314,13 @@ impl Dataset {
             as_of: Some(self.bundle_date().unwrap_or(t).min(t)),
             contracts: self.contracts.clone(),
         };
-        // The close of the decision bar t: what a decision at t can have seen.
-        let horizon = time::bucket_range(prog.resolution, t).1.max(t);
+        // The close of the decision bar t: what a decision at t can have seen
+        // (a bar's label is its close instant; a daily label is its date).
+        let horizon = time::bucket_range(prog.base, t).1.max(t);
         for (name, tuples) in &self.facts {
             let Some(sig) = prog.relations.get(name) else { continue };
-            let (Some(k), Some(res)) = (sig.key_pos(), sig.res) else { continue };
+            let Some(k) = sig.key_pos() else { continue };
+            let res = sig.native.unwrap_or(prog.base);
             let records = self.available_at.contains_key(name);
             for (i, tu) in tuples.iter().enumerate() {
                 let key = tu[k].as_time().unwrap_or(i64::MAX);
@@ -324,8 +328,7 @@ impl Dataset {
                     // Judged on availability (the v2 theorem).
                     self.available(name, i, key, res) <= horizon
                 } else {
-                    let label = if res == prog.resolution { key } else { time::bucket(prog.resolution, key) };
-                    label <= t
+                    key <= horizon
                 };
                 if keep {
                     if records {
@@ -647,8 +650,8 @@ pub struct ExecConfig {
     pub maintenance_margin: f64,
     pub on_margin_call: OnMarginCall,
     /// Funding, as annual rates accrued over the calendar time between
-    /// consecutive decision bars: positive cash earns `cash_rate` (0 in v1,
-    /// warned), a debit pays `margin_rate`, short notional pays its borrow
+    /// consecutive decision bars: positive cash earns `cash_rate` (0 under
+    /// `financing cash 0`, warned), a debit pays `margin_rate`, short notional pays its borrow
     /// bucket's fee and earns `short_rebate`.
     pub cash_rate: f64,
     pub margin_rate: f64,
@@ -716,6 +719,10 @@ pub struct ExecConfig {
     pub start: Option<i64>,
     #[serde(default)]
     pub end: Option<i64>,
+    /// `silence flat` (language-v2, 4.4): an instrument with no decision at
+    /// a decision bar is closed; `silence hold` keeps it.
+    #[serde(default)]
+    pub silence_flat: bool,
 }
 
 impl Default for ExecConfig {
@@ -779,11 +786,124 @@ impl Default for ExecConfig {
             lot: Lot::Whole,
             start: None,
             end: None,
+            silence_flat: false,
         }
     }
 }
 
 impl ExecConfig {
+    /// The configuration the program's `execution`, `decisions` and
+    /// `report` blocks fix (language-v2, 4.3 to 4.5): every field of the
+    /// executor is a field of the block or derived from one.
+    pub fn from_program(prog: &Program) -> ExecConfig {
+        use crate::check::{Commission, Delisting, Impact, Leverage, Slippage};
+        let x = &prog.exec;
+        let mut cfg = ExecConfig {
+            initial_cash: x.capital,
+            compounding: x.compounding,
+            price_relation: Some(x.price_instance.clone()),
+            volume_relation: prog.relations.contains_key("volume").then(|| "volume".to_string()),
+            lot: if x.lot_fractional { Lot::Fractional } else { Lot::Whole },
+            actions_in_prices: x.actions_in_price,
+            running_sums: x.numerics == "running",
+            silence_flat: prog.silence_flat,
+            start: prog.report.window.map(|w| w.0),
+            end: prog.report.window.map(|w| w.1),
+            fee_bps_on_sells: 0.0,
+            ..ExecConfig::default()
+        };
+        match &x.commission {
+            Commission::None | Commission::PerContract => {
+                cfg.commission_per_share = 0.0;
+                cfg.commission_min_per_order = 0.0;
+                cfg.commission_bps = 0.0;
+            }
+            Commission::PerShare { per_share, min } => {
+                cfg.commission_per_share = *per_share;
+                cfg.commission_min_per_order = *min;
+                cfg.commission_bps = 0.0;
+            }
+            Commission::Bps(b) => {
+                cfg.commission_per_share = 0.0;
+                cfg.commission_min_per_order = 0.0;
+                cfg.commission_bps = *b;
+            }
+        }
+        match &x.slippage {
+            Slippage::None => {
+                cfg.slippage_bps = 0.0;
+                cfg.slippage_vol_mult = 0.0;
+            }
+            Slippage::Fixed(b) => {
+                cfg.slippage_bps = *b;
+                cfg.slippage_vol_mult = 0.0;
+            }
+            Slippage::Vol { mult, bars } => {
+                cfg.slippage_bps = 0.0;
+                cfg.slippage_vol_mult = *mult;
+                cfg.vol_window = *bars as usize;
+                cfg.vol_min_obs = (*bars as usize / 2).max(2);
+            }
+        }
+        match &x.impact {
+            Impact::None => cfg.impact_coef = 0.0,
+            Impact::Sqrt { coef, days } => {
+                cfg.impact_coef = *coef;
+                cfg.adv_window = *days as usize;
+            }
+        }
+        cfg.participation_cap = x.participation.unwrap_or(0.0);
+        match x.financing {
+            None => {
+                cfg.cash_rate = 0.0;
+                cfg.margin_rate = 0.0;
+                cfg.short_rebate = 0.0;
+                cfg.borrow = vec![BorrowBucket {
+                    adv_below: f64::INFINITY,
+                    fee_bps: 0.0,
+                    shortable: true,
+                }];
+            }
+            Some((cash, debit, short)) => {
+                cfg.cash_rate = cash;
+                cfg.margin_rate = debit;
+                cfg.short_rebate = short;
+            }
+        }
+        match &x.leverage {
+            Leverage::Unconstrained => {
+                cfg.max_gross = f64::INFINITY;
+                cfg.on_leverage = OnLeverage::Allow;
+                cfg.on_margin_call = OnMarginCall::Allow;
+                cfg.maintenance_margin = 0.0;
+            }
+            Leverage::RegT => {
+                cfg.max_gross = 2.0;
+                cfg.maintenance_margin = 0.25;
+                cfg.on_leverage = OnLeverage::Reject;
+            }
+            Leverage::Gross { max, halt } => {
+                cfg.max_gross = *max;
+                cfg.on_leverage = if *halt { OnLeverage::Halt } else { OnLeverage::Reject };
+            }
+        }
+        match &x.delisting {
+            Delisting::LastPrice => cfg.delist_at_last_price = true,
+            Delisting::Haircut(hs) => {
+                cfg.delist_at_last_price = false;
+                cfg.delisting_haircuts = hs.iter().filter(|(r, _)| r != "other").cloned().collect();
+                cfg.delisting_haircut_default = hs.iter().find(|(r, _)| r == "other").map(|(_, h)| *h).unwrap_or(1.0);
+            }
+        }
+        cfg.on_oversize = match x.oversize.as_str() {
+            "clamp" => OnOversize::Clamp,
+            "allow" => OnOversize::Allow,
+            _ => OnOversize::Halt,
+        };
+        cfg.on_ruin = if x.ruin == "continue" { OnRuin::Continue } else { OnRuin::Halt };
+        cfg
+    }
+
     /// Every cost, liquidity and funding model off and every name shortable
     /// for free: the executor of the semantic model alone, for hand-computed
     /// tests and for an author who wants a frictionless run (which is then
@@ -865,7 +985,7 @@ impl ExecConfig {
         if self.cash_rate == 0.0 {
             w.push(RunWarning {
                 bias: "cash-management".into(),
-                message: "cash earns nothing (the v1 cash rate is zero; a rate series comes with the v2 catalog)".into(),
+                message: "cash earns nothing (the execution block's financing credits no cash rate)".into(),
             });
         }
         if self.commission_per_share == 0.0 && self.commission_min_per_order == 0.0 && self.fee_bps_on_sells == 0.0 {
@@ -957,7 +1077,7 @@ pub enum RunError {
     /// (section 6): the nearest bars before and after it, if any.
     NotABar {
         t: i64,
-        res: Resolution,
+        cal: String,
         before: Option<i64>,
         after: Option<i64>,
     },
@@ -993,9 +1113,9 @@ impl std::fmt::Display for RunError {
                 second.1
             ),
             RunError::BadDecision { t, rule, decision, message } => write!(f, "invalid decision {} from rule {} at {}: {}", decision, rule, time::format_timestamp(*t), message),
-            RunError::NoBars => write!(f, "the environment instance has no bars at the decision resolution"),
-            RunError::NotABar { t, res, before, after } => {
-                write!(f, "{} is not a bar at {}; ", time::format_timestamp(*t), res)?;
+            RunError::NoBars => write!(f, "the data has no bars on the decision calendar"),
+            RunError::NotABar { t, cal, before, after } => {
+                write!(f, "{} is not a bar of calendar {}; ", time::format_timestamp(*t), cal)?;
                 match (before, after) {
                     (Some(b), Some(a)) => write!(f, "nearest bars are {} and {}", time::format_timestamp(*b), time::format_timestamp(*a)),
                     (Some(b), None) | (None, Some(b)) => write!(f, "the nearest bar is {}", time::format_timestamp(*b)),
@@ -1198,7 +1318,7 @@ pub(crate) struct RelInfo {
     pub key_pos: usize,
     pub inputs: Vec<usize>,
     pub stored: bool,
-    pub res: Resolution,
+    pub cal: Cal,
     pub rules: Vec<usize>,
     pub entity_positions: Vec<usize>,
 }
@@ -1209,6 +1329,9 @@ pub(crate) struct CompiledRule {
     pub slots: FxHashMap<String, usize>,
     pub nslots: usize,
     pub label: String,
+    /// The slot of the head's first entity variable: the instrument whose
+    /// sessions a per-instrument calendar ranges over.
+    pub entity_slot: Option<usize>,
 }
 
 pub type Env = Vec<Option<Value>>;
@@ -1288,7 +1411,20 @@ pub struct Kernel<'p> {
     pub(crate) in_progress: FxHashSet<MemoKey>,
     /// Calls that halted on a stuck instance, by memo key (see `call`).
     pub(crate) memo_errors: FxHashMap<MemoKey, RunError>,
-    pub(crate) domains: HashMap<Resolution, BTreeSet<i64>>,
+    /// The instances a call left stuck on a partial operation (section 7:
+    /// a ⊥ instance halts the run where a decision demands it, and only
+    /// there): by memo key, the partial head tuple of each with its error.
+    /// A later call whose pattern meets one halts; one that does not reads
+    /// the live tuples.
+    pub(crate) memo_stuck: FxHashMap<MemoKey, Rc<StuckSet>>,
+    pub(crate) domains: HashMap<Cal, BTreeSet<i64>>,
+    /// Each instrument's sessions as (open, label) pairs by label (3.5), for
+    /// the `sessions` calendars, `session_of` and the session constraints.
+    pub(crate) sessions: FxHashMap<Sym, Rc<Vec<(i64, i64)>>>,
+    /// Each instrument's session labels: its domain on the `sessions` calendar.
+    pub(crate) session_domains: FxHashMap<Sym, BTreeSet<i64>>,
+    /// The `clock(A, @T)` relation of a session-offset clock.
+    pub(crate) clock_rel: Option<usize>,
     pub(crate) cfg: ExecConfig,
     pub(crate) price_rel: Option<usize>,
     pub(crate) price_col: usize,
@@ -1329,7 +1465,7 @@ pub struct Kernel<'p> {
     /// The longest `rows` window per resolution, in bars: a window cache
     /// that went cold re-solves up to that many bars back, so the memo keeps
     /// them (plus slack).
-    pub(crate) rows_lookback: Vec<(Resolution, usize)>,
+    pub(crate) rows_lookback: Vec<(Cal, usize)>,
     pub(crate) asof_memo_next: usize,
     /// Below this many results the memo is left alone.
     pub(crate) memo_min: usize,
@@ -1403,6 +1539,8 @@ impl<'p> Kernel<'p> {
 
     /// `from_dataset` under a plan (see `new_planned`).
     pub fn from_dataset_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, mut dataset: Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        // The bundle date is read from the facts before they move.
+        dataset.as_of = dataset.bundle_date();
         let facts = std::mem::take(&mut dataset.facts);
         let mut k = Kernel::build(lowered.program_for(prog), &dataset, cfg, true, Some(facts))?;
         k.apply_plan(prog, lowered);
@@ -1452,6 +1590,7 @@ impl<'p> Kernel<'p> {
     /// one copy of the data in memory (what a run that does not need the
     /// dataset afterwards should use).
     pub fn from_dataset(prog: &'p Program, mut dataset: Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        dataset.as_of = dataset.bundle_date();
         let facts = std::mem::take(&mut dataset.facts);
         Kernel::build(prog, &dataset, cfg, true, Some(facts))
     }
@@ -1464,7 +1603,7 @@ impl<'p> Kernel<'p> {
             if let Lit::Str(s) = value {
                 let (unit, pname) = name.split_once("::").unwrap_or((prog.strategy.as_str(), name.as_str()));
                 if let Some(p) = prog.param(unit, pname) {
-                    *value = if p.ty == Ty::Label { Lit::Label(s.clone()) } else { Lit::Equity(s.clone()) };
+                    *value = if p.ty == Ty::Label { Lit::Label(s.clone()) } else { Lit::Entity(s.clone()) };
                 }
             }
         }
@@ -1486,7 +1625,7 @@ impl<'p> Kernel<'p> {
         // simply false here.
         let mut unknown_labels: Vec<String> = Vec::new();
         let mut intern = |l: &Lit| match l {
-            Lit::Equity(s) => {
+            Lit::Entity(s) => {
                 if literal_equities.contains_key(s) {
                     return;
                 }
@@ -1581,14 +1720,13 @@ impl<'p> Kernel<'p> {
         for (name, sig) in &prog.relations {
             let key_pos = sig.key_pos().ok_or_else(|| RunError::Internal(format!("relation `{}` has no temporal key", name)))?;
             let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
-            let res = sig.res.ok_or_else(|| RunError::Internal(format!("relation `{}` has no resolution", name)))?;
             rel_ids.insert(name.clone(), rels.len());
             rels.push(Rc::new(RelInfo {
                 name: name.clone(),
                 key_pos,
-                inputs: sig.args.iter().enumerate().filter(|(_, a)| a.mode == Mode::In).map(|(i, _)| i).collect(),
+                inputs: vec![],
                 stored,
-                res,
+                cal: sig.cal.clone(),
                 rules: prog.rules_for(name),
                 entity_positions: sig.args.iter().enumerate().filter(|(_, a)| a.ty.is_entity()).map(|(i, _)| i).collect(),
             }));
@@ -1602,12 +1740,29 @@ impl<'p> Kernel<'p> {
                 st
             })
             .collect();
-        let mut native: HashMap<Resolution, BTreeSet<i64>> = HashMap::new();
+        // The base domain: the keys of the stored relations at the base
+        // calendar that are read at their own bars (bars and session
+        // labels); a catalog relation or a series read as of the bar
+        // contributes no bar.
+        let own_bar: Vec<bool> = rels
+            .iter()
+            .map(|r| prog.relations.get(&r.name).map(|s| s.cal == Cal::Base && s.native.is_none()).unwrap_or(false))
+            .collect();
+        let mut base_bars: BTreeSet<i64> = BTreeSet::new();
+        let mut session_rows: Vec<(Sym, i64, i64)> = Vec::new();
+        let session_id = rel_ids.get("session").copied();
         let mut load = |name: &str, tu: Tuple| -> Result<(), RunError> {
             let Some(&id) = rel_ids.get(name) else { return Ok(()) };
             let info = &rels[id];
             let key = tu[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", name)))?;
-            native.entry(info.res).or_default().insert(key);
+            if own_bar[id] {
+                base_bars.insert(key);
+            }
+            if Some(id) == session_id {
+                if let (Some(sym), Some(open)) = (tu.iter().find_map(|v| v.as_equity()), tu.iter().skip(info.key_pos + 1).find_map(|v| v.as_time())) {
+                    session_rows.push((sym, open, key));
+                }
+            }
             stores[id].insert(key, tu);
             Ok(())
         };
@@ -1633,18 +1788,47 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
-        let all_res = [Resolution::M1, Resolution::M5, Resolution::M15, Resolution::M30, Resolution::H1, Resolution::D1];
-        let mut domains: HashMap<Resolution, BTreeSet<i64>> = HashMap::new();
-        for r in all_res {
-            let mut dom: BTreeSet<i64> = native.get(&r).cloned().unwrap_or_default();
-            for (fr, ts) in &native {
-                if fr.finer_than(r) {
-                    for &t in ts {
-                        dom.insert(time::bucket(r, t));
-                    }
-                }
+        // The sessions by instrument, and the calendars' domains (3.1, 3.5):
+        // a civil calendar's labels are the last base bar of each period;
+        // the sessions calendar's labels are the session labels.
+        let mut sessions: FxHashMap<Sym, Rc<Vec<(i64, i64)>>> = FxHashMap::default();
+        {
+            let mut by_sym: BTreeMap<Sym, Vec<(i64, i64)>> = BTreeMap::new();
+            for (sym, open, label) in session_rows {
+                by_sym.entry(sym).or_default().push((open, label));
             }
-            domains.insert(r, dom);
+            for (sym, mut v) in by_sym {
+                v.sort_by_key(|(_, l)| *l);
+                v.dedup_by_key(|(_, l)| *l);
+                sessions.insert(sym, Rc::new(v));
+            }
+        }
+        let mut domains: HashMap<Cal, BTreeSet<i64>> = HashMap::new();
+        let mut wanted: BTreeSet<Cal> = prog.calendars.values().cloned().collect();
+        wanted.extend(prog.relations.values().map(|s| s.cal.clone()));
+        wanted.insert(prog.decision_cal.clone());
+        wanted.insert(Cal::Base);
+        for cal in wanted {
+            let dom: BTreeSet<i64> = match &cal {
+                Cal::Base => base_bars.clone(),
+                Cal::Sessions => sessions.values().flat_map(|v| v.iter().map(|(_, l)| *l)).collect(),
+                Cal::SessionsOf(root) => {
+                    let sym = symbols.get(root);
+                    sym.and_then(|s| sessions.get(&s)).map(|v| v.iter().map(|(_, l)| *l).collect()).unwrap_or_default()
+                }
+                civil => {
+                    let mut last: BTreeMap<i64, i64> = BTreeMap::new();
+                    for &t in &base_bars {
+                        let k = time::period_key(civil, t);
+                        let e = last.entry(k).or_insert(t);
+                        if t > *e {
+                            *e = t;
+                        }
+                    }
+                    last.into_values().collect()
+                }
+            };
+            domains.insert(cal, dom);
         }
         // Compiled rules: variable slots.
         let mut compiled = Vec::new();
@@ -1655,11 +1839,18 @@ impl<'p> Kernel<'p> {
                 slots.entry(v.to_string()).or_insert(n);
             });
             let nslots = slots.len();
+            let entity_slot = prog.relations.get(&rule.head.name).and_then(|sig| {
+                sig.args.iter().zip(&rule.head.terms).find_map(|(a, t)| match t {
+                    Term::Var(v, _) if a.ty.is_entity() => slots.get(v).copied(),
+                    _ => None,
+                })
+            });
             compiled.push(Rc::new(CompiledRule {
                 idx: i,
                 slots,
                 nslots,
                 label: prog.rule_label(i),
+                entity_slot,
             }));
         }
         // Parameters.
@@ -1709,75 +1900,51 @@ impl<'p> Kernel<'p> {
                     )));
                 }
             }
-            params.insert((unit.to_string(), pname.to_string()), lit_value(value, &mut sym_tmp, &mut lab_tmp, &literal_equities));
+            // The strategy's parameters are in scope of every unit it links
+            // (a library instance reads them by its own unit): the override
+            // applies wherever the parameter is.
+            let v = lit_value(value, &mut sym_tmp, &mut lab_tmp, &literal_equities);
+            let qualified = name.contains("::");
+            for (u, ps) in &prog.params {
+                if (u == unit || !qualified) && ps.contains_key(pname) {
+                    params.insert((u.clone(), pname.to_string()), v.clone());
+                }
+            }
         }
-        // Price relation for the executor.
+        // The price relation the execution block names: a primitive or a
+        // derived Price relation the executor fills and marks at (4.3).
         let price_rel = match &cfg.price_relation {
             Some(name) => {
                 let id = *rel_ids.get(name).ok_or_else(|| RunError::Config(format!("price relation `{}` is not in the program", name)))?;
                 let sig = prog.relations.get(name).unwrap();
-                if !matches!(sig.kind, Kind::Primitive { .. }) || price_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
-                    return Err(RunError::Config(format!(
-                        "price relation `{}` must be a primitive with an equity argument and a Price<...> output; `{}` has none",
-                        name, name
-                    )));
-                }
-                if !sig.res.map(|r| r <= prog.resolution).unwrap_or(false) {
-                    return Err(RunError::Config(format!("price relation `{}` is coarser than the decision resolution {}", name, prog.resolution)));
+                if price_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
+                    return Err(RunError::Config(format!("price relation `{}` must have an entity argument and a Price<...> output", name)));
                 }
                 Some(id)
             }
-            None => {
-                let mut cands: Vec<(&String, &Signature)> = prog
-                    .relations
-                    .iter()
-                    .filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. }) && s.res.map(|r| r <= prog.resolution).unwrap_or(false))
-                    .filter(|(_, s)| s.args.iter().any(|a| a.ty.is_entity()) && price_column(s).is_some())
-                    .collect();
-                cands.sort_by_key(|(n, s)| (s.res != Some(prog.resolution), !n.starts_with("close"), (*n).clone()));
-                cands.first().map(|(n, _)| rel_ids[*n])
-            }
+            None => rel_ids.get("close").copied(),
         };
         let price_col = price_rel.and_then(|id| price_column(prog.relations.get(&rels[id].name).unwrap())).unwrap_or(0);
-        // Volume relation for the participation cap and impact.
+        // The base volume for the participation cap and impact.
         let volume_rel = match &cfg.volume_relation {
             Some(name) => {
                 let id = *rel_ids.get(name).ok_or_else(|| RunError::Config(format!("volume relation `{}` is not in the program", name)))?;
                 let sig = prog.relations.get(name).unwrap();
-                if !matches!(sig.kind, Kind::Primitive { .. }) || shares_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
-                    return Err(RunError::Config(format!(
-                        "volume relation `{}` must be a primitive with an equity argument and a Quantity<Shares> output; `{}` has none",
-                        name, name
-                    )));
-                }
-                if !sig.res.map(|r| r <= prog.resolution).unwrap_or(false) {
-                    return Err(RunError::Config(format!("volume relation `{}` is coarser than the decision resolution {}", name, prog.resolution)));
+                if shares_column(sig).is_none() || !sig.args.iter().any(|a| a.ty.is_entity()) {
+                    return Err(RunError::Config(format!("volume relation `{}` must have an entity argument and a quantity output", name)));
                 }
                 Some(id)
             }
-            None => {
-                let mut cands: Vec<(&String, &Signature)> = prog
-                    .relations
-                    .iter()
-                    .filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. }) && s.res.map(|r| r <= prog.resolution).unwrap_or(false))
-                    .filter(|(_, s)| s.args.iter().any(|a| a.ty.is_entity()) && shares_column(s).is_some())
-                    .collect();
-                cands.sort_by_key(|(n, s)| (s.res != Some(prog.resolution), !n.starts_with("volume"), (*n).clone()));
-                cands.first().map(|(n, _)| rel_ids[*n])
-            }
+            None => rel_ids.get("volume").copied(),
         };
         let volume_col = volume_rel.and_then(|id| shares_column(prog.relations.get(&rels[id].name).unwrap())).unwrap_or(0);
+        // The base bar primitives market-on-open, limit and stop orders execute against.
         let companion = |which: &str| -> Option<(usize, usize)> {
-            let id = price_rel?;
-            let name = rels[id].name.replacen("close", which, 1);
-            if name == rels[id].name {
-                return None;
-            }
-            let sig = prog.relations.get(&name)?;
+            let sig = prog.relations.get(which)?;
             if !matches!(sig.kind, Kind::Primitive { .. }) {
                 return None;
             }
-            Some((*rel_ids.get(&name)?, price_column(sig)?))
+            Some((*rel_ids.get(which)?, price_column(sig)?))
         };
         let (open_rel, high_rel, low_rel) = (companion("open"), companion("high"), companion("low"));
         // An order that executes away from the close needs the price
@@ -1807,14 +1974,14 @@ impl<'p> Kernel<'p> {
                     }
                 })
                 .collect();
+            let _ = price_name;
             return Err(RunError::Config(format!(
-                "rule {} places a `{}` order, but the price relation `{}` has no {} companion in environment `{}` ({}): every such order would wait for a print that never comes and be dropped; add the relation to the data, name a --price-relation that has it, or use `market` or `moc`",
+                "rule {} places a `{}` order, but the data has no {} bars ({}): every such order would wait for a print that never comes and be dropped; add `need bars` for a class with {}, or use `market` or `moc`",
                 crate::check::rule_label(&prog.rules, ri),
                 kind,
-                price_name,
                 missing.join(", "),
-                prog.environment,
-                expected.join(", ")
+                expected.join(", "),
+                missing.join(", ")
             )));
         }
         // The catalog's actions, by name (data-bundle doc, section 3).
@@ -1829,9 +1996,9 @@ impl<'p> Kernel<'p> {
         // longest calendar lookback (windows and lags) of any rule.
         let mut asof_read: FxHashSet<usize> = FxHashSet::default();
         let mut horizon: Option<i64> = Some(0);
-        let mut rows_lookback: Vec<(Resolution, usize)> = Vec::new();
+        let mut rows_lookback: Vec<(Cal, usize)> = Vec::new();
         for rule in &prog.rules {
-            let rule_res = prog.relations.get(&rule.head.name).and_then(|s| s.res).unwrap_or(prog.resolution);
+            let rule_res = prog.relations.get(&rule.head.name).map(|s| s.cal.clone()).unwrap_or(prog.decision_cal.clone());
             let count = |e: &Expr| -> Option<usize> {
                 match e {
                     Expr::Lit(Lit::Int(n), _) => Some(*n as usize),
@@ -1851,7 +2018,7 @@ impl<'p> Kernel<'p> {
                     },
                     _ => return None,
                 };
-                Some((d.months * 31 + d.days) * time::DAY)
+                Some((d.months * 31 + d.days) * time::DAY + d.secs)
             };
             let mut stack: Vec<&Literal> = rule.body.iter().collect();
             while let Some(lit) = stack.pop() {
@@ -1862,13 +2029,25 @@ impl<'p> Kernel<'p> {
                         }
                     }
                     Literal::Agg { conj, .. } => stack.extend(conj.iter()),
-                    Literal::Window { kind: WindowKind::Rows, dur, .. } => match count(dur) {
+                    Literal::Case { branches, .. } => stack.extend(branches.iter().flat_map(|b| b.guard.iter())),
+                    Literal::Window {
+                        kind: WindowKind::Rows | WindowKind::PriorRows,
+                        dur,
+                        ..
+                    } => match count(dur) {
                         Some(n) => match rows_lookback.iter_mut().find(|(r, _)| *r == rule_res) {
                             Some(slot) => slot.1 = slot.1.max(n),
-                            None => rows_lookback.push((rule_res, n)),
+                            None => rows_lookback.push((rule_res.clone(), n)),
                         },
                         None => horizon = None,
                     },
+                    Literal::Window {
+                        kind: WindowKind::Bucket(_) | WindowKind::Session,
+                        ..
+                    } => {
+                        // A bucket or a session spans at most a year of base bars.
+                        horizon = horizon.map(|h| h.max(366 * time::DAY));
+                    }
                     Literal::Window {
                         kind: WindowKind::Window | WindowKind::Prior,
                         dur,
@@ -1882,6 +2061,38 @@ impl<'p> Kernel<'p> {
                     }
                     _ => {}
                 }
+            }
+        }
+        // The decision clock of a session offset (3.5): per instrument and
+        // session, the base bar labelled open + offset, or the first bar it
+        // traded after it within the session.
+        if let (Some(offset), Some(&cid)) = (prog.clock.offset, rel_ids.get("clock")) {
+            let print_rel = rel_ids.get("close").copied();
+            let mut facts: Vec<(Sym, i64)> = Vec::new();
+            for (sym, v) in &sessions {
+                for &(open, label) in v.iter() {
+                    let target = time::add_duration(open, offset);
+                    if target > label {
+                        continue;
+                    }
+                    let bar = match print_rel {
+                        Some(pid) => {
+                            let epos = rels[pid].entity_positions.first().copied().unwrap_or(0);
+                            stores[pid]
+                                .by_time
+                                .range(target..=label)
+                                .find(|(_, tus)| tus.iter().any(|tu| tu[epos] == Value::Equity(*sym)))
+                                .map(|(t, _)| *t)
+                        }
+                        None => base_bars.range(target..=label).next().copied(),
+                    };
+                    if let Some(b) = bar {
+                        facts.push((*sym, b));
+                    }
+                }
+            }
+            for (sym, b) in facts {
+                stores[cid].insert(b, vec![Value::Equity(sym), Value::Time(b)]);
             }
         }
         // A week of slack covers `prev` across weekends and holidays at any resolution.
@@ -1899,13 +2110,17 @@ impl<'p> Kernel<'p> {
             symbols,
             stores,
             rels,
+            clock_rel: rel_ids.get("clock").copied().filter(|_| prog.clock.offset.is_some()),
             rel_ids,
             compiled,
             memo: Default::default(),
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),
+            memo_stuck: Default::default(),
             domains,
+            session_domains: sessions.iter().map(|(s, v)| (*s, v.iter().map(|(_, l)| *l).collect())).collect(),
+            sessions,
             cfg,
             price_rel,
             price_col,
@@ -2003,9 +2218,9 @@ impl<'p> Kernel<'p> {
         Ok(key)
     }
 
-    /// A bucket of resolution `res` exists from now on.
-    pub fn open_bucket(&mut self, res: Resolution, label: i64) {
-        self.domains.entry(res).or_default().insert(label);
+    /// A bucket of a calendar exists from now on.
+    pub fn open_bucket(&mut self, cal: &Cal, label: i64) {
+        self.domains.entry(cal.clone()).or_default().insert(label);
     }
 
     /// A tuple keyed at `key` arrived after its bar closed: everything
@@ -2016,6 +2231,7 @@ impl<'p> Kernel<'p> {
         self.memo.clear();
         self.asof_memo.clear();
         self.memo_errors.clear();
+        self.memo_stuck.clear();
         for cache in self.windows.values_mut() {
             let keep = std::mem::take(cache);
             *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
@@ -2037,14 +2253,15 @@ impl<'p> Kernel<'p> {
             return;
         }
         let mut cutoff = (t - h).min(keep_from);
-        for &(res, n) in &self.rows_lookback {
-            if let Some(&back) = self.domains.get(&res).and_then(|d| d.range(..=t).rev().nth(n + 3)) {
+        for (res, n) in &self.rows_lookback {
+            if let Some(&back) = self.domains.get(res).and_then(|d| d.range(..=t).rev().nth(*n + 3)) {
                 cutoff = cutoff.min(back);
             } else {
                 return;
             }
         }
         self.memo.evict_before(cutoff, &self.asof_read);
+        self.memo_stuck.retain(|k, _| Memo::time_of(k) >= cutoff);
         // The as-of shortcuts are not bucketed: scanned only once they double.
         if self.asof_memo.len() >= self.asof_memo_next {
             self.asof_memo.retain(|(_, _, k), _| *k >= cutoff);
@@ -2073,8 +2290,14 @@ impl<'p> Kernel<'p> {
         self.rel_ids.get(name).copied()
     }
 
-    pub fn relation_resolution(&self, rel: usize) -> Resolution {
-        self.rels[rel].res
+    pub fn relation_cal(&self, rel: usize) -> Cal {
+        self.rels[rel].cal.clone()
+    }
+
+    /// The native resolution a stored relation's keys are read at: a catalog
+    /// relation's or a series', else the base.
+    pub fn relation_native(&self, rel: usize) -> Resolution {
+        self.prog.relations.get(&self.rels[rel].name).and_then(|s| s.native).unwrap_or(self.prog.base)
     }
 
     pub fn is_primitive(&self, rel: usize) -> bool {
@@ -2085,12 +2308,30 @@ impl<'p> Kernel<'p> {
         self.prog
     }
 
-    /// The decision bars of the run: the domain at the decision resolution
-    /// within the configured window.
+    /// The decision bars of the run: the decision calendar's domain within
+    /// the configured window.
     pub fn decision_bars(&self) -> Vec<i64> {
         let lo = self.cfg.start.unwrap_or(i64::MIN);
         let hi = self.cfg.end.unwrap_or(i64::MAX);
-        self.domains[&self.prog.resolution].range(lo..=hi).copied().collect()
+        self.domains.get(&self.prog.decision_cal).map(|d| d.range(lo..=hi).copied().collect()).unwrap_or_default()
+    }
+
+    /// The base bars of decision bar `t`'s bucket: `(t, t)` on the base
+    /// calendar, else from the bar after the previous label to `t`.
+    pub(crate) fn decision_bucket(&self, t: i64) -> (i64, i64) {
+        if self.prog.decision_cal == Cal::Base {
+            return (t, t);
+        }
+        let prev = self.domains.get(&self.prog.decision_cal).and_then(|d| d.range(..t).next_back().copied());
+        (prev.map(|p| p + 1).unwrap_or(i64::MIN), t)
+    }
+
+    /// The session of `sym` holding base bar `t`: its open and label.
+    pub fn session_at(&self, sym: Sym, t: i64) -> Option<(i64, i64)> {
+        let v = self.sessions.get(&sym)?;
+        let i = v.partition_point(|(_, l)| *l < t);
+        let (open, label) = *v.get(i)?;
+        (open < t && t <= label).then_some((open, label))
     }
 
     fn rel(&self, name: &str) -> Result<usize, RunError> {
@@ -2146,23 +2387,23 @@ impl<'p> Kernel<'p> {
         &self.literal_counts
     }
 
-    /// The bars of the time domain at `res` (section 6): what a relation at
-    /// that resolution can be queried at.
-    pub fn bars_at(&self, res: Resolution) -> Vec<i64> {
-        self.domains.get(&res).map(|d| d.iter().copied().collect()).unwrap_or_default()
+    /// The bars of the time domain of a calendar: what a relation on it can
+    /// be queried at.
+    pub fn bars_at(&self, cal: &Cal) -> Vec<i64> {
+        self.domains.get(cal).map(|d| d.iter().copied().collect()).unwrap_or_default()
     }
 
-    /// `t` is a bar of the time domain at `res`, or the error naming the
+    /// `t` is a bar of the calendar's domain, or the error naming the
     /// nearest bars (what `explain` and `query` refuse: a label between two
     /// bars would read a phantom bucket).
-    pub fn check_bar(&self, res: Resolution, t: i64) -> Result<(), RunError> {
-        let domain = self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))?;
+    pub fn check_bar(&self, cal: &Cal, t: i64) -> Result<(), RunError> {
+        let domain = self.domains.get(cal).ok_or_else(|| RunError::Internal(format!("no time domain at {}", cal)))?;
         if domain.contains(&t) {
             Ok(())
         } else {
             Err(RunError::NotABar {
                 t,
-                res,
+                cal: self.prog.cal_name(cal),
                 before: domain.range(..t).next_back().copied(),
                 after: domain.range(t..).next().copied(),
             })
@@ -2213,14 +2454,14 @@ impl<'p> Kernel<'p> {
         let (id, col) = rel?;
         let info = &self.rels[id];
         let entity_pos = *info.entity_positions.first()?;
-        if info.res == self.prog.resolution {
+        if info.cal == self.prog.decision_cal {
             return self.stores[id]
                 .by_time
                 .get(&t)
                 .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
                 .and_then(|tu| tu[col].as_f64());
         }
-        let (lo, hi) = time::bucket_range(self.prog.resolution, t);
+        let (lo, hi) = self.decision_bucket(t);
         let mut acc = None;
         for (_, tus) in self.stores[id].by_time.range(lo..=hi) {
             for tu in tus.iter().filter(|tu| tu[entity_pos] == Value::Equity(sym)) {
@@ -2245,21 +2486,30 @@ impl<'p> Kernel<'p> {
         self.bar_field(self.low_rel, sym, t, |acc, v| acc.map(|a| a.min(v)).unwrap_or(v))
     }
 
-    /// The last decision bar at or after `t` within `t`'s calendar day at
-    /// which `sym` has a price: the close a market-on-close order decided at
-    /// `t` executes at (the session's last print; at @1d, `t` itself).
+    /// The last decision bar at or after `t` within `t`'s session (the
+    /// instrument's own, or its calendar day) at which `sym` has a price:
+    /// the close a market-on-close order decided at `t` executes at (the
+    /// session's last print; on a daily or coarser calendar, `t` itself).
     pub fn session_last_bar(&self, sym: Sym, t: i64) -> Option<i64> {
-        let id = self.price_rel?;
-        let info = &self.rels[id];
-        let entity_pos = *info.entity_positions.first()?;
-        let lo = time::bucket_range(self.prog.resolution, t).0.min(t);
-        let day_end = time::floor_div(t, time::DAY) * time::DAY + time::DAY - 1;
-        self.stores[id]
-            .by_time
-            .range(lo..=day_end)
-            .rev()
-            .find(|(_, tus)| tus.iter().any(|tu| tu[entity_pos] == Value::Equity(sym)))
-            .map(|(&ts, _)| if info.res == self.prog.resolution { ts } else { time::bucket(self.prog.resolution, ts) })
+        if !self.prog.base.is_sub_daily() || self.prog.decision_cal != Cal::Base {
+            return Some(t);
+        }
+        let end = match self.session_at(sym, t) {
+            Some((_, label)) => label,
+            None => time::floor_div(t, time::DAY) * time::DAY + time::DAY - 1,
+        };
+        let domain = self.domains.get(&Cal::Base)?;
+        let bars: Vec<i64> = domain.range(t..=end).rev().copied().collect();
+        bars.into_iter().find(|&b| self.has_price(sym, b))
+    }
+
+    /// Whether `sym` has a print at base bar `t`: a tuple of the price
+    /// relation when it is stored, else of the base `close`.
+    fn has_price(&self, sym: Sym, t: i64) -> bool {
+        let stored = self.price_rel.filter(|&id| self.rels[id].stored).or_else(|| self.rel_ids.get("close").copied());
+        let Some(id) = stored else { return false };
+        let Some(&entity_pos) = self.rels[id].entity_positions.first() else { return false };
+        self.stores[id].by_time.get(&t).map(|tus| tus.iter().any(|tu| tu[entity_pos] == Value::Equity(sym))).unwrap_or(false)
     }
 
     /// Currency per point per unit held: a future's multiplier, 1 for a share.
@@ -2284,14 +2534,14 @@ impl<'p> Kernel<'p> {
         let info = &self.rels[id];
         let entity_pos = *info.entity_positions.first()?;
         let col = self.volume_col;
-        if info.res == self.prog.resolution {
+        if info.cal == self.prog.decision_cal {
             self.stores[id]
                 .by_time
                 .get(&t)
                 .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
                 .and_then(|tu| tu[col].as_f64())
         } else {
-            let (lo, hi) = time::bucket_range(self.prog.resolution, t);
+            let (lo, hi) = self.decision_bucket(t);
             let mut sum = None;
             for (_, tus) in self.stores[id].by_time.range(lo..=hi) {
                 for tu in tus.iter().filter(|tu| tu[entity_pos] == Value::Equity(sym)) {
@@ -2313,7 +2563,7 @@ impl<'p> Kernel<'p> {
     pub fn adv(&self, sym: Sym, bars: &[i64], end: usize) -> Option<f64> {
         let end = end.min(bars.len().saturating_sub(1));
         let n = self.cfg.adv_window.max(1);
-        if self.prog.resolution.seconds().is_some() {
+        if self.prog.base.is_sub_daily() && self.prog.decision_cal == Cal::Base {
             let today = time::day_key(bars[end]);
             let mut days: Vec<(i64, Option<f64>)> = Vec::new();
             for &t in bars[..=end].iter().rev() {
@@ -2387,11 +2637,22 @@ impl<'p> Kernel<'p> {
         let info = self.rels[id].clone();
         let entity_pos = *info.entity_positions.first()?;
         let col = self.price_col;
-        let found = if info.res == self.prog.resolution {
+        let found = if !info.stored {
+            // A derived price relation (a total-return index): its tuple at
+            // the decision bar, evaluated on demand.
+            let width = self.prog.relations[&info.name].args.len();
+            let mut pattern: Vec<Option<Value>> = vec![None; width];
+            pattern[info.key_pos] = Some(Value::Time(t));
+            pattern[entity_pos] = Some(Value::Equity(sym));
+            match self.call(id, &pattern) {
+                Ok(tuples) => tuples.first().and_then(|(tu, _)| tu[col].as_f64()),
+                Err(_) => None,
+            }
+        } else if info.cal == self.prog.decision_cal {
             let key = Value::Equity(sym);
             self.stores[id].lookup(t, Some(&key)).iter().find(|tu| tu[entity_pos] == key).and_then(|tu| tu[col].as_f64())
         } else {
-            let (lo, hi) = time::bucket_range(self.prog.resolution, t);
+            let (lo, hi) = self.decision_bucket(t);
             self.stores[id]
                 .by_time
                 .range(lo..=hi)
@@ -2404,11 +2665,10 @@ impl<'p> Kernel<'p> {
         found
     }
 
-    /// The `+` head arguments of rule `rule_idx`, in signature order: what
-    /// `explain` needs as `inputs`.
-    pub fn rule_inputs(&self, rule_idx: usize) -> Vec<(String, Ty)> {
-        let sig = &self.prog.relations[&self.prog.rules[rule_idx].head.name];
-        sig.args.iter().filter(|a| a.mode == Mode::In).map(|a| (a.name.clone(), a.ty.clone())).collect()
+    /// The bracketed inputs of a rule: none in the linked program, where
+    /// every template is instantiated.
+    pub fn rule_inputs(&self, _rule_idx: usize) -> Vec<(String, Ty)> {
+        Vec::new()
     }
 
     /// Parse a command-line value as an input of type `ty`: an equity by
@@ -2416,7 +2676,7 @@ impl<'p> Kernel<'p> {
     pub fn parse_input(&self, ty: &Ty, raw: &str) -> Result<Value, String> {
         let raw = raw.trim();
         match ty {
-            Ty::Equity => self.equity(raw.trim_matches('"')),
+            Ty::Entity => self.equity(raw.trim_matches('"')),
             Ty::Label => {
                 let name = raw.trim_matches('"');
                 self.labels.get(name).map(Value::Label).ok_or_else(|| format!("`{}` is not a label of the dataset", name))
@@ -2425,17 +2685,17 @@ impl<'p> Kernel<'p> {
                 .map(Value::Time)
                 .ok_or_else(|| format!("`{}` is not a Timestamp (YYYY-MM-DD[THH:MM[:SS]])", raw)),
             Ty::Count => raw.parse().map(Value::Count).map_err(|_| format!("`{}` is not a Count", raw)),
-            Ty::Duration => match crate::parser::parse_lit(raw) {
+            Ty::Duration => match crate::syntax::parse_lit(raw) {
                 Ok(Lit::Duration(d)) => Ok(Value::Dur(Box::new(d))),
                 _ => Err(format!("`{}` is not a Duration (such as 20d, 3mo or 1y)", raw)),
             },
-            Ty::Quantity(_) => match crate::parser::parse_lit(raw) {
+            Ty::Quantity(_) => match crate::syntax::parse_lit(raw) {
                 Ok(l @ (Lit::Int(_) | Lit::Float(_))) => Ok(Value::Num(l_num(&l))),
-                Ok(l @ (Lit::Shares(_) | Lit::Money(..))) if crate::check::types::compat(ty, &l.ty()) => Ok(Value::Num(l_num(&l))),
+                Ok(l @ (Lit::Quantity(..) | Lit::Money(..) | Lit::Price(..))) if crate::check::types::compat(ty, &l.ty()) => Ok(Value::Num(l_num(&l))),
                 Ok(l) => Err(format!("`{}` is {}, not {}", raw, l.ty(), ty)),
                 Err(_) => Err(format!("`{}` is not a {}", raw, ty)),
             },
-            Ty::Decision | Ty::IntLit | Ty::StrLit => Err(format!("a {} cannot be given on the command line", ty)),
+            Ty::Decision | Ty::IntLit | Ty::StrLit | Ty::DimVar(_) => Err(format!("a {} cannot be given on the command line", ty)),
         }
     }
 
@@ -2450,8 +2710,9 @@ impl<'p> Kernel<'p> {
         if let Some(t) = time::parse_timestamp(raw) {
             return Ok(Value::Time(t));
         }
-        match crate::parser::parse_lit(raw) {
-            Ok(Lit::Str(name) | Lit::Equity(name)) => self.equity(&name),
+        match crate::syntax::parse_lit(raw) {
+            Ok(Lit::Str(name) | Lit::Entity(name)) => self.equity(&name),
+            Ok(Lit::Time(t)) => Ok(Value::Time(t)),
             Ok(Lit::Label(name)) => self.labels.get(&name).map(Value::Label).ok_or_else(|| format!("`{}` is not a label of the dataset", name)),
             Ok(Lit::Int(i)) => Ok(Value::Count(i)),
             Ok(Lit::Duration(d)) => Ok(Value::Dur(Box::new(d))),
@@ -2488,12 +2749,12 @@ impl<'p> Kernel<'p> {
         let info = self.rels[rel].clone();
         // Only bars of the rule's time domain are ever evaluated (section 6);
         // a label between two bars would read a phantom bucket.
-        let res = self.prog.infos[rule_idx].resolution;
-        let domain = self.domains.get(&res).ok_or_else(|| RunError::Internal(format!("no time domain at {}", res)))?;
-        if !domain.contains(&t) {
+        let cal = self.prog.infos[rule_idx].cal.clone();
+        let domain = self.domains.get(&cal).ok_or_else(|| RunError::Internal(format!("no time domain at {}", cal)))?;
+        if !domain.contains(&t) && !cal.per_entity() {
             return Err(RunError::NotABar {
                 t,
-                res,
+                cal: self.prog.cal_name(&cal),
                 before: domain.range(..t).next_back().copied(),
                 after: domain.range(t..).next().copied(),
             });
@@ -2549,7 +2810,9 @@ impl<'p> Kernel<'p> {
         // to the end is the halt the run would have met.
         let mut envs = vec![env];
         let mut stuck: Vec<eval::Stuck> = Vec::new();
-        for (i, lit) in rule.body.iter().enumerate() {
+        let order = self.plan_order(rule_idx);
+        for &i in order.iter() {
+            let lit = &rule.body[i];
             let before = envs.len() + stuck.len();
             let entering: Option<Env> = envs.first().cloned().or_else(|| stuck.first().map(|s| s.env.clone()));
             let (next, still) = self.solve_kleene_from(&cr, &rule.body, &[i], envs, stuck, None)?;
@@ -2611,17 +2874,18 @@ fn lag_uses_param(prog: &Program, unit: &str, name: &str) -> bool {
 fn l_num(l: &Lit) -> f64 {
     match l {
         Lit::Int(i) => *i as f64,
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => *x,
-        Lit::Duration(_) | Lit::Str(_) | Lit::Equity(_) | Lit::Label(_) => f64::NAN,
+        Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => *x,
+        Lit::Time(t) => *t as f64,
+        Lit::Duration(_) | Lit::Str(_) | Lit::Entity(_) | Lit::Label(_) => f64::NAN,
     }
 }
 
 /// The magnitude a literal is ranged by: its number, or a duration's
-/// approximate length in days; an equity has none.
+/// approximate length in days; an entity has none.
 fn lit_magnitude(l: &Lit) -> Option<f64> {
     match l {
         Lit::Duration(d) => Some(d.approx_days()),
-        Lit::Str(_) | Lit::Equity(_) | Lit::Label(_) => None,
+        Lit::Str(_) | Lit::Entity(_) | Lit::Label(_) => None,
         _ => Some(l_num(l)),
     }
 }
@@ -2641,11 +2905,12 @@ fn price_column(sig: &Signature) -> Option<usize> {
 pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols, equities: &HashMap<String, Sym>) -> Value {
     match l {
         Lit::Int(i) => Value::Count(*i),
-        Lit::Float(x) | Lit::Shares(x) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
+        Lit::Float(x) | Lit::Quantity(x, _) | Lit::Money(x, _) | Lit::Price(x, _) => Value::Num(*x),
         Lit::Duration(d) => Value::Dur(Box::new(*d)),
+        Lit::Time(t) => Value::Time(*t),
         // A ticker literal is what `Kernel::new` resolved it to; one it did
         // not see (an unchecked program) reads as its own id.
-        Lit::Str(s) | Lit::Equity(s) => Value::Equity(equities.get(s).copied().unwrap_or_else(|| symbols.intern(s))),
+        Lit::Str(s) | Lit::Entity(s) => Value::Equity(equities.get(s).copied().unwrap_or_else(|| symbols.intern(s))),
         Lit::Label(s) => Value::Label(labels.intern(s)),
     }
 }
@@ -2684,10 +2949,18 @@ fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
                     term(t1, f);
                 }
                 Builtin::MonthStart { t } | Builtin::DayStart { t } => term(t, f),
+                Builtin::SessionOf { a, t, s } => {
+                    term(a, f);
+                    term(t, f);
+                    term(s, f);
+                }
             },
-            Literal::Window { dur, min, .. } => {
+            Literal::Window { dur, min, lo, .. } => {
                 expr(dur, f);
                 expr(min, f);
+                if let Some(lo) = lo {
+                    expr(lo, f);
+                }
             }
             Literal::Cmp { lhs, rhs, .. } => {
                 expr(lhs, f);
@@ -2704,14 +2977,18 @@ fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
                 }
                 atom.terms.iter().for_each(|t| term(t, f));
             }
-            Literal::Resample { inner, min, aggs, .. } => {
-                inner.terms.iter().for_each(|t| term(t, f));
-                expr(min, f);
-                aggs.iter().for_each(|(_, _, e)| expr(e, f));
-            }
             Literal::AsOf { atom, at, .. } => {
                 atom.terms.iter().for_each(|t| term(t, f));
                 term(at, f);
+            }
+            Literal::Case { branches, otherwise, .. } => {
+                for b in branches {
+                    b.guard.iter().for_each(|c| lit(c, f));
+                    expr(&b.value, f);
+                }
+                if let Some(e) = otherwise {
+                    expr(e, f);
+                }
             }
         }
     }
@@ -2748,12 +3025,20 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
                     term(t1, f);
                 }
                 Builtin::MonthStart { t } | Builtin::DayStart { t } => term(t, f),
+                Builtin::SessionOf { a, t, s } => {
+                    term(a, f);
+                    term(t, f);
+                    term(s, f);
+                }
             },
-            Literal::Window { var, base, dur, min, .. } => {
+            Literal::Window { var, base, dur, min, lo, .. } => {
                 term(var, f);
                 term(base, f);
                 expr(dur, f);
                 expr(min, f);
+                if let Some(lo) = lo {
+                    expr(lo, f);
+                }
             }
             Literal::Cmp { lhs, rhs, .. } => {
                 expr(lhs, f);
@@ -2780,18 +3065,19 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
                     f(k);
                 }
             }
-            Literal::Resample { inner, as_var, min, aggs, .. } => {
-                inner.terms.iter().for_each(|t| term(t, f));
-                f(as_var);
-                expr(min, f);
-                aggs.iter().for_each(|(x, _, e)| {
-                    f(x);
-                    expr(e, f);
-                });
-            }
             Literal::AsOf { atom, at, .. } => {
                 atom.terms.iter().for_each(|t| term(t, f));
                 term(at, f);
+            }
+            Literal::Case { var, branches, otherwise, .. } => {
+                f(var);
+                for b in branches {
+                    b.guard.iter().for_each(|c| lit(c, f));
+                    expr(&b.value, f);
+                }
+                if let Some(e) = otherwise {
+                    expr(e, f);
+                }
             }
         }
     }

@@ -5,52 +5,60 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::ir::{DecisionMode, Duration};
+use crate::ir::Duration;
 
 pub type Sym = u32;
 
+/// The one decision algebra (language-v2, 4.4): a target weight of
+/// capital, a target quantity, or a signed delta.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Ctor {
-    Buy,
-    Sell,
-    Short,
-    Cover,
-    TargetWeight,
-    TargetQuantity,
+    HoldWeight,
+    HoldQuantity,
+    Trade,
 }
 
 impl Ctor {
     pub fn parse(name: &str) -> Option<Ctor> {
         Some(match name {
-            "buy" => Ctor::Buy,
-            "sell" => Ctor::Sell,
-            "short" => Ctor::Short,
-            "cover" => Ctor::Cover,
-            "target_weight" => Ctor::TargetWeight,
-            "target_quantity" => Ctor::TargetQuantity,
+            "hold_weight" => Ctor::HoldWeight,
+            "hold_quantity" => Ctor::HoldQuantity,
+            "trade" => Ctor::Trade,
             _ => return None,
         })
     }
+    /// The constructor as the program writes it.
     pub fn name(self) -> &'static str {
         match self {
-            Ctor::Buy => "buy",
-            Ctor::Sell => "sell",
-            Ctor::Short => "short",
-            Ctor::Cover => "cover",
-            Ctor::TargetWeight => "target_weight",
-            Ctor::TargetQuantity => "target_quantity",
+            Ctor::HoldWeight | Ctor::HoldQuantity => "hold",
+            Ctor::Trade => "trade",
         }
     }
-    pub fn mode(self) -> DecisionMode {
+    /// The resolved name, distinguishing the two `hold` forms.
+    pub fn resolved_name(self) -> &'static str {
         match self {
-            Ctor::Buy | Ctor::Sell | Ctor::Short | Ctor::Cover => DecisionMode::Delta,
-            Ctor::TargetWeight | Ctor::TargetQuantity => DecisionMode::Target,
+            Ctor::HoldWeight => "hold_weight",
+            Ctor::HoldQuantity => "hold_quantity",
+            Ctor::Trade => "trade",
+        }
+    }
+    /// A target (the book is driven to it) rather than a delta.
+    pub fn is_target(self) -> bool {
+        matches!(self, Ctor::HoldWeight | Ctor::HoldQuantity)
+    }
+    /// Whether a written constructor name matches this constructor: `hold`
+    /// matches both of its forms.
+    pub fn matches(self, name: &str) -> bool {
+        match name {
+            "hold" => self.is_target(),
+            "trade" => self == Ctor::Trade,
+            other => Ctor::parse(other) == Some(self),
         }
     }
 }
 
 /// How an order executes (section 6, order types): at the next bar's
-/// close (`Market`, the v1 contract), at the open of the instrument's next
+/// close (`Market`, the default contract), at the open of the instrument's next
 /// bar (`Moo`), at the close of the last bar of the session containing the
 /// decision (`Moc`), at the next open and back to flat at the close of that
 /// session (`MooMoc`, an intraday position), or when a bar trades through a

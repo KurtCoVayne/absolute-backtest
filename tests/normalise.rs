@@ -3,39 +3,22 @@
 //! invariant under renaming, reordering and the written form of derived
 //! forms (Proposition 2.1) but not under a change of constant.
 
-mod corpus;
+mod common;
 
 use std::fs;
-use std::path::Path;
 
-use absolute_backtest::check::{check_program, Program, Severity, Workspace};
+use absolute_backtest::check::{check_program, Severity};
 use absolute_backtest::compiler::normalise::{normalise, NirStage};
 use absolute_backtest::compiler::Stage;
 
-fn program(ws: &Workspace, name: &str) -> Program {
-    let (p, diags) = check_program(ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
-fn strategy_name(src: &str) -> String {
-    let units = absolute_backtest::parse_units(src).unwrap();
-    units.iter().find(|u| u.kind == absolute_backtest::UnitKind::Strategy).map(|u| u.name.clone()).expect("a strategy unit")
-}
-
+/// The corpus strategies and the two company programs, each named by its
+/// file (the corpus names a file after its strategy).
 fn corpus_sources() -> Vec<(String, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut out = Vec::new();
     for sub in ["strategies", "company"] {
-        let mut files: Vec<_> = fs::read_dir(root.join(sub))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().map(|e| e == "dsl").unwrap_or(false))
-            .collect();
-        files.sort();
-        for f in files {
-            let src = fs::read_to_string(&f).unwrap();
-            out.push((strategy_name(&src), src));
+        for f in common::dsl_files(sub) {
+            let name = f.file_stem().unwrap().to_string_lossy().to_string();
+            out.push((name, fs::read_to_string(&f).unwrap()));
         }
     }
     out
@@ -46,17 +29,16 @@ fn corpus_sources() -> Vec<(String, String)> {
 #[test]
 fn the_canonical_form_round_trips_on_the_corpus() {
     for (name, src) in corpus_sources() {
-        let mut ws = corpus::base_workspace();
-        ws.add_source(&src).unwrap();
-        let prog = program(&ws, &name);
+        let prog = common::program(&src, &name);
         let nir = normalise(&prog);
         assert_eq!(nir.hash.len(), 64, "{}", name);
         let stage = NirStage { nir: &nir, prog: &prog };
         let text = stage.text();
-        // The rendering is a complete workspace: the environment, the
-        // libraries and the strategy.
-        let mut ws2 = Workspace::new();
-        ws2.add_source(&text).unwrap_or_else(|e| panic!("{}: the canonical rendering does not parse: {}\n{}", name, e, text));
+        // The rendering is the strategy with every instantiated relation
+        // written out as its own rules; it is checked against the class
+        // catalog and the library of the base workspace, as a program is.
+        let mut ws2 = common::base_workspace();
+        ws2.add_source(&text).unwrap_or_else(|e| panic!("{}: the canonical rendering does not parse: {} at {}\n{}", name, e.message, e.span, text));
         let (p2, diags) = check_program(&ws2, &name);
         let errors: Vec<String> = diags.iter().filter(|d| d.severity == Severity::Error).map(|d| d.to_string()).collect();
         assert!(errors.is_empty(), "{}: the canonical rendering does not check:\n{}\n{}", name, errors.join("\n"), text);
@@ -76,25 +58,34 @@ fn the_canonical_form_round_trips_on_the_corpus() {
 
 const BASE: &str = r#"
 strategy canon {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  param floor : Price<USD> = 20 USD/share
-  rel rich(-A: Equity, @T: Timestamp, -P: Price<USD>)
-  rich(A, T, P) :- universe(A, T), close(A, T, P), P > floor, logret(A, T, R), R > 0.0.
-  rel entry(-A: Equity, @T: Timestamp)
-  entry(A, T) :- rich(A, T, _), flat(A, T), not bought_within(A, T, 20d).
-  decide(T, buy(A, qty)) :- entry(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).
+  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  uses calendar, bars, book
+  clock { decide on base }
+  universe { universe(A, T) :- listed(A, T), traded@base(A, T). }
+  params {
+    qty : Quantity<Shares> = 10 shares
+    floor : Price<USD> = 20 USD/share
+    cooldown : Duration = 20d
+  }
+  rules {
+    rel rich(A: Equity, @T, P: Price<USD>)
+    rich(A, T, P) :- universe(A, T), close(A, T, P), P > floor, log_price_return(A, T, R), R > 0.0.
+    rel entry(A: Equity, @T)
+    entry(A, T) :- rich(A, T, _), flat(A, T), not bought_within[cooldown](A, T).
+  }
+  decisions {
+    silence hold
+    orders market
+    decide(T, trade(A, qty)) :- entry(A, T).
+    decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.
+  }
+  execution equity_default
+  report { calendar base   periods 252 per year }
 }
 "#;
 
 fn hash_of(src: &str, name: &str) -> (String, String) {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let prog = program(&ws, name);
+    let prog = common::program(src, name);
     let nir = normalise(&prog);
     let core = nir.core_text();
     (nir.hash, core)
@@ -108,30 +99,33 @@ fn the_hash_is_invariant_under_renaming_and_reordering() {
     // Variables renamed.
     let renamed = BASE
         .replace(
-            "rich(A, T, P) :- universe(A, T), close(A, T, P), P > floor, logret(A, T, R), R > 0.0.",
-            "rich(X, S, Px) :- universe(X, S), close(X, S, Px), Px > floor, logret(X, S, Ret), Ret > 0.0.",
+            "rich(A, T, P) :- universe(A, T), close(A, T, P), P > floor, log_price_return(A, T, R), R > 0.0.",
+            "rich(X, S, Px) :- universe(X, S), close(X, S, Px), Px > floor, log_price_return(X, S, Ret), Ret > 0.0.",
         )
         .replace(
-            "decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).",
-            "decide(Now, sell(Name, Qty)) :- held(Name, Now, Qty), prev(Now, Before), decided(Before, buy(Name, _)).",
+            "decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.",
+            "decide(Now, trade(Name, Delta)) :- held(Name, Now, Qty), prev(Now, Before), decided(Before, trade(Name, Bought)), Bought > 0 shares, Delta = -Qty.",
         );
+    assert_ne!(renamed, BASE);
     assert_eq!(hash_of(&renamed, "canon"), (base.clone(), core.clone()), "renaming changed the hash");
     // Literals reordered (a void reordering: tests and generators move).
     let reordered = BASE
         .replace(
-            "rich(A, T, P) :- universe(A, T), close(A, T, P), P > floor, logret(A, T, R), R > 0.0.",
-            "rich(A, T, P) :- universe(A, T), logret(A, T, R), close(A, T, P), R > 0.0, P > floor.",
+            "rich(A, T, P) :- universe(A, T), close(A, T, P), P > floor, log_price_return(A, T, R), R > 0.0.",
+            "rich(A, T, P) :- universe(A, T), log_price_return(A, T, R), close(A, T, P), R > 0.0, P > floor.",
         )
         .replace(
-            "entry(A, T) :- rich(A, T, _), flat(A, T), not bought_within(A, T, 20d).",
-            "entry(A, T) :- rich(A, T, _), not bought_within(A, T, 20d), flat(A, T).",
+            "entry(A, T) :- rich(A, T, _), flat(A, T), not bought_within[cooldown](A, T).",
+            "entry(A, T) :- rich(A, T, _), not bought_within[cooldown](A, T), flat(A, T).",
         );
+    assert_ne!(reordered, BASE);
     assert_eq!(hash_of(&reordered, "canon"), (base.clone(), core.clone()), "reordering literals changed the hash");
     // Rules reordered.
     let rules_reordered = BASE.replace(
-        "  decide(T, buy(A, qty)) :- entry(A, T).\n  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).",
-        "  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).\n  decide(T, buy(A, qty)) :- entry(A, T).",
+        "    decide(T, trade(A, qty)) :- entry(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.",
+        "    decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.\n    decide(T, trade(A, qty)) :- entry(A, T).",
     );
+    assert_ne!(rules_reordered, BASE);
     assert_eq!(hash_of(&rules_reordered, "canon").0, base, "reordering rules changed the hash");
     // The strategy renamed.
     let strategy_renamed = BASE.replace("strategy canon {", "strategy other_name {");
@@ -141,44 +135,51 @@ fn the_hash_is_invariant_under_renaming_and_reordering() {
     assert_ne!(hash_of(&changed, "canon").0, base, "a different constant kept the hash");
     let changed = BASE.replace("R > 0.0", "R > 0.01");
     assert_ne!(hash_of(&changed, "canon").0, base, "a different literal kept the hash");
+    // The decisions block and the execution block are part of the identity
+    // (Propositions 3.13 and 4.3); the report block is not (4.5).
+    let silence = BASE.replace("silence hold", "silence flat");
+    assert_ne!(hash_of(&silence, "canon").0, base, "the silence policy kept the hash");
+    let execution = BASE.replace("execution equity_default", "execution equity_default with { lot fractional }");
+    assert_ne!(hash_of(&execution, "canon").0, base, "the execution block kept the hash");
+    let report = BASE.replace("periods 252 per year", "periods 252 per year   window 2024-01-01 .. 2024-12-31");
+    assert_eq!(hash_of(&report, "canon").0, base, "the report block changed the hash");
 }
 
 /// The derived forms reduce to the core forms of section 2.6.
 #[test]
 fn derived_forms_reduce_to_core_forms() {
-    let src = r#"
-strategy forms {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param n : Count = 3
-  rel candidate(-A: Equity, @T: Timestamp, -M: Scalar)
-  candidate(A, T, M) :- universe(A, T), momentum(A, T, 6mo, 1mo, M).
-  rel selected(-A: Equity, @T: Timestamp)
-  selected(A, T) :- bar(T), top(n, candidate(A, T, M), by (M desc, A asc)).
-  rel ranked(-A: Equity, @T: Timestamp, -K: Scalar)
-  ranked(A, T, K) :- bar(T), rank(candidate(A, T, M), by (M desc, A asc), as K).
-  rel last_sel(+A: Equity, @T: Timestamp)
-  last_sel(A, T) :- universe(A, T), prev(T, T0), selected(A, _) asof T0.
-  decide(T, target_weight(A, W)) :- selected(A, T), ranked(A, T, K), W = 1 / K.
-}
-"#;
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let prog = program(&ws, "forms");
+    let src = common::StrategyParts {
+        name: "forms".into(),
+        uses: "calendar, book".into(),
+        params: "    n : Count = 3\n    lookback : Duration = 6mo\n    skip : Duration = 1mo".into(),
+        rules: r#"
+    rel candidate(A: Equity, @T, M: Scalar)
+    candidate(A, T, M) :- universe(A, T), lag(T, skip, T1), close(A, T1, P1), lag(T, lookback, T0), close(A, T0, P0), M = P1 / P0 - 1.
+    rel selected(A: Equity, @T)
+    selected(A, T) :- bar(T), top[n](candidate(A, T, M) by (M desc, A asc)) within (T).
+    rel ranked(A: Equity, @T, K: Count)
+    ranked(A, T, K) :- K = rank(candidate(A, T, M) by (M desc, A asc)) within (T).
+    rel last_sel(A: Equity, @T)
+    last_sel(A, T) :- universe(A, T), prev(T, T0), selected(A, _) asof T0.
+"#
+        .into(),
+        decides: "    decide(T, hold(A, W)) :- selected(A, T), ranked(A, T, K), last_sel(A, T), W = 1 / K.".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&src, "forms");
     let nir = normalise(&prog);
     let core = nir.core_text();
     assert!(core.contains("count() over (candidate(") && core.contains("<lex"), "{}", core);
     assert!(core.contains("= (") && core.contains(" + 1)"), "rank is a count plus one:\n{}", core);
-    assert!(core.contains("asof(selected, V0, V2)") || core.contains("asof(selected"), "{}", core);
-    assert!(core.contains("prev(V1)"), "{}", core);
+    assert!(core.contains("asof(selected"), "{}", core);
+    assert!(core.contains("= prev("), "{}", core);
     // The surface rendering keeps the derived forms and re-parses.
     let text = NirStage { nir: &nir, prog: &prog }.text();
-    assert!(text.contains("top(n, candidate(") && text.contains("rank(candidate(") && text.contains(" asof "), "{}", text);
-    let mut ws2 = Workspace::new();
-    ws2.add_source(&text).unwrap();
+    assert!(text.contains("top[n](candidate(") && text.contains("rank(candidate(") && text.contains(" asof "), "{}", text);
+    let mut ws2 = common::base_workspace();
+    ws2.add_source(&text).unwrap_or_else(|e| panic!("the canonical rendering does not parse: {} at {}\n{}", e.message, e.span, text));
     let (p2, diags) = check_program(&ws2, "forms");
-    assert!(diags.iter().all(|d| d.severity != Severity::Error), "{:?}", diags.iter().map(|d| d.to_string()).collect::<Vec<_>>());
+    assert!(diags.iter().all(|d| d.severity != Severity::Error), "{}\n{}", common::text(&diags), text);
     assert_eq!(normalise(&p2.unwrap()).hash, nir.hash);
 }

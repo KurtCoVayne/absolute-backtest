@@ -2,47 +2,21 @@
 //! neglect and slippage are modeled with conservative, non-zero defaults; a
 //! configuration that turns a model off is warned, never silent).
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
-use absolute_backtest::data::{business_days, synthetic_daily};
+use absolute_backtest::data::synthetic_daily;
 use absolute_backtest::kernel::time::format_timestamp;
-use absolute_backtest::kernel::{run, Dataset, ExecConfig, Value};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
-
-/// One symbol X over consecutive weekdays from 2024-01-08.
-fn market(prices: &[f64]) -> Dataset {
-    let mut ds = Dataset::new();
-    let x = ds.intern("X");
-    for (t, p) in business_days((2024, 1, 8), prices.len()).into_iter().zip(prices) {
-        ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(*p)]);
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
-    }
-    ds
-}
+use absolute_backtest::kernel::{run, ExecConfig, Value};
 
 /// Buy 10 on an up bar when flat, sell the bar after the buy.
-const UP_DOWN: &str = r#"
-strategy up_down {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel up(-A: Equity, @T: Timestamp)
-  up(A, T) :- universe(A, T), logret(A, T, R), R > 0.
-  decide(T, buy(A, qty)) :- up(A, T), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).
+fn up_down() -> String {
+    common::strategy(
+        "up_down",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    rel up(A: Equity, @T)\n    up(A, T) :- universe(A, T), log_price_return(A, T, R), R > 0.",
+        "    decide(T, trade(A, qty)) :- up(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.",
+    )
 }
-"#;
 
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
@@ -56,8 +30,8 @@ fn frictionless_is_the_old_zero_cost_executor() {
     assert_eq!(cfg.fee_bps_on_sells, 0.0);
     assert_eq!(cfg.slippage_bps, 0.0);
     assert_eq!(cfg.slippage_vol_mult, 0.0);
-    let prog = program(UP_DOWN, "up_down");
-    let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let prog = common::program(&up_down(), "up_down");
+    let ds = common::market("X", &[10.0, 11.0, 10.0, 12.0, 13.0]);
     let r = run(
         &prog,
         &ds,
@@ -92,8 +66,8 @@ fn the_defaults_are_non_zero_and_conservative() {
 
 #[test]
 fn the_per_order_minimum_binds_on_a_small_order() {
-    let prog = program(UP_DOWN, "up_down");
-    let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let prog = common::program(&up_down(), "up_down");
+    let ds = common::market("X", &[10.0, 11.0, 10.0, 12.0, 13.0]);
     let cfg = ExecConfig {
         initial_cash: 1000.0,
         commission_per_share: 0.005,
@@ -108,7 +82,7 @@ fn the_per_order_minimum_binds_on_a_small_order() {
     assert!(close(r.final_cash, 887.0), "{}", r.final_cash);
     assert!(close(r.costs.commissions, 3.0));
     // 300 shares at 0.005 = 1.50 is above the minimum.
-    let big = program(&UP_DOWN.replace("10 shares", "300 shares"), "up_down");
+    let big = common::program(&up_down().replace("10 shares", "300 shares"), "up_down");
     let r = run(
         &big,
         &ds,
@@ -125,8 +99,8 @@ fn the_per_order_minimum_binds_on_a_small_order() {
 
 #[test]
 fn the_regulatory_fee_is_charged_on_sells_only() {
-    let prog = program(UP_DOWN, "up_down");
-    let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let prog = common::program(&up_down(), "up_down");
+    let ds = common::market("X", &[10.0, 11.0, 10.0, 12.0, 13.0]);
     let cfg = ExecConfig {
         initial_cash: 1000.0,
         fee_bps_on_sells: 0.278,
@@ -163,7 +137,7 @@ fn slippage_scales_with_realized_volatility() {
             _ => unreachable!(),
         })
         .collect();
-    let prog = program(UP_DOWN, "up_down");
+    let prog = common::program(&up_down(), "up_down");
     let cfg = ExecConfig {
         initial_cash: 100_000.0,
         slippage_vol_mult: 0.1,
@@ -208,18 +182,9 @@ fn slippage_scales_with_realized_volatility() {
 
 #[test]
 fn target_weights_size_at_the_expected_fill_price() {
-    let src = r#"
-strategy full {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = 1.0
-  decide(T, target_weight(A, w)) :- universe(A, T), flat(A, T).
-}
-"#;
-    let prog = program(src, "full");
-    let ds = market(&[10.0, 10.0, 10.0, 10.0, 10.0]);
+    let src = common::strategy("full", "    w : Scalar = 1.0", "", "    decide(T, hold(A, w)) :- universe(A, T), flat(A, T).");
+    let prog = common::program(&src, "full");
+    let ds = common::market("X", &[10.0, 10.0, 10.0, 10.0, 10.0]);
     // 100 bps slippage: a fully invested book must fit after slippage, and
     // the commission it pays is never leverage.
     let cfg = ExecConfig {
@@ -239,8 +204,8 @@ strategy full {
 
 #[test]
 fn a_frictionless_run_is_warned_and_a_default_run_is_not() {
-    let prog = program(UP_DOWN, "up_down");
-    let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0]);
+    let prog = common::program(&up_down(), "up_down");
+    let ds = common::market("X", &[10.0, 11.0, 10.0, 12.0, 13.0]);
     let r = run(
         &prog,
         &ds,

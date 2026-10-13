@@ -3,58 +3,38 @@
 //! square-root impact in participation of average daily volume, a delta
 //! order's remainder expiring and a target re-issuing itself.
 
-mod corpus;
+mod common;
 
-use absolute_backtest::check::{check_program, Program};
 use absolute_backtest::data::business_days;
 use absolute_backtest::kernel::time::format_timestamp;
-use absolute_backtest::kernel::{run, Dataset, ExecConfig, Value};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
+use absolute_backtest::kernel::{run, Dataset, ExecConfig};
 
 /// One symbol X over consecutive weekdays from 2024-01-08, with a volume per bar.
 fn market(prices: &[f64], volumes: &[f64]) -> Dataset {
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
-    for ((t, p), v) in business_days((2024, 1, 8), prices.len()).into_iter().zip(prices).zip(volumes) {
-        ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(*p)]);
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(*v)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
+    let bars = business_days((2024, 1, 8), prices.len());
+    let x = ds.add_security("X", "X", bars[0], None);
+    for ((t, p), v) in bars.iter().zip(prices).zip(volumes) {
+        common::add_bar(&mut ds, x, *t, *p, *v);
     }
+    ds.derive_tickers();
     ds
 }
 
-const UP_DOWN: &str = r#"
-strategy up_down {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param qty : Quantity<Shares> = 10 shares
-  rel up(-A: Equity, @T: Timestamp)
-  up(A, T) :- universe(A, T), logret(A, T, R), R > 0.
-  decide(T, buy(A, qty)) :- up(A, T), flat(A, T).
-  decide(T, sell(A, Q)) :- held(A, T, Q), prev(T, T0), decided(T0, buy(A, _)).
+/// Buy 10 on an up bar when flat, sell the bar after the buy.
+fn up_down() -> String {
+    common::strategy(
+        "up_down",
+        "    qty : Quantity<Shares> = 10 shares",
+        "    rel up(A: Equity, @T)\n    up(A, T) :- universe(A, T), log_price_return(A, T, R), R > 0.",
+        "    decide(T, trade(A, qty)) :- up(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), prev(T, T0), decided(T0, trade(A, Q1)), Q1 > 0 shares, Q = -Q0.",
+    )
 }
-"#;
 
 /// Target the full book once, when flat; silent afterwards.
-const FULL_ONCE: &str = r#"
-strategy full_once {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = 1.0
-  decide(T, target_weight(A, w)) :- universe(A, T), flat(A, T).
+fn full_once() -> String {
+    common::strategy("full_once", "    w : Scalar = 1.0", "", "    decide(T, hold(A, w)) :- universe(A, T), flat(A, T).")
 }
-"#;
 
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
@@ -74,7 +54,7 @@ fn the_defaults_and_frictionless() {
 
 #[test]
 fn a_delta_order_fills_up_to_the_participation_cap_and_the_remainder_expires() {
-    let prog = program(UP_DOWN, "up_down");
+    let prog = common::program(&up_down(), "up_down");
     // Volume 40 a bar: the cap is 4 shares of the 10 asked for.
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0], &[40.0; 5]);
     let cfg = ExecConfig {
@@ -101,7 +81,7 @@ fn a_delta_order_fills_up_to_the_participation_cap_and_the_remainder_expires() {
 
 #[test]
 fn a_target_re_issues_itself_until_reached() {
-    let prog = program(FULL_ONCE, "full_once");
+    let prog = common::program(&full_once(), "full_once");
     // 1000 cash at 10 is 100 shares; volume 300 caps a bar at 30.
     let ds = market(&[10.0; 8], &[300.0; 8]);
     let cfg = ExecConfig {
@@ -132,22 +112,13 @@ fn a_target_re_issues_itself_until_reached() {
 fn a_new_decision_supersedes_an_open_target() {
     // Target the full book, then flat the next bar: the open remainder of the
     // first target is dropped in favour of the liquidation.
-    let src = r#"
-strategy flip {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = 1.0
-  rel opening(@T: Timestamp)
-  opening(T) :- bar(T), not has_prev(T).
-  rel has_prev(@T: Timestamp)
-  has_prev(T) :- bar(T), prev(T, _).
-  decide(T, target_weight(A, w)) :- universe(A, T), opening(T).
-  decide(T, target_weight(A, 0)) :- held(A, T, _), has_prev(T).
-}
-"#;
-    let prog = program(src, "flip");
+    let src = common::strategy(
+        "flip",
+        "    w : Scalar = 1.0",
+        "    rel opening(@T)\n    opening(T) :- bar(T), not has_prev(T).\n    rel has_prev(@T)\n    has_prev(T) :- bar(T), prev(T, _).",
+        "    decide(T, hold(A, w)) :- universe(A, T), opening(T).\n    decide(T, hold(A, 0)) :- held(A, T, _), has_prev(T).",
+    );
+    let prog = common::program(&src, "flip");
     let ds = market(&[10.0; 6], &[300.0; 6]);
     let cfg = ExecConfig {
         initial_cash: 1000.0,
@@ -163,9 +134,9 @@ strategy flip {
 
 #[test]
 fn impact_is_square_root_in_participation_of_adv() {
-    let prog = program(UP_DOWN, "up_down");
+    let prog = common::program(&up_down(), "up_down");
     // ADV 10_000 and 100 shares: participation 1%, impact 0.1 * sqrt(0.01) = 1%.
-    let big = program(&UP_DOWN.replace("10 shares", "100 shares"), "up_down");
+    let big = common::program(&up_down().replace("10 shares", "100 shares"), "up_down");
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0], &[10_000.0; 5]);
     let cfg = ExecConfig {
         initial_cash: 100_000.0,
@@ -189,7 +160,7 @@ fn impact_is_square_root_in_participation_of_adv() {
 
 #[test]
 fn turning_liquidity_models_off_is_warned() {
-    let prog = program(UP_DOWN, "up_down");
+    let prog = common::program(&up_down(), "up_down");
     let ds = market(&[10.0, 11.0, 10.0, 12.0, 13.0], &[40.0; 5]);
     let r = run(
         &prog,

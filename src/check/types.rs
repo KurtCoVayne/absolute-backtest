@@ -1,5 +1,6 @@
-//! The dimensional type algebra of section 2 as a set of total functions
-//! from operand types to a result type or a diagnostic message.
+//! The dimensional type algebra (semantic model, section 2; language-v2,
+//! section 7.3) as a set of total functions from operand types to a result
+//! type or a diagnostic message.
 
 use crate::ir::{BinOp, CmpOp, Dim, Ty};
 
@@ -12,8 +13,13 @@ pub fn compat(expected: &Ty, actual: &Ty) -> bool {
     match (expected, actual) {
         (Ty::Count, Ty::IntLit) | (Ty::IntLit, Ty::Count) => true,
         (Ty::Quantity(d), Ty::IntLit) | (Ty::IntLit, Ty::Quantity(d)) => d.is_scalar(),
-        // A string literal is an Equity or a Label from context.
-        (Ty::Equity, Ty::StrLit) | (Ty::StrLit, Ty::Equity) | (Ty::Label, Ty::StrLit) | (Ty::StrLit, Ty::Label) => true,
+        // A string literal is an entity or a Label from context.
+        (Ty::Entity, Ty::StrLit) | (Ty::StrLit, Ty::Entity) | (Ty::Label, Ty::StrLit) | (Ty::StrLit, Ty::Label) => true,
+        // A dimension variable of a library signature matches any quantity
+        // until instantiation resolves it.
+        (Ty::DimVar(_), Ty::Quantity(_)) | (Ty::Quantity(_), Ty::DimVar(_)) | (Ty::DimVar(_), Ty::IntLit) | (Ty::IntLit, Ty::DimVar(_)) | (Ty::DimVar(_), Ty::Count) | (Ty::Count, Ty::DimVar(_)) => {
+            true
+        }
         _ => false,
     }
 }
@@ -71,7 +77,8 @@ pub fn bin_type(op: BinOp, l: &Ty, r: &Ty) -> Result<Ty, String> {
             BinOp::Div => a.div(b).map(Ty::Quantity).ok_or_else(|| format!("currency mismatch: cannot divide {} by {}", a, b)),
         },
         (Ty::Timestamp, _) | (_, Ty::Timestamp) => Err("Timestamp admits only comparison and the temporal builtins; use prev/lag/window for bar distances".into()),
-        (Ty::Duration, _) | (_, Ty::Duration) => Err("Duration admits no arithmetic in v1; use it as a window or lag length".into()),
+        (Ty::Duration, _) | (_, Ty::Duration) => Err("Duration admits no arithmetic; use it as a window, lag or session offset".into()),
+        (Ty::DimVar(d), _) | (_, Ty::DimVar(d)) => Err(format!("the dimension variable {} is not resolved here", d)),
         _ => Err(format!("cannot {} {} and {}", verb(op), l, r)),
     }
 }
@@ -124,6 +131,54 @@ pub fn call_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
                 t => Err(format!("abs requires a quantity, found {}", t)),
             }
         }
+        "sign" => {
+            if args.len() != 1 {
+                return Err("sign takes one argument".into());
+            }
+            match &args[0] {
+                Ty::IntLit | Ty::Quantity(_) | Ty::Count => Ok(Ty::scalar()),
+                t => Err(format!("sign requires a quantity, found {}", t)),
+            }
+        }
+        "floor" | "ceil" => {
+            if args.len() != 1 {
+                return Err(format!("{} takes one argument", name));
+            }
+            if !scalar_arg(&args[0]) && args[0] != Ty::Count {
+                return Err(format!("{} requires a Scalar argument, found {}", name, args[0]));
+            }
+            Ok(Ty::scalar())
+        }
+        "clamp" => {
+            if args.len() != 3 {
+                return Err("clamp takes three arguments: clamp(x, lo, hi)".into());
+            }
+            let mut acc = args[0].clone();
+            for a in &args[1..] {
+                if !compat(&acc, a) {
+                    return Err(format!("clamp requires arguments of one dimension, found {} and {}", acc, a));
+                }
+                if acc == Ty::IntLit {
+                    acc = a.clone();
+                }
+            }
+            match acc {
+                Ty::IntLit => Ok(Ty::scalar()),
+                Ty::Quantity(_) | Ty::Count => Ok(acc),
+                t => Err(format!("clamp requires quantities, found {}", t)),
+            }
+        }
+        "decile" => {
+            if args.len() != 2 {
+                return Err("decile takes two arguments: decile(rank, n)".into());
+            }
+            for a in args {
+                if !scalar_arg(a) && *a != Ty::Count {
+                    return Err(format!("decile takes a rank and a count, found {}", a));
+                }
+            }
+            Ok(Ty::Count)
+        }
         "least" | "greatest" => {
             if args.len() < 2 {
                 return Err(format!("{} takes at least two arguments", name));
@@ -155,7 +210,7 @@ pub fn cmp_ok(op: CmpOp, l: &Ty, r: &Ty) -> Result<(), String> {
         return Err(format!("cannot compare {} with {}: both sides must share one dimension and currency", l, r));
     }
     match l {
-        Ty::Equity | Ty::Decision | Ty::Label | Ty::StrLit => {
+        Ty::Entity | Ty::Decision | Ty::Label | Ty::StrLit => {
             if op != CmpOp::Eq {
                 return Err(format!("{} admits only `=`", l));
             }
@@ -198,6 +253,13 @@ pub fn agg_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
             let t = as_q(one(name)?)?;
             Ok(if t == Ty::Count { Ty::scalar() } else { t })
         }
+        "var" => {
+            let t = as_q(one(name)?)?;
+            if t == Ty::Count {
+                return Ok(Ty::scalar());
+            }
+            bin_type(BinOp::Mul, &t, &t)
+        }
         "quantile" => {
             let (e, q) = two("quantile")?;
             if !matches!(q, Ty::IntLit) && !matches!(q, Ty::Quantity(d) if d.is_scalar()) {
@@ -216,10 +278,16 @@ pub fn agg_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
             let (a, b) = (as_q(a)?, as_q(b)?);
             bin_type(BinOp::Mul, &a, &b)
         }
-        "ols_beta" => {
-            let (y, x) = two("ols_beta")?;
+        "ols_slope" => {
+            let (y, x) = two("ols_slope")?;
             let (y, x) = (as_q(y)?, as_q(x)?);
             bin_type(BinOp::Div, &y, &x)
+        }
+        "ols_r" => {
+            let (y, x) = two("ols_r")?;
+            as_q(y)?;
+            as_q(x)?;
+            Ok(Ty::scalar())
         }
         _ => Err(format!("unknown aggregate `{}`", name)),
     }
@@ -280,10 +348,13 @@ mod tests {
     #[test]
     fn aggregates_keep_or_combine_dimensions() {
         assert_eq!(agg_type("std", &[price()]).unwrap(), price());
-        assert_eq!(agg_type("count", &[Ty::Equity]).unwrap(), Ty::Count);
+        assert_eq!(agg_type("count", &[Ty::Entity]).unwrap(), Ty::Count);
         assert_eq!(agg_type("corr", &[price(), shares()]).unwrap(), Ty::scalar());
         assert_eq!(agg_type("cov", &[price(), shares()]).unwrap(), notional());
-        assert_eq!(agg_type("ols_beta", &[notional(), price()]).unwrap(), shares());
+        assert_eq!(agg_type("ols_slope", &[notional(), price()]).unwrap(), shares());
+        assert_eq!(agg_type("ols_r", &[notional(), price()]).unwrap(), Ty::scalar());
+        assert_eq!(call_type("decile", &[Ty::scalar(), Ty::Count]).unwrap(), Ty::Count);
+        assert_eq!(call_type("sign", &[price()]).unwrap(), Ty::scalar());
         assert_eq!(agg_type("mean", &[Ty::Count]).unwrap(), Ty::scalar());
     }
 
@@ -291,8 +362,8 @@ mod tests {
     fn comparisons_need_one_dimension() {
         assert!(cmp_ok(CmpOp::Lt, &price(), &price()).is_ok());
         assert!(cmp_ok(CmpOp::Lt, &price(), &notional()).is_err());
-        assert!(cmp_ok(CmpOp::Lt, &Ty::Equity, &Ty::Equity).is_err());
-        assert!(cmp_ok(CmpOp::Eq, &Ty::Equity, &Ty::Equity).is_ok());
+        assert!(cmp_ok(CmpOp::Lt, &Ty::Entity, &Ty::Entity).is_err());
+        assert!(cmp_ok(CmpOp::Eq, &Ty::Entity, &Ty::Entity).is_ok());
         assert!(cmp_ok(CmpOp::Ge, &Ty::Count, &Ty::IntLit).is_ok());
     }
 }

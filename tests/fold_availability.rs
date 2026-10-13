@@ -5,22 +5,14 @@
 //! availability: the fold's decisions at t equal the batch kernel's on the
 //! tuples available at t.
 
-mod corpus;
+mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
 
-use absolute_backtest::check::{check_program, Program};
 use absolute_backtest::data::{load_parquet_dir, synthetic_daily, write_parquet_dir};
-use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
+use absolute_backtest::kernel::time::format_timestamp;
 use absolute_backtest::kernel::{run, run_fold, verify_causality, Dataset, ExecConfig, Value};
-
-fn program(src: &str, name: &str) -> Program {
-    let mut ws = corpus::base_workspace();
-    ws.add_source(src).unwrap();
-    let (p, diags) = check_program(&ws, name);
-    let text: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-    p.unwrap_or_else(|| panic!("{} should check:\n{}", name, text.join("\n")))
-}
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 
@@ -28,12 +20,14 @@ const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 /// bar late (at the next bar's close).
 fn delayed() -> Dataset {
     let base = synthetic_daily(&SYMS, (2022, 1, 3), 200, 7);
-    let mut bars: Vec<i64> = base.facts["universe"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
+    let mut bars: Vec<i64> = base.facts["close"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
     bars.sort();
     bars.dedup();
-    let mut ds = Dataset::new();
-    ds.symbols = base.symbols.clone();
-    ds.labels = base.labels.clone();
+    let mut ds = Dataset {
+        facts: BTreeMap::new(),
+        available_at: BTreeMap::new(),
+        ..base.clone()
+    };
     for (rel, tuples) in &base.facts {
         for (i, tu) in tuples.iter().enumerate() {
             let key = tu[1].as_time().unwrap();
@@ -51,10 +45,7 @@ fn delayed() -> Dataset {
 
 #[test]
 fn the_fold_is_causal_on_availability_and_the_batch_kernel_is_not() {
-    let p = program(
-        &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/sma_crossover.dsl")).unwrap(),
-        "sma_crossover",
-    );
+    let p = common::corpus_program("sma_crossover");
     let ds = delayed();
     assert!(ds.has_availability());
     let full = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
@@ -86,39 +77,41 @@ fn the_fold_is_causal_on_availability_and_the_batch_kernel_is_not() {
 fn a_late_tuple_is_read_from_its_availability_on() {
     // One name, prices 10, 11, 12, 13, 14; the close of day 2 arrives at the
     // close of day 3. A rule reading today's close sees nothing on day 2; a
-    // rule reading yesterday's close sees it on day 3.
-    let days: Vec<i64> = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"]
-        .iter()
-        .map(|d| parse_timestamp(d).unwrap())
-        .collect();
+    // rule reading yesterday's close sees it on day 3. The name is in the
+    // universe while listed, so day 2 is a bar whatever its close.
+    let days: Vec<i64> = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"].iter().map(|d| common::day(d)).collect();
     let mut ds = Dataset::new();
-    let x = ds.intern("X");
+    let x = ds.add_security("X", "X", days[0], None);
     for (i, &t) in days.iter().enumerate() {
         let p = 10.0 + i as f64;
         if i == 1 {
+            for rel in ["open", "high", "low"] {
+                ds.add(rel, vec![Value::Equity(x), Value::Time(t), Value::Num(p)]);
+            }
             ds.add_available("close", vec![Value::Equity(x), Value::Time(t), Value::Num(p)], days[2]);
+            ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
+            ds.add("listed", vec![Value::Equity(x), Value::Time(t)]);
         } else {
-            ds.add("close", vec![Value::Equity(x), Value::Time(t), Value::Num(p)]);
+            common::add_bar(&mut ds, x, t, p, 1000.0);
         }
-        ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(1000.0)]);
-        ds.add("universe", vec![Value::Equity(x), Value::Time(t)]);
     }
     ds.derive_tickers();
-    let src = r#"
-strategy reads {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode target
-  param w : Scalar = 0.1
-  rel today(@T: Timestamp)
-  today(T) :- universe(A, T), close(A, T, _).
-  rel yesterday(@T: Timestamp)
-  yesterday(T) :- universe(A, T), prev(T, T0), close(A, T0, _).
-  decide(T, target_weight(A, w)) :- universe(A, T), today(T), yesterday(T).
-}
-"#;
-    let p = program(src, "reads");
+    let src = common::StrategyParts {
+        name: "reads".into(),
+        universe: "universe(A, T) :- listed(A, T).".into(),
+        params: "    w : Scalar = 0.1".into(),
+        rules: r#"
+    rel today(@T)
+    today(T) :- universe(A, T), close(A, T, _).
+    rel yesterday(@T)
+    yesterday(T) :- universe(A, T), prev(T, T0), close(A, T0, _).
+"#
+        .into(),
+        decides: "    decide(T, hold(A, w)) :- universe(A, T), today(T), yesterday(T).".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "reads");
     let r = run_fold(
         &p,
         &ds,
@@ -149,10 +142,7 @@ strategy reads {
 
 #[test]
 fn availability_loads_from_parquet_and_truncation_follows_it() {
-    let p = program(
-        &fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/corpus/strategies/sma_crossover.dsl")).unwrap(),
-        "sma_crossover",
-    );
+    let p = common::corpus_program("sma_crossover");
     let ds = delayed();
     let dir = std::env::temp_dir().join(format!("abt-avail-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);

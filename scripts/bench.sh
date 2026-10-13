@@ -25,7 +25,7 @@ FROM=${FROM:-2014-01-01}
 LIMIT=${LIMIT:-1800}
 ABT=${ABT:-target/release/abt}
 PY=${PY:-python3}
-CORPUS="corpus/env corpus/lib corpus/strategies"
+CORPUS="corpus-v2/catalog corpus-v2/lib corpus-v2/strategies"
 EXCEPTIONS=scripts/ingest/reviewed/norgate-spx-2014.parquet
 mkdir -p "$OUT"
 ROWS="$OUT/rows.tsv"
@@ -69,7 +69,7 @@ for rung in $RUNGS; do
   convert_s=$(since "$t")
   rm -rf "$bundle"; t=$(now)
   tflag=-v; [ "$(uname)" = Darwin ] && tflag=-l
-  /usr/bin/time $tflag "$ABT" bundle build --from-norgate "$inputs" --env equities_1d_v2 --version bench --out "$bundle" $CORPUS >"$OUT/build-$rung.log" 2>&1 \
+  /usr/bin/time $tflag "$ABT" bundle build --from-norgate "$inputs" --class equity --version bench --out "$bundle" $CORPUS >"$OUT/build-$rung.log" 2>&1 \
     || { echo "bundle build $rung failed: $(grep -v '^ ' "$OUT/build-$rung.log" | tail -1)" >&2; continue; }
   build_s=$(since "$t"); t=$(now)
   "$ABT" bundle test "$bundle" $CORPUS >"$OUT/test-$rung.log" 2>&1

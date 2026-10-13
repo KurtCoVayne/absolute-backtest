@@ -20,7 +20,7 @@ use super::executor::{Executor, SimExecutor};
 use super::time;
 use super::{Dataset, ExecConfig, Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
 use crate::check::Program;
-use crate::ir::Resolution;
+use crate::ir::{Cal, Resolution};
 
 /// When the fold takes a checkpoint (data-bundle doc, section 2): at the end
 /// of every calendar month of the decision bars, or every n decision bars.
@@ -46,11 +46,11 @@ pub struct Checkpoint {
     pub symbols: Vec<String>,
     pub labels: Vec<String>,
     pub stores: Vec<Store>,
-    pub domains: Vec<(Resolution, Vec<i64>)>,
+    pub domains: Vec<(Cal, Vec<i64>)>,
     pub last_price: Vec<(Sym, f64)>,
     pub windows: Vec<(WindowKey, Vec<(i64, WindowRows)>)>,
     pub stats: KernelStats,
-    pub open_buckets: Vec<(Resolution, i64)>,
+    pub open_buckets: Vec<(Cal, i64)>,
     pub decided_once: bool,
     pub result: RunResult,
     pub executor: serde_json::Value,
@@ -72,12 +72,12 @@ pub fn fingerprint(prog: &Program, cfg: &ExecConfig) -> u64 {
 pub enum Event {
     /// A primitive tuple, in the kernel's symbol order, available at `avail`.
     Tuple { rel: usize, key: i64, avail: i64, tuple: Tuple },
-    /// The close of bucket `label` at `res`.
-    Barrier { res: Resolution, label: i64 },
+    /// The close of bucket `label` on a calendar.
+    Barrier { cal: Cal, label: i64 },
 }
 
 /// The ordered stream of a dataset: every primitive tuple available at its
-/// own bar's close (the v1 convention), ordered by availability, then by
+/// own bar's close (the labelling convention), ordered by availability, then by
 /// relation, then by the order the dataset holds them in.
 pub struct EventLog {
     pub events: Vec<Event>,
@@ -91,7 +91,7 @@ impl EventLog {
             if !k.is_primitive(rel) {
                 continue;
             }
-            let res = k.relation_resolution(rel);
+            let res = k.relation_native(rel);
             let records = ds.availability_of(name).is_some();
             for (i, tu) in tuples.iter().enumerate() {
                 let tuple = k.remap_tuple(tu);
@@ -109,56 +109,66 @@ impl EventLog {
     }
 }
 
-/// The open bucket per resolution the program needs, and the barriers a
-/// tuple's arrival closes.
+/// The open bucket per calendar the program decides on, and the barriers
+/// a tuple's arrival closes. The fold streams the base bars: a decision
+/// barrier is the close of a decision-calendar bucket.
 struct Scheduler {
-    needed: Vec<Resolution>,
-    open: HashMap<Resolution, i64>,
+    needed: Vec<Cal>,
+    open: HashMap<Cal, i64>,
+    /// The decision calendar's labels (from the batch domain), for the
+    /// civil calendars whose label is the period's last bar.
+    labels: Vec<i64>,
 }
 
 impl Scheduler {
     fn new(k: &Kernel) -> Scheduler {
-        let mut needed: Vec<Resolution> = k.rels.iter().map(|r| r.res).collect();
-        needed.push(k.prog.resolution);
-        needed.sort();
-        needed.dedup();
-        Scheduler { needed, open: HashMap::new() }
+        let needed: Vec<Cal> = vec![k.prog.decision_cal.clone()];
+        let labels: Vec<i64> = k.domains.get(&k.prog.decision_cal).map(|d| d.iter().copied().collect()).unwrap_or_default();
+        Scheduler { needed, open: HashMap::new(), labels }
+    }
+
+    /// The decision bucket holding a base instant: its label.
+    fn label_of(&self, cal: &Cal, t: i64) -> i64 {
+        if *cal == Cal::Base {
+            return t;
+        }
+        let i = self.labels.partition_point(|l| *l < t);
+        self.labels.get(i).copied().unwrap_or(t)
     }
 
     /// A tuple keyed `key` at native resolution `native`, available at
-    /// `avail`, arrived: the barriers its availability closes (finer first),
-    /// after opening the bucket the availability reaches and the bucket the
-    /// tuple falls in at every resolution at or above its own. A bucket
-    /// closes when the stream's availability passes its end, never because
-    /// of a key: a late tuple falls into a closed bucket.
-    fn advance(&mut self, k: &mut Kernel, key: i64, avail: i64, native: Resolution) -> Vec<(Resolution, i64)> {
+    /// `avail`, arrived: the barriers its availability closes, after opening
+    /// the bucket the availability reaches. A bucket closes when the
+    /// stream's availability passes its end, never because of a key: a late
+    /// tuple falls into a closed bucket.
+    fn advance(&mut self, k: &mut Kernel, key: i64, avail: i64, native: Resolution) -> Vec<(Cal, i64)> {
         let mut closed = Vec::new();
-        for &r in &self.needed {
-            if r < native {
-                continue;
-            }
-            let front = time::bucket(r, avail);
-            match self.open.get(&r).copied() {
+        let _ = native;
+        let needed = self.needed.clone();
+        for r in &needed {
+            let front = self.label_of(r, avail);
+            match self.open.get(r).copied() {
                 Some(l) if l == front => {}
                 Some(l) if l < front => {
-                    closed.push((r, l));
-                    self.open.insert(r, front);
+                    closed.push((r.clone(), l));
+                    self.open.insert(r.clone(), front);
                     k.open_bucket(r, front);
                 }
                 Some(_) => {}
                 None => {
-                    self.open.insert(r, front);
+                    self.open.insert(r.clone(), front);
                     k.open_bucket(r, front);
                 }
             }
             // The tuple's own bucket exists whatever its availability.
-            k.open_bucket(r, time::bucket(r, key));
+            let own = self.label_of(r, key);
+            k.open_bucket(r, own);
         }
         closed
     }
 
-    fn close_all(&mut self) -> Vec<(Resolution, i64)> {
-        let mut out: Vec<(Resolution, i64)> = self.open.drain().collect();
+    fn close_all(&mut self) -> Vec<(Cal, i64)> {
+        let mut out: Vec<(Cal, i64)> = self.open.drain().collect();
         out.sort();
         out
     }
@@ -229,8 +239,8 @@ impl<'p, 'e> Fold<'p, 'e> {
             labels: k.labels.names().to_vec(),
             stores: k.stores.clone(),
             domains: {
-                let mut d: Vec<(Resolution, Vec<i64>)> = k.domains.iter().map(|(r, s)| (*r, s.iter().copied().collect())).collect();
-                d.sort_by_key(|(r, _)| *r);
+                let mut d: Vec<(Cal, Vec<i64>)> = k.domains.iter().map(|(r, s)| (r.clone(), s.iter().copied().collect())).collect();
+                d.sort_by_key(|(r, _)| r.clone());
                 d
             },
             last_price: {
@@ -241,7 +251,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             windows: k.windows.iter().map(|(key, cache)| (key.clone(), cache.iter().map(|(t, rows)| (*t, rows.clone())).collect())).collect(),
             stats: k.stats(),
             open_buckets: {
-                let mut v: Vec<(Resolution, i64)> = self.sched.open.iter().map(|(r, l)| (*r, *l)).collect();
+                let mut v: Vec<(Cal, i64)> = self.sched.open.iter().map(|(r, l)| (r.clone(), *l)).collect();
                 v.sort();
                 v
             },
@@ -311,10 +321,10 @@ impl<'p, 'e> Fold<'p, 'e> {
     fn step_inner(&mut self, ev: Event) -> Result<(), RunError> {
         match ev {
             Event::Tuple { rel, key, avail, tuple } => {
-                let native = self.kernel.relation_resolution(rel);
+                let native = self.kernel.relation_native(rel);
                 self.ran_decision = false;
                 for (res, label) in self.sched.advance(&mut self.kernel, key, avail, native) {
-                    self.barrier(res, label)?;
+                    self.barrier(&res, label)?;
                 }
                 // A checkpoint at the end of a decision bar, before the tuple
                 // that closed it is stored: the replay resumes at this tuple.
@@ -329,25 +339,26 @@ impl<'p, 'e> Fold<'p, 'e> {
                         self.bars_since_checkpoint = 0;
                     }
                 }
-                // A tuple keyed before the open bucket of its own resolution
-                // arrived after its bar closed: it is available from now on,
-                // and what was derived meanwhile is recomputed on demand.
-                let late = self.sched.open.get(&native).map(|&open| time::bucket(native, key) < open).unwrap_or(false);
+                // A tuple keyed before the open decision bucket arrived after
+                // its bar closed: it is available from now on, and what was
+                // derived meanwhile is recomputed on demand.
+                let dcal = self.kernel.prog.decision_cal.clone();
+                let late = self.sched.open.get(&dcal).map(|&open| self.sched.label_of(&dcal, key) < open).unwrap_or(false);
                 self.kernel.insert_fact(rel, tuple)?;
                 if late {
                     self.kernel.invalidate_from(key);
                 }
                 Ok(())
             }
-            Event::Barrier { res, label } => {
-                self.kernel.open_bucket(res, label);
-                self.barrier(res, label)
+            Event::Barrier { cal, label } => {
+                self.kernel.open_bucket(&cal, label);
+                self.barrier(&cal, label)
             }
         }
     }
 
-    fn barrier(&mut self, res: Resolution, label: i64) -> Result<(), RunError> {
-        if res != self.kernel.prog.resolution {
+    fn barrier(&mut self, res: &Cal, label: i64) -> Result<(), RunError> {
+        if *res != self.kernel.prog.decision_cal {
             return Ok(());
         }
         // Outside the run's window a bar is data only.
@@ -374,7 +385,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             return Err(RunError::Internal("the fold halted on an earlier event".into()));
         }
         for (res, label) in self.sched.close_all() {
-            self.barrier(res, label)?;
+            self.barrier(&res, label)?;
         }
         if !self.decided_once {
             return Err(RunError::NoBars);

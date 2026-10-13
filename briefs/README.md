@@ -10,7 +10,7 @@ Procedure: for a brief `NAME.md`, keep the model's successive attempts as
 the model's text as written, nothing edited by hand), then run
 
 ```
-abt briefs report --briefs briefs --attempts attempts [--out report.json] corpus/
+abt briefs report --briefs briefs --attempts attempts [--out report.json] corpus-v2/catalog corpus-v2/lib
 ```
 
 The report records, per brief, whether the first attempt checked clean,
