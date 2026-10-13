@@ -302,16 +302,18 @@ fn failures_and_why_not() {
 }
 
 /// Why-not follows the excluding literal into the derived relation it
-/// reads, down to the root: a list the data never carries, three relations
-/// below `decide`, is the absence-driven verdict of the chain (the Oct 6
-/// study's `"SP500"` program, `docs/llm-usability.md`).
+/// reads, down to the root: a list the data never carries (the catalog's
+/// `SP400`, which the synthetic market has no members of; a name outside
+/// the catalog's vocabulary is V), three relations below `decide`, is the
+/// absence-driven verdict of the chain (the Oct 6 study's `"SP500"`
+/// program, `docs/llm-usability.md`).
 #[test]
 fn why_not_follows_the_chain_to_the_root() {
     let src = common::StrategyParts {
         name: "chain".into(),
-        needs: "need bars @1d   need listing   need lists \"NOPE\"".into(),
+        needs: "need bars @1d   need listing   need lists \"SP400\"".into(),
         params: "    qty : Quantity<Shares> = 10 shares".into(),
-        rules: "    rel cand(A: Equity, @T)\n    cand(A, T) :- universe(A, T), member(A, T, \"NOPE\").\n    rel sel(A: Equity, @T)\n    sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share.".into(),
+        rules: "    rel cand(A: Equity, @T)\n    cand(A, T) :- universe(A, T), member(A, T, \"SP400\").\n    rel sel(A: Equity, @T)\n    sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share.".into(),
         decides: "    decide(T, trade(A, qty)) :- sel(A, T), not position(A, T, _).".into(),
         ..Default::default()
     }
@@ -322,13 +324,12 @@ fn why_not_follows_the_chain_to_the_root() {
         assert!(r.decisions.is_empty());
         let t = *r.bars.last().unwrap();
         let w = why_not(k, &p, "decide", t, None, Some(Value::Equity(0))).unwrap();
-        eprintln!("PROBE chain\n{}", w.text());
         assert_eq!(w.depth(), 3, "{}", w.text());
         assert!(w.absence_driven(), "{}", w.text());
         let roots = w.roots();
         assert_eq!(roots.len(), 1, "{}", w.text());
         assert_eq!(roots[0].rule, "chain::cand#1");
-        assert!(roots[0].literal.as_ref().map(|(_, t)| t.contains("member(A, T, \"NOPE\")")).unwrap_or(false), "{:?}", roots[0].literal);
+        assert!(roots[0].literal.as_ref().map(|(_, t)| t.contains("member(A, T, \"SP400\")")).unwrap_or(false), "{:?}", roots[0].literal);
         assert!(roots[0].absence_driven);
         let text = w.text();
         assert!(text.contains("    why not sel(") && text.contains("        why not cand("), "{}", text);
