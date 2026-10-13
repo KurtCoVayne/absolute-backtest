@@ -64,13 +64,12 @@ fn explain_rejects_a_phantom_bucket() {
     let prog = common::program(&src, "bucket_counts");
     let ds = synthetic_minute(&["AAA", "BBB"], (2024, 1, 2), 2, 390, 7);
     let mut k = ran(&prog, &ds);
+    // A day's label is its last bar; a minute between two labels is no bar.
     let labels = k.bars_at(&prog.decision_cal);
-    eprintln!("PROBE labels {:?}", labels.iter().map(|t| format_timestamp(*t)).collect::<Vec<_>>());
     assert_eq!(labels.len(), 2, "one label a day: {:?}", labels);
     let mcount = rule(&prog, "bucket_counts::mcount#1");
-    let err = k.explain(mcount, ts("2024-01-02T10:30:00"), &[]).expect_err("10:30 is not a daily label").to_string();
-    eprintln!("PROBE err {}", err);
-    assert!(err.contains("2024-01-02T10:30:00 is not a bar of calendar daily"), "{}", err);
+    let err = k.explain(mcount, ts("2024-01-03T10:30:00"), &[]).expect_err("10:30 is not a daily label").to_string();
+    assert!(err.contains("2024-01-03T10:30:00 is not a bar of calendar daily"), "{}", err);
     assert!(err.contains(&format_timestamp(labels[0])) && err.contains(&format_timestamp(labels[1])), "{}", err);
     // A label is a real bar holding the day's 390 minute bars of each name.
     let ex = k.explain(mcount, labels[0], &[]).unwrap();

@@ -34,15 +34,16 @@ fn never() -> String {
 fn program_graph_reaches_and_annotates() {
     let prog = common::program(&up_down(), "up_down");
     let g = program_graph(&prog);
-    eprintln!("PROBE nodes {:?}", g.nodes.iter().map(|n| (n.name.clone(), n.depth, n.closed_loop)).collect::<Vec<_>>());
-    eprintln!("PROBE relations {:?}", prog.relations.keys().collect::<Vec<_>>());
     assert_eq!(g.nodes[0].name, "decide");
     for name in ["up", "flat", "held", "log_price_return", "price_return", "position", "decided", "universe", "close"] {
         assert!(g.node(name).is_some(), "graph lacks {}", name);
     }
-    // The book's drawdown is instantiated by `uses book`; decide never reaches it.
-    assert!(prog.relations.contains_key("drawdown"), "{:?}", prog.relations.keys().collect::<Vec<_>>());
+    // A library relation decide never reaches is not even instantiated
+    // (`uses book` brings in `drawdown` only when a rule reads it), and a
+    // primitive of the demand decide never reads is not in the graph.
+    assert!(!prog.relations.contains_key("drawdown"), "{:?}", prog.relations.keys().collect::<Vec<_>>());
     assert!(g.node("drawdown").is_none(), "drawdown is a library relation decide never reaches");
+    assert!(prog.relations.contains_key("volume") && g.node("volume").is_none(), "volume is a primitive decide never reaches");
     assert!(g.node("decide").unwrap().closed_loop);
     assert!(g.node("flat").unwrap().closed_loop, "flat reads position");
     assert!(!g.node("up").unwrap().closed_loop, "up reads market data only");
@@ -59,9 +60,9 @@ fn program_graph_reaches_and_annotates() {
     let flat = g.node("flat").unwrap();
     assert!(flat.reads.contains(&("position".to_string(), '-')), "{:?}", flat.reads);
     let text = show_program(&prog);
-    eprintln!("PROBE show\n{}", text);
     assert!(text.contains("decide(@T: Timestamp, -D: Decision)"), "{}", text);
-    assert!(text.contains("up_down::decide#1: decide(T, trade(A, qty)) :- up(A, T), flat(A, T)."), "{}", text);
+    // A decision prints with its order, the block's `market` when omitted.
+    assert!(text.contains("up_down::decide#1: decide(T, trade(A, qty, market)) :- up(A, T), flat(A, T)."), "{}", text);
     assert!(text.contains("closed loop"), "{}", text);
 }
 
@@ -75,7 +76,6 @@ fn coverage_names_the_first_empty_relation() {
     let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let result = k.run().unwrap();
     let by_name = |n: &str| result.coverage.iter().find(|c| c.name == n).cloned().unwrap();
-    eprintln!("PROBE coverage {:?}", result.coverage);
     assert_eq!(by_name("decide").tuples, 0);
     assert_eq!(by_name("decide").calls, 60);
     assert_eq!(by_name("rich").tuples, 0);
@@ -86,7 +86,6 @@ fn coverage_names_the_first_empty_relation() {
     assert_eq!(by_name("close").tuples, 120);
     assert!(!by_name("close").derived);
     let (text, causes) = coverage_report(&prog, &result.coverage, result.bars.len());
-    eprintln!("PROBE report\n{}", text);
     assert_eq!(causes.len(), 1, "{}", text);
     assert_eq!(causes[0].relation, "rich");
     assert_eq!(causes[0].path, vec!["decide".to_string(), "go".to_string(), "rich".to_string()]);

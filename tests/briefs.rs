@@ -88,7 +88,16 @@ fn the_command_line_prints_and_writes_the_report() {
     let (root, briefs, attempts) = fixture("cli");
     let out = root.join("report.json");
     let o = Command::new(env!("CARGO_BIN_EXE_abt"))
-        .args(["briefs", "report", "--briefs", &briefs.to_string_lossy(), "--attempts", &attempts.to_string_lossy(), "--out", &out.to_string_lossy()])
+        .args([
+            "briefs",
+            "report",
+            "--briefs",
+            &briefs.to_string_lossy(),
+            "--attempts",
+            &attempts.to_string_lossy(),
+            "--out",
+            &out.to_string_lossy(),
+        ])
         .args(CORPUS)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()

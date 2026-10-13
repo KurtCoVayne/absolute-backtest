@@ -152,11 +152,13 @@ fn the_summary_table_records_calendar_windows() {
         let sum = tables::summary(k, &p);
         assert!(!sum.is_empty(), "{}", sum.text());
         let labels: std::collections::BTreeSet<String> = sum.rows.iter().filter_map(|row| if let Cell::Str(s) = &row[0] { Some(s.clone()) } else { None }).collect();
-        eprintln!("PROBE labels {:?}", labels);
-        eprintln!("PROBE first rows\n{}", sum.text().lines().take(6).collect::<Vec<_>>().join("\n"));
         assert!(sum.rows.iter().all(|row| matches!(&row[6], Cell::Str(s) if s == "cached rows")), "{}", sum.text());
         assert_eq!(labels.len(), 2, "one rule per instance: {:?}", labels);
-        assert!(labels.iter().any(|l| l.contains("mean_window[")) && labels.iter().any(|l| l.contains("std_window[")), "rule labels: {:?}", labels);
+        assert!(
+            labels.iter().any(|l| l.contains("mean_window[")) && labels.iter().any(|l| l.contains("std_window[")),
+            "rule labels: {:?}",
+            labels
+        );
         assert!(
             sum.rows.iter().any(|row| matches!(&row[2], Cell::Str(s) if s == "std")) && sum.rows.iter().any(|row| matches!(&row[2], Cell::Str(s) if s == "mean")),
             "{}",
@@ -180,7 +182,6 @@ fn the_summary_table_holds_the_running_sums() {
     let ds = dataset();
     with_run(&p, &ds, true, |k, _| {
         let sum = tables::summary(k, &p);
-        eprintln!("PROBE rows_sum\n{}", sum.text().lines().take(6).collect::<Vec<_>>().join("\n"));
         let running: Vec<&Vec<Cell>> = sum.rows.iter().filter(|row| matches!(&row[6], Cell::Str(s) if s == "running")).collect();
         assert!(!running.is_empty(), "{}", sum.text());
         for row in running.iter().take(50) {
@@ -236,7 +237,6 @@ fn derivation_witnesses_and_trees() {
         assert_eq!(tree.rule.as_deref(), Some("trailing_stop::decide#2"));
         assert!(tree.size() > 4, "{}", tree.text());
         let text = tree.text();
-        eprintln!("PROBE tree\n{}", text);
         assert!(text.contains("supplied by the executor") || text.contains("supplied by the primitive"), "{}", text);
         assert!(text.contains("depth limit"), "{}", text);
         assert!(text.contains("not fill("), "the negation is a leaf: {}", text);
@@ -270,7 +270,6 @@ fn failures_and_why_not() {
             f.columns.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             vec!["rule", "identity", "bar", "literal", "literal_text", "bindings", "absence_driven"]
         );
-        eprintln!("PROBE failure\n{}", f.text());
         assert!(f.len() >= IDS.len(), "{}", f.text());
         assert!(f.rows.iter().all(|row| matches!(&row[1], Cell::Str(s) if IDS.contains(&s.as_str()))), "{}", f.text());
         assert!(f.rows.iter().any(|row| matches!(&row[4], Cell::Str(s) if s == "strong(A, T)")), "{}", f.text());
@@ -313,7 +312,8 @@ fn why_not_follows_the_chain_to_the_root() {
         name: "chain".into(),
         needs: "need bars @1d   need listing   need lists \"SP400\"".into(),
         params: "    qty : Quantity<Shares> = 10 shares".into(),
-        rules: "    rel cand(A: Equity, @T)\n    cand(A, T) :- universe(A, T), member(A, T, \"SP400\").\n    rel sel(A: Equity, @T)\n    sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share.".into(),
+        rules: "    rel cand(A: Equity, @T)\n    cand(A, T) :- universe(A, T), member(A, T, \"SP400\").\n    rel sel(A: Equity, @T)\n    sel(A, T) :- cand(A, T), close(A, T, P), P > 0 USD/share."
+            .into(),
         decides: "    decide(T, trade(A, qty)) :- sel(A, T), not position(A, T, _).".into(),
         ..Default::default()
     }
@@ -365,7 +365,6 @@ fn materialise_and_the_run_tables() {
         let book = tables::book(r);
         assert_eq!(book.len(), r.exposure.len());
         let b = tables::binding(&p, &ds);
-        eprintln!("PROBE binding\n{}", b.text());
         assert!(b.rows.iter().any(|row| matches!(&row[0], Cell::Str(s) if s == "close")), "{}", b.text());
         assert!(b.rows.iter().all(|row| matches!(row[2], Cell::Int(n) if n > 0)));
     });
