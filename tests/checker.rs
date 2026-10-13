@@ -133,7 +133,6 @@ fn a_strategy_declared_twice_in_the_workspace_is_a_u_error_naming_both() {
 }
 
 #[test]
-#[ignore = "src: a library declared twice in the workspace is not reported; the first declaration silently wins"]
 fn a_library_declared_twice_in_the_workspace_is_a_u_error() {
     let dup = "library calendar {\n  data { class any }\n  rules { }\n}\n";
     let src = common::strategy("uses_dup", "    qty : Quantity<Shares> = 100 shares", "", "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).");
@@ -264,7 +263,6 @@ fn a_calendar_duration_default_is_rejected_only_when_no_month_length_fits() {
 // that uses it.
 
 #[test]
-#[ignore = "src: W3 is not reported for a library relation declared with no rule; the empty template instantiates silently"]
 fn a_library_declared_relation_with_no_rules_is_warned_about() {
     let lib = "library ghost_lib {\n  data { class any }\n  rules {\n    rel ghost(A: Entity, @T)\n  }\n}\n";
     let src = common::StrategyParts {
@@ -370,7 +368,6 @@ fn a_numeric_literal_in_a_strategy_rule_warns_w5() {
 /// `min` count of a library window) is a degree of freedom of the strategy
 /// like any other literal of the rule.
 #[test]
-#[ignore = "src: a strategy's bracket literal (`30` in `zscore_window[lb, 30, close]`) is neither warned W5 nor counted for the strategy; it is substituted into the library instance and counted as a library literal"]
 fn a_literal_in_a_bracket_argument_warns_w5() {
     let src = dof_clean().replace("zscore_window[lb, k, close](A, T, Z), Z > 1.", "zscore_window[lb, 30, close](A, T, Z), Z > 1.");
     let (p, diags) = common::check(&src, "dof_clean");

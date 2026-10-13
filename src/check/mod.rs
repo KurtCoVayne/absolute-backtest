@@ -676,6 +676,9 @@ pub(crate) struct Checker<'a> {
     dof: DegreesOfFreedom,
     /// Calendars used by any rule: views and universes are generated for them.
     pub cals_used: BTreeSet<Cal>,
+    /// Literals the strategy writes in bracket arguments, by rule label:
+    /// its own degrees of freedom (W5), substituted into library instances.
+    pub bracket_literals: Vec<(String, Lit, Span)>,
 }
 
 impl<'a> Checker<'a> {
@@ -720,6 +723,7 @@ impl<'a> Checker<'a> {
             complete_set: BTreeSet::new(),
             dof: DegreesOfFreedom::default(),
             cals_used: BTreeSet::new(),
+            bracket_literals: Vec::new(),
         }
     }
 
@@ -856,6 +860,17 @@ impl<'a> Checker<'a> {
             }
             match self.ws.library(&name) {
                 Some(lib) => {
+                    let copies: Vec<Span> = self.ws.libraries().filter(|l| l.name == name).map(|l| l.span).collect();
+                    if copies.len() > 1 {
+                        let at: Vec<String> = copies.iter().map(|s| s.to_string()).collect();
+                        self.diag(
+                            Code::U,
+                            &name,
+                            None,
+                            copies[1],
+                            format!("library `{}` is declared twice in the workspace (at {}); rename or remove one", name, at.join(" and ")),
+                        );
+                    }
                     order.push(lib);
                     for (l, lsp) in lib.uses.iter().rev() {
                         stack.push((l.clone(), *lsp, lib.name.clone()));
@@ -1651,6 +1666,31 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // W3 for a library's declaration no rule of the library defines.
+        let lib_decls: Vec<(String, String, Span)> = self
+            .libs
+            .iter()
+            .flat_map(|lib| {
+                lib.rules
+                    .rels
+                    .iter()
+                    .filter(|d| !lib.rules.rules.iter().any(|r| r.head.name == d.name) && !is_reserved(&d.name))
+                    .map(|d| (lib.name.clone(), d.name.clone(), d.span))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (lib, name, span) in lib_decls {
+            self.diag(
+                Code::W3,
+                &lib,
+                None,
+                span,
+                format!(
+                    "derived relation `{}` of library `{}` is declared but no rule defines it; it is always empty, so every rule reading it positively can never fire",
+                    name, lib
+                ),
+            );
+        }
         // W2: unused parameters.
         let mut used: HashSet<String> = HashSet::new();
         for (_, info) in &infos {
@@ -1669,6 +1709,10 @@ impl<'a> Checker<'a> {
             instruments: self.dof.instruments,
             ..Default::default()
         };
+        // A literal written in a strategy's bracket is the strategy's (W5),
+        // not the library instance's it was substituted into.
+        let substituted: HashSet<(u32, u32)> = self.bracket_literals.iter().map(|(_, _, sp)| (sp.line, sp.col)).collect();
+        let bracket_literals = self.bracket_literals.clone();
         for (i, r) in rules.iter().enumerate() {
             let own = r.unit == root_name;
             if own {
@@ -1677,7 +1721,16 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let label = rule_label(&rules, i);
-            for (lit, span) in dof::literals_in_rule(r) {
+            let mut seen: HashSet<(u32, u32)> = HashSet::new();
+            let mut lits: Vec<(Lit, Span)> = dof::literals_in_rule(r).into_iter().filter(|(_, sp)| own || !substituted.contains(&(sp.line, sp.col))).collect();
+            if own {
+                lits.extend(bracket_literals.iter().filter(|(l, _, _)| *l == label).map(|(_, lit, sp)| (lit.clone(), *sp)));
+            }
+            for (lit, span) in lits {
+                // `rows[N]` desugars its count into the minimum too: one literal.
+                if !seen.insert((span.line, span.col)) {
+                    continue;
+                }
                 if let Lit::Entity(_) = lit {
                     // The instruments table is warned once, as W9.
                     if own && r.head.name != "instruments" {

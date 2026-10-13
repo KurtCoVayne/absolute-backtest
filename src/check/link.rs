@@ -505,7 +505,7 @@ impl<'a> Checker<'a> {
             return match self.ensure_traded(&cal) {
                 Some(inst) => Some(Resolved { name: inst, cal, read: Read::Plain }),
                 None => {
-                    if !self.demand_empty {
+                    if !self.demand_empty && !self.scope_incomplete {
                         err(
                             self,
                             Code::E,
@@ -1250,7 +1250,14 @@ impl<'a> Checker<'a> {
         let mut out = Vec::new();
         for b in &atom.brackets {
             match b {
-                ast::BracketArg::Lit(l, sp) => out.push(RArg::Val(Expr::Lit(l.clone(), *sp))),
+                ast::BracketArg::Lit(l, sp) => {
+                    // A literal the strategy writes in a bracket is its own
+                    // degree of freedom (W5), wherever it is substituted.
+                    if unit == self.root.name {
+                        self.bracket_literals.push((label.to_string(), l.clone(), *sp));
+                    }
+                    out.push(RArg::Val(Expr::Lit(l.clone(), *sp)))
+                }
                 ast::BracketArg::Name(n, sp) => {
                     if let Some(e) = subst.vals.get(n) {
                         out.push(RArg::Val(e.clone()));
@@ -1278,13 +1285,15 @@ impl<'a> Checker<'a> {
                         );
                         return None;
                     } else {
-                        self.diag(
-                            Code::U,
-                            unit,
-                            Some(label.to_string()),
-                            *sp,
-                            format!("`{}` in the brackets of `{}` is neither a parameter nor a relation", n, atom.name),
-                        );
+                        if !self.scope_incomplete {
+                            self.diag(
+                                Code::U,
+                                unit,
+                                Some(label.to_string()),
+                                *sp,
+                                format!("`{}` in the brackets of `{}` is neither a parameter nor a relation", n, atom.name),
+                            );
+                        }
                         return None;
                     }
                 }

@@ -88,7 +88,6 @@ fn a_missing_class_is_one_error_reported_first() {
 /// adv-05: a strategy checked without its catalog, library and preset files
 /// gets one diagnostic per missing unit and nothing per relation.
 #[test]
-#[ignore = "src: with the class missing, `traded@base` is still reported E and a bracket relation (`close` in `mean_window[..]`) U once per atom"]
 fn a_strategy_alone_reports_only_the_missing_units() {
     let src = common::corpus_source("strategies", "sma_crossover");
     let mut ws = Workspace::new();
