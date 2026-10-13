@@ -1,10 +1,10 @@
 # 00 · Architecture: the three layers
 
-Oct 12, 2026 · specification for implementation. This document and its five companions (`01-data.md`, `02-kernel.md`, `03-query.md`, `04-protocol.md`, `05-migration.md`) are the build sheet for splitting `absolute-backtest` into three independent Rust programs. Nothing in them is left to design; where a value is still the owner's to supply, section 8 names it and the default that stands until it is supplied.
+Oct 12, 2026 · specification for implementation. This document and its six companions (`01-data.md`, `02-kernel.md`, `03-query.md`, `04-protocol.md`, `05-migration.md`, `06-performance.md`) are the build sheet for splitting `absolute-backtest` into three independent Rust programs. Nothing in them is left to design; where a value is still the owner's to supply, section 8 names it and the default that stands until it is supplied.
 
 Tags on claims: **[E]** an established result, with a reference. **[N]** a new proposition, with a proof or proof sketch. **[C]** a conjecture, with what would settle it. **[D]** a design decision, with the alternative it rejects and why.
 
-Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n` are sections of the five companion documents. Decisions in this document are numbered `A-D1` to `A-D34` and are cited by the companions.
+Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n` are sections of the six companion documents (`X` is `06-performance.md`). Decisions in this document are numbered `A-D1` to `A-D34` and are cited by the companions.
 
 ---
 
