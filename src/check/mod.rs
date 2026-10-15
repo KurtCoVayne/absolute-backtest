@@ -426,6 +426,8 @@ pub struct Program {
     pub exec: ExecBlock,
     pub report: ReportConfig,
     pub observes: Vec<Observe>,
+    /// The strategy as written: what the renderings of the program print.
+    pub source: ast::Strategy,
 }
 
 impl Program {
@@ -500,6 +502,13 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
 /// synth`, `abt bundle build`, `abt bundle test`). The program decides
 /// nothing of consequence (`hold(A, 0)` over the universe).
 pub fn class_program(ws: &Workspace, class: &str) -> Result<Program, Vec<Diagnostic>> {
+    class_program_at(ws, class, None)
+}
+
+/// `class_program` reading the class's bars at `base` (`@1m` for a minute
+/// bundle of a class whose catalog is written at `@1d`); `None` reads them
+/// at the class's own base.
+pub fn class_program_at(ws: &Workspace, class: &str, base: Option<Resolution>) -> Result<Program, Vec<Diagnostic>> {
     let Some(cls) = ws.class(class) else {
         let known: Vec<String> = ws.units.iter().filter_map(|u| if let Unit::Class(c) = u { Some(c.name.clone()) } else { None }).collect();
         return Err(vec![Diagnostic {
@@ -515,7 +524,7 @@ pub fn class_program(ws: &Workspace, class: &str) -> Result<Program, Vec<Diagnos
             ),
         }]);
     };
-    let mut needs: Vec<String> = vec!["need bars".into()];
+    let mut needs: Vec<String> = vec![format!("need bars{}", base.map(|r| format!(" {}", r)).unwrap_or_default())];
     for word in ["actions", "listing", "sessions", "point_value", "commission"] {
         if cls.rels.iter().any(|r| Demand::need_for(&r.name) == word) {
             needs.push(format!("need {}", word));
@@ -1989,6 +1998,7 @@ impl<'a> Checker<'a> {
             exec,
             report,
             observes: self.observes,
+            source: self.root.clone(),
         };
         (Some(program), self.diags)
     }

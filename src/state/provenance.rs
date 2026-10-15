@@ -243,8 +243,8 @@ fn derive_in(k: &mut Kernel, prog: &Program, id: &str, depth: usize, memo: &mut 
     let Some(sig) = prog.relations.get(&rel) else {
         return Err(RunError::Request(format!("`{}` is not a relation of {}", rel, prog.strategy)));
     };
-    let leaf = |note: String| Derivation {
-        id: id.clone(),
+    let leaf = |id: &str, note: String| Derivation {
+        id: id.to_string(),
         relation: rel.clone(),
         bar,
         rule: None,
@@ -252,29 +252,33 @@ fn derive_in(k: &mut Kernel, prog: &Program, id: &str, depth: usize, memo: &mut 
         note: Some(note),
     };
     if args.len() != sig.args.len() {
-        return Ok(leaf(format!("{} argument(s) given, the signature has {}", args.len(), sig.args.len())));
+        return Ok(leaf(&id, format!("{} argument(s) given, the signature has {}", args.len(), sig.args.len())));
     }
-    // Signatures carry no inputs (language-v2, 3.4): the whole tuple is
-    // found by its rendered text among the relation's tuples at the bar.
+    // Signatures carry no inputs (language-v2, 3.4): the tuple is found
+    // among the relation's tuples at the bar, argument by argument; a `_`
+    // (a body literal's wildcard) matches any value, and the node is then
+    // named by the tuple found.
     let inputs: Vec<Value> = Vec::new();
     let tuples = match k.query(&rel, bar, &inputs) {
         Ok(t) => t,
-        Err(RunError::Arithmetic { message, .. }) => return Ok(leaf(format!("partial arithmetic: {}", message))),
-        Err(RunError::NotABar { .. }) => return Ok(leaf(format!("{} is not a bar of {}", format_timestamp(bar), rel))),
+        Err(RunError::Arithmetic { message, .. }) => return Ok(leaf(&id, format!("partial arithmetic: {}", message))),
+        Err(RunError::NotABar { .. }) => return Ok(leaf(&id, format!("{} is not a bar of {}", format_timestamp(bar), rel))),
         Err(e) => return Err(e),
     };
-    let wanted = format!("{}({})", rel, args.join(", "));
-    let found = tuples
-        .into_iter()
-        .find(|tu| format!("{}({})", rel, tu.iter().map(|v| k.show(v)).collect::<Vec<_>>().join(", ")) == wanted);
+    let found = tuples.into_iter().find(|tu| tu.len() == args.len() && tu.iter().zip(&args).all(|(v, a)| a == "_" || k.show(v) == *a));
     let Some(tuple) = found else {
-        return Ok(leaf(format!("no such tuple of {} at {}", rel, format_timestamp(bar))));
+        return Ok(leaf(&id, format!("no such tuple of {} at {}", rel, format_timestamp(bar))));
+    };
+    let id = if args.iter().any(|a| a == "_") {
+        format!("{}({})@{}", rel, tuple.iter().map(|v| k.show(v)).collect::<Vec<_>>().join(", "), format_timestamp(bar))
+    } else {
+        id
     };
     if let Some(kind) = supplied(prog, &rel) {
-        return Ok(leaf(format!("supplied by the {}", kind)));
+        return Ok(leaf(&id, format!("supplied by the {}", kind)));
     }
     let Some(w) = witness(k, prog, &rel, bar, &tuple)? else {
-        return Ok(leaf("no rule re-derives it".into()));
+        return Ok(leaf(&id, "no rule re-derives it".into()));
     };
     let mut body = Vec::new();
     for b in &w.body {

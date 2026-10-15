@@ -54,7 +54,7 @@ pub fn write_dump(prog: &Program, ds: &Dataset, cfg: &ExecConfig, result: &RunRe
         vec![
             ("t", times(ds_.iter().map(|d| d.t))),
             ("equity", strs(ds_.iter().map(|d| sym(d.decision.equity)))),
-            ("ctor", strs(ds_.iter().map(|d| d.decision.ctor.name().to_string()))),
+            ("ctor", strs(ds_.iter().map(|d| d.decision.ctor.resolved_name().to_string()))),
             ("amount", nums(ds_.iter().map(|d| d.decision.amount))),
             ("order", strs(ds_.iter().map(|d| d.decision.order.to_string()))),
             ("rule", strs(ds_.iter().map(|d| prog.rule_label(d.rule)))),
@@ -84,7 +84,7 @@ pub fn write_dump(prog: &Program, ds: &Dataset, cfg: &ExecConfig, result: &RunRe
         vec![
             ("t", times(dr.iter().map(|(t, _, _)| *t))),
             ("equity", strs(dr.iter().map(|(_, d, _)| sym(d.equity)))),
-            ("ctor", strs(dr.iter().map(|(_, d, _)| d.ctor.name().to_string()))),
+            ("ctor", strs(dr.iter().map(|(_, d, _)| d.ctor.resolved_name().to_string()))),
             ("amount", nums(dr.iter().map(|(_, d, _)| d.amount))),
             ("reason", strs(dr.iter().map(|(_, _, r)| r.clone()))),
         ],

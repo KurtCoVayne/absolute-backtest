@@ -1268,34 +1268,38 @@ impl<'p> Kernel<'p> {
                     }
                 }
                 self.stats.window_calls += 1;
-                // The group keys (language-v2, 4.2): the variables the
-                // conjunction binds that are unbound outside it and neither
-                // a constraint's time nor aggregated over; one result per
-                // distinct binding of them (`close@C(A, T, P)` groups by A).
-                let mut aggregated: Vec<String> = Vec::new();
-                for l in conj {
-                    if let Literal::Window { var: Term::Var(v, _), .. } = l {
-                        aggregated.push(v.clone());
+                // The group (language-v2, 4.2; semantic model, 5.1): with
+                // `within`, exactly its variables; otherwise the variables
+                // the conjunction shares with the rest of the rule (the head
+                // or another literal). A variable of the conjunction alone
+                // is local to it, neither a key nor bound by the aggregation.
+                // A group variable bound outside is an input of the group; an
+                // unbound one is a key the aggregation binds, with one result
+                // per distinct binding (`close@C(A, T, P) :- P = last(P1)
+                // over (...)` groups by A).
+                let group_vars: Vec<String> = match within {
+                    Some(w) => w.clone(),
+                    None => {
+                        let mut aggregated: Vec<String> = Vec::new();
+                        for l in conj {
+                            if let Literal::Window { var: Term::Var(v, _), .. } = l {
+                                aggregated.push(v.clone());
+                            }
+                        }
+                        for a in args {
+                            let mut vs = Vec::new();
+                            a.vars(&mut vs);
+                            aggregated.extend(vs.into_iter().map(|(v, _)| v));
+                        }
+                        let outer = outer_vars(&self.prog.rules[cr.idx], lit);
+                        let mut mentioned: Vec<String> = Vec::new();
+                        for l in conj {
+                            literal_vars(l, &mut mentioned);
+                        }
+                        mentioned.into_iter().filter(|v| !aggregated.contains(v) && outer.contains(v)).collect()
                     }
-                }
-                for a in args {
-                    let mut vs = Vec::new();
-                    a.vars(&mut vs);
-                    aggregated.extend(vs.into_iter().map(|(v, _)| v));
-                }
-                if let Some(w) = within {
-                    aggregated.extend(w.iter().cloned());
-                }
-                let mut mentioned: Vec<String> = Vec::new();
-                for l in conj {
-                    literal_vars(l, &mut mentioned);
-                }
-                let mut group_slots: Vec<usize> = mentioned
-                    .iter()
-                    .filter(|v| !aggregated.contains(v))
-                    .filter_map(|v| cr.slots.get(v).copied())
-                    .filter(|&s| env[s].is_none())
-                    .collect();
+                };
+                let mut group_slots: Vec<usize> = group_vars.iter().filter_map(|v| cr.slots.get(v).copied()).filter(|&s| env[s].is_none()).collect();
                 group_slots.sort_unstable();
                 group_slots.dedup();
                 let grouped = !group_slots.is_empty();
@@ -2268,6 +2272,36 @@ impl<'p> Kernel<'p> {
 /// commutative, so this changes nothing but the cost: the window enumerates
 /// the bars and the atom becomes a lookup instead of a scan.
 /// Every variable a literal mentions.
+/// The variables a rule mentions outside one of its body literals: in the
+/// head or in another literal. Another aggregation's conjunction is its own
+/// scope, so of it only the result and the group count.
+pub(crate) fn outer_vars(rule: &Rule, lit: &Literal) -> Vec<String> {
+    fn term(t: &Term, out: &mut Vec<String>) {
+        match t {
+            Term::Var(v, _) => out.push(v.clone()),
+            Term::Ctor(_, subs, _) => subs.iter().for_each(|s| term(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    rule.head.terms.iter().for_each(|t| term(t, &mut out));
+    for l in &rule.body {
+        if std::ptr::eq(l, lit) || l == lit {
+            continue;
+        }
+        match l {
+            Literal::Agg { var, within, .. } => {
+                out.push(var.clone());
+                if let Some(w) = within {
+                    out.extend(w.iter().cloned());
+                }
+            }
+            _ => literal_vars(l, &mut out),
+        }
+    }
+    out
+}
+
 pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {
     fn term(t: &Term, out: &mut Vec<String>) {
         match t {

@@ -507,7 +507,6 @@ fn a_walk_forward_picks_per_fold_and_logs_every_evaluation() {
 /// A trailing hold-out leaves every trial strictly before the embargo, so
 /// a trial and the revealed tail partition the sample.
 #[test]
-#[ignore = "src: run_study truncates the sample at `h - 1`, but Dataset::truncated takes a bar label and its daily horizon (bucket_range) reaches the end of day h, so every trial keeps the embargo's first bar"]
 fn a_trial_stops_before_the_trailing_embargo() {
     let dir = temp_dir("boundary");
     let project = Project::open(&dir);
@@ -529,7 +528,6 @@ fn a_trial_stops_before_the_trailing_embargo() {
 /// study tests run on the synthetic market, whose second name splits 2:1
 /// at two fifths of the sample.)
 #[test]
-#[ignore = "src: the executor fills a bar's pending orders (and checks ruin) before applying the bar's split, so a hold target sized at the post-split price is filled against the pre-split quantity and then doubled: a 2:1 split leaves a 100% fixed-base book at 200%, and one whose equity had bled halts on a false ruin"]
 fn a_split_is_applied_before_the_bar_fills() {
     use absolute_backtest::kernel::Value;
     let src = common::StrategyParts {

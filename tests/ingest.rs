@@ -190,7 +190,6 @@ fn databento_fixture(with_recv: bool) -> PathBuf {
 /// `volume`, the listing), keyed at the bar close, with the availability
 /// the export records.
 #[test]
-#[ignore = "src: databento_minute (src/ingest.rs) writes the v1 relations `close_m` and `volume_m`, which no v2 program reads; the equity class's minute bars are `open`, `high`, `low`, `close`, `volume`"]
 fn a_databento_export_is_keyed_at_the_bar_close_with_recorded_availability() {
     let prog = common::program(&hold_minute(), "minute_hold");
     let dir = databento_fixture(true);
@@ -232,7 +231,6 @@ fn a_databento_export_is_keyed_at_the_bar_close_with_recorded_availability() {
 /// manifest records the delay, the source and the recorded availability of
 /// the minute bars.
 #[test]
-#[ignore = "src: `abt bundle build --from-databento --class equity` ingests with check::class_program, whose demand is `need bars` at the class's base @1d, which the minute adapter refuses (`the program reads class equity at @1d`); and the adapter writes `close_m`/`volume_m` (see the test above)"]
 fn the_bundle_builder_takes_a_databento_export_with_a_processing_delay() {
     let dir = databento_fixture(true);
     let strategy = dir.join("minute_hold.dsl");

@@ -85,6 +85,10 @@ pub struct SimExecutor {
     /// (pay, sym, cash, amount, shares).
     receivables: Vec<(i64, Sym, f64, f64, f64)>,
     delisted_done: HashSet<Sym>,
+    /// The bar whose corporate actions the book carries (applied once,
+    /// before the bar's fills).
+    #[serde(default)]
+    actions_done: Option<i64>,
     zero_haircut_involuntary: usize,
     not_shortable: usize,
     shorts_held: bool,
@@ -107,6 +111,7 @@ impl SimExecutor {
             margin_calls: 0,
             receivables: Vec::new(),
             delisted_done: HashSet::new(),
+            actions_done: None,
             zero_haircut_involuntary: 0,
             not_shortable: 0,
             shorts_held: false,
@@ -150,6 +155,13 @@ impl SimExecutor {
             self.cash -= i;
             result.funding.margin_interest += i;
         }
+        // Then the execution bar's corporate actions: a split multiplies the
+        // quantity held, so the borrow fee and the orders are sized against
+        // the post-split book at the bar's (post-split) prices; a dividend
+        // going ex accrues to the shares held through the bar. Interest was
+        // earned on the cash held over the interval, before a payment at
+        // the bar.
+        self.corporate_actions(k, tn, result);
         // A future is sold, not borrowed: no borrow fee, no locate.
         let shorts: Vec<(Sym, f64)> = self.positions.iter().filter(|(s, q)| **q < 0.0 && !k.is_future(**s)).map(|(s, q)| (*s, *q)).collect();
         for (sym, q) in shorts {
@@ -653,13 +665,15 @@ impl SimExecutor {
         k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.cash)]);
     }
 
-    /// Corporate actions and delistings at the bar (data-bundle doc, section
-    /// 4), before the mark: a split multiplies the position at its ex-date, a
-    /// dividend's receivable is recorded at the ex-date and paid at the pay
-    /// date, a delisted name is force-closed at its last trade less the
-    /// haircut for the reason.
-    fn actions(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
-        let fill_rel = k.rel_id("fill");
+    /// Corporate actions at the bar (data-bundle doc, section 4), once, before
+    /// the bar's fills and its mark: a split multiplies the position at its
+    /// ex-date, a dividend's receivable is recorded at the ex-date and paid
+    /// at the pay date. Whether the book changed.
+    fn corporate_actions(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
+        if self.actions_done == Some(t) {
+            return false;
+        }
+        self.actions_done = Some(t);
         let mut book_changed = false;
         let split_rel = if self.cfg.actions_in_prices { None } else { k.split_rel };
         let dividend_rel = if self.cfg.actions_in_prices { None } else { k.dividend_rel };
@@ -748,6 +762,14 @@ impl SimExecutor {
             });
             book_changed = true;
         }
+        book_changed
+    }
+
+    /// Delistings at the bar, after its fills: a delisted name is
+    /// force-closed at its last trade less the haircut for the reason.
+    fn delistings(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
+        let fill_rel = k.rel_id("fill");
+        let mut book_changed = false;
         if let Some(id) = k.delisted_rel {
             let entity_pos = k.rels[id].entity_positions.first().copied().unwrap_or(0);
             let gone: Vec<(Sym, String)> = k.stores[id]
@@ -827,7 +849,9 @@ impl Executor for SimExecutor {
         }
         self.bars.push(t);
         result.bars.push(t);
-        if self.actions(k, t, result) {
+        let mut changed = self.corporate_actions(k, t, result);
+        changed |= self.delistings(k, t, result);
+        if changed {
             self.rewrite_book(k, t);
         }
         // Mark to market before the bar's decisions.

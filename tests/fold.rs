@@ -130,7 +130,6 @@ fn the_fold_equals_the_batch_kernel_on_every_daily_corpus_strategy() {
 /// The strategies on a minute base (`opening_gap`, `resampled_momentum`),
 /// whose daily catalog is keyed at the date.
 #[test]
-#[ignore = "src: kernel/fold.rs Scheduler::advance opens a base bucket at every tuple's key, so the daily listing's midnight keys become decision bars of a minute-base run (opening_gap: the fold has 9630 bars, the batch kernel 9600)"]
 fn the_fold_equals_the_batch_kernel_on_every_minute_corpus_strategy() {
     fold_equals_batch(true);
 }

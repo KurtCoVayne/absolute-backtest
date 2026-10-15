@@ -101,6 +101,27 @@ fn a_split_multiplies_the_position_at_the_ex_date_and_cashes_the_fraction() {
     assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![22.5]);
 }
 
+/// A program that applies actions (`actions apply`) without loading them
+/// (`need actions`) cannot see the split: the run warns, naming what the
+/// data carries, and the split is a price move to its book.
+#[test]
+fn a_split_the_program_does_not_load_is_warned() {
+    let mut m = market(&[Some(20.0), Some(20.0), Some(10.0), Some(10.0), Some(10.0)]);
+    m.ds.add("split", vec![Value::Equity(m.x), Value::Time(m.days[2]), Value::Num(2.0)]);
+    // (The catalog library needs the actions too, so it goes with them.)
+    let blind = hold().replace("need actions   ", "").replace(", catalog", "");
+    assert_ne!(blind, hold());
+    let p = common::program(&blind, "hold");
+    let r = run(&p, &m.ds, cfg(1000.0)).unwrap();
+    let w: Vec<&str> = r.warnings.iter().filter(|w| w.bias == "corporate actions").map(|w| w.message.as_str()).collect();
+    assert!(w.len() == 1 && w[0].contains("split") && w[0].contains("need actions"), "{:?}", r.warnings);
+    assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![10.0], "the split is not applied");
+    // With the need, the split is applied and nothing is warned.
+    let r = run(&common::program(&hold(), "hold"), &m.ds, cfg(1000.0)).unwrap();
+    assert!(r.warnings.iter().all(|w| w.bias != "corporate actions"), "{:?}", r.warnings);
+    assert_eq!(r.final_positions.values().copied().collect::<Vec<_>>(), vec![20.0]);
+}
+
 #[test]
 fn a_dividend_is_credited_on_the_pay_date_for_the_shares_held_at_the_ex_date() {
     // Announced day 1: ex day 3, pay day 5, 1.00 a share. Bought 10 on day 2; the

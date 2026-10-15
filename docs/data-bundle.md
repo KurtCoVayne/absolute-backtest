@@ -161,7 +161,7 @@ component that differs between the two is the executor attached to the fold.
 > forward, `liquid`), and the executor's handling of splits, dividends and
 > delistings with the haircuts of section 10 item 2. The synthetic catalog
 > market carries every event. The bundle format (`src/bundle.rs`), the
-> version a strategy names (`env name@version`) and the bundle tests the data
+> version a strategy names (`prefer version "V"` in its data block) and the bundle tests the data
 > can answer are in; a bundle that has not passed them is refused by `abt run
 > --bundle` unless `--untested`, which notes that its decisions are not
 > causality-certified.
@@ -306,7 +306,11 @@ write `AAPL`, and the bundle date fixes what that means.
 > (`--dividends reinvest`), actions already in a total-return price relation
 > (`--actions in-prices`), a run window (`--start`, `--end`) and the metrics
 > of both conventions per bar or per day on a reporting calendar
-> (`--report-by day --report-calendar REL`, `--periods-per-year`).
+> (`--report-by day --report-calendar REL`, `--periods-per-year`). In the
+> second formulation these options are gone: each is a field of the
+> program's execution block (`capital ... fixed | compounding`, `orders`,
+> `commission X bps per side`, `delisting last_price`, `actions in_price`)
+> or its report block (`calendar`, `periods N per year`, `window`).
 
 Seventeen biases live in the gap between a decision and a fill; the executor
 models fourteen with conservative defaults and warns when a study turns a

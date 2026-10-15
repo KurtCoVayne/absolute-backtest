@@ -99,7 +99,6 @@ fn the_window_cache_only_evicts_on_every_daily_corpus_strategy() {
 /// The strategies on a minute base (`opening_gap`, `resampled_momentum`),
 /// whose daily catalog is keyed at the date.
 #[test]
-#[ignore = "src: kernel/fold.rs Scheduler::advance opens a base bucket at every tuple's key, so the daily listing's midnight keys become decision bars of a minute-base fold (opening_gap: the fold decides nothing where the batch kernel decides; see tests/fold.rs)"]
 fn the_window_cache_is_exact_on_every_minute_corpus_strategy_on_both_drivers() {
     cache_is_exact(true, true);
 }

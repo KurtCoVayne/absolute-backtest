@@ -282,10 +282,14 @@ dataset. The fold (`kernel::run_fold`, `abt run --kernel fold`;
 `docs/data-bundle.md`, section 2) is `state' = step(state, event)` over the
 dataset's event log: every primitive tuple available at its own bar's close,
 ordered by availability, then relation; a tuple's arrival opens the buckets
-it falls in at every calendar the program needs and closes the ones before
-them, and the barrier of a decision bucket runs the executor's fill of the
-previous bar's orders, the bar's open (actions, mark, margin), the
-strategy's decisions and the executor's take, in the batch driver's order.
+it falls in at every calendar the program has and closes the ones before
+them (a bar of the base calendar opens only with a tuple at the base
+resolution; every other calendar's buckets are the schedule the dataset
+carries, the periods' last bars and the sessions), and the barrier of a
+decision bucket runs the executor's fill of the previous bar's orders (after
+the bar's corporate actions, so an ex-date's orders fill against the
+post-split book), the bar's open (delistings, mark, margin), the strategy's
+decisions and the executor's take, in the batch driver's order.
 Because every temporal builtin looks back only, a time domain that grows as
 buckets open is observationally the up-front one. The fold's state is
 serialisable (`kernel::Checkpoint`): `--checkpoint-every month|N
@@ -440,7 +444,7 @@ abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR |
 abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
-abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS --version V --out DIR <files...>
+abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>
 abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>
 abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>

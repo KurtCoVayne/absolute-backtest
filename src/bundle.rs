@@ -559,13 +559,13 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
     }
     accepted_here.set(accepted);
     push("action reconciliation", problems);
-    // Delisting coverage: a name whose last universe bar is before the data's
+    // Delisting coverage: a name whose last listed bar is before the data's
     // last bar has a delisted tuple.
     let mut problems = Vec::new();
-    if let Some(universe) = ds.facts.get("universe") {
-        let last_bar = universe.iter().filter_map(|tu| tu[1].as_time()).max();
+    if let Some(listing) = ds.facts.get("listed") {
+        let last_bar = listing.iter().filter_map(|tu| tu[1].as_time()).max();
         let mut last_seen: BTreeMap<Value, i64> = BTreeMap::new();
-        for tu in universe {
+        for tu in listing {
             if let Some(t) = tu[1].as_time() {
                 let e = last_seen.entry(tu[0].clone()).or_insert(t);
                 *e = (*e).max(t);
@@ -575,20 +575,20 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
         if let Some(last_bar) = last_bar {
             for (sym, t) in &last_seen {
                 if *t < last_bar && !delisted.contains(sym) {
-                    problems.push(format!("{} leaves the universe at {} with no delisted record", sym_name(sym), format_timestamp(*t)));
+                    problems.push(format!("{} leaves the listing at {} with no delisted record", sym_name(sym), format_timestamp(*t)));
                 }
             }
         }
     }
     push("delisting coverage", problems);
-    // Membership: a member tuple is for a name in the universe that bar.
+    // Membership: a member tuple is for a name listed that bar.
     let mut problems = Vec::new();
-    if let (Some(members), Some(universe)) = (ds.facts.get("member"), ds.facts.get("universe")) {
-        let listed: std::collections::BTreeSet<(Value, i64)> = universe.iter().filter_map(|tu| Some((tu[0].clone(), tu[1].as_time()?))).collect();
+    if let (Some(members), Some(listing)) = (ds.facts.get("member"), ds.facts.get("listed")) {
+        let listed: std::collections::BTreeSet<(Value, i64)> = listing.iter().filter_map(|tu| Some((tu[0].clone(), tu[1].as_time()?))).collect();
         for tu in members {
             if let Some(t) = tu[1].as_time() {
                 if !listed.contains(&(tu[0].clone(), t)) {
-                    problems.push(format!("{} is a member at {} but not in the universe", sym_name(&tu[0]), format_timestamp(t)));
+                    problems.push(format!("{} is a member at {} but not listed", sym_name(&tu[0]), format_timestamp(t)));
                 }
             }
         }

@@ -1,9 +1,9 @@
 //! Printable stage results (compiler design, section 2.3): every stage
 //! result renders as text for a reader and as JSON for tools. This module
 //! also holds the renderer of the core IR back to the surface syntax of the
-//! second formulation, which the Normalise stage uses for its re-parseable
-//! rendering, and the rendering of a checked program as written
-//! (`ir --stage checked`).
+//! second formulation (the Normalise stage's canonical core text), and the
+//! rendering of a checked program as written (`ir --stage checked`), which
+//! is the AST's (`syntax::print`).
 
 use crate::check::Program;
 use crate::ir::*;
@@ -18,56 +18,7 @@ pub trait Stage {
 /// A map from variable names to the names they are rendered with.
 pub type NameMap<'a> = &'a dyn Fn(&str) -> String;
 
-/// A literal value as the lexer reads it back: a float always carries a
-/// point or an exponent, so that `2.0` does not come back as the integer `2`.
-pub fn render_lit(l: &Lit) -> String {
-    fn float(x: f64) -> String {
-        if x.is_finite() && x.fract() == 0.0 && x.abs() < 1e15 {
-            format!("{:.1}", x)
-        } else {
-            format!("{:?}", x)
-        }
-    }
-    fn amount(x: f64) -> String {
-        if x.fract() == 0.0 && x.abs() < 1e15 {
-            format!("{}", x as i64)
-        } else {
-            format!("{:?}", x)
-        }
-    }
-    match l {
-        Lit::Int(i) => format!("{}", i),
-        Lit::Float(x) => float(*x),
-        Lit::Quantity(x, u) => format!("{} {}", amount(*x), u),
-        Lit::Money(x, c) => format!("{} {}", amount(*x), c),
-        Lit::Price(x, c) => format!("{} {}/unit", amount(*x), c),
-        Lit::Duration(d) => d.to_string(),
-        Lit::Time(t) if *t == i64::MIN => "1970-01-01".to_string(),
-        Lit::Time(t) => crate::kernel::time::format_timestamp(*t),
-        Lit::Str(s) | Lit::Entity(s) | Lit::Label(s) => format!("\"{}\"", s),
-    }
-}
-
-pub fn render_term(t: &Term, names: NameMap) -> String {
-    match t {
-        Term::Var(v, _) => names(v),
-        Term::Wild(_) => "_".into(),
-        Term::Param(p, _) => p.clone(),
-        Term::Lit(l, _) => render_lit(l),
-        Term::Ctor(c, args, _) => format!("{}({})", c, args.iter().map(|a| render_term(a, names)).collect::<Vec<_>>().join(", ")),
-    }
-}
-
-pub fn render_expr(e: &Expr, names: NameMap) -> String {
-    match e {
-        Expr::Var(v, _) => names(v),
-        Expr::Param(p, _) => p.clone(),
-        Expr::Lit(l, _) => render_lit(l),
-        Expr::Neg(x, _) => format!("-{}", render_expr(x, names)),
-        Expr::Bin(op, a, b, _) => format!("({} {} {})", render_expr(a, names), op, render_expr(b, names)),
-        Expr::Call(f, args, _) => format!("{}({})", f, args.iter().map(|a| render_expr(a, names)).collect::<Vec<_>>().join(", ")),
-    }
-}
+pub use crate::syntax::print::{render_expr, render_lit, render_term};
 
 pub fn render_atom(a: &Atom, names: NameMap) -> String {
     format!("{}({})", a.name, a.terms.iter().map(|t| render_term(t, names)).collect::<Vec<_>>().join(", "))
@@ -202,154 +153,19 @@ pub fn render_param(p: &Param) -> String {
     s
 }
 
-/// A rendering of a checked, linked program as source in the second
-/// formulation: the nine blocks of the strategy with every instantiated
-/// relation and view written out as a rule of the program (the linked
-/// program is first order). `rule_text` renders each rule by its index;
-/// `rule_order` gives the order rules are emitted in.
-pub struct SourceRendering<'a> {
-    pub prog: &'a Program,
-    pub strategy_name: &'a str,
-    pub rule_text: &'a dyn Fn(usize) -> String,
-    pub rule_order: Vec<usize>,
-}
-
-impl<'a> SourceRendering<'a> {
-    pub fn render(&self) -> String {
-        let prog = self.prog;
-        let mut out = String::new();
-        out.push_str(&format!("strategy {} {{\n", self.strategy_name));
-        // data
-        let d = &prog.demand;
-        out.push_str(&format!("  data {{\n    class {}\n", d.class));
-        if let Some(r) = d.bars {
-            out.push_str(&format!(
-                "    need bars {}{}{}\n",
-                r,
-                d.bars_from.map(|t| format!(" from {}", crate::kernel::time::format_timestamp(t))).unwrap_or_default(),
-                if d.bars_complete { " complete" } else { "" }
-            ));
-        }
-        let mut words: Vec<&str> = Vec::new();
-        if d.actions {
-            words.push("actions");
-        }
-        if d.listing {
-            words.push("listing");
-        }
-        if d.sessions {
-            words.push("sessions");
-        }
-        if d.point_value {
-            words.push("point_value");
-        }
-        if d.commission {
-            words.push("commission");
-        }
-        if !words.is_empty() {
-            out.push_str(&format!("    need {}\n", words.join(", ")));
-        }
-        if !d.lists.is_empty() {
-            out.push_str(&format!("    need lists {}\n", d.lists.iter().map(|l| format!("\"{}\"", l)).collect::<Vec<_>>().join(", ")));
-        }
-        if !d.series.is_empty() {
-            let items: Vec<String> = d.series.iter().map(|(n, r)| format!("\"{}\"{}", n, r.map(|r| format!(" {}", r)).unwrap_or_default())).collect();
-            out.push_str(&format!("    need series {}{}\n", items.join(", "), if d.series_complete { " complete" } else { "" }));
-        }
-        out.push_str(&format!("    {}\n    prefer {}\n  }}\n", if d.require_tested { "require tested" } else { "allow untested" }, d.prefer));
-        // calendars, clock
-        let declared: Vec<String> = prog.calendars.iter().filter(|(n, _)| n.as_str() != "base").map(|(n, c)| format!("{} = {}", n, c)).collect();
-        if !declared.is_empty() {
-            out.push_str(&format!("  calendars {{ {} }}\n", declared.join("   ")));
-        }
-        out.push_str(&format!(
-            "  clock {{ decide on {}{} }}\n",
-            prog.clock.calendar,
-            prog.clock.offset.map(|d| format!(" at session + {}", d)).unwrap_or_default()
-        ));
-        // universe
-        out.push_str("  universe {\n");
-        if !prog.instruments.is_empty() {
-            let rows: Vec<String> = prog
-                .instruments
-                .iter()
-                .map(|(n, f)| format!("{}{}", n, f.map(|t| format!(" from {}", crate::kernel::time::format_timestamp(t))).unwrap_or_default()))
-                .collect();
-            out.push_str(&format!("    instruments {{ {} }}\n", rows.join("; ")));
-        }
-        for &i in &self.rule_order {
-            if prog.rules[i].head.name == "universe" {
-                out.push_str(&format!("    {}\n", (self.rule_text)(i)));
-            }
-        }
-        out.push_str("  }\n");
-        // params
-        out.push_str("  params {\n");
-        if let Some(ps) = prog.params.get(&prog.strategy) {
-            for p in ps.values() {
-                out.push_str(&format!("    {}\n", render_param(p)));
-            }
-        }
-        out.push_str("  }\n");
-        // rules: every derived relation but the universe, the instruments
-        // table and decide, with its rules.
-        out.push_str("  rules {\n");
-        let mut rels: Vec<&Signature> = prog
-            .relations
-            .values()
-            .filter(|s| matches!(s.kind, Kind::Derived { .. }) && !matches!(s.name.as_str(), "universe" | "instruments"))
-            .collect();
-        rels.sort_by(|a, b| a.name.cmp(&b.name));
-        for s in rels {
-            out.push_str(&format!("    rel {}\n", render_signature(s, true)));
-            for &i in &self.rule_order {
-                if prog.rules[i].head.name == s.name {
-                    out.push_str(&format!("    {}\n", (self.rule_text)(i)));
-                }
-            }
-        }
-        for o in &prog.observes {
-            let wheres = if o.wheres.is_empty() {
-                String::new()
-            } else {
-                format!(" where {}", o.wheres.iter().map(|(v, l)| format!("{} = {}", v, render_lit(l))).collect::<Vec<_>>().join(", "))
-            };
-            out.push_str(&format!("    observe {}{}{}\n", o.rel, wheres, if o.trace_instances { " trace instances" } else { "" }));
-        }
-        out.push_str("  }\n");
-        // decisions
-        out.push_str(&format!(
-            "  decisions {{\n    silence {}\n    orders {}\n",
-            if prog.silence_flat { "flat" } else { "hold" },
-            prog.default_order
-        ));
-        for &i in &self.rule_order {
-            if prog.rules[i].head.name == "decide" {
-                out.push_str(&format!("    {}\n", (self.rule_text)(i)));
-            }
-        }
-        out.push_str("  }\n");
-        // execution, report
-        for line in prog.exec.to_string().lines() {
-            out.push_str(&format!("  {}\n", line));
-        }
-        out.push_str(&format!("  {}\n", prog.report));
-        out.push_str("}\n");
-        out
-    }
-}
-
-/// The checked program as written (`ir --stage checked`).
+/// The checked program as written (`ir --stage checked`): the strategy's
+/// blocks as the AST holds them, the execution and report blocks expanded.
 pub fn render_checked(prog: &Program) -> String {
-    let identity = |v: &str| v.to_string();
-    let text = |i: usize| render_rule(&prog.rules[i], &identity, None);
-    SourceRendering {
-        prog,
-        strategy_name: &prog.strategy,
-        rule_text: &text,
-        rule_order: (0..prog.rules.len()).collect(),
-    }
-    .render()
+    let exec = prog.exec.to_string();
+    let report = prog.report.to_string();
+    crate::syntax::print::render_strategy(
+        &prog.source,
+        &crate::syntax::print::Options {
+            execution: Some(&exec),
+            report: Some(&report),
+            rule_style: None,
+        },
+    )
 }
 
 /// The JSON of a checked program: relations, parameters, rules as text,

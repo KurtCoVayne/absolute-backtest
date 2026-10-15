@@ -650,10 +650,13 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 let saved = self.vars.clone();
                 self.schedule(conj, true);
                 // The group of an aggregation with no `within` is its free
-                // variables (4.2): what the conjunction binds that is
-                // neither a constraint's time nor aggregated over is a
-                // group key, bound by the aggregation with one result per
-                // group (`close@C(A, T, P) :- P = last(P1) over (...)`).
+                // variables (4.2): what the conjunction binds that the rest
+                // of the rule shares (the head or another literal), neither a
+                // constraint's time nor aggregated over, is a group key,
+                // bound by the aggregation with one result per group
+                // (`close@C(A, T, P) :- P = last(P1) over (...)`); a
+                // variable of the conjunction alone is local to it.
+                let outer = crate::kernel::eval::outer_vars(self.rule, lit);
                 let mut aggregated: Vec<String> = Vec::new();
                 for c in conj {
                     if let Literal::Window { var: Term::Var(v, _), .. } = c {
@@ -668,7 +671,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                 let group_keys: Vec<(String, VarState)> = if within.is_none() {
                     self.vars
                         .iter()
-                        .filter(|(v, _)| !saved.contains_key(*v) && !aggregated.contains(v))
+                        .filter(|(v, _)| !saved.contains_key(*v) && !aggregated.contains(v) && outer.contains(v))
                         .map(|(v, st)| (v.clone(), st.clone()))
                         .collect()
                 } else {
@@ -843,11 +846,15 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         ),
                     );
                 }
-                if let Some((k, _, ksp)) = rank {
+                if let Some((k, ties, ksp)) = rank {
                     if self.is_bound(k) {
                         self.err(Code::B, *ksp, format!("the rank `{}` must be a fresh variable", k));
                     } else {
-                        self.bind(k, Some(Ty::Count), TimeProv::Other);
+                        // An ordinal rank is a position, a Count; an averaged
+                        // one is the mean of the positions a run of equal keys
+                        // spans (2.5), a Scalar.
+                        let ty = if *ties == Ties::Average { Ty::scalar() } else { Ty::Count };
+                        self.bind(k, Some(ty), TimeProv::Other);
                     }
                 }
             }

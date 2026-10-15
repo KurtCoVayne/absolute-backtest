@@ -315,8 +315,9 @@ impl Dataset {
             contracts: self.contracts.clone(),
         };
         // The close of the decision bar t: what a decision at t can have seen
-        // (a bar's label is its close instant; a daily label is its date).
-        let horizon = time::bucket_range(prog.base, t).1.max(t);
+        // (a bar's label is its close instant; a daily label is its date). An
+        // instant that is no label bounds the sample at itself.
+        let horizon = if time::bucket(prog.base, t) == t { time::bucket_range(prog.base, t).1 } else { t };
         for (name, tuples) in &self.facts {
             let Some(sig) = prog.relations.get(name) else { continue };
             let Some(k) = sig.key_pos() else { continue };
@@ -1427,6 +1428,9 @@ pub struct Kernel<'p> {
     /// the live tuples.
     pub(crate) memo_stuck: FxHashMap<MemoKey, Rc<StuckSet>>,
     pub(crate) domains: HashMap<Cal, BTreeSet<i64>>,
+    /// Every calendar's labels over the whole dataset (the bars' keys, the
+    /// periods' last bars, the sessions): what a fold opens buckets from.
+    pub(crate) schedule: HashMap<Cal, BTreeSet<i64>>,
     /// Each instrument's sessions as (open, label) pairs by label (3.5), for
     /// the `sessions` calendars, `session_of` and the session constraints.
     pub(crate) sessions: FxHashMap<Sym, Rc<Vec<(i64, i64)>>>,
@@ -1701,6 +1705,29 @@ impl<'p> Kernel<'p> {
                 ),
             });
         }
+        // Corporate actions the data carries and the program does not load
+        // (no `need actions`): the executor cannot apply what it never sees,
+        // so the run says so rather than booking a split as a price move.
+        let carried: Vec<&str> = if cfg.actions_in_prices { vec!["delisted"] } else { vec!["split", "dividend", "delisted"] };
+        let ignored: Vec<&str> = carried
+            .into_iter()
+            .filter(|r| dataset.facts.get(*r).map(|v| !v.is_empty()).unwrap_or(false) && !prog.relations.contains_key(*r))
+            .collect();
+        if !ignored.is_empty() {
+            run_warnings.push(RunWarning {
+                bias: "corporate actions".into(),
+                message: format!(
+                    "the data carries {} and the program does not load {} (its data block has no `need actions`), so the executor applies none: {}",
+                    ignored.join(", "),
+                    if ignored.len() > 1 { "them" } else { "it" },
+                    if ignored.contains(&"split") {
+                        "a split moves the price and not the position, and a delisted name is never closed"
+                    } else {
+                        "a delisted name is never closed"
+                    }
+                ),
+            });
+        }
         let (symbols, remap) = symbols.sorted();
         let (labels, remap_labels) = labels.sorted();
         let literal_equities: HashMap<String, Sym> = literal_equities.into_iter().map(|(k, s)| (k, remap[s as usize])).collect();
@@ -1800,6 +1827,29 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        // A streaming kernel stores no fact yet, but its calendars are a
+        // schedule the bundle carries: the keys of the bars and the sessions
+        // are read from the dataset without storing a tuple.
+        if !load_facts {
+            for (name, tuples) in &dataset.facts {
+                let Some(&id) = rel_ids.get(name.as_str()) else { continue };
+                if !own_bar[id] && Some(id) != session_id {
+                    continue;
+                }
+                let key_pos = rels[id].key_pos;
+                for tu in tuples {
+                    let Some(key) = tu[key_pos].as_time() else { continue };
+                    if own_bar[id] {
+                        base_bars.insert(key);
+                    }
+                    if Some(id) == session_id {
+                        if let (Some(sym), Some(open)) = (tu.iter().find_map(|v| v.as_equity()), tu.iter().skip(key_pos + 1).find_map(|v| v.as_time())) {
+                            session_rows.push((remap[sym as usize], open, key));
+                        }
+                    }
+                }
+            }
+        }
         // The sessions by instrument, and the calendars' domains (3.1, 3.5):
         // a civil calendar's labels are the last base bar of each period;
         // the sessions calendar's labels are the session labels.
@@ -1841,6 +1891,15 @@ impl<'p> Kernel<'p> {
                 }
             };
             domains.insert(cal, dom);
+        }
+        // The schedule is every calendar's labels over the whole dataset: a
+        // batch kernel's domains are the schedule; a streaming kernel's start
+        // empty and grow as the fold's stream reaches each bucket.
+        let schedule = domains.clone();
+        if !load_facts {
+            for d in domains.values_mut() {
+                d.clear();
+            }
         }
         // Compiled rules: variable slots.
         let mut compiled = Vec::new();
@@ -2131,6 +2190,7 @@ impl<'p> Kernel<'p> {
             memo_errors: Default::default(),
             memo_stuck: Default::default(),
             domains,
+            schedule,
             session_domains: sessions.iter().map(|(s, v)| (*s, v.iter().map(|(_, l)| *l).collect())).collect(),
             sessions,
             cfg,
@@ -2680,10 +2740,6 @@ impl<'p> Kernel<'p> {
 
     /// The bracketed inputs of a rule: none in the linked program, where
     /// every template is instantiated.
-    pub fn rule_inputs(&self, _rule_idx: usize) -> Vec<(String, Ty)> {
-        Vec::new()
-    }
-
     /// Parse a command-line value as an input of type `ty`: an equity by
     /// identifier, a timestamp, or a literal in the DSL's own grammar.
     pub fn parse_input(&self, ty: &Ty, raw: &str) -> Result<Value, String> {
@@ -2777,14 +2833,7 @@ impl<'p> Kernel<'p> {
             env[cr.slots[v]] = Some(Value::Time(t));
         }
         if inputs.len() != info.inputs.len() {
-            let need: Vec<String> = self.rule_inputs(rule_idx).iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
-            return Err(RunError::Request(format!(
-                "rule {} takes {} inputs ({}), {} given",
-                cr.label,
-                info.inputs.len(),
-                need.join(", "),
-                inputs.len()
-            )));
+            return Err(RunError::Request(format!("rule {} takes {} inputs, {} given", cr.label, info.inputs.len(), inputs.len())));
         }
         for (pos, val) in info.inputs.iter().zip(inputs) {
             if let Term::Var(v, _) = &rule.head.terms[*pos] {
@@ -2878,6 +2927,7 @@ fn lag_uses_param(prog: &Program, unit: &str, name: &str) -> bool {
         match l {
             Literal::Builtin(Builtin::Lag { n: Expr::Param(p, _), .. }, _) => p == name,
             Literal::Agg { conj, .. } => conj.iter().any(|c| lit(c, name)),
+            Literal::Case { branches, .. } => branches.iter().any(|b| b.guard.iter().any(|g| lit(g, name))),
             _ => false,
         }
     }

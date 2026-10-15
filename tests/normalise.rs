@@ -27,7 +27,6 @@ fn corpus_sources() -> Vec<(String, String)> {
 /// The canonical rendering of a program parses, checks without errors, and
 /// normalises to the same hash and the same core text.
 #[test]
-#[ignore = "src: Nir::source (compiler/print.rs SourceRendering) writes the linked instances and views as strategy declarations (`rel bought_within[cooldown](A: Entity, @T: base)`, `rel traded@base(...)`) and drops `uses`, so the rendering of every v2 program fails to parse"]
 fn the_canonical_form_round_trips_on_the_corpus() {
     for (name, src) in corpus_sources() {
         let prog = common::program(&src, &name);
@@ -188,7 +187,6 @@ fn derived_forms_reduce_to_core_forms() {
 
 /// The surface rendering of the derived forms re-parses to the same hash.
 #[test]
-#[ignore = "src: Nir::source renders the `traded@base` view of the universe as `rel traded@base(A: Entity, @T: base)`, which does not parse (see the_canonical_form_round_trips_on_the_corpus)"]
 fn the_surface_rendering_of_derived_forms_re_parses() {
     let prog = common::program(&forms_strategy(), "forms");
     let nir = normalise(&prog);

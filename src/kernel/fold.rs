@@ -109,31 +109,40 @@ impl EventLog {
     }
 }
 
-/// The open bucket per calendar the program decides on, and the barriers
-/// a tuple's arrival closes. The fold streams the base bars: a decision
-/// barrier is the close of a decision-calendar bucket.
+/// The open bucket of every calendar of the program, and the barriers a
+/// tuple's arrival closes. The fold streams the base bars; every other
+/// calendar's buckets are the schedule's (the periods' last bars, the
+/// session labels), opened as the stream reaches them, so that a view or a
+/// window on any calendar sees the buckets the batch kernel would at that
+/// bar. A decision barrier is the close of a decision-calendar bucket.
 struct Scheduler {
     needed: Vec<Cal>,
     open: HashMap<Cal, i64>,
-    /// The decision calendar's labels (from the batch domain), for the
-    /// civil calendars whose label is the period's last bar.
-    labels: Vec<i64>,
+    /// Each calendar's labels but the base's, in order (the schedule).
+    labels: HashMap<Cal, Vec<i64>>,
 }
 
 impl Scheduler {
     fn new(k: &Kernel) -> Scheduler {
-        let needed: Vec<Cal> = vec![k.prog.decision_cal.clone()];
-        let labels: Vec<i64> = k.domains.get(&k.prog.decision_cal).map(|d| d.iter().copied().collect()).unwrap_or_default();
+        let mut needed: Vec<Cal> = k.schedule.keys().cloned().collect();
+        for c in [Cal::Base, k.prog.decision_cal.clone()] {
+            if !needed.contains(&c) {
+                needed.push(c);
+            }
+        }
+        needed.sort();
+        let labels = k.schedule.iter().filter(|(c, _)| **c != Cal::Base).map(|(c, d)| (c.clone(), d.iter().copied().collect())).collect();
         Scheduler { needed, open: HashMap::new(), labels }
     }
 
-    /// The decision bucket holding a base instant: its label.
-    fn label_of(&self, cal: &Cal, t: i64) -> i64 {
+    /// The bucket of a calendar holding an instant: its label, the first at
+    /// or after the instant; `None` past the calendar's last label.
+    fn label_of(&self, cal: &Cal, t: i64) -> Option<i64> {
         if *cal == Cal::Base {
-            return t;
+            return Some(t);
         }
-        let i = self.labels.partition_point(|l| *l < t);
-        self.labels.get(i).copied().unwrap_or(t)
+        let labels = self.labels.get(cal)?;
+        labels.get(labels.partition_point(|l| *l < t)).copied()
     }
 
     /// A tuple keyed `key` at native resolution `native`, available at
@@ -151,15 +160,19 @@ impl Scheduler {
         let needed = self.needed.clone();
         for r in &needed {
             let front = self.label_of(r, avail);
-            if *r == Cal::Base && !base_tuple {
+            // Past a calendar's last label the stream opens no bucket of it,
+            // and closes the open one.
+            let opens = if *r == Cal::Base { base_tuple } else { front.is_some() };
+            if !opens {
                 if let Some(l) = self.open.get(r).copied() {
-                    if l < front {
+                    if front.map(|f| l < f).unwrap_or(true) {
                         closed.push((r.clone(), l));
                         self.open.remove(r);
                     }
                 }
                 continue;
             }
+            let Some(front) = front else { continue };
             match self.open.get(r).copied() {
                 Some(l) if l == front => {}
                 Some(l) if l < front => {
@@ -174,8 +187,9 @@ impl Scheduler {
                 }
             }
             // The tuple's own bucket exists whatever its availability.
-            let own = self.label_of(r, key);
-            k.open_bucket(r, own);
+            if let Some(own) = self.label_of(r, key) {
+                k.open_bucket(r, own);
+            }
         }
         closed
     }
@@ -208,7 +222,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         let sched = Scheduler::new(&kernel);
         let result = RunResult {
             symbols: kernel.symbols.names().to_vec(),
-            warnings: kernel.cfg.warnings(),
+            warnings: kernel.cfg.warnings().into_iter().chain(kernel.run_warnings.iter().cloned()).collect(),
             price_relation: kernel.price_rel.map(|id| kernel.rels[id].name.clone()),
             volume_relation: kernel.volume_rel.map(|id| kernel.rels[id].name.clone()),
             base_capital: (!kernel.cfg.compounding).then_some(kernel.cfg.initial_cash),
@@ -356,7 +370,12 @@ impl<'p, 'e> Fold<'p, 'e> {
                 // its bar closed: it is available from now on, and what was
                 // derived meanwhile is recomputed on demand.
                 let dcal = self.kernel.prog.decision_cal.clone();
-                let late = self.sched.open.get(&dcal).map(|&open| self.sched.label_of(&dcal, key) < open).unwrap_or(false);
+                let late = self
+                    .sched
+                    .open
+                    .get(&dcal)
+                    .map(|&open| self.sched.label_of(&dcal, key).map(|l| l < open).unwrap_or(false))
+                    .unwrap_or(false);
                 self.kernel.insert_fact(rel, tuple)?;
                 if late {
                     self.kernel.invalidate_from(key);

@@ -280,8 +280,13 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
         return Err(format!("{}: no bar rows", bars.path().display()));
     }
     let (ce, ci, cc, cv) = (bars.col("ts_event")?, bars.col("instrument_id")?, bars.col("close")?, bars.col("volume")?);
+    // Open, high and low when the export carries them, else the close.
+    let (co, ch, cl) = (bars.col("open").ok(), bars.col("high").ok(), bars.col("low").ok());
     let recv = bars.col("ts_recv").ok();
     let recorded = recv.is_some();
+    // The listing is the daily catalog, keyed at the date: a name is listed
+    // on every day it has a bar, available with the day's first bar.
+    let mut listed: BTreeSet<(u32, i64)> = BTreeSet::new();
     for r in 0..bars.len() {
         let t = bars.time(ce, r)? + 60;
         let id = history.id_at(&bars.string(ci, r)?, t)?;
@@ -290,21 +295,29 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
         if close <= 0.0 {
             return Err(format!("{}: non-positive close {} for {} at {}", bars.at(r), close, id, format_timestamp(t)));
         }
+        let column = |c: Option<usize>| -> Result<f64, String> { c.map(|c| bars.number(c, r)).transpose().map(|v| v.unwrap_or(close)) };
+        let (open, high, low) = (column(co)?, column(ch)?, column(cl)?);
         let avail = match recv {
             Some(c) => bars.time(c, r)?.max(t) + processing_delay,
             None => t + processing_delay,
         };
-        let close_tuple = vec![Value::Equity(sym), Value::Time(t), Value::Num(close)];
-        let volume_tuple = vec![Value::Equity(sym), Value::Time(t), Value::Num(bars.number(cv, r)?)];
-        let universe_tuple = vec![Value::Equity(sym), Value::Time(t)];
-        if recorded || processing_delay > 0 {
-            ds.add_available("close_m", close_tuple, avail);
-            ds.add_available("volume_m", volume_tuple, avail);
-            ds.add_available("listed", universe_tuple, avail);
-        } else {
-            ds.add("close_m", close_tuple);
-            ds.add("volume_m", volume_tuple);
-            ds.add("listed", universe_tuple);
+        let day = crate::kernel::time::day_key(t) * crate::kernel::time::DAY;
+        let mut tuples: Vec<(&str, Vec<Value>)> = vec![
+            ("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(open)]),
+            ("high", vec![Value::Equity(sym), Value::Time(t), Value::Num(high)]),
+            ("low", vec![Value::Equity(sym), Value::Time(t), Value::Num(low)]),
+            ("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(close)]),
+            ("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(bars.number(cv, r)?)]),
+        ];
+        if listed.insert((sym, day)) {
+            tuples.push(("listed", vec![Value::Equity(sym), Value::Time(day)]));
+        }
+        for (rel, tuple) in tuples {
+            if recorded || processing_delay > 0 {
+                ds.add_available(rel, tuple, avail);
+            } else {
+                ds.add(rel, tuple);
+            }
         }
     }
     ds.derive_tickers();

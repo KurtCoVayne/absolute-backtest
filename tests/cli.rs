@@ -111,8 +111,8 @@ fn explain_trailing_stop(rule: &str, extra: &[&str]) -> Output {
 
 /// trend-05: a library rule is explained by its `unit::head#n` label (the
 /// strategy's own may drop the unit). A v2 rule takes its inputs in brackets
-/// at link time, so `--inputs` feeds nothing and is refused with the count;
-/// an unknown label is refused naming the label form.
+/// at link time, so there is no `--inputs` option; an unknown label is
+/// refused naming the label form.
 #[test]
 fn explain_takes_a_library_rule_by_its_qualified_label() {
     let out = explain_trailing_stop("state::high_since_entry#1", &[]);
@@ -122,8 +122,7 @@ fn explain_takes_a_library_rule_by_its_qualified_label() {
 
     let out = explain_trailing_stop("decide#1", &["--inputs", "AAA,20d"]);
     let (_, stderr) = text(&out);
-    assert!(!out.status.success() && stderr.contains("0 inputs") && stderr.contains("2 given"), "stderr: {}", stderr);
-    assert!(!stderr.contains("internal"), "stderr: {}", stderr);
+    assert!(!out.status.success() && stderr.contains("unknown option") && stderr.contains("--inputs"), "stderr: {}", stderr);
 
     let out = explain_trailing_stop("nope#1", &[]);
     let (_, stderr) = text(&out);

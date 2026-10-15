@@ -6,6 +6,10 @@
 //! print the compiler's stages; `synth`, `bundle`, `study` and `briefs`
 //! manage data, bundles, studies and the briefs report. `usage()` holds
 //! the exact grammar of every command.
+// `RunError` carries the rule, the decision and the message of a halt; the
+// library allows the same lint for the same reason.
+#![allow(clippy::result_large_err)]
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -15,7 +19,7 @@ use absolute_backtest::check::{check_program, check_workspace, Severity, Workspa
 use absolute_backtest::data;
 use absolute_backtest::kernel::time::{format_timestamp, parse_timestamp};
 use absolute_backtest::kernel::{ExecConfig, Kernel, RunError, RunResult, Value};
-use absolute_backtest::{observe, Mode, Term, Ty};
+use absolute_backtest::{observe, Term, Ty};
 
 struct Args {
     cmd: String,
@@ -75,13 +79,13 @@ const OPTIONS: [&str; 51] = [
     "from",
     "version",
     "as-of",
-    "inputs",
     "bind",
     "param",
     "data",
     "rule",
     "at",
     "class",
+    "base",
     "out",
     "days",
     "symbols",
@@ -168,10 +172,6 @@ fn run_keeping(
                 for c in &causes {
                     for ri in prog.rules_for(&c.relation) {
                         let label = prog.rule_label(ri);
-                        if !k.rule_inputs(ri).is_empty() {
-                            notes.push(format!("rule {} takes inputs; explain it at a bar with abt query --rel {} --inputs ... --explain", label, c.relation));
-                            continue;
-                        }
                         let cal = prog.cal_of(&c.relation);
                         let first = result.bars[0];
                         let last = *result.bars.last().unwrap();
@@ -208,8 +208,8 @@ fn run_keeping(
 
 /// The program that covers a class whole (every relation, list and series
 /// the catalog declares), for the bundle and synthetic-market commands.
-fn class_program_or_exit(ws: &Workspace, class: &str) -> absolute_backtest::check::Program {
-    absolute_backtest::check::class_program(ws, class).unwrap_or_else(|diags| {
+fn class_program_or_exit(ws: &Workspace, class: &str, base: Option<absolute_backtest::Resolution>) -> absolute_backtest::check::Program {
+    absolute_backtest::check::class_program_at(ws, class, base).unwrap_or_else(|diags| {
         for d in &diags {
             eprintln!("{}", d);
         }
@@ -282,38 +282,6 @@ fn bar_for(k: &Kernel, prog: &absolute_backtest::check::Program, rel: &str, at: 
     Ok(t)
 }
 
-/// `--inputs`, parsed by the relation's input types (none when absent).
-fn inputs_for(k: &Kernel, prog: &absolute_backtest::check::Program, rel: &str, args: &Args) -> Result<Option<Vec<Value>>, RunError> {
-    let raw: Vec<String> = args
-        .opts
-        .get("inputs")
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let Some(sig) = prog.relations.get(rel) else {
-        let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
-        return Err(RunError::Request(format!("`{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
-    };
-    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).map(|a| (a.name.clone(), a.ty.clone())).collect();
-    if need.len() != raw.len() {
-        let shown: Vec<String> = need.iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
-        return Err(RunError::Request(format!(
-            "`{}` takes {} input(s) ({}), {} given; pass them in signature order with --inputs V1,V2,...",
-            rel,
-            need.len(),
-            shown.join(", "),
-            raw.len()
-        )));
-    }
-    need.iter()
-        .zip(&raw)
-        .map(|((n, ty), r)| k.parse_input(ty, r).map_err(|m| RunError::Request(format!("input `{}`: {}", n, m))))
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
-}
-
 /// `--symbol`, parsed as an instrument.
 fn symbol_for(k: &Kernel, args: &Args) -> Result<Option<Value>, RunError> {
     match args.opts.get("symbol") {
@@ -333,9 +301,9 @@ fn rel_option(args: &Args, what: &str) -> String {
 /// Write the state tables of a run as Arrow IPC files under `dir`
 /// (compiler design, section 7.2): coverage, plan with the observed
 /// counts, book, summary, the extension of every demanded derived
-/// relation whose inputs are at most its entity, the carried values of
-/// the recursive ones, and the derivation and failure tables of `decide`
-/// at the sampled bars. Returns the number of files.
+/// relation, the carried values of the recursive ones, and the derivation
+/// and failure tables of `decide` at the sampled bars. Returns the number
+/// of files.
 fn write_tables(k: &mut Kernel, prog: &absolute_backtest::check::Program, result: &RunResult, plan: &absolute_backtest::plan::Plan, dir: &Path) -> Result<usize, RunError> {
     use absolute_backtest::state::tables;
     std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("--tables {}: {}", dir.display(), e)))?;
@@ -359,10 +327,6 @@ fn write_tables(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
         .iter()
         .filter(|(_, s)| matches!(s.kind, absolute_backtest::Kind::Derived { .. } | absolute_backtest::Kind::Output))
         .filter(|(n, _)| plan.relations.iter().find(|r| &r.name == *n).map(|r| r.demanded && !r.elided).unwrap_or(false))
-        .filter(|(_, s)| {
-            let inputs: Vec<&absolute_backtest::Arg> = s.args.iter().filter(|a| false && a.mode == Mode::Key).collect();
-            inputs.is_empty() || matches!(inputs.as_slice(), [a] if a.ty.is_entity())
-        })
         .map(|(n, _)| n.clone())
         .collect();
     for name in &names {
@@ -417,23 +381,6 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
                 names.join(", ")
             )));
         };
-        // A relation whose only input is its entity is written for every
-        // symbol; any other input must be given at a bar with `query --inputs`.
-        let inputs: Vec<&absolute_backtest::Arg> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).collect();
-        let per_symbol = matches!(inputs.as_slice(), [a] if a.ty.is_entity());
-        if !inputs.is_empty() && !per_symbol {
-            let names: Vec<&str> = inputs.iter().map(|a| a.name.as_str()).collect();
-            return Err(RunError::Request(format!(
-                "--ledger: `{}` takes the inputs {}; a ledger is written for relations whose inputs are at most their entity (query it at a bar with --inputs instead)",
-                rel,
-                names.join(", ")
-            )));
-        }
-        let symbols: Vec<Value> = if per_symbol {
-            (0..k.symbol_names().len()).map(|i| Value::Equity(i as u32)).collect()
-        } else {
-            vec![]
-        };
         let bars: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
         let width = sig.args.len();
         let mut times: Vec<Option<i64>> = Vec::new();
@@ -448,16 +395,7 @@ fn write_ledger(k: &mut Kernel, prog: &absolute_backtest::check::Program, result
             })
             .collect();
         for t in bars {
-            let found: Vec<Vec<Value>> = if per_symbol {
-                let mut all = Vec::new();
-                for s in &symbols {
-                    all.extend(k.query(rel, t, std::slice::from_ref(s))?);
-                }
-                all
-            } else {
-                k.query(rel, t, &[])?
-            };
-            for tu in found {
+            for tu in k.query(rel, t, &[])? {
                 times.push(Some(t));
                 for j in 0..width {
                     match (&mut cols[j], &tu[j]) {
@@ -500,7 +438,7 @@ type Runner = dyn Fn(&absolute_backtest::check::Program, &absolute_backtest::ker
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised] [--kernel batch|fold]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report's metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised] [--kernel batch|fold]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report's metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --base RES            the bars a built bundle holds (default: the class's base; @1m with --from-databento)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
     );
     exit(code)
 }
@@ -1001,7 +939,7 @@ fn main() {
             print!("{}", observe::show_graph(&prog, &compiled));
         }
         "table" => {
-            // abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--inputs ...] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            // abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
             let (prog, _) = checked_program(&args);
             let which = args.opts.get("table").cloned().unwrap_or_else(|| {
                 eprintln!("table needs --table NAME (coverage, plan, book, binding, summary, extension, carried, derivation, failure)");
@@ -1035,18 +973,17 @@ fn main() {
                     "summary" => tables::summary(k, &prog),
                     "extension" | "carried" | "derivation" | "failure" => {
                         let rel = rel.clone().unwrap();
-                        let inputs = inputs_for(k, &prog, &rel, &args)?;
                         match which.as_str() {
-                            "extension" => tables::extension(k, &prog, &rel, &bars, inputs.as_deref())?,
-                            "carried" => tables::carried(k, &prog, &rel, &bars, inputs.as_deref())?,
+                            "extension" => tables::extension(k, &prog, &rel, &bars, None)?,
+                            "carried" => tables::carried(k, &prog, &rel, &bars, None)?,
                             "derivation" => {
                                 let t = bar_for(k, &prog, &rel, at, &bars)?;
-                                tables::derivation(k, &prog, &rel, t, inputs.as_deref())?
+                                tables::derivation(k, &prog, &rel, t, None)?
                             }
                             _ => {
                                 let t = bar_for(k, &prog, &rel, at, &bars)?;
                                 let sym = symbol_for(k, &args)?;
-                                tables::failure(k, &prog, &rel, t, inputs.as_deref(), sym)?
+                                tables::failure(k, &prog, &rel, t, None, sym)?
                             }
                         }
                     }
@@ -1075,7 +1012,7 @@ fn main() {
             }
         }
         "why-not" => {
-            // abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--inputs ...] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            // abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
             let (prog, _) = checked_program(&args);
             let rel = rel_option(&args, "why-not");
             let (dataset, label) = load_dataset(&args, &prog);
@@ -1091,9 +1028,8 @@ fn main() {
             let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
                 let result = k.run()?;
                 let t = bar_for(k, &prog, &rel, at, &result.bars)?;
-                let inputs = inputs_for(k, &prog, &rel, &args)?;
                 let sym = symbol_for(k, &args)?;
-                let w = absolute_backtest::state::provenance::why_not(k, &prog, &rel, t, inputs.as_deref(), sym)?;
+                let w = absolute_backtest::state::provenance::why_not(k, &prog, &rel, t, None, sym)?;
                 Ok(if json {
                     format!("{}\n", serde_json::to_string_pretty(&w.json()).unwrap_or_default())
                 } else {
@@ -1109,7 +1045,7 @@ fn main() {
             }
         }
         "materialise" | "materialize" => {
-            // abt materialise --strategy NAME --rel R [--at T] [--inputs ...] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            // abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
             let (prog, _) = checked_program(&args);
             let rel = rel_option(&args, "materialise");
             let (dataset, label) = load_dataset(&args, &prog);
@@ -1126,8 +1062,7 @@ fn main() {
             let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
                 let result = k.run()?;
                 let t = bar_for(k, &prog, &rel, at, &result.bars)?;
-                let inputs = inputs_for(k, &prog, &rel, &args)?;
-                let table = absolute_backtest::state::tables::materialise(k, &prog, &rel, t, inputs.as_deref(), elided)?;
+                let table = absolute_backtest::state::tables::materialise(k, &prog, &rel, t, None, elided)?;
                 Ok(if json {
                     format!("{}\n", serde_json::to_string_pretty(&table.json()).unwrap_or_default())
                 } else {
@@ -1209,11 +1144,6 @@ fn main() {
                     exit(2)
                 })
             });
-            let raw_inputs: Vec<String> = args
-                .opts
-                .get("inputs")
-                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-                .unwrap_or_default();
             let symbol = args.opts.get("symbol").cloned();
             let explain = args.flags.contains("explain");
             let out = std::thread::Builder::new()
@@ -1232,33 +1162,11 @@ fn main() {
                         None => k.bars_at(&cal).into_iter().rfind(|&b| b <= last).unwrap_or(last),
                     };
                     k.check_bar(&cal, t)?;
-                    let need: Vec<(String, Ty)> = sig.args.iter().filter(|a| false && a.mode == Mode::Key).map(|a| (a.name.clone(), a.ty.clone())).collect();
-                    // A relation whose only input is its entity (`close(+A, @T, -P)`)
-                    // is queried for the symbol when --inputs is not given.
-                    let raw_inputs: Vec<String> = match (&symbol, raw_inputs.is_empty(), need.as_slice()) {
-                        (Some(s), true, [(_, Ty::Entity)]) => vec![s.clone()],
-                        _ => raw_inputs,
-                    };
-                    if need.len() != raw_inputs.len() {
-                        let shown: Vec<String> = need.iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
-                        return Err(RunError::Request(format!(
-                            "`{}` takes {} input(s) ({}), {} given; pass them in signature order with --inputs V1,V2,...",
-                            rel,
-                            need.len(),
-                            shown.join(", "),
-                            raw_inputs.len()
-                        )));
-                    }
-                    let inputs: Vec<Value> = need
-                        .iter()
-                        .zip(&raw_inputs)
-                        .map(|((n, ty), raw)| k.parse_input(ty, raw).map_err(|m| RunError::Request(format!("input `{}`: {}", n, m))))
-                        .collect::<Result<_, _>>()?;
                     let sym: Option<Value> = match &symbol {
                         Some(s) => Some(k.parse_binding(s).map_err(|m| RunError::Request(format!("--symbol {}: {}", s, m)))?),
                         None => None,
                     };
-                    let tuples = k.query(&rel, t, &inputs)?;
+                    let tuples = k.query(&rel, t, &[])?;
                     // A tuple is the symbol's when a field is the symbol, or a
                     // decision on it (`decide(T, buy(A, Q))` holds A inside D).
                     let is_sym = |v: &Value, s: &Value| match (v, s) {
@@ -1297,7 +1205,7 @@ fn main() {
                                     }
                                 }
                             }
-                            match k.explain_with(ri, t, &inputs, &bindings) {
+                            match k.explain_with(ri, t, &[], &bindings) {
                                 Ok(ex) => text.push_str(&format!("{}\n", ex)),
                                 Err(e) => text.push_str(&format!("{}\n", e)),
                             }
@@ -1345,11 +1253,6 @@ fn main() {
                         eprintln!("no rule labelled `{}`; labels are unit::head#n, e.g. {}", label, prog.rule_label(0));
                         exit(1)
                     });
-                let raw_inputs: Vec<String> = args
-                    .opts
-                    .get("inputs")
-                    .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-                    .unwrap_or_default();
                 let raw_binds: Vec<(String, String)> = args
                     .multi
                     .get("bind")
@@ -1369,31 +1272,14 @@ fn main() {
                     .stack_size(512 << 20)
                     .spawn(move || {
                         let mut k = Kernel::new(&prog, &dataset, cfg)?;
-                        // The rule's `+` arguments come from --inputs, parsed by the
-                        // signature's types; body variables from --bind.
-                        let need = k.rule_inputs(rule_idx);
-                        if need.len() != raw_inputs.len() {
-                            let shown: Vec<String> = need.iter().map(|(n, ty)| format!("{}: {}", n, ty)).collect();
-                            return Err(RunError::Request(format!(
-                                "rule {} takes {} inputs ({}), {} given; pass them in signature order with --inputs V1,V2,...",
-                                prog.rule_label(rule_idx),
-                                need.len(),
-                                shown.join(", "),
-                                raw_inputs.len()
-                            )));
-                        }
-                        let inputs: Vec<Value> = need
-                            .iter()
-                            .zip(&raw_inputs)
-                            .map(|((n, ty), raw)| k.parse_input(ty, raw).map_err(|m| RunError::Request(format!("input `{}`: {}", n, m))))
-                            .collect::<Result<_, _>>()?;
+                        // Body variables from --bind.
                         let bindings: Vec<(String, Value)> = raw_binds
                             .iter()
                             .map(|(var, raw)| k.parse_binding(raw).map(|v| (var.clone(), v)).map_err(|m| RunError::Request(format!("--bind {}: {}", var, m))))
                             .collect::<Result<_, _>>()?;
                         // Run up to and including `at`, so executor state exists, then explain.
                         let _ = k.run()?;
-                        k.explain_with(rule_idx, at, &inputs, &bindings)
+                        k.explain_with(rule_idx, at, &[], &bindings)
                     })
                     .unwrap()
                     .join()
@@ -2041,7 +1927,17 @@ fn main() {
                     let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
                     let version = args.opts.get("version").cloned().unwrap_or_else(|| usage(1));
                     let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
-                    let prog = class_program_or_exit(&ws, &env);
+                    // The bars the bundle holds: --base, else the class's own
+                    // base, or the minute bars the Databento adapter produces.
+                    let base = match args.opts.get("base") {
+                        Some(b) => Some(absolute_backtest::Resolution::parse(b.trim_start_matches('@')).unwrap_or_else(|| {
+                            eprintln!("--base: `{}` is not a resolution (@1m, @5m, @15m, @30m, @1h, @1d, @1w)", b);
+                            exit(2)
+                        })),
+                        None if args.opts.contains_key("from-databento") => Some(absolute_backtest::Resolution::M1),
+                        None => None,
+                    };
+                    let prog = class_program_or_exit(&ws, &env, base);
                     let mut source: Option<String> = None;
                     let mut exceptions = Vec::new();
                     let processing_delay: i64 = option(&args.opts, "processing-delay", "a number of seconds", 0);
@@ -2113,7 +2009,7 @@ fn main() {
                         eprintln!("{}", e);
                         exit(2)
                     });
-                    let prog = class_program_or_exit(&ws, &m.name);
+                    let prog = class_program_or_exit(&ws, &m.name, None);
                     let (m, results) = absolute_backtest::bundle::test_bundle(&prog, &dir).unwrap_or_else(|e| {
                         eprintln!("{}", e);
                         exit(2)
@@ -2142,7 +2038,7 @@ fn main() {
             let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
             let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
             // The writer needs a program whose demand covers the class whole.
-            let prog = class_program_or_exit(&ws, &env);
+            let prog = class_program_or_exit(&ws, &env, None);
             let ds = synthetic_for(&prog, &args.opts);
             data::write_parquet_dir(&prog, &ds, Path::new(&out)).unwrap_or_else(|e| {
                 eprintln!("{}", e);

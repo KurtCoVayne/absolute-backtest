@@ -64,7 +64,6 @@ fn market(days: usize) -> Dataset {
 }
 
 #[test]
-#[ignore = "src: reference/engine.py dispatches on the v1 constructors (buy, sell, short, cover, target_weight, target_quantity); a v2 dump's `trade`, `hold_weight` and `hold_quantity` fall into its target_weight branch, so it buys a delta of 10 shares as ten times the equity and halts on leverage"]
 fn every_daily_corpus_strategy_agrees_with_the_reference() {
     if !python_with_pandas() {
         eprintln!("skipped: python3 with pandas is not installed");
@@ -94,7 +93,6 @@ fn every_daily_corpus_strategy_agrees_with_the_reference() {
 }
 
 #[test]
-#[ignore = "src: reference/engine.py dispatches on the v1 constructors (buy, sell, short, cover, target_weight, target_quantity); a v2 dump's `trade`, `hold_weight` and `hold_quantity` fall into its target_weight branch, so it buys a delta of 10 shares as ten times the equity and halts on leverage"]
 fn policy_and_model_variants_agree_with_the_reference() {
     if !python_with_pandas() {
         eprintln!("skipped: python3 with pandas is not installed");
@@ -273,7 +271,6 @@ fn the_action_markets_end_at_their_hand_computed_nav() {
 }
 
 #[test]
-#[ignore = "src: reference/engine.py dispatches on the v1 constructors (buy, sell, short, cover, target_weight, target_quantity); a v2 dump's `trade`, `hold_weight` and `hold_quantity` fall into its target_weight branch, so it buys a delta of 10 shares as ten times the equity and halts on leverage"]
 fn the_action_markets_agree_with_the_reference() {
     if !python_with_pandas() {
         eprintln!("skipped: python3 with pandas is not installed");

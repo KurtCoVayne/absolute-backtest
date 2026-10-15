@@ -240,7 +240,6 @@ fn the_warnings_of_the_abstract_interpretation() {
 /// negative delta bound in the body, and the abstract interpretation does
 /// not warn on it.
 #[test]
-#[ignore = "src: analysis/ai.rs A011 still judges a delta by the first formulation (`trade(A, Q)` with `Q = -Q0` warns `may carry a non-positive quantity ... the kernel halts on it`); a v2 delta is signed and the kernel fills it"]
 fn a_negative_delta_is_not_warned() {
     let src = with_rules(
         "",

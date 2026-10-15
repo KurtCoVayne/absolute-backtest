@@ -169,12 +169,9 @@ pub fn program_graph(prog: &Program) -> ProgramGraph {
             let args: Vec<String> = sig
                 .args
                 .iter()
-                .map(|a| {
-                    let m = match a.mode {
-                        Mode::Out => "-",
-                        Mode::Key => "@",
-                    };
-                    format!("{}{}: {}", m, a.name, a.ty)
+                .map(|a| match a.mode {
+                    Mode::Key => format!("@{}: {}", a.name, a.ty),
+                    Mode::Out => format!("{}: {}", a.name, a.ty),
                 })
                 .collect();
             Node {
@@ -353,6 +350,14 @@ fn render_program(prog: &Program, facts: Option<GraphFacts>) -> String {
             ));
         }
     }
+    // The executor's configuration, expanded from the execution block, and
+    // the reporting.
+    out.push('\n');
+    for line in prog.exec.to_string().lines() {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("{}\n", prog.report));
     out.push_str("\nlegend: a read's sign is + positive, - negated, ~ inside an aggregation or reduction; depth is the longest path from a primitive; a closed-loop relation is evaluated after the previous bar's fills, an open-loop one could be computed ahead of any decision\n");
     out
 }

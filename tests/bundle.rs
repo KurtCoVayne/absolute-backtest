@@ -151,7 +151,6 @@ fn a_broken_bundle_fails_the_right_test_and_is_not_marked_tested() {
 /// whose rows stop before the data's last bar with no delisting record,
 /// and a member of a list on a day it is not listed.
 #[test]
-#[ignore = "src: the bundle tests `delisting coverage` and `membership` (src/bundle.rs, run_tests_with) read `universe`, which no v2 dataset holds (the catalog's listing is `listed`), so both pass vacuously"]
 fn a_missing_delisting_record_and_a_member_outside_the_listing_fail_their_tests() {
     let cls = class_prog();
     // Drop the delisting record: a name whose prices stop with no reason.
@@ -204,7 +203,6 @@ fn a_strategy_names_the_bundle_version_it_was_written_against() {
 /// writes it, pins the bundle version by its spelling, the bundle's own
 /// (`equity@2026.10`).
 #[test]
-#[ignore = "src: the parser reads a bare `prefer version 2026.10` as the float 2026.1 (src/syntax/parser.rs, Prefer::Version from Tok::Float), so the pinned strategy never matches bundle `equity@2026.10`; only the quoted spelling survives"]
 fn a_bare_version_keeps_its_spelling() {
     let src = common::corpus_source("strategies", "total_return_momentum").replace("prefer  latest", "prefer  version 2026.10");
     let p = common::program(&src, "total_return_momentum");

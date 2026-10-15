@@ -284,7 +284,6 @@ fn a_minute_rule_reads_the_previous_days_bar_until_the_day_closes() {
 
 /// Both drivers agree on what a minute rule sees of the daily bars.
 #[test]
-#[ignore = "src: on a minute bundle the fold takes the midnight keys of the daily catalog (listed) as base bars (six bars here, the batch kernel four) and decides nothing"]
 fn the_fold_agrees_with_the_batch_kernel_on_a_minute_rule_reading_daily_bars() {
     let f = run_fold(&intraday_daily(), &two_minute_days(), ExecConfig::frictionless()).unwrap();
     let fold: Vec<(String, f64)> = f.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect();

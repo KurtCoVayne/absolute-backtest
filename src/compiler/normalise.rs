@@ -19,10 +19,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 
-use super::print::{render_lit, render_literal, render_param, render_rule, render_signature, SourceRendering, Stage};
+use super::print::{render_lit, render_literal, render_param, render_rule, render_signature, Stage};
 use super::sha256::sha256_hex;
 use crate::check::Program;
 use crate::ir::*;
+use crate::syntax::print::{render_strategy, Options, RuleStyle};
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub enum NirTerm {
@@ -1498,19 +1499,30 @@ impl Nir {
         format!("{} :- {}.", head, body.join(", "))
     }
 
-    /// The program in the surface syntax with canonical names and order
-    /// (re-parseable).
+    /// The program in the surface syntax (re-parseable): the strategy as
+    /// written, each of its rules with canonical variable names and its
+    /// body in canonical order, the execution and report blocks expanded.
+    /// The library instances are not written out: the rendering is checked
+    /// against the same workspace and links to the same program.
     pub fn source(&self, prog: &Program) -> String {
-        let by_origin: HashMap<usize, usize> = self.rules.iter().enumerate().map(|(i, r)| (r.origin, i)).collect();
-        let text = |origin: usize| -> String { self.rule_text(by_origin[&origin]) };
-        let order: Vec<usize> = self.rules.iter().map(|r| r.origin).collect();
-        SourceRendering {
-            prog,
-            strategy_name: &prog.strategy,
-            rule_text: &text,
-            rule_order: order,
-        }
-        .render()
+        let style = |span: Span| -> Option<RuleStyle> {
+            let origin = prog.rules.iter().position(|r| r.unit == prog.strategy && r.span == span)?;
+            let r = self.rules.iter().find(|r| r.origin == origin)?;
+            Some(RuleStyle {
+                names: r.names.iter().map(|(c, w)| (w.clone(), c.clone())).collect(),
+                order: r.surface_origin.clone(),
+            })
+        };
+        let exec = prog.exec.to_string();
+        let report = prog.report.to_string();
+        render_strategy(
+            &prog.source,
+            &Options {
+                execution: Some(&exec),
+                report: Some(&report),
+                rule_style: Some(&style),
+            },
+        )
     }
 
     /// The canonical core text of every rule, one per line.

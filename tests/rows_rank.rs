@@ -15,13 +15,13 @@ fn rolling() -> String {
         "rolling",
         "    n : Count = 3
     w : Scalar = 0.1
-    cut_avg : Count = 2
+    cut_avg : Scalar = 2.0
     cut_ord : Count = 3",
         "    rel avg3(A: Equity, @T, M: Price<USD>)
     avg3(A, T, M) :- universe(A, T), M = mean(P) over (T1 in rows[n], close(A, T1, P)).
     rel px(A: Equity, @T, P: Price<USD>)
     px(A, T, P) :- universe(A, T), close(A, T, P).
-    rel rk(A: Equity, @T, K: Count)
+    rel rk(A: Equity, @T, K: Scalar)
     rk(A, T, K) :- bar(T), K = rank_average(px(A, T, P) by (P desc)) within (T).
     rel ordk(A: Equity, @T, K: Count)
     ordk(A, T, K) :- bar(T), K = rank(px(A, T, P) by (P desc, A asc)) within (T).",

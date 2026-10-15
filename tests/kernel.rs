@@ -331,16 +331,21 @@ fn every_corpus_strategy_runs_and_is_deterministic() {
         let prog = common::corpus_program(&name);
         let ds = dataset_for(&prog, 400, 11);
         let cfg = ExecConfig::from_program(&prog);
+        let rejects = cfg.on_leverage == OnLeverage::Reject;
         let a = run(&prog, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
         let b = run(&prog, &ds, cfg).unwrap();
         let show = |r: &RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {} {}", d.t, r.describe_decision(&d.decision), d.rule)).collect() };
         assert_eq!(show(&a), show(&b), "{} is not deterministic", name);
         assert_eq!(a.final_cash.to_bits(), b.final_cash.to_bits(), "{} is not deterministic", name);
-        // Every bar has a price, so the only drops are last-bar decisions and
-        // the decisions on the delisted name after its rows stop.
+        // Every bar has a price, so the only drops are last-bar decisions,
+        // the decisions on the delisted name after its rows stop, and the
+        // orders an execution block that rejects (`leverage ... reject`)
+        // rejects as leverage.
         let last = *a.bars.last().unwrap();
         assert!(
-            a.dropped.iter().all(|(t, _, reason)| (*t == last && reason == "no next bar") || reason.contains("no price")),
+            a.dropped
+                .iter()
+                .all(|(t, _, reason)| (*t == last && reason == "no next bar") || reason.contains("no price") || (rejects && reason.starts_with("rejected, would exceed"))),
             "{} dropped decisions: {:?}",
             name,
             a.dropped
@@ -391,7 +396,6 @@ fn causality_theorem_holds_empirically() {
 }
 
 #[test]
-#[ignore = "src: on a minute bundle the fold takes the midnight keys of the daily catalog as base bars, ignores the decision calendar and decides nothing, so the check is vacuous"]
 fn causality_theorem_holds_empirically_on_minute_bundles() {
     for name in ["resampled_momentum", "opening_gap"] {
         causality_holds(name);
@@ -658,7 +662,6 @@ fn quantile_conventions_and_the_aggregate_halt() {
 /// An aggregation's conjunction admits comparisons and assignments over
 /// the variables bound inside it, and they filter the group (trend-15).
 #[test]
-#[ignore = "src: the evaluator takes every fresh non-argument variable of an aggregation's conjunction (P, Cost) as a group key, whatever `within` says, so the count is per distinct close"]
 fn comparisons_and_assignments_inside_an_aggregation_filter_the_group() {
     let src = common::strategy(
         "n_up",

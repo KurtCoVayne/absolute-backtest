@@ -88,6 +88,8 @@ impl std::fmt::Display for Tok {
 pub struct Token {
     pub tok: Tok,
     pub span: Span,
+    /// A number's lexeme as written (`2026.10`), for a version.
+    pub raw: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,7 +164,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             let s: String = chars[i + 1..j].iter().collect();
             let k = j + 1 - i;
             advance(&mut i, &mut line, &mut col, k);
-            toks.push(Token { tok: Tok::Str(s), span });
+            toks.push(Token { tok: Tok::Str(s), span, raw: None });
             continue;
         }
         if c.is_ascii_digit() {
@@ -190,7 +192,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 })?;
                 let k = j - i;
                 advance(&mut i, &mut line, &mut col, k);
-                toks.push(Token { tok: Tok::Date(t), span });
+                toks.push(Token { tok: Tok::Date(t), span, raw: None });
                 continue;
             }
             let mut j = i;
@@ -259,7 +261,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             };
             let k = j - i;
             advance(&mut i, &mut line, &mut col, k);
-            toks.push(Token { tok, span });
+            toks.push(Token {
+                tok,
+                span,
+                raw: Some(chars[i - k..i].iter().collect()),
+            });
             continue;
         }
         if c == '@' {
@@ -278,10 +284,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
                 })?;
                 let k = j - i;
                 advance(&mut i, &mut line, &mut col, k);
-                toks.push(Token { tok: Tok::Res(r), span });
+                toks.push(Token { tok: Tok::Res(r), span, raw: None });
             } else {
                 advance(&mut i, &mut line, &mut col, 1);
-                toks.push(Token { tok: Tok::At, span });
+                toks.push(Token { tok: Tok::At, span, raw: None });
             }
             continue;
         }
@@ -295,9 +301,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             let k = j - i;
             advance(&mut i, &mut line, &mut col, k);
             if text == "_" {
-                toks.push(Token { tok: Tok::Under, span });
+                toks.push(Token { tok: Tok::Under, span, raw: None });
             } else {
-                toks.push(Token { tok: Tok::Ident(text), span });
+                toks.push(Token {
+                    tok: Tok::Ident(text),
+                    span,
+                    raw: None,
+                });
             }
             continue;
         }
@@ -337,11 +347,12 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             },
         };
         advance(&mut i, &mut line, &mut col, len);
-        toks.push(Token { tok, span });
+        toks.push(Token { tok, span, raw: None });
     }
     toks.push(Token {
         tok: Tok::Eof,
         span: Span { line, col },
+        raw: None,
     });
     Ok(toks)
 }

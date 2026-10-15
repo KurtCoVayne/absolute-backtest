@@ -453,13 +453,16 @@ impl Parser {
                     Prefer::Latest
                 } else if self.eat_kw("version") {
                     let v = match self.peek().clone() {
+                        // A bare version keeps its spelling: `2026.10` is not 2026.1.
                         Tok::Float(x) => {
+                            let raw = self.toks[self.pos].raw.clone();
                             self.bump();
-                            format!("{}", x)
+                            raw.unwrap_or_else(|| format!("{}", x))
                         }
                         Tok::Int(i) => {
+                            let raw = self.toks[self.pos].raw.clone();
                             self.bump();
-                            format!("{}", i)
+                            raw.unwrap_or_else(|| format!("{}", i))
                         }
                         Tok::Ident(s) | Tok::Str(s) => {
                             self.bump();

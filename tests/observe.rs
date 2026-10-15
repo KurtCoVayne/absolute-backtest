@@ -60,7 +60,16 @@ fn program_graph_reaches_and_annotates() {
     let flat = g.node("flat").unwrap();
     assert!(flat.reads.contains(&("position".to_string(), '-')), "{:?}", flat.reads);
     let text = show_program(&prog);
-    assert!(text.contains("decide(@T: Timestamp, -D: Decision)"), "{}", text);
+    // A signature carries no binding modes (language-v2, 4.2).
+    assert!(text.contains("decide(@T: Timestamp, D: Decision)"), "{}", text);
+    // The execution block is printed expanded, the preset's defaults
+    // included, and the report block after it (4.3, 4.5).
+    assert!(
+        text.contains("execution {") && text.contains("leverage      gross <= 1 halt") && text.contains("commission    per_share 0.005 USD min 1 USD"),
+        "{}",
+        text
+    );
+    assert!(text.contains("report { calendar base   periods 252 per year }"), "{}", text);
     // A decision prints with its order, the block's `market` when omitted.
     assert!(text.contains("up_down::decide#1: decide(T, trade(A, qty, market)) :- up(A, T), flat(A, T)."), "{}", text);
     assert!(text.contains("closed loop"), "{}", text);

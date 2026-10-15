@@ -15,17 +15,19 @@ abt show --strategy NAME <files...>
 ```
 
 prints the program graph: every relation `decide` reaches, from `decide`
-upward, each with its signature (modes `+` input, `-` output, `@` temporal
-key), its kind (primitive, executor, kernel, derived, output), its
-resolution, whether it is complete (so `not R(...)` is admissible), the
+upward, each with its signature (`@T` the temporal key, every other
+argument with its type; a library relation under its instance name, such as
+`bought_within[cooldown]`), its kind (primitive, executor, kernel, derived,
+output), its calendar, whether it is complete (so `not R(...)` is admissible), the
 stratum it is evaluated in, whether it reads its own past (temporal
 recursion), whether it is in the closed loop (reads the book: `position`,
 `cash`, `nav`, `fill`, `decided`) or the open loop, its depth (the longest
 path from a primitive), the relations it reads with the sign of each read
 (`+` positive, `-` negated, `~` inside an aggregation or reduction), and its
 rules. The primitives the program reads are listed last with their
-completeness. The first line gives the counts and the depth of the whole
-program.
+completeness, then the execution block expanded field by field (what the
+executor runs with, a preset's defaults included) and the report block. The
+first line gives the counts and the depth of the whole program.
 
 Read it to confirm that the relations you meant to connect are connected
 (a relation you defined but `decide` never reaches is not in the graph), that
@@ -45,9 +47,8 @@ coverage over 468 decision bars (calls: bars and inputs the relation was demande
   close                                                     27577 tuples in the data (primitive)
 ```
 
-A derived relation's `calls` are the bars (times the input tuples, for a
-relation with `+` arguments) at which some rule or the decision asked for
-it; `with tuples` are the calls that derived at least one tuple; `tuples` are
+A derived relation's `calls` are the bars at which some rule or the
+decision asked for it; `with tuples` are the calls that derived at least one tuple; `tuples` are
 all it derived. A primitive, executor or kernel relation shows what the data,
 the executor or the kernel holds.
 
@@ -75,33 +76,37 @@ mistake rather than a feature.
 ## Any relation at any bar: `abt query`
 
 ```
-abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>
+abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 ```
 
 runs the strategy and prints the tuples of `RELATION` at the bar `--at` (the
 last decision bar when omitted; a timestamp that is not a bar of the
-relation's resolution is refused naming the nearest bars). Any relation can
+relation's calendar is refused naming the nearest bars). Any relation can
 be queried: a primitive (`close`), an executor relation (`position`), a
-feature, a signal, `decide`. A relation with `+` arguments needs them in
-`--inputs`, in signature order (`sma` as `--inputs AAA,20d,12`); when the
-only input is the entity, `--symbol` supplies it. `--symbol` also keeps one
-instrument's tuples, including the decisions on it (`decide` carries the
-instrument inside the decision value).
+library instance by the name `abt show` prints, a signal, `decide`. A
+relation takes no inputs at a query: its bracketed inputs were bound when
+the library relation was instantiated. `--symbol` keeps one instrument's
+tuples, including the decisions on it (`decide` carries the instrument
+inside the decision value).
 
 `--explain` adds, for every rule of the relation at that bar, whether it
 fired and with how many solutions, with the first solution's variables and
 their values (every variable of the rule, so the instance can be checked
 against the data), or the first body literal with no solution. With
-`--symbol` the rule is explained for that instrument only. The executor
-options (`--price-relation`, `--frictionless`, `--capital`, ...) are those of
-the run being examined; pass the same ones.
+`--symbol` the rule is explained for that instrument only. The executor is
+the program's execution block, so the run examined is the one `abt run`
+makes; no option changes it.
 
 ```
-abt query --strategy sma_crossover --rel above --at 2023-06-01 --symbol AAA --explain --synthetic corpus/
-above at 2023-06-01 (@1d): 1 tuple(s) for AAA
-  above(AAA, 2023-06-01)
-rule sma_crossover::above#1 fired at 2023-06-01 with A = AAA with 1 solution(s); first solution: A = AAA, F = 36.906, S = 35.854, T = 2023-06-01
+abt query --strategy sma_crossover --rel above --at 2023-06-01 --symbol AAA --explain --synthetic corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
+above at 2023-06-01 (base): 1 tuple(s) for AAA
+  above(E1, 2023-06-01)
+rule sma_crossover::above#1 fired at 2023-06-01 with A = E1 with 1 solution(s); first solution: A = E1, F = 38.64666666666667, S = 38.56162162162161, T = 2023-06-01
 ```
+
+The synthetic market's securities are `E1`, `E2`, ... carrying the tickers
+given; an instrument shows by its identifier, and `--symbol AAA` resolves
+the ticker as of the run's bundle date.
 
 `abt explain --rule LABEL --at TIMESTAMP ...` is the same question asked of
 one rule by its label (`unit::head#n`), with `--bind VAR=VALUE` for any body
@@ -116,10 +121,9 @@ abt run ... --ledger R1,R2,... --ledger-out DIR
 writes, for each named relation, every tuple it held at every bar of the run
 (of the relation's own resolution, inside the run's window) as
 `DIR/<relation>.parquet`, one column per argument of the signature plus
-`bar`, and the coverage counts as `DIR/coverage.parquet`. A relation whose
-only `+` argument is its entity (`close`, `sma`'s cousins without other
-inputs) is written for every symbol; a relation with other `+` arguments is
-queried at a bar with `--inputs` instead. The ledger is what
+`bar`, and the coverage counts as `DIR/coverage.parquet`. Every tuple is
+written, for every instrument; a library relation is named by its instance
+name (`--ledger 'mean_window[fast, fast_min, close]'`). The ledger is what
 to read when a feature's values over time, not one bar, are in question; a
 feature the evaluator would have skipped at some bars (because an earlier
 literal excluded the instance) is computed for the ledger, so the ledger is
@@ -157,7 +161,7 @@ are undecided and `--replay-dir DIR` keeps the scripts to run by hand.
 
 ```
 abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure
-          [--rel R] [--at T] [--inputs V1,...] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+          [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt run ... --tables DIR
 ```
 
@@ -180,8 +184,8 @@ the rows) or JSON, and `--out FILE` writes it as Arrow IPC (Parquet for a
 
 `--tables DIR` on a run writes them all as Arrow IPC under `DIR`:
 `coverage`, `plan` (with the observed counts), `book`, `binding`,
-`summary`, `extension/<R>` for every demanded derived relation whose
-inputs are at most its entity, `carried/<R>` for the temporally recursive
+`summary`, `extension/<R>` for every demanded derived relation,
+`carried/<R>` for the temporally recursive
 ones, and `derivation` and `failure` of `decide` at the sampled bars (the
 last bar and nine evenly spaced ones; `abt table --at BAR` answers for any
 other).
@@ -190,12 +194,12 @@ other).
 
 ```
 abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | ...) <files...>
-abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--inputs V1,...] [--json] (--data DIR | ...) <files...>
-abt materialise --strategy NAME --rel R [--at T] [--inputs V1,...] [--json] (--data DIR | ...) <files...>
+abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | ...) <files...>
+abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | ...) <files...>
 ```
 
 A tuple's id is its text with the bar it holds at, as the derivation table
-prints it: `decide(2022-05-10, sell(SPY, 100))@2022-05-10`.
+prints it: `decide(2022-04-14, trade(E5, -100))@2022-04-14`.
 `explain --derivation` prints its derivation tree: the rule that derived
 it, that rule's body tuples, and theirs, down to supplied tuples (a
 primitive's, the executor's) or `--depth` levels (default 6; a truncated
@@ -205,14 +209,17 @@ at the bar with its head bound to the tuple; by the determinism contract
 two runs give the same witness, so nothing is recorded during the run.
 
 ```
-decide(2022-05-10, sell(SPY, 100))@2022-05-10  [trailing_stop::decide#2]
-  held(SPY, 2022-05-10, 100)@2022-05-10  [features::held#1]
-    position(SPY, 2022-05-10, 100)@2022-05-10  (supplied by the executor)
-  high_since_entry(SPY, 2022-05-10, 94.48)@2022-05-10  [trailing_stop::high_since_entry#2]
-    position(SPY, 2022-05-10, 100)@2022-05-10  (supplied by the executor)
-    not fill(SPY, 2022-05-10, _, _)@2022-05-10  (absent, as the negation requires)
-    high_since_entry(SPY, 2022-05-09, 94.48)@2022-05-09  [trailing_stop::high_since_entry#2]
+decide(2022-04-14, trade(E5, -100))@2022-04-14  [trailing_stop::decide#2]
+  held(E5, 2022-04-14, 100)@2022-04-14  [book::held#1]
+    position(E5, 2022-04-14, 100)@2022-04-14  (supplied by the executor)
+  high_since_entry(E5, 2022-04-14, 119.83)@2022-04-14  [state::high_since_entry#2]
+    held(E5, 2022-04-14, 100)@2022-04-14  [book::held#1]
+      position(E5, 2022-04-14, 100)@2022-04-14  (depth limit: explain this tuple to continue)
+    not fill(E5, 2022-04-14, _, _)@2022-04-14  (absent, as the negation requires)
+    high_since_entry(E5, 2022-04-13, 119.83)@2022-04-13  [state::high_since_entry#2]
     ...
+    close(E5, 2022-04-14, 108.34)@2022-04-14  (supplied by the primitive)
+  close(E5, 2022-04-14, 108.34)@2022-04-14  (supplied by the primitive)
 ```
 
 `why-not` answers for an absent tuple: per rule of the relation, the first
@@ -226,14 +233,13 @@ never happened, a label the data never carries), the verdict is
 *absence-driven*: the data, not the rule, decided.
 
 ```
-why not decide(E1) at 2025-10-31:
-  momentum_liquid_monthly::decide#1 excluded at literal 1 `selected(A, T, _)` with A = E1, T = 2025-10-31
-    why not selected(E1) at 2025-10-31:
-      momentum_liquid_monthly::selected#1 excluded at literal 1 `cand(A, T, _)` with A = E1, T = 2025-10-31
-        why not cand(E1) at 2025-10-31:
-          momentum_liquid_monthly::cand#1 excluded at literal 2 `member(A, T, "SP500")` with ...: absence-driven
-  ...
-verdict: absence-driven
+why not decide(E1) at 2022-04-14:
+  trailing_stop::decide#1 excluded at literal 1 `strong(A, T)` with A = E1, T = 2022-04-14
+    why not strong(E1) at 2022-04-14:
+      trailing_stop::strong#1 excluded at literal 2 `M > threshold` with A = E1, M = -0.0866652710906427, T = 2022-04-14
+  trailing_stop::decide#2 excluded at literal 1 `held(A, T, Q0)` with A = E1, T = 2022-04-14
+    why not held(E1) at 2022-04-14:
+      book::held#1 excluded at literal 1 `position(A, T, Q)` with A = E1, T = 2022-04-14: absence-driven (a supplied relation has no tuple there)
 ```
 
 `materialise` evaluates a relation at a bar from its rules whether or not
