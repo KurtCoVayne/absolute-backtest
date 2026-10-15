@@ -1987,6 +1987,74 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        // W7 on the values the run uses: the checker judged a calendar
+        // window's `min K` against its duration on the parameters' defaults,
+        // and an override may make the window unable to hold K bars, which
+        // leaves its rule deriving nothing, silently.
+        if !cfg.param_overrides.is_empty() {
+            let effective = |unit: &str, name: &str| -> Option<Lit> {
+                cfg.param_overrides
+                    .iter()
+                    .rev()
+                    .find(|(n, _)| match n.split_once("::") {
+                        Some((u, pn)) => u == unit && pn == name,
+                        None => n == name,
+                    })
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| prog.param(unit, name).map(|p| p.value.clone()))
+            };
+            let value = |e: &Expr, unit: &str, overridden: bool| -> Option<Lit> {
+                match e {
+                    Expr::Lit(l, _) => Some(l.clone()),
+                    Expr::Param(p, _) if overridden => effective(unit, p),
+                    Expr::Param(p, _) => prog.param(unit, p).map(|p| p.value.clone()),
+                    _ => None,
+                }
+            };
+            fn windows<'a>(lits: &'a [Literal], out: &mut Vec<(&'a Expr, &'a Expr)>) {
+                for l in lits {
+                    match l {
+                        Literal::Window {
+                            kind: WindowKind::Window | WindowKind::Prior,
+                            dur,
+                            min,
+                            ..
+                        } => out.push((dur, min)),
+                        Literal::Agg { conj, .. } => windows(conj, out),
+                        Literal::Case { branches, .. } => branches.iter().for_each(|b| windows(&b.guard, out)),
+                        _ => {}
+                    }
+                }
+            }
+            for (ri, rule) in prog.rules.iter().enumerate() {
+                let mut ws = Vec::new();
+                windows(&rule.body, &mut ws);
+                for (dur, min) in ws {
+                    let (Some(Lit::Duration(d)), Some(Lit::Int(k))) = (value(dur, &rule.unit, true), value(min, &rule.unit, true)) else {
+                        continue;
+                    };
+                    let defaults = (value(dur, &rule.unit, false), value(min, &rule.unit, false));
+                    if defaults == (Some(Lit::Duration(d)), Some(Lit::Int(k))) {
+                        continue;
+                    }
+                    let cal = &prog.infos[ri].cal;
+                    let bars = crate::check::rule::window_capacity(cal, prog.base, &d);
+                    if k > bars {
+                        run_warnings.push(RunWarning {
+                            bias: "window sanity".into(),
+                            message: format!(
+                                "with the parameter overrides, rule {} reads a window of {} with `min {}`, and such a window holds at most {} bars on calendar `{}`: the aggregate never has enough rows, so the rule derives nothing (W7)",
+                                prog.rule_label(ri),
+                                d,
+                                k,
+                                bars,
+                                prog.cal_name(cal)
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         // The price relation the execution block names: a primitive or a
         // derived Price relation the executor fills and marks at (4.3).
         let price_rel = match &cfg.price_relation {

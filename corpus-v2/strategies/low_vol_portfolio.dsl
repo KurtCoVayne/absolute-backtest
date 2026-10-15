@@ -3,7 +3,7 @@ strategy low_vol_portfolio {
   data {
     class   equity
     need    bars @1d
-    need    listing
+    need    actions, listing
     require tested
     prefer  latest
   }

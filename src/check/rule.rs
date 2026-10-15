@@ -934,14 +934,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             _ => None,
         };
         let (Some(d), Some(k)) = (d, k) else { return };
-        let bar_secs: i64 = match &self.cal {
-            Cal::Base => self.cx.base.seconds().unwrap_or(86_400),
-            Cal::Days | Cal::Sessions | Cal::SessionsOf(_) => 86_400,
-            Cal::Weeks(n) => *n as i64 * 7 * 86_400,
-            Cal::Months(n) => *n as i64 * 28 * 86_400,
-            Cal::Years(n) => *n as i64 * 365 * 86_400,
-        };
-        let bars = d.max_secs() / bar_secs.max(1);
+        let bars = window_capacity(&self.cal, self.cx.base, &d);
         if k > bars {
             self.err(
                 Code::W7,
@@ -1639,3 +1632,18 @@ pub(crate) fn complementary(cx: &Checker, a: &Rule, b: &Rule) -> bool {
 
 #[allow(dead_code)]
 fn _unused(_: &HashSet<String>) {}
+
+/// The bars a calendar window of duration `d` can hold on calendar `cal`
+/// over a base of resolution `base`: what W7 judges a window's `min K`
+/// against, on the defaults here and on a run's parameter overrides in the
+/// kernel.
+pub fn window_capacity(cal: &Cal, base: Resolution, d: &Duration) -> i64 {
+    let bar_secs: i64 = match cal {
+        Cal::Base => base.seconds().unwrap_or(86_400),
+        Cal::Days | Cal::Sessions | Cal::SessionsOf(_) => 86_400,
+        Cal::Weeks(n) => *n as i64 * 7 * 86_400,
+        Cal::Months(n) => *n as i64 * 28 * 86_400,
+        Cal::Years(n) => *n as i64 * 365 * 86_400,
+    };
+    d.max_secs() / bar_secs.max(1)
+}

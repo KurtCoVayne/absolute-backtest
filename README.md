@@ -265,7 +265,7 @@ error [N] bad_negation_incomplete_derived at 29:49 in rule bad_negation_incomple
 | O | observation | every `observe` names a relation of the program; a `where` binds identity arguments only |
 | W1, W2, W3, W4 | dead rule, unused parameter, undefined relation, degenerate reduction | a derived relation decide never reaches; a parameter never referenced; a declared relation no rule defines (always empty); a reduction whose group holds every identity of its atom, so it ranks one tuple |
 | W5, W6 | degrees of freedom, ticker snapshot | a numeric literal inside a strategy's own rule is a degree of freedom the study counts (a library's literals are counted, never warned); an instrument literal names the security carrying that ticker at the bundle date |
-| W7, W8, W9 | window sanity, never fired, hindsight list | a calendar window's `min K` exceeds what its duration can hold on the rule's calendar; a relation on a path to decide never fired (reported by the run's coverage report); an `instruments` table is counted and warned |
+| W7, W8, W9 | window sanity, never fired, hindsight list | a calendar window's `min K` exceeds what its duration can hold on the rule's calendar (judged on the defaults, and again by the run on its `--param` overrides); a relation on a path to decide never fired (reported by the run's coverage report); an `instruments` table is counted and warned |
 
 Diagnostics are ordered errors before warnings, whole-unit diagnostics (a
 missing block, a library or class not in the workspace, no decide rule)
@@ -359,6 +359,10 @@ regulatory-fee field, so the costs line's `fees` is always zero. A field
 whose value turns a model off is reported on every run as the bias it
 leaves unmodeled (`warning (cash-management): cash earns nothing (the
 execution block's financing credits no cash rate)`), by reading the block.
+A run also warns when the data has corporate actions (`split`, `dividend`,
+`delisted`) and the program's data block does not `need actions`: the
+executor cannot apply what it does not load, so a split would move the
+price and not the position, and a delisted name would never be closed.
 The numbers of the semantic model's conservative defaults are the
 `equity_default` preset.
 

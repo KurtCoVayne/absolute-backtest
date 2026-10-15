@@ -457,6 +457,32 @@ fn a_last_bar_decision_is_dropped_for_want_of_a_next_bar() {
 /// runs of one program (section 3) and its sweep axis (section 1):
 /// `ExecConfig.param_overrides` replaces a default, checked against the
 /// parameter's type and range.
+/// W7 on the values a run uses: an override that leaves a calendar window
+/// unable to hold its `min` rows is warned, naming the rule (the checker
+/// judged the defaults); one that keeps the window feasible is not.
+#[test]
+fn an_override_that_empties_a_window_is_warned() {
+    let prog = common::corpus_program("sma_crossover");
+    let ds = synthetic_daily(&["AAA", "XYZ", "BBB"], (2022, 1, 3), 120, 3);
+    let run_with = |v: &str| {
+        let cfg = ExecConfig {
+            param_overrides: vec![("fast".into(), absolute_backtest::syntax::parse_lit(v).unwrap())],
+            ..ExecConfig::from_program(&prog)
+        };
+        run(&prog, &ds, cfg).unwrap()
+    };
+    let r = run_with("10d");
+    let w: Vec<&str> = r.warnings.iter().filter(|w| w.bias == "window sanity").map(|w| w.message.as_str()).collect();
+    assert!(
+        w.len() == 1 && w[0].contains("mean_window[fast, fast_min, close]") && w[0].contains("`min 12`") && w[0].contains("at most 10 bars"),
+        "{:?}",
+        r.warnings
+    );
+    assert!(r.decisions.is_empty(), "the fast window never fills, so nothing crosses");
+    let r = run_with("30d");
+    assert!(r.warnings.iter().all(|w| w.bias != "window sanity"), "{:?}", r.warnings);
+}
+
 #[test]
 fn parameter_overrides_change_the_run_within_type_and_range() {
     let src = common::strategy(

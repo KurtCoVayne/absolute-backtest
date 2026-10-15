@@ -231,16 +231,20 @@ fn the_event_log_is_ordered_by_availability_then_relation() {
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
-    // Every tuple of a primitive the program reads (the bars, the listing
-    // and the tickers of five names over twenty bars), once; the catalog
-    // the demand does not ask for is not in the log.
+    // Every tuple of a primitive the program reads (the bars, the actions,
+    // the listing and the tickers of five names over twenty bars), once;
+    // the catalog the demand does not ask for (the index membership) is
+    // not in the log.
     let expected: usize = ds
         .facts
         .iter()
         .filter(|(name, _)| matches!(p.relations.get(name.as_str()).map(|s| &s.kind), Some(Kind::Primitive { .. })))
         .map(|(_, tuples)| tuples.len())
         .sum();
-    assert!(ds.facts.contains_key("split") && !p.relations.contains_key("split"), "the market has actions the demand does not read");
+    assert!(
+        ds.facts.contains_key("member") && !p.relations.contains_key("member"),
+        "the market has a membership the demand does not read"
+    );
     assert_eq!(log.events.len(), expected);
     assert!(expected >= 7 * 5 * 16, "open, high, low, close, volume, listed and ticker: {}", expected);
     assert!(kernel.decision_bars().is_empty(), "a streaming kernel starts with no bars");

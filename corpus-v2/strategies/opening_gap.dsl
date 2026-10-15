@@ -6,7 +6,7 @@ strategy opening_gap {
   data {
     class   equity
     need    bars @1m
-    need    listing
+    need    actions, listing
     require tested
     prefer  latest
   }
