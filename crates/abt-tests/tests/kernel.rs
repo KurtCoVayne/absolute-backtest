@@ -241,7 +241,13 @@ fn add_minute(ds: &mut Dataset, sym: Sym, t: i64, close: f64, volume: f64) {
 fn minute_bars(ds: &mut Dataset, sym: Sym, d: &str, closes: &[f64]) {
     ds.add("listed", vec![Value::Equity(sym), Value::Time(day(d))]);
     for (i, p) in closes.iter().enumerate() {
-        add_minute(ds, sym, day(d) + 9 * 3600 + 31 * 60 + 60 * i as i64, *p, 100.0);
+        add_minute(
+            ds,
+            sym,
+            day(d) + 9 * abt_kernel::kernel::time::HOUR + 31 * abt_kernel::kernel::time::MIN + abt_kernel::kernel::time::MIN * i as i64,
+            *p,
+            100.0,
+        );
     }
 }
 
@@ -770,7 +776,7 @@ fn minute_days(bars_per_day: &[usize], start_price: f64, step: f64) -> Dataset {
     for (i, (d, &n)) in days.into_iter().zip(bars_per_day).enumerate() {
         ds.add("listed", vec![Value::Equity(y), Value::Time(d)]);
         for b in 0..n {
-            let t = d + 9 * 3600 + 31 * 60 + 60 * b as i64;
+            let t = d + 9 * abt_kernel::kernel::time::HOUR + 31 * abt_kernel::kernel::time::MIN + abt_kernel::kernel::time::MIN * b as i64;
             add_minute(&mut ds, y, t, start_price + step * i as f64 + 0.01 * b as f64, 100.0);
         }
     }

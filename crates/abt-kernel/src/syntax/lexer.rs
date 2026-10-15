@@ -106,8 +106,8 @@ fn duration_suffix(amount: i64, suffix: &str) -> Option<Duration> {
         "w" => Duration::days(amount * 7),
         "mo" => Duration::months(amount),
         "y" => Duration::months(amount * 12),
-        "min" => Duration::secs(amount * 60),
-        "h" => Duration::secs(amount * 3600),
+        "min" => Duration::nanos(amount * crate::kernel::time::MIN),
+        "h" => Duration::nanos(amount * crate::kernel::time::HOUR),
         "s" => Duration::secs(amount),
         _ => return None,
     })

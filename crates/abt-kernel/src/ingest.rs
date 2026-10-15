@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::check::Program;
-use crate::kernel::time::format_timestamp;
+use crate::kernel::time::{self, format_timestamp};
 use crate::kernel::{Dataset, Value};
 use crate::table::Table;
 
@@ -288,7 +288,7 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
     // on every day it has a bar, available with the day's first bar.
     let mut listed: BTreeSet<(u32, i64)> = BTreeSet::new();
     for r in 0..bars.len() {
-        let t = bars.time(ce, r)? + 60;
+        let t = bars.time(ce, r)? + time::MIN;
         let id = history.id_at(&bars.string(ci, r)?, t)?;
         let sym = ds.intern(&id);
         let close = bars.number(cc, r)?;
@@ -298,8 +298,8 @@ pub fn databento_minute(dir: &Path, prog: &Program, processing_delay: i64) -> Re
         let column = |c: Option<usize>| -> Result<f64, String> { c.map(|c| bars.number(c, r)).transpose().map(|v| v.unwrap_or(close)) };
         let (open, high, low) = (column(co)?, column(ch)?, column(cl)?);
         let avail = match recv {
-            Some(c) => bars.time(c, r)?.max(t) + processing_delay,
-            None => t + processing_delay,
+            Some(c) => bars.time(c, r)?.max(t) + processing_delay * time::SEC,
+            None => t + processing_delay * time::SEC,
         };
         let day = crate::kernel::time::day_key(t) * crate::kernel::time::DAY;
         let mut tuples: Vec<(&str, Vec<Value>)> = vec![

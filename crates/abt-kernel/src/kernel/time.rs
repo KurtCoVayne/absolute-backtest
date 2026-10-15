@@ -1,9 +1,29 @@
-//! Calendar arithmetic over Unix timestamps (seconds, naive wall clock):
+//! Calendar arithmetic over Unix timestamps in nanoseconds (naive wall
+//! clock; docs/spec/00-architecture.md, A-D7, and docs/spec/ERRATA.md, E-18):
 //! civil dates, calendar-duration subtraction and resolution buckets.
 
 use crate::ir::{Cal, Duration, Resolution};
 
-pub const DAY: i64 = 86_400;
+pub const SEC: i64 = 1_000_000_000;
+pub const MIN: i64 = 60 * SEC;
+pub const HOUR: i64 = 60 * MIN;
+pub const DAY: i64 = 24 * HOUR;
+
+/// A time of `s` whole seconds.
+pub const fn from_secs(s: i64) -> i64 {
+    s * SEC
+}
+
+/// The seconds of a span of nanoseconds, as a float. A whole number of
+/// seconds converts through the integer, so a float computed from it has
+/// the bits it had when times were seconds.
+pub fn secs_f64(d: i64) -> f64 {
+    if d % SEC == 0 {
+        (d / SEC) as f64
+    } else {
+        d as f64 / SEC as f64
+    }
+}
 
 /// Days since 1970-01-01 for a proleptic Gregorian civil date.
 pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
@@ -59,37 +79,37 @@ pub fn weekday(t: i64) -> u32 {
 }
 
 /// `t − d` in calendar terms: months move the civil date (day clamped to
-/// the target month), then days subtract whole days, then seconds.
+/// the target month), then days subtract whole days, then the clock part.
 pub fn sub_duration(t: i64, d: Duration) -> i64 {
     let mut t = t;
     if d.months != 0 {
         let days = floor_div(t, DAY);
-        let secs = t - days * DAY;
+        let clock = t - days * DAY;
         let (y, m, dd) = civil_from_days(days);
         let total = y * 12 + (m as i64 - 1) - d.months;
         let ny = floor_div(total, 12);
         let nm = (total - ny * 12) as u32 + 1;
         let nd = dd.min(days_in_month(ny, nm));
-        t = days_from_civil(ny, nm, nd) * DAY + secs;
+        t = days_from_civil(ny, nm, nd) * DAY + clock;
     }
-    t - d.days * DAY - d.secs
+    t - d.days * DAY - d.nanos
 }
 
 /// `t + d` in calendar terms (the inverse of `sub_duration` for whole days
-/// and seconds; months move the civil date forward, day clamped).
+/// and clock parts; months move the civil date forward, day clamped).
 pub fn add_duration(t: i64, d: Duration) -> i64 {
     let mut t = t;
     if d.months != 0 {
         let days = floor_div(t, DAY);
-        let secs = t - days * DAY;
+        let clock = t - days * DAY;
         let (y, m, dd) = civil_from_days(days);
         let total = y * 12 + (m as i64 - 1) + d.months;
         let ny = floor_div(total, 12);
         let nm = (total - ny * 12) as u32 + 1;
         let nd = dd.min(days_in_month(ny, nm));
-        t = days_from_civil(ny, nm, nd) * DAY + secs;
+        t = days_from_civil(ny, nm, nd) * DAY + clock;
     }
-    t + d.days * DAY + d.secs
+    t + d.days * DAY + d.nanos
 }
 
 /// The civil week of `t` (Monday-based), as a count of weeks since the epoch's Monday.
@@ -122,7 +142,7 @@ pub fn period_key(cal: &Cal, t: i64) -> i64 {
 /// The label of the `res` bucket containing `t`: the civil date for @1d,
 /// otherwise the bar's close instant (the ceiling to the bar length).
 pub fn bucket(res: Resolution, t: i64) -> i64 {
-    match res.seconds() {
+    match res.nanos() {
         None if res == Resolution::W1 => (week_key(t) * 7 - 3 + 6) * DAY,
         None => floor_div(t, DAY) * DAY,
         Some(s) => {
@@ -138,7 +158,7 @@ pub fn bucket(res: Resolution, t: i64) -> i64 {
 
 /// Inclusive instant range covered by the bucket with `label`.
 pub fn bucket_range(res: Resolution, label: i64) -> (i64, i64) {
-    match res.seconds() {
+    match res.nanos() {
         None if res == Resolution::W1 => (label - 6 * DAY, label + DAY - 1),
         None => (label, label + DAY - 1),
         Some(s) => (label - s + 1, label),
@@ -154,7 +174,8 @@ pub fn day_key(t: i64) -> i64 {
     floor_div(t, DAY)
 }
 
-/// Parse `YYYY-MM-DD`, optionally followed by ` HH:MM[:SS]` or `THH:MM[:SS]`.
+/// Parse `YYYY-MM-DD`, optionally followed by ` HH:MM[:SS[.fffffffff]]` or
+/// `THH:MM[:SS[.fffffffff]]`.
 pub fn parse_timestamp(s: &str) -> Option<i64> {
     let s = s.trim();
     let (date, time) = if s.len() > 10 { (&s[..10], Some(s[11..].trim())) } else { (s, None) };
@@ -171,23 +192,41 @@ pub fn parse_timestamp(s: &str) -> Option<i64> {
         let mut parts = time.split(':');
         let h: i64 = parts.next()?.parse().ok()?;
         let mi: i64 = parts.next()?.parse().ok()?;
-        let sec: i64 = parts.next().map(|x| x.parse().ok()).unwrap_or(Some(0))?;
+        let (sec, frac) = match parts.next() {
+            Some(x) => match x.split_once('.') {
+                Some((s, f)) => (s.parse::<i64>().ok()?, Some(f)),
+                None => (x.parse::<i64>().ok()?, None),
+            },
+            None => (0, None),
+        };
         if h > 23 || mi > 59 || sec > 59 {
             return None;
         }
-        t += h * 3600 + mi * 60 + sec;
+        t += h * HOUR + mi * MIN + sec * SEC;
+        if let Some(f) = frac {
+            if f.is_empty() || f.len() > 9 || !f.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            t += f.parse::<i64>().ok()? * 10i64.pow(9 - f.len() as u32);
+        }
     }
     Some(t)
 }
 
 pub fn format_timestamp(t: i64) -> String {
     let days = floor_div(t, DAY);
-    let secs = t - days * DAY;
+    let clock = t - days * DAY;
     let (y, m, d) = civil_from_days(days);
-    if secs == 0 {
-        format!("{:04}-{:02}-{:02}", y, m, d)
+    if clock == 0 {
+        return format!("{:04}-{:02}-{:02}", y, m, d);
+    }
+    let secs = clock / SEC;
+    let nanos = clock % SEC;
+    let hms = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", y, m, d, secs / 3600, (secs % 3600) / 60, secs % 60);
+    if nanos == 0 {
+        hms
     } else {
-        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", y, m, d, secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!("{}.{:09}", hms, nanos)
     }
 }
 

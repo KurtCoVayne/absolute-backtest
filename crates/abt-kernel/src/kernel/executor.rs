@@ -145,7 +145,7 @@ impl SimExecutor {
 
         // Funding over the calendar time to the execution bar: interest on
         // cash or on the debit, borrow fee and rebate on short notional.
-        let dt = (tn - t) as f64 / (365.0 * 86_400.0);
+        let dt = time::secs_f64(tn - t) / (365.0 * 86_400.0);
         if self.cash > 0.0 {
             let i = self.cash * self.cfg.cash_rate * dt;
             self.cash += i;

@@ -206,7 +206,7 @@ fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
 fn a_fixed_base_book_reports_compounded_and_additive_conventions() {
     use abt_kernel::kernel::{FillRecord, RunResult};
     use abt_kernel::study::metrics::{convention_metrics, period_returns};
-    let day = 86_400;
+    let day = abt_kernel::kernel::time::DAY;
     let curve = vec![(0, 100.0), (7 * day, 110.0), (14 * day, 90.0), (21 * day, 95.0), (28 * day, 100.0)];
     let fill = |t: i64, q: f64, p: f64| FillRecord {
         t,

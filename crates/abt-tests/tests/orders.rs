@@ -52,11 +52,11 @@ fn market(bars: &[(f64, f64, f64, f64)]) -> (Dataset, Vec<i64>) {
 fn minute_market(bars: &[(&str, f64, f64)]) -> Dataset {
     let mut ds = Dataset::new();
     let first = common::day(bars[0].0);
-    let x = ds.add_security("X", "X", first - first.rem_euclid(86_400), None);
+    let x = ds.add_security("X", "X", first - first.rem_euclid(abt_kernel::kernel::time::DAY), None);
     let mut days = BTreeSet::new();
     for (stamp, o, c) in bars {
         let t = common::day(stamp);
-        days.insert(t - t.rem_euclid(86_400));
+        days.insert(t - t.rem_euclid(abt_kernel::kernel::time::DAY));
         for (rel, p) in [("open", *o), ("high", o.max(*c)), ("low", o.min(*c)), ("close", *c)] {
             ds.add(rel, vec![Value::Equity(x), Value::Time(t), Value::Num(p)]);
         }

@@ -137,7 +137,7 @@ pub struct Manifest {
 
 fn today() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    format_timestamp(secs - secs.rem_euclid(86_400))
+    format_timestamp(secs - secs.rem_euclid(crate::kernel::time::DAY))
 }
 
 fn arrow_type(ty: &Ty) -> Result<DataType, String> {

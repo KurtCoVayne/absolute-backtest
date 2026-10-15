@@ -226,7 +226,7 @@ fn a_bound_timestamp_may_be_assigned_as_a_value() {
     // after that entry, so at least 30 days after the fill.
     let first_fill = r.fills[0].t;
     assert!(
-        sells[0].t - first_fill >= 30 * 86_400,
+        sells[0].t - first_fill >= 30 * abt_kernel::kernel::time::DAY,
         "first sell {} vs first fill {}",
         format_timestamp(sells[0].t),
         format_timestamp(first_fill)

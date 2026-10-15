@@ -1638,12 +1638,13 @@ fn _unused(_: &HashSet<String>) {}
 /// against, on the defaults here and on a run's parameter overrides in the
 /// kernel.
 pub fn window_capacity(cal: &Cal, base: Resolution, d: &Duration) -> i64 {
-    let bar_secs: i64 = match cal {
-        Cal::Base => base.seconds().unwrap_or(86_400),
-        Cal::Days | Cal::Sessions | Cal::SessionsOf(_) => 86_400,
-        Cal::Weeks(n) => *n as i64 * 7 * 86_400,
-        Cal::Months(n) => *n as i64 * 28 * 86_400,
-        Cal::Years(n) => *n as i64 * 365 * 86_400,
+    use crate::kernel::time::DAY;
+    let bar: i64 = match cal {
+        Cal::Base => base.nanos().unwrap_or(DAY),
+        Cal::Days | Cal::Sessions | Cal::SessionsOf(_) => DAY,
+        Cal::Weeks(n) => *n as i64 * 7 * DAY,
+        Cal::Months(n) => *n as i64 * 28 * DAY,
+        Cal::Years(n) => *n as i64 * 365 * DAY,
     };
-    d.max_secs() / bar_secs.max(1)
+    d.max_nanos() / bar.max(1)
 }

@@ -703,8 +703,9 @@ and `kernel::run` the `RunResult` (the crate is `abt_kernel`). The suites
 under `crates/abt-tests/tests/` and `crates/abt/tests/` run on this
 formulation's programs; `crates/abt-tests/tests/tv_golden.rs` holds every
 corpus program's run to its golden file (`docs/spec/ERRATA.md`, E-1);
-`.github/workflows/ci.yml` runs `cargo fmt --all --check`, `cargo clippy
---workspace --all-targets -- -D warnings` and `cargo test --workspace`.
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings` and `cargo test` at the workspace's virtual
+root, which covers every member.
 
 ## Program
 

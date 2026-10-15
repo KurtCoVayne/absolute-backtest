@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::check::Program;
 use crate::ir::*;
 use crate::kernel::time::week_key;
-use crate::kernel::time::{bucket, days_from_civil, format_timestamp, weekday, DAY};
+use crate::kernel::time::{self, bucket, days_from_civil, format_timestamp, weekday, DAY};
 use crate::kernel::{Dataset, Security, Sym, Value};
 use crate::table::{write_table, Col, Table};
 
@@ -458,7 +458,7 @@ pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, b
             ds.add("listed", vec![Value::Equity(sym), Value::Time(d)]);
             ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(spx)]);
             for b in 0..bars_per_day {
-                let t = d + 9 * 3600 + 31 * 60 + (b as i64) * 60;
+                let t = d + 9 * time::HOUR + 31 * time::MIN + (b as i64) * time::MIN;
                 let o = (price * 100.0).round() / 100.0;
                 price *= (0.0006 * rng.normal()).exp();
                 let c = (price * 100.0).round() / 100.0;
@@ -499,7 +499,7 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
         );
         let mut price = if i + 1 == roots.len() && roots.len() > 1 { 2.0 } else { 100.0 + 25.0 * i as f64 };
         for &d in &day_starts {
-            let open_t = d + 9 * 3600 + 30 * 60;
+            let open_t = d + 9 * time::HOUR + 30 * time::MIN;
             let gap = 0.004 * rng.normal();
             price += price.abs().max(1.0) * gap;
             ds.add("point_value", vec![Value::Equity(sym), Value::Time(d), Value::Num(50.0 - 10.0 * (i % 4) as f64)]);
@@ -508,7 +508,7 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
             ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(home)]);
             let mut last = open_t;
             for b in 0..bars_per_session {
-                let t = open_t + 60 + (b as i64) * 60;
+                let t = open_t + time::MIN + (b as i64) * time::MIN;
                 let o = (price * 100.0).round() / 100.0;
                 price += price.abs().max(1.0) * 0.0008 * rng.normal();
                 let c = (price * 100.0).round() / 100.0;

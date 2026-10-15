@@ -192,11 +192,11 @@ fn cell_of(col: &ArrayRef, r: usize) -> Cell<'_> {
         DataType::Float64 => Cell::Float(get!(Float64Array)),
         DataType::Boolean => Cell::Bool(get!(BooleanArray)),
         DataType::Date32 => Cell::Time(get!(Date32Array) as i64 * DAY),
-        DataType::Date64 => Cell::Time(get!(Date64Array).div_euclid(1000)),
-        DataType::Timestamp(TimeUnit::Second, _) => Cell::Time(get!(TimestampSecondArray)),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => Cell::Time(get!(TimestampMillisecondArray).div_euclid(1_000)),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => Cell::Time(get!(TimestampMicrosecondArray).div_euclid(1_000_000)),
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => Cell::Time(get!(TimestampNanosecondArray).div_euclid(1_000_000_000)),
+        DataType::Date64 => Cell::Time(get!(Date64Array) * 1_000_000),
+        DataType::Timestamp(TimeUnit::Second, _) => Cell::Time(get!(TimestampSecondArray) * 1_000_000_000),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => Cell::Time(get!(TimestampMillisecondArray) * 1_000_000),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Cell::Time(get!(TimestampMicrosecondArray) * 1_000),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Cell::Time(get!(TimestampNanosecondArray)),
         _ => Cell::Null,
     }
 }
@@ -237,11 +237,8 @@ fn batch_of(path: &Path, cols: Vec<(&str, Col)>) -> Result<(Arc<Schema>, Option<
             Col::Int(v) => (DataType::Int64, Arc::new(Int64Array::from(v))),
             Col::Float(v) => (DataType::Float64, Arc::new(Float64Array::from(v))),
             Col::Bool(v) => (DataType::Boolean, Arc::new(BooleanArray::from(v))),
-            // Parquet has no second unit: milliseconds keep the logical type.
-            Col::Time(v) => (
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-                Arc::new(TimestampMillisecondArray::from(v.into_iter().map(|t| t.map(|t| t * 1000)).collect::<Vec<_>>())),
-            ),
+            // Times are nanoseconds (A-D7), the unit Arrow and Parquet keep.
+            Col::Time(v) => (DataType::Timestamp(TimeUnit::Nanosecond, None), Arc::new(TimestampNanosecondArray::from(v))),
         };
         fields.push(Field::new(name, ty, true));
         arrays.push(arr);

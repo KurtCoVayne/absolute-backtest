@@ -52,20 +52,21 @@ impl Resolution {
     pub fn finer_than(self, other: Resolution) -> bool {
         self < other
     }
-    /// Length of one bar in seconds; `None` for the daily and weekly
+    /// Length of one bar in nanoseconds; `None` for the daily and weekly
     /// resolutions, whose buckets are civil periods.
-    pub fn seconds(self) -> Option<i64> {
+    pub fn nanos(self) -> Option<i64> {
+        use crate::kernel::time::{HOUR, MIN};
         Some(match self {
-            Resolution::M1 => 60,
-            Resolution::M5 => 300,
-            Resolution::M15 => 900,
-            Resolution::M30 => 1800,
-            Resolution::H1 => 3600,
+            Resolution::M1 => MIN,
+            Resolution::M5 => 5 * MIN,
+            Resolution::M15 => 15 * MIN,
+            Resolution::M30 => 30 * MIN,
+            Resolution::H1 => HOUR,
             Resolution::D1 | Resolution::W1 => return None,
         })
     }
     pub fn is_sub_daily(self) -> bool {
-        self.seconds().is_some()
+        self.nanos().is_some()
     }
     /// The calendar a resolution corresponds to over a finer base.
     pub fn as_calendar(self) -> Cal {
@@ -435,59 +436,70 @@ impl Signature {
 }
 
 /// A calendar duration: months (years are 12 months), days (weeks are 7
-/// days) and seconds (`30min`, `2h`).
+/// days) and a clock part in nanoseconds (`30min`, `2h`, `5s`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Duration {
     pub months: i64,
     pub days: i64,
     #[serde(default)]
-    pub secs: i64,
+    pub nanos: i64,
 }
 
 impl Duration {
     pub const fn days(d: i64) -> Duration {
-        Duration { months: 0, days: d, secs: 0 }
+        Duration { months: 0, days: d, nanos: 0 }
     }
     pub const fn months(m: i64) -> Duration {
-        Duration { months: m, days: 0, secs: 0 }
+        Duration { months: m, days: 0, nanos: 0 }
     }
+    /// A clock duration of `s` whole seconds.
     pub const fn secs(s: i64) -> Duration {
-        Duration { months: 0, days: 0, secs: s }
+        Duration {
+            months: 0,
+            days: 0,
+            nanos: s * crate::kernel::time::SEC,
+        }
+    }
+    pub const fn nanos(n: i64) -> Duration {
+        Duration { months: 0, days: 0, nanos: n }
     }
     pub fn is_zero(&self) -> bool {
-        self.months == 0 && self.days == 0 && self.secs == 0
+        self.months == 0 && self.days == 0 && self.nanos == 0
     }
     /// Approximate length in days, for ordering durations in the kernel.
     pub fn approx_days(&self) -> f64 {
-        self.months as f64 * 30.4375 + self.days as f64 + self.secs as f64 / 86_400.0
+        self.months as f64 * 30.4375 + self.days as f64 + crate::kernel::time::secs_f64(self.nanos) / 86_400.0
     }
-    /// The shortest calendar length in seconds this duration can take.
-    pub fn min_secs(&self) -> i64 {
-        ((self.months / 12) * 365 + (self.months % 12) * 28 + self.days) * 86_400 + self.secs
+    /// The shortest calendar length in nanoseconds this duration can take.
+    pub fn min_nanos(&self) -> i64 {
+        ((self.months / 12) * 365 + (self.months % 12) * 28 + self.days) * crate::kernel::time::DAY + self.nanos
     }
-    /// The longest calendar length in seconds this duration can take.
-    pub fn max_secs(&self) -> i64 {
-        ((self.months / 12) * 366 + (self.months % 12) * 31 + self.days) * 86_400 + self.secs
+    /// The longest calendar length in nanoseconds this duration can take.
+    pub fn max_nanos(&self) -> i64 {
+        ((self.months / 12) * 366 + (self.months % 12) * 31 + self.days) * crate::kernel::time::DAY + self.nanos
     }
     pub fn min_days(&self) -> i64 {
-        self.min_secs() / 86_400
+        self.min_nanos() / crate::kernel::time::DAY
     }
     pub fn max_days(&self) -> i64 {
-        self.max_secs() / 86_400
+        self.max_nanos() / crate::kernel::time::DAY
     }
 }
 
 impl fmt::Display for Duration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.months, self.days, self.secs) {
-            (0, 0, s) if s % 3600 == 0 && s != 0 => write!(f, "{}h", s / 3600),
-            (0, 0, s) if s % 60 == 0 && s != 0 => write!(f, "{}min", s / 60),
-            (0, 0, s) if s != 0 => write!(f, "{}s", s),
+        use crate::kernel::time::{HOUR, MIN, SEC};
+        match (self.months, self.days, self.nanos) {
+            (0, 0, n) if n % HOUR == 0 && n != 0 => write!(f, "{}h", n / HOUR),
+            (0, 0, n) if n % MIN == 0 && n != 0 => write!(f, "{}min", n / MIN),
+            (0, 0, n) if n % SEC == 0 && n != 0 => write!(f, "{}s", n / SEC),
+            (0, 0, n) if n != 0 => write!(f, "{}ns", n),
             (0, d, 0) => write!(f, "{}d", d),
             (m, 0, 0) if m % 12 == 0 => write!(f, "{}y", m / 12),
             (m, 0, 0) => write!(f, "{}mo", m),
             (m, d, 0) => write!(f, "{}mo+{}d", m, d),
-            (m, d, s) => write!(f, "{}mo+{}d+{}s", m, d, s),
+            (m, d, n) if n % SEC == 0 => write!(f, "{}mo+{}d+{}s", m, d, n / SEC),
+            (m, d, n) => write!(f, "{}mo+{}d+{}ns", m, d, n),
         }
     }
 }

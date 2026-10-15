@@ -89,8 +89,8 @@ fn futures_market(closes: &[f64], contract: Option<Contract>) -> (Dataset, Sym) 
     let point_value = contract.as_ref().map(|c| c.multiplier).unwrap_or(1.0);
     let commission = contract.as_ref().and_then(|c| c.commission_per_contract).unwrap_or(0.0);
     for (d, p) in days.iter().zip(closes) {
-        let open = d + 9 * 3600 + 30 * 60;
-        let t = open + 60;
+        let open = d + 9 * abt_kernel::kernel::time::HOUR + 30 * abt_kernel::kernel::time::MIN;
+        let t = open + abt_kernel::kernel::time::MIN;
         for rel in ["open", "high", "low", "close"] {
             ds.add(rel, vec![Value::Equity(x), Value::Time(t), Value::Num(*p)]);
         }

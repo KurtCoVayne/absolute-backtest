@@ -2173,7 +2173,7 @@ impl<'p> Kernel<'p> {
                     },
                     _ => return None,
                 };
-                Some((d.months * 31 + d.days) * time::DAY + d.secs)
+                Some((d.months * 31 + d.days) * time::DAY + d.nanos)
             };
             let mut stack: Vec<&Literal> = rule.body.iter().collect();
             while let Some(lit) = stack.pop() {

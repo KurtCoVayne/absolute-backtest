@@ -1054,7 +1054,7 @@ impl<'p> Kernel<'p> {
                 // A bar's offset in its session is its start less the open
                 // (minute 0 is the first bar of a session; bars are labelled
                 // at their close), so labels in [open + lo + res, open + hi + res).
-                let res = self.prog.base.seconds().unwrap_or(0);
+                let res = self.prog.base.nanos().unwrap_or(0);
                 let from = time::add_duration(open, lo_d) + res;
                 let to = time::add_duration(open, *hi) + res;
                 let end = label.min(t);

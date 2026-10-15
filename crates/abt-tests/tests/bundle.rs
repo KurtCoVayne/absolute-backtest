@@ -269,7 +269,7 @@ fn a_reviewed_exception_admits_a_real_price_move_and_is_counted() {
     assert!(rec.detail.contains("1 reviewed exception"), "{:?}", rec);
     // An exception for another day does not excuse this one.
     let wrong = vec![Exception {
-        t: t + 86_400,
+        t: t + abt_kernel::kernel::time::DAY,
         ..exceptions[0].clone()
     }];
     assert!(!result(&run_tests_with(&cls, &ds, &wrong), "action reconciliation").passed);
