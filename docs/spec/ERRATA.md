@@ -99,6 +99,19 @@ and the batch driver agree on every corpus program.
   in a later bucket than its `t` is still emitted in order.
 - **E-15 (D-3.1).** Partition buckets: a month for a base of one day or
   coarser, a day for a base of one minute up to one day, an hour below a minute.
+- **E-30 (D-3.1, D-2.6; partition files and versions).** A partition file is
+  named by its content, `part/<relation>/<bucket>.<hash>.parquet`, and is
+  shared by every version that holds that bucket unchanged; a version is the
+  manifest that lists its files (`manifest/<relation>/<version>.json`), and
+  its id hashes the schema, the attributes and the (bucket, file hash)
+  pairs. Partitions keep each row's sequence number (D-3.3), so the order a
+  source delivered its rows in is part of the version: the same rows
+  delivered in the same order give the same version in any store. A log is
+  a sequence of Arrow IPC segments `log/<relation>/<source>/<first>-<last>.arrows`;
+  the entity offset index is a sidecar `.idx` (compressed sparse rows) until
+  M-8 maps it. A declared constraint such as the equity class's `close > 0`
+  is enforced from M-4, with the kernel's preconditions it pairs with (K-3.2,
+  clause 10); until then a bundle's own tests stand where they stood.
 - **E-16 (P-3.2).** `QueryForm`'s identity is a list of entities; the
   `series` class is keyed by a label (`value(name, t, r, v)`). The identity
   admits labels.

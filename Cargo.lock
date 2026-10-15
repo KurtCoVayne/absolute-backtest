@@ -18,6 +18,14 @@ version = "0.2.0"
 [[package]]
 name = "abt-data"
 version = "0.2.0"
+dependencies = [
+ "abt-agg",
+ "abt-wire",
+ "arrow",
+ "parquet",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "abt-kernel"

@@ -14,7 +14,7 @@ class equity {
   volume(A: Equity, @T, V: Quantity<Shares>)
 
   # The catalog: listing and identity, corporate actions as events, point-in-time lists.
-  listed(A: Equity, @T) complete                                   # listed and tradable on T
+  listed(A: Equity, @T) complete                                    # listed and tradable on T
   ticker(A: Equity, @T, S: Label) complete
   split(A: Equity, @T, Factor: Scalar) complete                     # effective at the ex-date T: new shares per old
   dividend(A: Equity, @T, Ex: Timestamp, Pay: Timestamp, Amount: Price<USD>) complete   # announced at T
