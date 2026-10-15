@@ -1,4 +1,4 @@
-# 04 · The protocol and the shared crates (`abt-wire`, `abt-agg`)
+# 04 · The protocol and the shared crates (`abt-wire`, `abt-agg`, `abt-codec`)
 
 Oct 12, 2026 · the only boundary between the three programs (A-D3). Tags and cross-references as in `00-architecture.md`.
 
@@ -41,6 +41,22 @@ The aggregate kernels, one implementation (A-D8). Pure functions and window-stat
 API: `WindowState::new(function, mode)`, `push(t, x…)`, `evict(t)`, `value() -> Option<f64>` (`None` below the minimum count or at a partial point, which the caller treats as `⊥`), and the batch form `reduce(function, mode, columns) -> Result<Option<f64>, AggError>` over rows already in canonical order. The canonical reduction order is entity ascending by id, then `t` ascending (A-4.7); `abt-agg` never sorts, it requires the order and asserts it in debug builds. `AggError` names the partial point (one observation for a variance, a constant series for a correlation, a quantile level outside [0, 1]) as the present `aggregate` does.
 
 **Proposition 1.1 [N] (one implementation, one answer).** For any function, mode, and sequence of rows in canonical order, the data layer's pass (D-6.4) and the kernel's evaluation (K-4) produce the same `f64`, bit for bit. *Proof.* Both call `abt-agg` on the same rows in the same order with the same mode; the functions are deterministic and use no reassociation outside the mode's stated rebuild points, which are at the same row counts in both callers (the rebuild is a function of the window's row index). ∎ `tests/agg.rs` holds every function and mode against a 128-bit rational reference on random windows within the mode's stated tolerance (`two_pass`: to the bit of the two-pass formula; `running`: 1e-12 relative, as `docs/assessment.md`), and the pushdown equality test of D-9.2 holds the two callers to each other.
+
+
+### 1.3 `abt-codec`
+
+Added by `07-storage.md` (A-D35, A-D36). The resident block format of Norgate and Databento and the structures precomputed over it, as pure functions over byte slices: no I/O, no registry, no semantics.
+
+| Module | Contents |
+| --- | --- |
+| `tick` | the tick column (ST-3): per-block exponent and GCD quantum, the encoder's verified reconstruction (`recip_exact`), exact `i128` sums across blocks of different quanta |
+| `block` | the lane-interleaved layout (ST-4.2), width-specialised `pack`/`unpack` for widths 0 to 64, `unpack_rows` for a prefix, single-value extraction, patched exceptions (ST-4.4), the horizontal tail and its in-place append (ST-8.3) |
+| `predict` | OHLC from the close (ST-4.5) |
+| `summary` | block summaries, cumulative summaries, sparse tables, the window rule of ST-5.1 |
+| `rank` | presence bitmaps with rank and select directories (ST-5.4) |
+| `wavelet` | wavelet matrices over rank-reduced offsets (ST-5.7) |
+
+The data layer builds and queries with it; the kernel decodes mapped segments with it (`map`, 3.1); `abt-agg`'s reductions run on its decoded blocks, and `abt-agg` gains the `exact` mode for tick columns (D-6.3). Property tests: encode then decode is the identity at every width with and without exceptions; extraction equals decoding; exact sums equal a 128-bit rational reference (ST-13). [D] One implementation of the format shared by its writer and its readers, for the reason `abt-agg` is one implementation of the aggregates: a reader's decoder and the writer's encoder cannot drift.
 
 ---
 
@@ -98,6 +114,7 @@ Every error names what the caller can act on (the need, the plan over budget, th
 | `aggregate` | `View`, `AggregateRequest` | a table (streamed) and `{ cache_key }` |
 | `subscribe` | `StreamSpec`, `from_seq`, `paced: bool`, `to_seq?`, `with_index: bool` | `{ stream }`, then, when `with_index`, the barrier index as an Arrow table (`calendar`, `label`, `seq`) before the first event batch; then event batches until `cancel` or `to_seq` |
 | `stream_index` | `StreamSpec` | the barrier index alone, as an Arrow table, computed from the merge without streaming (what the query layer reads to turn an embargo into a `to_seq`, Q-2.3) |
+| `map` | `View`, `relation`, `columns`, `level`, entity range | segment descriptors as an Arrow table (`path`, `offset`, `length`, `codec_version`, the directory and header arrays' locations) and the tail descriptors with their visible counts at the view's sequence; the reader maps the immutable segments read-only and decodes them with `abt-codec` (ST-10.2). Same machine only; tails and append logs are read through `query` and `subscribe` |
 | `ack` | `seq` | — |
 | `put` | `relation`, `RelationSchema`, batches | `{ version, seq_range }` |
 | `get` | `cache_key` or `version` | a table (streamed) or `not_found` |

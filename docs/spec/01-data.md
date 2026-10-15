@@ -30,6 +30,8 @@ The wire types of `abt-wire` (P-1.1), as the data layer stores them:
 
 [D] `f64` for prices and quantities, with vendor fixed-point (Databento's `1e-9` `i64`) converted at ingest. The kernel computes in `f64`; storing fixed-point would add a conversion on every read and a second numeric type to the dimension algebra.
 
+**Amended by `07-storage.md` (A-D35).** For Norgate and Databento, prices and quantities are *stored* as tick columns: exact integers with a per-block quantum found from the data (ST-3), every vendor value reproduced bit for bit. `Num` stays the type on the wire and in the kernel; it is a view computed on read (one correctly rounded division, or a verified multiply). The measurement that reversed this decision: Databento prices are on each contract's tick but are not `f32`, `f64` sums are not associative, and packed ticks decode faster than `f64` scans (ST-2).
+
 ### 2.2 Relations and schemas
 
 **Definition 2.1 (schema).** A relation schema is (name, class, columns, calendar, constraints, attributes) where a column is (name, type, role), roles are `entity`, `event_time`, `receipt_time`, `value`, `label`; exactly one column has role `event_time` (`t`) and at most one `receipt_time` (`r`); the *identity* of the relation is its `entity` columns and `t`; `calendar` names the base calendar the relation is keyed on (a label the kernel interprets; the data layer uses it only to choose partition granularity, 3.1); `constraints` are declared per column from the closed set {`not_null`, `> c`, `>= c`, `< c`, `<= c`, `in {labels}`}; `attributes` are free (key, value) pairs set by an adapter or a reviewer and read by other layers' preconditions (for example `reviewed = complete`, `receipt = recorded`).
@@ -88,6 +90,8 @@ Labels are interned per registry in one dictionary with stable `u32` codes; a co
 ---
 
 ## 3. The storage engine
+
+**Amended by `07-storage.md` (A-D36 to A-D39).** For Norgate and Databento the resident form is ST-4: instrument-contiguous, lane-interleaved blocks of tick values, with the precomputed structures of ST-5 (cumulative summaries, the calendar ladder, presence and rank, the catalog structures, wavelet matrices), all hot. Partitions of 3.1 and 3.2 are replaced for them by ST-7's content-addressed segments, compaction and delta partitions (3.3) by sealing tails and copy-on-write revisions (ST-8), and the per-row `seq` column by per-instrument visible counts (ST-8.2). The log, the manifest, versions, snapshot reads at a sequence number (Definition 3.2 and Proposition 3.3 hold, ST Prop. 8.1), retention and pinning (3.4), the cache (3.5) and tiers (3.7) stand. The time-major Parquet layout below remains the form for relations of other sources and for `put`s by other layers.
 
 ### 3.1 Layout
 
@@ -236,7 +240,7 @@ The answer is a relation keyed like the input (entity, `t`) with the aggregate a
 
 ### 6.3 Numerics
 
-The request's `numerics ∈ {two_pass, running}` selects the `abt-agg` form (P-1.2); the cache key includes it. Results are bit-identical to the kernel's evaluation of the same aggregate over the same rows (6.5).
+The request's `numerics ∈ {exact, two_pass, running}` selects the `abt-agg` form (P-1.2); the cache key includes it. Results are bit-identical to the kernel's evaluation of the same aggregate over the same rows (6.5). `exact` (added by `07-storage.md`, ST-3, Proposition 3.3) applies to tick columns: sums and moments are exact integers in the instrument's finest exponent, accumulated in `i128`, so they are independent of order and vectorise; the `f64` result is one correctly rounded division. It is the default for new programs; the parity books (MW14, R8L) pin `two_pass`.
 
 ### 6.4 The algorithm
 

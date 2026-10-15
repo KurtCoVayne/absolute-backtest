@@ -58,6 +58,19 @@ Gate: G1; `tests/fold_windows.rs` and `tests/window_order.rs` green; a before/af
 | `crates/abt-kernel/src/kernel/{mod, fold}.rs` (rewire; deletions of `Dataset`, `Store`, `Scheduler`, the batch driver) | −1,900 / +900 |
 | `crates/abt-kernel/tests/{fold, fold_availability, fold_checkpoint, asof, data, bundle, memo, store}.rs` rewritten over the service | 1,200 |
 
+**Amended by `07-storage.md`.** M-2 also builds the hot store for Norgate and Databento:
+
+| Files | Lines |
+| --- | --- |
+| `crates/abt-codec/src/{tick, block, predict, summary, rank, wavelet}.rs` (ST-10.1) | 2,600 |
+| `crates/abt-codec/tests/{roundtrip, extract, exact, summary, rank, wavelet}.rs` and `benches/` (the measurements of `scripts/study/encoding/` as Criterion benches) | 1,400 |
+| `crates/abt-data/src/hot/{directory, segment, ladder, presence, catalog, query}.rs` (ST-4 to ST-6) | 2,200 |
+| `crates/abt-data/src/staging/{land, normalise, classify, build, verify, publish, export}.rs` (ST-7) | 1,800 |
+| `crates/abt-data/src/hot/append.rs` (tails, visibility, sealing, ST-8) | 700 |
+| `crates/abt-data/tests/{staging, append, ladder, hot_query}.rs` | 1,200 |
+
+The Norgate and Databento adapters of M-6 feed S0 and S1 of this pipeline; until M-6, `bundle_v2` stages the books' bundles through it. Additional gate: ST-13 (the whole staged store round-trips bit for bit; the hot store is within ST-9's budget).
+
 Gate: G1 (the books' bundles imported through `bundle_v2`); G5 in its new form; G3 in-process against socket, 1 against 8 data threads; D-9.1's budgets measured and recorded in `docs/assessment.md`. This is the largest step; M-3's parser and checker work can proceed in parallel from its second week since they touch neither the store nor the stream.
 
 ### M-3 · The second formulation in the kernel

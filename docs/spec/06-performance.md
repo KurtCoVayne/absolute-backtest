@@ -14,6 +14,8 @@ Separation is paid for exactly once, at the boundary, and the boundary is design
 
 ### 2.1 Structures
 
+**Amended by `07-storage.md`.** For Norgate and Databento, the rows *Partitions*, *Resident cache*, *Compaction*, *Late rows* and *Snapshot reads* below are superseded by ST-4 to ST-8: instrument-contiguous lane-interleaved tick blocks, all hot and memory-mapped, with precomputed summaries, ladder, presence and wavelets; tails appended in place and visible by sequence number; revisions by copy-on-write. The aggregate pass of 2.2 then runs over each instrument's contiguous run of decoded blocks (thread `p` owns a range of instruments, so steps 1, 2 and 4 hold with no binary search), and a random window is answered from cumulative summaries (ST-5.1). The rows below remain the design for other sources and for `put`s.
+
 | Component | Structure | Operation and bound | Why this one |
 | --- | --- | --- | --- |
 | Log (D-3.1) | append-only Arrow IPC stream file per (relation, stream); group commit of ≤ 4,096 rows or 10 ms live; one `write` and one `fdatasync` per group (fsync policy: every group live, every 64 MiB in historical ingest); footer index (seq → byte offset) every 4,096 rows | append O(1) amortised; seek to `seq` O(log n) then sequential | the log is the stream: replay is a sequential read at disk bandwidth with no merge |

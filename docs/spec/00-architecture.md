@@ -1,10 +1,10 @@
 # 00 · Architecture: the three layers
 
-Oct 12, 2026 · specification for implementation. This document and its six companions (`01-data.md`, `02-kernel.md`, `03-query.md`, `04-protocol.md`, `05-migration.md`, `06-performance.md`) are the build sheet for splitting `absolute-backtest` into three independent Rust programs. Nothing in them is left to design; where a value is still the owner's to supply, section 8 names it and the default that stands until it is supplied.
+Oct 12, 2026 · specification for implementation. This document and its seven companions (`01-data.md`, `02-kernel.md`, `03-query.md`, `04-protocol.md`, `05-migration.md`, `06-performance.md`, `07-storage.md`) are the build sheet for splitting `absolute-backtest` into three independent Rust programs. Nothing in them is left to design; where a value is still the owner's to supply, section 8 names it and the default that stands until it is supplied.
 
 Tags on claims: **[E]** an established result, with a reference. **[N]** a new proposition, with a proof or proof sketch. **[C]** a conjecture, with what would settle it. **[D]** a design decision, with the alternative it rejects and why.
 
-Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n` are sections of the six companion documents (`X` is `06-performance.md`). Decisions in this document are numbered `A-D1` to `A-D34` and are cited by the companions.
+Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D40` and are cited by the companions; A-D35 to A-D40 were added with `07-storage.md` (Oct 15, 2026).
 
 ---
 
@@ -68,6 +68,12 @@ Every decision below was taken in the design conversation of Oct 12, 2026 or fol
 | A-D32 | **USD only.** The dimension system carries currencies; FX conversion is reserved as an event kind (K-5.2) and not implemented. | Multi-currency now: needs rates, conversion events and a second book convention. |
 | A-D33 | **No MCP server in this specification.** Every command has `--json`; the socket protocol is the agent's API when one is wanted. | None now. |
 | A-D34 | **v1 is retired by the migration** (M-9): `corpus/`, `environment` files, `ExecConfig`, the 72 options and the `study` subcommands as they exist. `--param` survives for plans. | Keeping both surfaces: two meanings of every command during the migration. |
+| A-D35 | **Prices and quantities are stored as integer ticks** with a per-block quantum (a decimal exponent times a GCD found from the data); `f64` is a view computed on read; every vendor value round-trips bit for bit (ST-3). | `f64` or `f32` storage: `f64` sums are not associative, Databento's ticks are not `f32`, and the GCD saves 5 to 19 bits a value on binary-fraction ticks (ES's 0.25 to ZT's 1/256, ST-2.2). |
+| A-D36 | **The resident form is instrument-contiguous, lane-interleaved blocks** of 1,024 values, offsets from a base with patched exceptions and OHLC predicted from the close, memory-mapped from immutable segments (ST-4). Decode-and-sum runs at 0.18 to 0.38 ns a value, faster than an uncompressed scan. | Uncompressed columns (about 26 GB and slower); entropy coding in memory (pcodec: 10 to 20 times slower to decode); time-major order (2.4 times larger, ST-2.3). |
+| A-D37 | **Everything independent of a program is precomputed and hot** for Norgate and Databento: cumulative block summaries, block min/max with sparse tables, the full calendar ladder, presence with rank directories, catalog structures, standing event aggregates, wavelet matrices for close and volume (ST-5). Program-dependent results are recomputed in run-scoped memory. | Caching rolling results: unbounded in number and incompressible. |
+| A-D38 | **Data enters through a seven-stage staging pipeline** (land, normalise, classify, build, verify by decoding, publish atomically, export and collect) with content-addressed segments shared between versions (ST-7). | Rebuilding the store per update: minutes instead of milliseconds, and no structural sharing. |
+| A-D39 | **Appends are written in place into per-instrument tail blocks** and become visible by sequence number; revisions of history are copy-on-write versions (ST-8). | Appends as new versions: a version a minute live. |
+| A-D40 | **ORATS is not held hot**; its holding is a separate decision (ST-11). Norgate and Databento together are about 6.7 to 7.0 GB hot. | Any hot ORATS design: about 87 GB at the smallest lossless encoding. |
 
 ---
 
@@ -149,14 +155,15 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 | Target | Value |
 | --- | --- |
 | Instruments live | 10,000 at @1m |
-| History resident | 30 years @1d; 5 years @1m |
+| History resident | 30 years @1d; 5 years @1m; for Norgate and Databento, all history (ST-9) |
 | Barrier to decision, MW14-class program, live | < 50 ms |
 | Sustained ingest | 200,000 rows/s |
 | Cross-section of one bar from the hot tail | < 1 ms |
 | Point lookup, range scan per entity | O(log n), O(log n + k) |
 | MW14 full replay (1991–2026) | ≤ 60 s, ≤ 1.5 GB (today 126 s, 3.1 GB) |
 | R8L full replay (2000–2026) | ≤ 3 s, ≤ 0.6 GB |
-| Storage per stored value | ≤ 16 B resident, ≤ 4 B on disk after compression |
+| Storage per stored value | Norgate and Databento: ≤ 2 B resident on average with every precomputed structure, about 6.7 to 7.0 GB in all (ST-9); other sources: ≤ 16 B resident, ≤ 4 B on disk after compression |
+| Hot data layer + kernels + staging, peak | ≤ 14 GB on the 16 GB reference machine (ST-9) |
 | Full-minute futures bundle (47M bars) | resident on the reference machine |
 
 ---
@@ -176,4 +183,4 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 
 - [E] Conjunctive-query evaluation for demand resolution (V-3.12); Kleene conjunction for order-independent bodies (V-5); the causality theorem (F-7.1); BLAKE3 (O'Connor, Aumasson, Neves, Wilcox-O'Hearn 2020).
 - [N] Reproduction across processes (4.2); mode invariance of decisions (4.3); replay equals live across the boundary (4.4); observation and queries change nothing across layers (4.6).
-- [D] A-D1 to A-D34.
+- [D] A-D1 to A-D40.
