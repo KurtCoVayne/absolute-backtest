@@ -50,13 +50,13 @@ Added by `07-storage.md` (A-D35, A-D36). The resident block format of Norgate an
 | Module | Contents |
 | --- | --- |
 | `tick` | the tick column (ST-3): per-block exponent and GCD quantum, the encoder's verified reconstruction (`recip_exact`), exact `i128` sums across blocks of different quanta |
-| `block` | the lane-interleaved layout (ST-4.2), width-specialised `pack`/`unpack` for widths 0 to 64, `unpack_rows` for a prefix, single-value extraction, patched exceptions (ST-4.4), the horizontal tail and its in-place append (ST-8.3) |
+| `block` | the lane-interleaved layout (ST-4.2), width-specialised `pack`/`unpack` for widths 0 to 64 (fully unrolled), row-range decoding for short edges, single-value extraction, patched exceptions (ST-4.4), the horizontal tail and its in-place append (ST-8.3) |
 | `predict` | OHLC from the close (ST-4.5) |
-| `summary` | block summaries, cumulative summaries, sparse tables, the window rule of ST-5.1 |
+| `summary` | block summaries, cumulative summaries and cross-moments, sparse tables with argmin/argmax, the range rules of ST-5.1 to ST-5.3 |
 | `rank` | presence bitmaps with rank and select directories (ST-5.4) |
-| `wavelet` | wavelet matrices over rank-reduced offsets (ST-5.7) |
+| `wavelet` | wavelet matrices over rank-reduced offsets: k-th, count and listing over a row range (ST-5.7) |
 
-The data layer builds and queries with it; the kernel decodes mapped segments with it (`map`, 3.1); `abt-agg`'s reductions run on its decoded blocks, and `abt-agg` gains the `exact` mode for tick columns (D-6.3). Property tests: encode then decode is the identity at every width with and without exceptions; extraction equals decoding; exact sums equal a 128-bit rational reference (ST-13). [D] One implementation of the format shared by its writer and its readers, for the reason `abt-agg` is one implementation of the aggregates: a reader's decoder and the writer's encoder cannot drift.
+The data layer builds and queries with it; the kernel decodes mapped segments with it (`map`, 3.1); `abt-agg`'s reductions run on its decoded blocks, and `abt-agg` gains the `exact` mode for tick columns (D-6.3). Property tests: encode then decode is the identity at every width with and without exceptions; extraction and row-range decoding equal full decoding; every range operation equals a direct reduction; exact sums equal a 128-bit rational reference (ST-13). [D] One implementation of the format shared by its writer and its readers, for the reason `abt-agg` is one implementation of the aggregates: a reader's decoder and the writer's encoder cannot drift.
 
 ---
 

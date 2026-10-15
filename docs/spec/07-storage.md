@@ -8,7 +8,7 @@ This document supersedes, for Norgate and Databento: the `f64` representation of
 
 ## 1. The result in one paragraph
 
-Every Norgate and Databento value is held hot, about 3.3 billion values in roughly 6.7 to 7.0 GB with every precomputed structure, inside the 16 GB machine with room for the kernel and the query layer. Prices and quantities are exact integer ticks: each block of 1,024 values of one instrument carries a quantum found from the data (a decimal exponent times a greatest common divisor), so every vendor value converts to an integer and back bit for bit. Blocks are stored instrument-contiguous and lane-interleaved (the FastLanes layout), offsets from a base, with OHLC predicted from the close and rare outliers patched, and a decode-and-sum runs at 0.18 to 0.38 ns a value, faster than scanning the same values uncompressed (0.63 to 0.85 ns as `i64`), because the scan is bandwidth-bound and the packed form is two to six times smaller. Everything that does not depend on a program is precomputed and hot: cumulative block summaries that answer any window, block min and max with sparse tables, the full calendar ladder of bars, presence bitmaps with rank directories, the catalog structures, standing event aggregates, and wavelet matrices for order statistics. Data enters through a seven-stage staging pipeline that verifies every block by decoding it, publishes versions atomically and shares unchanged blocks between versions; appends are written in place into each instrument's tail block and become visible by sequence number, so a reader bound to an earlier sequence never sees them, and revisions of history become new versions by copy-on-write.
+Every Norgate and Databento value is held hot, about 3.3 billion values in roughly 6.7 to 7.1 GB with every precomputed structure, inside the 16 GB machine with room for the kernel and the query layer. Prices and quantities are exact integer ticks: each block of 1,024 values of one instrument carries a quantum found from the data (a decimal exponent times a greatest common divisor), so every vendor value converts to an integer and back bit for bit. Blocks are stored instrument-contiguous and lane-interleaved (the FastLanes layout), offsets from a base, with OHLC predicted from the close and rare outliers patched, and a decode-and-sum runs at 0.18 to 0.38 ns a value, faster than scanning the same values uncompressed (0.63 to 0.85 ns as `i64`), because the scan is bandwidth-bound and the packed form is two to six times smaller. Everything that does not depend on a program is precomputed and hot: cumulative block summaries that answer any window, block min and max with sparse tables, the full calendar ladder of bars, presence bitmaps with rank directories, the catalog structures with interval indexes, standing event aggregates, a revision table for receipt-time reads, and wavelet matrices for order statistics. Every encoding and every structure answers a range of rows without decoding outside the blocks the range covers (ST-6), so a range max, a quantile or an OHLCV bar over 30,000 rows costs 0.6 to 4 µs instead of the 20 to 60 µs of a scan. Data enters through a seven-stage staging pipeline that verifies every block by decoding it, publishes versions atomically and shares unchanged blocks between versions; appends are written in place into each instrument's tail block and become visible by sequence number, so a reader bound to an earlier sequence never sees them, and revisions of history become new versions by copy-on-write.
 
 ---
 
@@ -61,6 +61,19 @@ All figures are measured on the company's data in S3 (Oct 15, 2026): NDLake `bar
 | length 250 to 2,250 | 759 ns | 662 ns |
 | length 2,000 to 22,000 | 728 ns | 4,596 ns |
 
+| Range query on rows `[a, b)` of one column, width 11, 33.5M values, random positions (`lanes-bench range`) | Packed, with the precomputed structures | Uncompressed `u32`, scanned |
+| --- | --- | --- |
+| point (one row) | 26 ns | 12 ns |
+| series read + sum, 1 to 32 rows (mean 16); the same queries as a batch sorted by start | 206 ns; 87 ns | 42 ns; 35 ns |
+| series read + sum, 32 to 1,024 rows (mean 527) | 686 ns; 345 ns | 384 ns; 186 ns |
+| series read + sum, 1,024 to 65,536 rows (mean 33,321) | 13.4 µs; 10.7 µs | 15.3 µs; 5.3 µs |
+| range max (sparse table + edges), the same three lengths | 220 ns / 733 ns / 1.34 µs | 87 ns / 519 ns / 19.4 µs |
+| OHLCV bar over an arbitrary range (two points, a max, a min, a sum), the same three lengths | 677 ns / 2.25 µs / 3.93 µs | 197 ns / 2.03 µs / 59.5 µs |
+| median of a range (wavelet matrix), 20 to 300 / 300 to 3,000 / 3,000 to 30,000 rows | 908 / 829 / 582 ns | copy and select: 651 ns / 3.50 µs / 31.1 µs |
+| count of values below `c` in a range (wavelet matrix), any length | 306 to 349 ns | a scan of the range |
+
+Three findings shape ST-6. A block a range covers by a quarter or more must be decoded with the fully unrolled kernel (shifts are constants); the row-range kernel, whose shifts are computed at run time, decoded long ranges at 28.8 µs against 13.4 µs, so it is used for short edges only. Short random ranges pay one more dependent cache miss than an uncompressed column (the block's header) and the decode instructions, which shrink the overlap between independent queries: 3 to 5 times an uncompressed read, 0.1 to 0.2 µs in absolute terms; sorting a batch halves it. A range read many times while it fits in cache is faster from a decoded copy (5.3 against 10.7 µs above), which is what the run-scoped decoded-block cache is for.
+
 ### 2.5 Rejected alternatives
 
 | Alternative | Why not |
@@ -94,19 +107,21 @@ For each (relation, column, calendar level) the store holds, per instrument, one
 
 ### 4.2 The lane-interleaved layout
 
-A block of 1,024 offsets is 32 lanes of 32 values: value `j` lives in lane `j mod 32` at row `j div 32`, and row `i` of every lane occupies bits `[i·W, (i+1)·W)` of that lane's `W` words, so the packed block is `32·W` 32-bit words (64-bit words for `W > 32`). Unpacking row `i` is the same shift and mask on 32 adjacent words, which compilers vectorise (8 lanes per AVX2 instruction, 16 with AVX-512, 4 with NEON on the M4). A single value is extracted with one or two word reads. Reference: Afroozeh and Boncz, *The FastLanes Compression Layout*, VLDB 2023.
+A block of 1,024 offsets is 32 lanes of 32 values: value `j` lives in lane `j mod 32` at row `j div 32`, and row `i` of every lane occupies bits `[i·W, (i+1)·W)` of that lane's `W` words, so the packed block is `32·W` 32-bit words (64-bit words for `W > 32`). Unpacking row `i` is the same shift and mask on 32 adjacent words, which compilers vectorise (8 lanes per AVX2 instruction, 16 with AVX-512, 4 with NEON on the M4). A single value is extracted with one or two word reads. Rows `[a, b)` of a block are rows `a div 32` to `⌈b/32⌉` of every lane, with the lanes outside `[a, b)` masked in the first and last row: offsets are random access, so no row before `a` is decoded. Decoding uses the fully unrolled kernel (one per width, shifts as constants) when the range covers at least 256 values of the block, and the row-range kernel otherwise (ST-2.4). Reference: Afroozeh and Boncz, *The FastLanes Compression Layout*, VLDB 2023.
 
 ### 4.3 Header
 
-32 bytes per block: `base: i64`, `g: u64`, `e: i8`, `W: u8`, `n: u16`, `flags: u16` (`recip_exact`, `patched`, `predicted`), `exceptions: u32` (offset into the block's exception list, 0 when none), padding to 32. Headers are stored apart from the packed words (a header array per column), so a scan reads headers sequentially.
+32 bytes per block: `base: i64`, `g: u64`, `e: i8`, `W: u8`, `n: u16`, `flags: u16` (`recip_exact`, `patched`, `predicted`), `exceptions: u32` (offset into the block's exception list, 0 when none), padding to 32. Headers are stored apart from the packed words (a header array per column, an instrument's headers contiguous), so a scan reads headers sequentially and a range reads the headers of its blocks from adjacent cache lines.
 
 ### 4.4 Patched exceptions
 
-Per block the width is `W* = argmin_W [ n·W + 74·#{u > 2^W − 1} ]`, 74 bits being the cost of an exception (its 10-bit position and 64-bit value). Values above the width are stored in the block's exception list and written back after unpacking. Volume blocks use this routinely (a rebalance day or a 10× spike widens one block otherwise); price blocks rarely need it.
+Per block the width is `W* = argmin_W [ n·W + 74·#{u > 2^W − 1} ]`, 74 bits being the cost of an exception (its 10-bit position and 64-bit value). Values above the width are stored in the block's exception list, sorted by position, and written back after unpacking; a range applies only the exceptions whose positions fall in it, found by binary search. Volume blocks use this routinely (a rebalance day or a 10× spike widens one block otherwise); price blocks rarely need it.
 
 ### 4.5 OHLC prediction
 
 A bar relation with open, high, low and close stores four tick columns per instrument: `C`; `H′ = H − max(O, C)`; `L′ = min(O, C) − L`; `O′ = O − C_prev`, with `C_prev` the previous row's close of the same instrument and, for the instrument's first row, `O′ = 0` and `O` stored in the instrument's directory entry (ST-4.8). The residuals are computed on integers at the finest exponent of the four columns over the block's rows, so they are exact; each residual column then has its own block headers, and its quantum is found from its own values (the GCD of `H′` is usually the close's tick). Decoding is `C`, then `O = O′ + C_prev`, then `H = H′ + max(O, C)` and `L = min(O, C) − L′`, element-wise on decoded blocks after aligning exponents (an integer multiplication by `10^{e* − e}`, exact). `H′ ≥ 0` and `L′ ≥ 0` hold on vendor data; a row violating them (a vendor error) is stored as an exception with its raw value and reported by S1.
+
+The prediction is row-local except for `C_prev`, so it never forces decoding outside a range: rows `[a, b)` need the close at row `a − 1` only, which is one extraction from the same block or the previous block's `last` (its block summary). Every summary, zone map, sparse table and wavelet matrix is built over the reconstructed values `O`, `H`, `L`, never over the residuals, which have no meaning to a predicate or an aggregate.
 
 ### 4.6 Other columns
 
@@ -128,24 +143,26 @@ Everything that is a function of the stored data alone, independent of any progr
 
 | Structure | Granularity | Answers | Size (both sources, all levels) |
 | --- | --- | --- | --- |
-| Block summary: `n`, min, max, the first time of each, first, last | per block | zone-map pruning; block-aligned min, max, first, last | in the 0.55 GB below |
-| Cumulative summary: `count`, `Σx`, `Σx²`, `Σk·x` exact in the instrument's finest exponent | per instrument at every block boundary | any window's moments: whole blocks from two cumulative entries, the edges decoded | 0.55 GB together with the block summaries and sparse tables |
-| Sparse table over block min and max | per instrument | range min and max over whole blocks in O(1) | (above) |
+| Block summary over the reconstructed values: `n`, min, max, the row of each, first, last | per block | zone-map pruning; block-aligned min, max, argmin, argmax, first, last | in the 0.55 GB below |
+| Cumulative summary: `count`, `Σx`, `Σx²`, `Σk·x` exact in the instrument's finest exponent | per instrument at every block boundary | any range's moments, mean, variance and trend slope: whole blocks from two cumulative entries, the edges decoded | 0.55 GB together with the block summaries and sparse tables |
+| Cumulative cross-moments of bar relations: `Σ C·V` and `Σ (H+L+C)·V`, exact | per instrument at every block boundary | dollar volume and VWAP (close or typical price) over any range | 0.03 GB |
+| Sparse table over block min and max, with the block of each | per instrument | range min, max, argmin, argmax over whole blocks in O(1) | (above) |
 | Calendar ladder (ST-5.3) | per instrument per level | any bucket of a standard calendar in O(1); coarser levels from finer | 1.0 GB |
-| Presence bitmap + rank directory per level (ST-5.4) | per instrument | (instrument, label) → row in O(1); which instruments traded at a label | 0.3 GB |
-| Catalog structures (ST-5.5) | per instrument, per index, per root | identity, symbols, actions, membership, delistings, classification, calendars, contract specs, roll map | 0.1 GB |
+| Presence bitmap + rank directory per level (ST-5.4) | per instrument | (instrument, label) → row in O(1); a label range → a row range; the number of rows in a label range | 0.3 GB |
+| Catalog structures (ST-5.5) | per instrument, per index, per root | identity, symbols, actions, membership at a date and over a range, instruments alive at a label or over a range, delistings, classification, calendars, contract specs, roll map | 0.1 GB |
 | Standing event aggregates (ST-5.6) | per instrument | adjustment factors as step functions | (in the catalog) |
-| Wavelet matrices (ST-5.7) | per instrument, close and volume, per level | range median, quantile, k-th in O(log σ) | 0.75 GB |
+| Wavelet matrices (ST-5.7) | per instrument, close and volume, per level | range median, quantile, k-th, count and listing of the values in `[lo, hi)`, in O(log σ) | 0.75 GB |
+| Revision table (ST-5.9) | per version | the values a revision superseded, with their receipt intervals: receipt-filtered reads and ranges | 0.01 GB |
 
 ### 5.1 Windows from cumulative summaries
 
-The sum over rows `[a, b)` of an instrument is `C(b) − C(a)`, where `C(k)` is the cumulative total at the start of `k`'s block plus the sum of the rows of that block before `k`. The in-block part decodes the shorter side only: the prefix when it is at most 512 values (unpacking only the rows it spans), otherwise the block total minus the suffix. A window of at most two blocks is decoded directly instead. Cost (ST-2.4): about 0.6 to 0.75 µs per random window whatever its length, dominated by the two cache misses, against a scan that grows with the length (4.6 µs at 2,000 to 22,000 rows). Sequential rolling windows (the kernel's and the aggregate pass's case) use sliding states over decoded blocks, 1.8 ns per output, and need no lookup at all.
+The sum over rows `[a, b)` of an instrument is `C(b) − C(a)`, where `C(k)` is the cumulative total at the start of `k`'s block plus the sum of the rows of that block before `k`. The in-block part decodes the shorter side only: the prefix when it is at most 512 values (unpacking only the rows it spans), otherwise the block total minus the suffix. A window of at most two blocks is decoded directly instead. Cost (ST-2.4): about 0.6 to 0.75 µs per random window whatever its length, dominated by the two cache misses, against a scan that grows with the length (4.6 µs at 2,000 to 22,000 rows). Sequential rolling windows (the kernel's and the aggregate pass's case) use sliding states over decoded blocks, 1.8 ns per output, and need no lookup at all. The same rule gives every cumulative quantity over any range: `count`, `Σx`, `Σx²` (so mean and variance), `Σk·x` (with `Σx` and `Σk`, the least-squares slope against row index, re-based to the range by `Σ(k−a)·x = Σk·x − a·Σx`), and the cross-moments `Σ C·V` and `Σ (H+L+C)·V` (dollar volume, VWAP). A reader uses a block's summary only if its visible count (ST-8.2) covers the whole block; otherwise it reduces its visible rows of that block directly.
 
 **Proposition 5.1 [N] (exact windows).** Window moments computed from cumulative summaries equal those of a direct reduction of the window, exactly. *Proof.* Proposition 3.3: every term is an exact integer in the instrument's finest exponent, and subtraction of exact integers is exact. ∎ Order statistics have no cumulative form; they use ST-5.7.
 
 ### 5.2 Min and max over ranges
 
-A range's minimum is the minimum of the sparse-table answer over its whole blocks and the two edge minima, the edges decoded as in ST-5.1. The sparse table has `⌈log₂ m⌉` rows over an instrument's `m` blocks; instruments have few blocks per level, so it is small.
+A range's minimum is the minimum of the sparse-table answer over its whole blocks and the two edge minima, the edges decoded as in ST-5.1; the sparse table keeps the block of each extremum, so the row of the minimum (the time of a high or a low) is that block's argmin from its summary, or the edge's. Measured: 1.34 µs for ranges of 1,024 to 65,536 rows, against 19.4 µs for a scan (ST-2.4). The sparse table has `⌈log₂ m⌉` rows over an instrument's `m` blocks; instruments have few blocks per level, so it is small.
 
 ### 5.3 The calendar ladder
 
@@ -158,6 +175,8 @@ Each level is a bar relation (open, high, low, close, volume, and the number of 
 
 **Proposition 5.2 [N] (exact ladder).** Every precomputed bar equals the bar computed from the base rows of its bucket. *Proof.* Open, high, low and close are first, max, min and last, which are exactly associative (they select one input value); volume and the row count are sums of integers, exact by Proposition 3.3; a coarser bucket is a union of finer buckets because the ladder's calendars are ordered by refinement (V-3.3, Prop. 3.3), so building from a finer level is a regrouping of the same inputs. ∎ Calendars outside the ladder are built on demand from the nearest finer level (ST-5.8).
 
+**Bars over any range.** A range aligned to a level (the months of 2015 to 2020) is a row range of that level. A bar over an arbitrary row range `[a, b)` of any level is computed from that level's structures without the ladder: open is the row `a` value, close the row `b − 1` value, high a range max of `H`, low a range min of `L`, volume a range sum of `V` (ST-5.1, ST-5.2). Measured: 3.9 µs over 1,024 to 65,536 rows, against 59.5 µs for scans (ST-2.4). The ladder is what makes a coarse calendar's bars a contiguous series for a sequential pass; ranges do not depend on it.
+
 ### 5.4 Presence and rank
 
 Per instrument and level, a bitmap over the level's labels within the instrument's alive interval marks the labels at which it has a row. A rank directory (a cumulative popcount every 512 bits plus a 9-bit relative count every 64 bits, about 25 % overhead; Jacobson 1989; Vigna 2008, rank9) answers "the row of label `ℓ`" in O(1), and select answers "the label of row `k`". The minute presence of futures is the larger part (about 0.23 GB before the directory); equity day presence is about 20 MB.
@@ -167,20 +186,23 @@ Per instrument and level, a bitmap over the level's labels within the instrument
 | Relation | Structure |
 | --- | --- |
 | Security master, vendor ids, tickers | interval indexes keyed by (vendor, key) and by symbol, binary search on time (D-2.4) |
-| Corporate actions (splits, dividends, delistings) | per-instrument event lists in time order |
-| Index membership (52 indexes) | the vendor's intervals (191,143 rows) plus, per index, a compressed bitmap of member instruments per day (roaring bitmaps; Lemire et al. 2016), a few MB |
+| Corporate actions (splits, dividends, delistings) | per-instrument event lists in time order; the events in a range by binary search |
+| Index membership (52 indexes) | the vendor's intervals (191,143 rows) in an augmented interval tree per index (members at any time in `[t0, t1]` in O(log n + k)), plus, per index, a compressed bitmap of member instruments per day (members at `t` in O(1); roaring bitmaps, Lemire et al. 2016), a few MB |
+| Instruments alive | per level, an augmented interval tree over every instrument's alive interval: the instruments alive at a label or during a range, in O(log n + k), what `section` and panel queries enumerate |
 | Classification, fundamentals | per-instrument event lists |
 | Trading calendars, futures sessions | per calendar a sorted label array and the session table |
 | Futures definitions | per contract: tick, multiplier, expiry, activation, unit; spreads inherit their legs' tick and are verified by the block GCD |
-| Continuous roll map | per root, the contract held at each date with its additive adjustment |
+| Continuous roll map | per root, the contract held at each date with its additive adjustment, as an interval list; the contracts held over a range by binary search |
 
 ### 5.6 Standing event aggregates
 
-Some program-independent results are needed by every equity program and are pure arithmetic over catalog events: the cumulative split factor and the cumulative total-return factor per instrument. They are declared by the kernel's `catalog` library as standing aggregate requests (cumulative product of a column of an event relation per entity, D-6.1), which the data layer evaluates at staging and stores as step functions: one entry per event. An adjusted price or a total-return index value is then the stored tick value times the step function's current factor, one multiply on read. The semantics stay in the request, which the kernel authors; the data layer computes a product (A-D6).
+Some program-independent results are needed by every equity program and are pure arithmetic over catalog events: the cumulative split factor and the cumulative total-return factor per instrument. They are declared by the kernel's `catalog` library as standing aggregate requests (cumulative product of a column of an event relation per entity, D-6.1), which the data layer evaluates at staging and stores as step functions: one entry per event. An adjusted price or a total-return index value is then the stored tick value times the step function's current factor, one multiply on read; the adjustment between two dates is the ratio of the factors at the two ends, two binary searches. Split factors are stored as exact rationals; the total-return factor is an `f64` product taken in event order, so it is deterministic. The semantics stay in the request, which the kernel authors; the data layer computes a product (A-D6).
 
 ### 5.7 Order statistics
 
 Range median, quantile and k-th smallest have no cumulative form. They are answered by a wavelet matrix per (instrument, column, level) over the rank-reduced offsets, in O(log σ), σ the number of distinct values of the instrument's column (Claude, Navarro and Ordóñez 2015; Gagie, Puglisi and Turpin 2009 for range quantiles). A matrix costs about `⌈log₂ σ⌉ · 1.25` bits a value (14 to 17 bits for a price or a volume over an instrument's history) plus the sorted distinct values. Built at staging for close and volume at Norgate's day level and coarser and at Databento's 1-hour level and coarser (about 0.75 GB); open, high and low, and finer futures levels, are built on first demand (about 0.35 GB a column at Norgate's day level) and kept for the life of the version. Doing all five columns at staging would cost about 1.8 GB; the extra 1 GB stays as headroom in ST-9.
+
+On a row range `[a, b)` a matrix answers: the k-th smallest (so median and any quantile), the number of values in `[lo, hi)` (so the rank of a value, the fraction above a threshold), and the listing of those values with their rows, each in O(log σ) plus the output. Measured: a median in 0.6 to 0.9 µs and a count in about 0.3 µs whatever the range's length, against 31 µs to copy and select over 3,000 to 30,000 rows (ST-2.4). A matrix covers sealed blocks only; a range that reaches the tail adds the tail's visible values by counting: a count adds a count over the tail, and a k-th smallest is found by binary search on the value with a count on each side, O(log σ) counts.
 
 ### 5.8 What is not precomputed, and why
 
@@ -191,26 +213,71 @@ Range median, quantile and k-th smallest have no cumulative form. They are answe
 | Calendars outside the ladder | unbounded | built on demand from the nearest finer level and cached until the version is evicted |
 | Wavelet matrices below 1 hour for futures, and for open, high and low | about 1 GB per column at 5 minutes; order statistics of raw open, high and low are rarely asked | built on first demand |
 | Order statistics of derived series (returns, dollar volume, a ratio) | the series is a program's expression | a sliding order-statistic structure in the aggregate pass (O(log w) per output), or a wavelet matrix built in run scope over the derived column |
+| Range sums of derived float series (realised variance of returns, a sum of log ratios) | returns are ratios, with no exact integer form, and which return (adjusted or not, close to close or open to close) is the program's choice | in run scope, one pass (1 to 2 ns a value) builds per-block partial sums of the derived column in canonical order; a range is then the sum of its whole blocks' partials in block order plus the decoded edges, O(range / 1,024), deterministic |
+| Moments across two instruments (a covariance of two series over a range) | quadratic in the number of instruments | the aggregate pass over the two series |
+| Decoded copies of blocks | the packed form is the resident form | a run-scoped decoded-block cache (LRU, default 256 MB) for ranges read repeatedly (ST-2.4) |
+
+### 5.9 Revisions and receipt-time reads
+
+D-2.2 keeps every revision of a fact and answers a receipt filter `r ≤ r_max` with the latest revision it admits. Blocks hold the latest revision of each row; the revision table holds what revisions superseded. Each entry is (relation, column, instrument, row, the superseded value's bits, its receipt interval `[r_from, r_to)`), and a row inserted by a revision has an entry whose value is *absent* before its receipt. The table is sorted by (relation, column, instrument, row) and indexed by `r_to`; it is built by S3 and carried, copy-on-write, by every later version.
+
+A read with a receipt filter decodes its range as usual, then substitutes, for each entry of the range (binary search, O(log R + entries)) whose interval contains `r_max`, the superseded value. Rows whose receipt follows `r_max` are excluded: for historical rows receipt is event time plus the version's delay, so they are a suffix of the range; for appended rows it is the receipt recorded in the append log (ST-8.2). Aggregates over a range with active entries are corrected exactly for sums and counts (subtract the latest value, add the superseded one: integers) and for counts in the wavelet matrix (±1 per entry); min, max and order statistics decode the blocks that hold active entries and combine them with the structures' answers over the other blocks. Revisions are vendor corrections, rare, so the table is small (ST-9). The stream emits, at each row's first receipt, the value then known (the oldest entry's value when the row has entries), and each later revision at its own receipt, from the table's `r_to` index (D-5.3).
 
 ---
 
-## 6. Query paths
+## 6. Range queries
 
-How each form of D-4.1 runs on this format, with its cost.
+### 6.1 The property
+
+**Proposition 6.1 [N] (range closure).** For every encoding and every structure of ST-3 to ST-5, a query over the rows `[a, b)` of one instrument reads only the blocks that intersect `[a, b)` with their headers and summaries, O(1) entries of the cumulative summaries, sparse tables and rank directories, and O(log σ) entries of a wavelet matrix; it needs the value of no row outside `[a, b)` except the close at row `a − 1`. (The decoder may still decode a whole intersecting block when that is faster, ST-4.2.) *Proof.* Offsets are per-block frame-of-reference values, so every row is addressed by its block and lane without decoding earlier rows (ST-4.2); quanta, bases and widths are per block (ST-3); exceptions are sorted by position (ST-4.4); the prediction of ST-4.5 is row-local except for `C_prev`; deltas, which would need every earlier row of a block, are not used (ST-2.5). Sums, moments and cross-moments decompose as differences of cumulative summaries (ST-5.1); min and max as overlapping sparse-table cells (ST-5.2); order statistics and counts are wavelet-matrix range operations (ST-5.7); presence ranges are rank differences (ST-5.4); catalog ranges are interval-tree or binary-search queries (ST-5.5, ST-5.6); revisions are a sorted table (ST-5.9). ∎
+
+The one encoding that does not have the property is the cold tier's (pcodec pages decode as a whole); it is never queried in place. A segment restored from the cold tier is restored whole, in the hot form, before it is read.
+
+### 6.2 Audit
+
+Each encoding and structure, the ranges it answers, and how.
+
+| Encoding or structure | Ranges it answers | How | Cost |
+| --- | --- | --- | --- |
+| Tick values, per-block quantum (ST-3) | any row range | each block decoded at its own exponent and scaled to the range's finest, an exact integer multiplication | per block, none extra |
+| Lane-interleaved offsets (ST-4.2) | any row range, any single row | rows `a div 32` to `⌈b/32⌉`, edge lanes masked; the unrolled kernel for blocks covered by ≥ 256 values | 26 ns a point; 13.4 µs for 33,000 rows, below an uncompressed scan |
+| Patched exceptions (ST-4.4) | any row range | binary search in the sorted exception list | O(log e) |
+| OHLC prediction (ST-4.5) | any row range | the close at `a − 1` from the block or the previous block's `last` | one extraction |
+| Tail block (ST-8.3) | any row range within the visible count | horizontal packing, random access | as above |
+| Block summaries (ST-5) | block-aligned ranges; pruning of any range | over reconstructed values, used only when the reader's visible count covers the block | O(1) per block |
+| Cumulative summaries and cross-moments (ST-5.1) | sum, count, mean, variance, slope, dollar volume, VWAP of any range | two cumulative entries, the shorter edges decoded | 0.6 to 0.75 µs at any length |
+| Sparse tables (ST-5.2) | min, max, argmin, argmax of any range | two overlapping cells plus the edges | 1.3 µs for 1,000 to 65,000 rows |
+| Calendar ladder (ST-5.3) | ranges aligned to a level, as row ranges of that level; any bar over any range from the level's own structures | as the rows above | 3.9 µs for an OHLCV bar over 1,000 to 65,000 rows |
+| Presence and rank (ST-5.4) | a label range to a row range; the number of rows in a label range | two ranks | O(1) |
+| Wavelet matrices (ST-5.7) | k-th, median, quantile, count and listing of values in `[lo, hi)` over any row range; ranges into the tail by counting | O(log σ) rank operations | 0.6 to 0.9 µs a median, 0.3 µs a count |
+| Catalog (ST-5.5) | members of an index, instruments alive, actions, tickers, roll map, contracts, over a date or a range | interval trees, sorted interval lists and event lists | O(log n + k) |
+| Standing event aggregates (ST-5.6) | the adjustment between any two dates | ratio of the factors at the two ends | two binary searches |
+| Revision table (ST-5.9) | receipt-filtered reads and aggregates over any range | binary search on (instrument, row); exact corrections for sums and counts | O(log R + entries) |
+| Append log (ST-8.2) | rows visible at a sequence, receipt-filtered tail rows | the visible count at the reader's sequence | O(log) + the tail's rows |
+| Directory (ST-4.8) | instruments in an id range | instruments are contiguous by id in segments | O(1) per instrument |
+
+Ranges across instruments (a panel: the instruments of a set over a date range) are the alive-interval or membership query of ST-5.5 followed by one row range per instrument; ranges across levels are one level's row range. A batch of range queries is sorted by (instrument, start) before it runs, so blocks are visited in order (87 against 206 ns for short random ranges, ST-2.4).
+
+### 6.3 The query forms
+
+How each form of D-4.1 runs, with its cost.
 
 | Form | Algorithm | Cost |
 | --- | --- | --- |
-| `point` (instrument, label) | directory → rank → block → lane extract | O(1); about 50 to 100 ns cold |
-| `latest` (instrument, ≤ t) | rank of t's label, select the previous set bit, extract | O(1) |
-| `series` (instrument, [t0, t1]) | rank both ends, decode the covered rows | 0.18 to 0.38 ns per value plus one miss per block |
-| `section` (label) | for each instrument alive at the label (alive intervals), test the presence bit and extract | O(alive): about 50 to 100 µs for 10,000 instruments |
-| `scan` with a predicate | block summaries prune whole blocks; survivors decoded and filtered | proportional to surviving blocks |
+| `point` (instrument, label) | rank of the label (presence), directory and header, lane extract | three dependent misses: about 0.2 to 0.3 µs alone, about 30 to 50 ns each in a batch (26 ns measured for the extract) |
+| `latest` (instrument, ≤ t) | rank of t's label, select the previous set bit, extract | as `point` |
+| `series` (instrument, [t0, t1]) | rank both ends, decode the covered rows (6.2) | 0.2 µs for a few rows; 0.4 ns a row over long ranges, below an uncompressed scan |
+| `section` (label) | the alive-interval tree gives the instruments alive at the label; for each, the presence bit and an extract | O(alive): about 0.3 to 0.5 ms for 10,000 instruments from memory, within A-7.3's 1 ms; during a replay, cursors hold the current blocks and a section is read from them |
+| panel (instruments × [t0, t1]) | the alive or membership query of ST-5.5, then `series` per instrument, sorted | the sum of the series |
+| `scan` with a predicate | block summaries prune whole blocks; survivors decoded and filtered; a value predicate on a column with a wavelet matrix lists the matching rows directly | proportional to surviving blocks, or O(log σ) per match |
 | `aggregate`, sequential window | decode + sliding state | 1.8 ns per output |
-| `aggregate`, random window | cumulative summaries + shorter edge (ST-5.1) | about 0.6 to 0.75 µs |
+| `aggregate`, random window (sum, count, mean, variance, slope, dollar volume, VWAP) | cumulative summaries + shorter edge (ST-5.1) | about 0.6 to 0.75 µs |
 | `aggregate`, ladder bucket | one row of the level | O(1) |
-| range min, max | sparse table + edges | O(1) + edges |
-| range median, quantile | wavelet matrix | O(log σ) |
-| `subscribe` (replay) | one cursor per live instrument holding its current decoded block; at each label, the instruments alive and present advance | each block decoded once; O(alive) per label |
+| bar over an arbitrary range | points, sparse tables, cumulative sums (ST-5.3) | 0.7 to 3.9 µs |
+| range min, max, argmin, argmax | sparse table + edges | 0.2 to 1.3 µs |
+| range median, quantile, count in `[lo, hi)` | wavelet matrix | 0.3 to 0.9 µs |
+| any of the above with a receipt filter | the same, corrected by the revision table (ST-5.9) | + O(log R + entries) |
+| `subscribe` (replay) | one cursor per live instrument holding its current decoded block; at each label, the instruments alive and present advance; revisions merged at their receipt (ST-5.9) | each block decoded once; O(alive) per label |
 
 ---
 
@@ -223,8 +290,8 @@ Data moves from a vendor to the hot store through seven stages. Each stage's out
 | S0 Land | vendor objects: NDLake year files and registry, Databento files listed in `manifest.csv`, the live gateway | the landing log: (source, key, ETag or SHA-256, size, fetched at) | the object's checksum matches the vendor's manifest where one exists (Databento's `manifest.csv` carries SHA-256) |
 | S1 Normalise | landed objects | Arrow batches in local staging (NVMe), one per (relation, instrument range), sorted by (instrument, time): ids from the registry, values as exact integers with their source exponent, receipt times | schema conformance and identity (D-8); every value converts exactly (ST-3) or is listed |
 | S2 Classify | normalised batches and the current version | per instrument: appends (time after its last row), duplicates (identical to stored), revisions (an existing row with a different value), late rows (inside the tail's span) | duplicates dropped; counts per class reported |
-| S3 Build | appends, revisions | appends applied to tails (ST-8); revisions: every affected block re-encoded copy-on-write, its block summaries, the cumulative summaries from that block to the instrument's end, the ladder buckets containing it, presence, wavelets of the affected instrument and level | — |
-| S4 Verify | built blocks | a verification report | every new block decodes to its source bit for bit (Prop. 3.2); summaries of new blocks equal a direct recomputation; for a sample of ladder buckets, the bar equals the bar recomputed from base rows (Prop. 5.2); row counts per instrument equal the source's |
+| S3 Build | appends, revisions | appends applied to tails (ST-8); revisions: every affected block re-encoded copy-on-write, its block summaries, the cumulative summaries and cross-moments from that block to the instrument's end, the sparse table of the instrument, the ladder buckets containing it, presence, wavelets of the affected instrument and level, and one revision-table entry per superseded value (ST-5.9) | — |
+| S4 Verify | built blocks | a verification report | every new block decodes to its source bit for bit (Prop. 3.2); summaries of new blocks equal a direct recomputation; for a sample of ladder buckets, the bar equals the bar recomputed from base rows (Prop. 5.2); for a sample of random ranges of every rebuilt instrument, every range query of ST-6.3 equals a direct reduction of the decoded rows; row counts per instrument equal the source's |
 | S5 Publish | verified segments | a new version manifest (the list of segment hashes and the sequence high-water), written then renamed into place | atomic: a reader sees the old manifest or the new one; readers holding the old version keep it (pinning, D-3.4) |
 | S6 Export and collect | published segments | the cold copy in S3 (pcodec-compressed segments, or Parquet for interoperability); unpinned superseded segments deleted | the cold copy round-trips to the hot form |
 
@@ -275,7 +342,7 @@ There is one writer per instrument (the data layer's ingest thread for its shard
 
 ### 8.5 The live path (Databento)
 
-The feed decoder writes each minute bar to the log (D-5.4), then appends it to its instrument's tails: about 50,000 appends a minute for 10,000 instruments and five columns, a few milliseconds at about 100 ns an append. The minute barrier then seals the minute in every open bucket of the ladder that ends with it. A late row (a minute whose bar arrives after its barrier) is an append when it is still the instrument's latest row; when it falls inside the tail's span it is inserted by re-encoding the tail under a new sequence, and readers at earlier sequences keep their view (8.3); when it falls inside a sealed block it is a revision (S2 to S5). Ladder buckets it touches that were already sealed are revised the same way. Its effect on the kernel is the late-data rule (K-4.4).
+The feed decoder writes each minute bar to the log (D-5.4), then appends it to its instrument's tails: about 50,000 appends a minute for 10,000 instruments and five columns, a few milliseconds at about 100 ns an append. The minute barrier then seals the minute in every open bucket of the ladder that ends with it. A late row (a minute whose bar arrives after its barrier) is an append when it is still the instrument's latest row; when it falls inside the tail's span it is inserted by re-encoding the tail under a new sequence, and readers at earlier sequences keep their view (8.3); when it falls inside a sealed block it is a revision (S2 to S5), recorded in the revision table as a row absent before its receipt (ST-5.9). Ladder buckets it touches that were already sealed are revised the same way. Its effect on the kernel is the late-data rule (K-4.4).
 
 ### 8.6 The daily Norgate path
 
@@ -300,18 +367,20 @@ Norgate and Databento, all history, all hot.
 | Calendar ladder: Databento 5, 15, 30 minutes and 1 hour | 0.65 to 1.0 GB |
 | Calendar ladder: Databento session, day, week, month | 0.03 GB |
 | Block summaries, cumulative summaries, sparse tables, all levels | 0.55 GB |
+| Cumulative cross-moments of bar relations (`Σ C·V`, `Σ (H+L+C)·V`) | 0.03 GB |
 | Directory and block headers (32 B for each of about 4.2M blocks) | 0.14 GB |
-| Catalog structures and standing event aggregates | 0.1 GB |
+| Catalog structures, interval trees and standing event aggregates | 0.1 GB |
+| Revision table | 0.01 GB |
 | Wavelet matrices, close and volume (ST-5.7) | 0.75 GB |
 | Append logs and live tails | 0.5 GB |
-| **Data layer, hot** | **≈ 6.7 to 7.0 GB** |
+| **Data layer, hot** | **≈ 6.7 to 7.1 GB** |
 | Staging, while it runs | ≤ 1 GB |
 | Kernels (one MW14-class program < 1 GB; a study of four kernels 2 to 4 GB) | ≤ 4 GB |
-| Run-scoped on-demand structures (rolling results, a non-standard calendar, a wavelet built on demand) | ≤ 2 GB |
-| **Peak** (staging during a four-kernel study) | **≤ 14 GB**, inside 16 GB with 2 GB for the operating system |
+| Run-scoped on-demand structures (rolling results, a non-standard calendar, a wavelet built on demand, the decoded-block cache) | ≤ 2 GB |
+| **Peak** (staging during a four-kernel study) | **≈ 14 GB**, inside 16 GB with 2 GB for the operating system |
 | **Typical** (one kernel, no staging) | **≈ 8.5 GB** |
 
-The figures scale measured bytes per value by estimated row counts (±25 %). The intraday ladder's range is the one real unknown: a contract that trades every minute has a fifth as many 5-minute bars as minute bars, but a calendar spread that trades a few times an hour has nearly as many, and spreads are 76 % of CL's rows. M-2 measures it on the full history; if the store exceeds 7.0 GB, the 5-minute level is the first to move from precomputed to on-demand (it is rebuilt from minutes at the encode rate, about 10 ns a value).
+The figures scale measured bytes per value by estimated row counts (±25 %). The intraday ladder's range is the one real unknown: a contract that trades every minute has a fifth as many 5-minute bars as minute bars, but a calendar spread that trades a few times an hour has nearly as many, and spreads are 76 % of CL's rows. M-2 measures it on the full history; if the store exceeds 7.1 GB, the 5-minute level is the first to move from precomputed to on-demand (it is rebuilt from minutes at the encode rate, about 10 ns a value).
 
 ---
 
@@ -347,7 +416,7 @@ ORATS is not held hot. Measured on three consecutive days of 2025 and scaled to 
 
 | Document | Change |
 | --- | --- |
-| `00-architecture.md` | A-D35 to A-D40 below; target "storage per stored value" becomes "≤ 2 B per value resident on average with every precomputed structure, about 6.7 to 7.0 GB for Norgate and Databento" |
+| `00-architecture.md` | A-D35 to A-D40 below; target "storage per stored value" becomes "≤ 2 B per value resident on average with every precomputed structure, about 6.7 to 7.1 GB for Norgate and Databento" |
 | `01-data.md` | D-2.1: prices and quantities are tick columns (ST-3), `f64` is a view; D-3.1 and D-3.2: the resident form is ST-4, partitions are ST-7 segments; the log, versions, snapshot reads, the cache and the tiers stand |
 | `04-protocol.md` | `abt-codec` beside `abt-wire` and `abt-agg`; the `map` request in the data service |
 | `06-performance.md` | X-2.1's store structures are superseded by ST-4 and ST-5 for Norgate and Databento |
@@ -372,15 +441,16 @@ ORATS is not held hot. Measured on three consecutive days of 2025 and scaled to 
 | Real-data round trip | every block of the staged Norgate and Databento store decodes bit for bit to the vendor's values (S4 over the whole store, once, at M-2) |
 | Exact aggregates | sums, moments and windows from cumulative summaries equal a 128-bit rational reference on random windows |
 | Ladder | every precomputed bar of a sample of instruments equals the bar recomputed from base rows |
+| Ranges | for every query of ST-6.3, on random ranges of random instruments, including ranges of one row, ranges that start or end mid-block, mid-row and at block boundaries, ranges that cover exceptions, ranges that reach the tail, and ranges read at earlier sequences and with receipt filters over revised rows: the answer equals a direct reduction of the decoded rows (exactly for every exact form) |
 | Appends | interleaved appends and reads at random sequences: every reader sees exactly the rows with sequence ≤ its own (Prop. 8.1); tails re-encoded under readers keep the readers' views |
 | Revisions | a revision publishes a version whose unchanged segments are shared by hash, and readers of the old version are unaffected |
-| Performance | `scripts/study/encoding/` benchmarks rerun on the reference machine at M-2 and M-8: decode-and-sum at or below the raw `u32` scan at every width up to 27; the hot store within the budget of ST-9 |
+| Performance | `scripts/study/encoding/` benchmarks rerun on the reference machine at M-2 and M-8: decode-and-sum at or below the raw `u32` scan at every width up to 27; range reads of 1,000 rows or more at or below an uncompressed scan; range max, OHLCV bars, medians and counts within twice the figures of ST-2.4; the hot store within the budget of ST-9 |
 | Parity | G1 unchanged: MW14 and R8L read their bars through the new store in `two_pass` mode and reproduce their references |
 
 ---
 
 ## 14. What is established, new and decided in this document
 
-- [E] Frame-of-reference and patched frame-of-reference coding (Zukowski, Héman, Nes and Boncz 2006); the FastLanes layout (Afroozeh and Boncz 2023); ALP's verified decimal reconstruction (Afroozeh, Kuffó and Boncz 2023); rank and select directories (Jacobson 1989; Vigna 2008); wavelet matrices and range quantiles (Claude, Navarro and Ordóñez 2015; Gagie, Puglisi and Turpin 2009); roaring bitmaps (Lemire et al. 2016); sparse tables for range minima (Bender and Farach-Colton 2000); pcodec (Loncaric 2024).
-- [N] Lossless representation (3.2); exact sums across blocks of different quanta (3.3); exact windows from cumulative summaries (5.1); exact ladder (5.2); immutable versions with structural sharing (7.1); snapshot exactness under appends (8.1).
+- [E] Frame-of-reference and patched frame-of-reference coding (Zukowski, Héman, Nes and Boncz 2006); the FastLanes layout (Afroozeh and Boncz 2023); ALP's verified decimal reconstruction (Afroozeh, Kuffó and Boncz 2023); rank and select directories (Jacobson 1989; Vigna 2008); wavelet matrices and range quantiles (Claude, Navarro and Ordóñez 2015; Gagie, Puglisi and Turpin 2009); roaring bitmaps (Lemire et al. 2016); sparse tables for range minima (Bender and Farach-Colton 2000); augmented interval trees (Cormen, Leiserson, Rivest and Stein, ch. 14); pcodec (Loncaric 2024).
+- [N] Lossless representation (3.2); exact sums across blocks of different quanta (3.3); exact windows from cumulative summaries (5.1); exact ladder (5.2); range closure of every encoding and structure (6.1); immutable versions with structural sharing (7.1); snapshot exactness under appends (8.1).
 - [D] A-D35 to A-D40.

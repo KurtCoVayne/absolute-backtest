@@ -70,10 +70,10 @@ Every decision below was taken in the design conversation of Oct 12, 2026 or fol
 | A-D34 | **v1 is retired by the migration** (M-9): `corpus/`, `environment` files, `ExecConfig`, the 72 options and the `study` subcommands as they exist. `--param` survives for plans. | Keeping both surfaces: two meanings of every command during the migration. |
 | A-D35 | **Prices and quantities are stored as integer ticks** with a per-block quantum (a decimal exponent times a GCD found from the data); `f64` is a view computed on read; every vendor value round-trips bit for bit (ST-3). | `f64` or `f32` storage: `f64` sums are not associative, Databento's ticks are not `f32`, and the GCD saves 5 to 19 bits a value on binary-fraction ticks (ES's 0.25 to ZT's 1/256, ST-2.2). |
 | A-D36 | **The resident form is instrument-contiguous, lane-interleaved blocks** of 1,024 values, offsets from a base with patched exceptions and OHLC predicted from the close, memory-mapped from immutable segments (ST-4). Decode-and-sum runs at 0.18 to 0.38 ns a value, faster than an uncompressed scan. | Uncompressed columns (about 26 GB and slower); entropy coding in memory (pcodec: 10 to 20 times slower to decode); time-major order (2.4 times larger, ST-2.3). |
-| A-D37 | **Everything independent of a program is precomputed and hot** for Norgate and Databento: cumulative block summaries, block min/max with sparse tables, the full calendar ladder, presence with rank directories, catalog structures, standing event aggregates, wavelet matrices for close and volume (ST-5). Program-dependent results are recomputed in run-scoped memory. | Caching rolling results: unbounded in number and incompressible. |
+| A-D37 | **Everything independent of a program is precomputed and hot** for Norgate and Databento: cumulative block summaries and cross-moments, block min/max with sparse tables, the full calendar ladder, presence with rank directories, catalog structures with interval indexes, standing event aggregates, a revision table for receipt-time reads, wavelet matrices for close and volume (ST-5). Every encoding and structure answers a range without decoding outside the blocks it covers (ST-6, audited and measured). Program-dependent results are recomputed in run-scoped memory. | Caching rolling results: unbounded in number and incompressible. |
 | A-D38 | **Data enters through a seven-stage staging pipeline** (land, normalise, classify, build, verify by decoding, publish atomically, export and collect) with content-addressed segments shared between versions (ST-7). | Rebuilding the store per update: minutes instead of milliseconds, and no structural sharing. |
 | A-D39 | **Appends are written in place into per-instrument tail blocks** and become visible by sequence number; revisions of history are copy-on-write versions (ST-8). | Appends as new versions: a version a minute live. |
-| A-D40 | **ORATS is not held hot**; its holding is a separate decision (ST-11). Norgate and Databento together are about 6.7 to 7.0 GB hot. | Any hot ORATS design: about 87 GB at the smallest lossless encoding. |
+| A-D40 | **ORATS is not held hot**; its holding is a separate decision (ST-11). Norgate and Databento together are about 6.7 to 7.1 GB hot. | Any hot ORATS design: about 87 GB at the smallest lossless encoding. |
 
 ---
 
@@ -162,7 +162,7 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 | Point lookup, range scan per entity | O(log n), O(log n + k) |
 | MW14 full replay (1991–2026) | ≤ 60 s, ≤ 1.5 GB (today 126 s, 3.1 GB) |
 | R8L full replay (2000–2026) | ≤ 3 s, ≤ 0.6 GB |
-| Storage per stored value | Norgate and Databento: ≤ 2 B resident on average with every precomputed structure, about 6.7 to 7.0 GB in all (ST-9); other sources: ≤ 16 B resident, ≤ 4 B on disk after compression |
+| Storage per stored value | Norgate and Databento: ≤ 2 B resident on average with every precomputed structure, about 6.7 to 7.1 GB in all (ST-9); other sources: ≤ 16 B resident, ≤ 4 B on disk after compression |
 | Hot data layer + kernels + staging, peak | ≤ 14 GB on the 16 GB reference machine (ST-9) |
 | Full-minute futures bundle (47M bars) | resident on the reference machine |
 

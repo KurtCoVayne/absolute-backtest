@@ -33,8 +33,8 @@ Each is a standalone crate (`cargo run --release -- …`), single-threaded, best
 | `codec-bench` | synthetic first pass: decimal + offsets, deltas, volume packing | none |
 | `real-bench` | horizontal bit-packing with the block GCD on the real columns, fused decode + exact sum, exact `f32` rebuild, raw `f32`/`f64` scans | `$DATA` |
 | `raw-bench` | uncompressed baselines on NDLake 2024 close: `i64` and canonical `f64` scans, rolling mean by sliding state and by prefix sums, exact variance in `i128`, random windows | `$DATA` |
-| `lanes-bench` | the lane-interleaved (FastLanes) layout: decode + sum at widths 5 to 27 against raw `u32`, `i64`, `f64` scans; with `extra`, the encode cost and random windows from cumulative block sums with the shorter edge decoded | none, or `extra` |
+| `lanes-bench` | the lane-interleaved (FastLanes) layout: decode + sum at widths 5 to 27 against raw `u32`, `i64`, `f64` scans; with `extra`, the encode cost and random windows from cumulative block sums with the shorter edge decoded; with `range`, every range operation of ST-6 (points, row ranges mid-block, sorted batches, range max through a sparse table, OHLCV bars over arbitrary ranges, wavelet-matrix medians and counts), each checked against a direct reduction | none, `extra` or `range` |
 
 ## Results (2-core 2.8 GHz VM)
 
-The tables of ST-2 are the results; `results/study.json` and `results/study2.json` are the raw outputs of the two Python studies. To be rerun on the reference machine at M-2 and M-8 (ST-13).
+The tables of ST-2 are the results (`results/range.txt` is the output of `lanes-bench range`); `results/study.json` and `results/study2.json` are the raw outputs of the two Python studies. To be rerun on the reference machine at M-2 and M-8 (ST-13).

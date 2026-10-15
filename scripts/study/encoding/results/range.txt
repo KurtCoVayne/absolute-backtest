@@ -1,0 +1,9 @@
+33554432 values per test, sum of the decoded column (exact integer), best of 9
+point, random row of 33.5M: packed extract 26.2 ns | raw u32 load 12.0 ns
+rows     1..32     (mean     16): series decode+sum     206 ns (raw      42); batch sorted      87 ns (raw      35) | range max   220 ns (raw scan      87) | OHLCV bar   677 ns (raw scans     197)
+rows    32..1024   (mean    527): series decode+sum     686 ns (raw     384); batch sorted     345 ns (raw     186) | range max   733 ns (raw scan     519) | OHLCV bar  2253 ns (raw scans    2031)
+rows  1024..65536  (mean  33321): series decode+sum   13411 ns (raw   15283); batch sorted   10713 ns (raw    5305) | range max  1340 ns (raw scan   19398) | OHLCV bar  3928 ns (raw scans   59490)
+wavelet matrix: 16.50 bits/value (with the rank directory)
+rows    20..300   : wavelet median   908 ns, count below c   306 ns | raw copy + select     651 ns
+rows   300..3000  : wavelet median   829 ns, count below c   318 ns | raw copy + select    3497 ns
+rows  3000..30000 : wavelet median   582 ns, count below c   349 ns | raw copy + select   31067 ns
