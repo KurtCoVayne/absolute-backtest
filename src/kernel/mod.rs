@@ -319,7 +319,13 @@ impl Dataset {
         // instant that is no label bounds the sample at itself.
         let horizon = if time::bucket(prog.base, t) == t { time::bucket_range(prog.base, t).1 } else { t };
         for (name, tuples) in &self.facts {
-            let Some(sig) = prog.relations.get(name) else { continue };
+            // A relation the program does not read keeps its name and no
+            // tuple: what the data has is part of the run's warnings, what
+            // it held after `t` is not part of the sample.
+            let Some(sig) = prog.relations.get(name) else {
+                out.facts.entry(name.clone()).or_default();
+                continue;
+            };
             let Some(k) = sig.key_pos() else { continue };
             let res = sig.native.unwrap_or(prog.base);
             let records = self.available_at.contains_key(name);
@@ -1709,15 +1715,14 @@ impl<'p> Kernel<'p> {
         // (no `need actions`): the executor cannot apply what it never sees,
         // so the run says so rather than booking a split as a price move.
         let carried: Vec<&str> = if cfg.actions_in_prices { vec!["delisted"] } else { vec!["split", "dividend", "delisted"] };
-        let ignored: Vec<&str> = carried
-            .into_iter()
-            .filter(|r| dataset.facts.get(*r).map(|v| !v.is_empty()).unwrap_or(false) && !prog.relations.contains_key(*r))
-            .collect();
+        // Judged on the relations the data has, not on their tuples, so that
+        // a truncated sample and a fold stopped early warn as the whole run.
+        let ignored: Vec<&str> = carried.into_iter().filter(|r| dataset.facts.contains_key(*r) && !prog.relations.contains_key(*r)).collect();
         if !ignored.is_empty() {
             run_warnings.push(RunWarning {
                 bias: "corporate actions".into(),
                 message: format!(
-                    "the data carries {} and the program does not load {} (its data block has no `need actions`), so the executor applies none: {}",
+                    "the data has {} and the program does not load {} (its data block has no `need actions`), so the executor applies none: {}",
                     ignored.join(", "),
                     if ignored.len() > 1 { "them" } else { "it" },
                     if ignored.contains(&"split") {
