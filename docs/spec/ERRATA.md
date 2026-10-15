@@ -162,6 +162,30 @@ and the batch driver agree on every corpus program.
   whole groups take time windows and buckets. A bucket of the per-instrument
   sessions calendar is not served (E-12).
 
+- **E-34 (D-2.2, D-2.3, D-2.4; names and the registry's relations).** A
+  market class's relation is stored as `<class>.<relation>` (`equity.close`,
+  `future.close`, `series.value`): the registry holds a schema by class and
+  name, and the classes share relation names. The class file still renders
+  the short names. `instrument` gains `multiplier` and
+  `commission_per_contract`, the contract terms a source declares (a
+  multiplier marks a declared contract; a share has none), and `ticker`
+  gains `to`, the end of the span a symbol is carried over, so that a
+  security table's spans are kept exactly. An adapter's rows name their
+  instruments by the source's keys; `vendor_id` attributes a key to its id,
+  a key first seen is assigned the next id with its `instrument` row, and the
+  registry's relations are written under one source so that each has one
+  current version. The transitional resolver binds a demand's relations
+  qualified by its class (a relation from several sources: the first source
+  by name) with the registry's `instrument`, `vendor_id` and `ticker`.
+- **E-35 (D-2.1, D-2.2; the key of a fact).** The identity of Definition
+  D-2.1 is the entity columns and `t`; a relation such as `member(A, T,
+  List)` holds several rows of one instrument at one time, which that
+  identity would refuse as conflicting revisions. A fact's key is its entity
+  columns, its label columns and `t`: rows that differ in a label are two
+  facts, rows that differ in a value with equal `r` conflict, and the latest
+  revision is taken per key. The entity offset index stays on the entity.
+  A value column a source does not carry is null.
+
 ## Aggregates
 
 - **E-27 (P-1.2, Proposition 1.1; the running sums' rebuild points).** "The

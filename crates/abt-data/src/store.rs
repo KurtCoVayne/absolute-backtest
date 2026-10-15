@@ -538,13 +538,13 @@ fn filter_rows(s: &RelationSchema, lay: &Layout, b: &RecordBatch, f: &RowFilter)
     Ok(arrow::compute::filter_record_batch(b, &keep)?)
 }
 
-/// Sorted rows with only the last revision of each (t, identity) kept: the
+/// Sorted rows with only the last revision of each (t, key) kept: the
 /// latest admitted one (D-2.2).
 fn latest_revisions(lay: &Layout, sorted: &RecordBatch) -> Result<RecordBatch, DataError> {
     if sorted.num_rows() < 2 {
         return Ok(sorted.clone());
     }
-    let cols: Vec<usize> = std::iter::once(lay.t).chain(lay.identity.iter().copied()).collect();
+    let cols: Vec<usize> = std::iter::once(lay.t).chain(lay.key.iter().copied()).collect();
     let fields: Vec<arrow::row::SortField> = cols.iter().map(|&i| arrow::row::SortField::new(sorted.column(i).data_type().clone())).collect();
     let conv = arrow::row::RowConverter::new(fields)?;
     let arrays: Vec<arrow::array::ArrayRef> = cols.iter().map(|&i| sorted.column(i).clone()).collect();

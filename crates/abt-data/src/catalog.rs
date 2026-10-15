@@ -335,7 +335,7 @@ pub fn relation_schema(class: &ClassDef, r: &CatalogRelation) -> RelationSchema 
         });
     }
     RelationSchema {
-        name: r.name.to_string(),
+        name: qualified(class.name, r.name),
         class: class.name.to_string(),
         columns,
         calendar: class.base.map(|(b, _)| b.to_string()),
@@ -343,6 +343,13 @@ pub fn relation_schema(class: &ClassDef, r: &CatalogRelation) -> RelationSchema 
         attributes: (!attributes.is_empty()).then_some(attributes),
         schema_version: Some(SCHEMA_VERSION.to_string()),
     }
+}
+
+/// A market class's relation as the store names it, `<class>.<relation>`
+/// (D-2.2: the registry holds a schema by class and name; `close` is the
+/// equity class's and the future class's).
+pub fn qualified(class: &str, relation: &str) -> String {
+    format!("{}.{}", class, relation)
 }
 
 /// Every schema the built-in classes define.

@@ -249,24 +249,21 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
     let lay = layout(&schema);
     let rows = match form {
         QueryForm::Latest(_) if all.num_rows() > 0 => {
-            // The greatest t ≤ t_max per identity: rows are in (t, identity)
-            // order, so each identity's last row.
-            let ids: Vec<u64> = (0..all.num_rows())
-                .map(|i| match lay.identity.first() {
-                    Some(&c) if schema.columns[c].ty == ColumnType::Entity => all.column(c).as_primitive::<arrow::datatypes::UInt64Type>().value(i),
-                    Some(&c) => all.column(c).as_primitive::<arrow::datatypes::UInt32Type>().value(i) as u64,
-                    None => 0,
-                })
-                .collect();
-            let mut last: BTreeMap<u64, usize> = BTreeMap::new();
-            for (i, id) in ids.iter().enumerate() {
-                last.insert(*id, i);
+            // The greatest t ≤ t_max per fact key: rows are in (t, key) order,
+            // so each key's last row.
+            let cols: Vec<ArrayRef> = lay.key.iter().map(|&c| all.column(c).clone()).collect();
+            let mut last: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+            if cols.is_empty() {
+                last.insert(Vec::new(), all.num_rows() - 1);
+            } else {
+                let conv = arrow::row::RowConverter::new(cols.iter().map(|c| arrow::row::SortField::new(c.data_type().clone())).collect())?;
+                let keys = conv.convert_columns(&cols)?;
+                for i in 0..all.num_rows() {
+                    last.insert(keys.row(i).as_ref().to_vec(), i);
+                }
             }
-            let keep: Vec<u32> = {
-                let mut v: Vec<u32> = last.values().map(|&i| i as u32).collect();
-                v.sort_unstable();
-                v
-            };
+            let mut keep: Vec<u32> = last.values().map(|&i| i as u32).collect();
+            keep.sort_unstable();
             arrow::compute::take_record_batch(&all, &arrow::array::UInt32Array::from(keep))?
         }
         _ => all,

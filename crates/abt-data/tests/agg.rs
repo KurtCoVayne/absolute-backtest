@@ -78,7 +78,7 @@ fn data() -> Vec<(u64, i64, f64)> {
 
 fn store() -> Store {
     let mut s = Store::temporary("agg").unwrap();
-    s.ingest("close", &[close_rows(&data())], "test", BTreeMap::new()).unwrap();
+    s.ingest("equity.close", &[close_rows(&data())], "test", BTreeMap::new()).unwrap();
     let mut cal: Vec<(&str, i64)> = (0..DAYS).map(|d| ("1d", T0 + d * DAY)).collect();
     cal.extend((0..DAYS).filter(|d| d % 5 == 4).map(|d| ("1w", T0 + d * DAY)));
     s.ingest("calendar_label", &[calendar_rows(&cal)], "test", BTreeMap::new()).unwrap();
@@ -87,7 +87,7 @@ fn store() -> Store {
 
 fn request(function: &str, window: WindowKind) -> AggregateRequest {
     AggregateRequest {
-        relation: "close".into(),
+        relation: "equity.close".into(),
         column: "P".into(),
         second_column: None,
         function: function.into(),
@@ -295,7 +295,7 @@ fn whole_groups_and_two_columns_and_failures() {
     let got = rows(&mut s, &req);
     assert!(got.iter().all(|r| r.2.is_some_and(|v| (v - 1.0).abs() < 1e-12)));
     let mut flat = Store::temporary("agg-flat").unwrap();
-    flat.ingest("close", &[close_rows(&(0..6).map(|d| (1, T0 + d * DAY, 5.0)).collect::<Vec<_>>())], "test", BTreeMap::new())
+    flat.ingest("equity.close", &[close_rows(&(0..6).map(|d| (1, T0 + d * DAY, 5.0)).collect::<Vec<_>>())], "test", BTreeMap::new())
         .unwrap();
     let mut req = request("corr", WindowKind::Rows);
     req.second_column = Some("P".into());
@@ -318,7 +318,7 @@ fn answers_are_cache_objects_keyed_by_request_and_versions() {
     let (_, k3) = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
     assert_ne!(k1, k3, "the numerics are part of the key (D-6.3)");
     // New input rows: a new version of the input, a new object.
-    s.ingest("close", &[close_rows(&[(1, T0 + 50 * DAY, 1.0)])], "test", BTreeMap::new()).unwrap();
+    s.ingest("equity.close", &[close_rows(&[(1, T0 + 50 * DAY, 1.0)])], "test", BTreeMap::new()).unwrap();
     req.numerics = Numerics::TwoPass;
     let (v4, k4) = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
     assert_ne!(k1, k4);

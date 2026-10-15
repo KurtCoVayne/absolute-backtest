@@ -73,8 +73,8 @@ fn revisions_are_kept_and_the_receipt_filter_picks_the_latest_admitted() {
     let mut s = Store::temporary("revisions").unwrap();
     let t = 19_000 * DAY;
     // A close at t, received at t, then corrected a day later.
-    let v1 = s.ingest("close", &[close_rows(&[(1, t, t, 10.0), (2, t, t, 20.0)])], "test", BTreeMap::new()).unwrap();
-    let v2 = s.ingest("close", &[close_rows(&[(1, t, t + DAY, 10.5)])], "test", BTreeMap::new()).unwrap();
+    let v1 = s.ingest("equity.close", &[close_rows(&[(1, t, t, 10.0), (2, t, t, 20.0)])], "test", BTreeMap::new()).unwrap();
+    let v2 = s.ingest("equity.close", &[close_rows(&[(1, t, t + DAY, 10.5)])], "test", BTreeMap::new()).unwrap();
     assert_ne!(v1, v2, "new rows make a new version");
     let all = rows_of(&s.read(&v2, &RowFilter::default()).unwrap());
     assert_eq!(all.len(), 3, "both revisions are kept: {:?}", all);
@@ -126,21 +126,21 @@ fn duplicates_are_dropped_conflicts_refused_and_versions_content_addressed() {
     let mut b = Store::temporary("dup-b").unwrap();
     let t = 19_000 * DAY;
     let rows = close_rows(&[(1, t, t, 10.0), (1, t + DAY, t + DAY, 11.0), (2, t, t, 20.0)]);
-    let va = a.ingest("close", std::slice::from_ref(&rows), "x", BTreeMap::new()).unwrap();
+    let va = a.ingest("equity.close", std::slice::from_ref(&rows), "x", BTreeMap::new()).unwrap();
     // The same rows in the same order, in another store: the same version.
     // The partitions keep each row's sequence number (D-3.3), so the order
     // the source delivered them in is part of the version.
-    let vb = b.ingest("close", std::slice::from_ref(&rows), "x", BTreeMap::new()).unwrap();
+    let vb = b.ingest("equity.close", std::slice::from_ref(&rows), "x", BTreeMap::new()).unwrap();
     assert_eq!(va, vb, "a version is a function of its rows and their order of delivery");
     let mut c = Store::temporary("dup-c").unwrap();
     let reordered = close_rows(&[(2, t, t, 20.0), (1, t + DAY, t + DAY, 11.0), (1, t, t, 10.0)]);
-    let vc = c.ingest("close", &[reordered], "x", BTreeMap::new()).unwrap();
+    let vc = c.ingest("equity.close", &[reordered], "x", BTreeMap::new()).unwrap();
     assert_ne!(va, vc, "another order of delivery is another log");
     // The same fact again: dropped, the version unchanged.
-    let again = a.ingest("close", &[close_rows(&[(1, t, t, 10.0)])], "x", BTreeMap::new()).unwrap();
+    let again = a.ingest("equity.close", &[close_rows(&[(1, t, t, 10.0)])], "x", BTreeMap::new()).unwrap();
     assert_eq!(again, va);
     // A different value at the same identity, time and receipt: refused.
-    let err = a.ingest("close", &[close_rows(&[(1, t, t, 99.0)])], "x", BTreeMap::new()).unwrap_err();
+    let err = a.ingest("equity.close", &[close_rows(&[(1, t, t, 99.0)])], "x", BTreeMap::new()).unwrap_err();
     assert!(err.to_string().contains("differ"), "{}", err);
     // An unknown relation is refused by name.
     assert!(a.ingest("nope", &[rows], "x", BTreeMap::new()).unwrap_err().to_string().contains("nope"));
@@ -157,11 +157,11 @@ fn unchanged_buckets_keep_their_files_and_the_index_answers_as_a_full_read() {
             rows.push((e, t, t, 100.0 + e as f64 + d as f64 / 10.0));
         }
     }
-    let v1 = s.ingest("close", &[close_rows(&rows)], "x", BTreeMap::new()).unwrap();
+    let v1 = s.ingest("equity.close", &[close_rows(&rows)], "x", BTreeMap::new()).unwrap();
     let m1 = s.manifest(&v1).unwrap();
     assert!(m1.partitions.len() >= 3, "monthly buckets for a daily relation");
     let later = start + 200 * DAY;
-    let v2 = s.ingest("close", &[close_rows(&[(1, later, later, 1.0)])], "x", BTreeMap::new()).unwrap();
+    let v2 = s.ingest("equity.close", &[close_rows(&[(1, later, later, 1.0)])], "x", BTreeMap::new()).unwrap();
     let m2 = s.manifest(&v2).unwrap();
     for p in &m1.partitions {
         assert!(m2.partitions.contains(p), "bucket {} rewritten", p.bucket);
@@ -182,7 +182,7 @@ fn unchanged_buckets_keep_their_files_and_the_index_answers_as_a_full_read() {
     assert_eq!(indexed, full);
     assert_eq!(indexed.len(), 3 * 90);
     // The log holds every row in acceptance order with gap-free seq.
-    let log = s.read_log("close", "x", 1, u64::MAX).unwrap();
+    let log = s.read_log("equity.close", "x", 1, u64::MAX).unwrap();
     let seqs: Vec<u64> = log
         .iter()
         .flat_map(|b| b.column(b.num_columns() - 1).as_primitive::<arrow::datatypes::UInt64Type>().values().to_vec())
@@ -194,9 +194,9 @@ fn unchanged_buckets_keep_their_files_and_the_index_answers_as_a_full_read() {
 fn pinned_versions_survive_gc_and_the_cache_returns_what_was_put() {
     let mut s = Store::temporary("gc").unwrap();
     let t = 19_000 * DAY;
-    let v1 = s.ingest("close", &[close_rows(&[(1, t, t, 1.0)])], "x", BTreeMap::new()).unwrap();
-    let _v2 = s.ingest("close", &[close_rows(&[(1, t + 40 * DAY, t + 40 * DAY, 2.0)])], "x", BTreeMap::new()).unwrap();
-    let v3 = s.ingest("close", &[close_rows(&[(1, t + 80 * DAY, t + 80 * DAY, 3.0)])], "x", BTreeMap::new()).unwrap();
+    let v1 = s.ingest("equity.close", &[close_rows(&[(1, t, t, 1.0)])], "x", BTreeMap::new()).unwrap();
+    let _v2 = s.ingest("equity.close", &[close_rows(&[(1, t + 40 * DAY, t + 40 * DAY, 2.0)])], "x", BTreeMap::new()).unwrap();
+    let v3 = s.ingest("equity.close", &[close_rows(&[(1, t + 80 * DAY, t + 80 * DAY, 3.0)])], "x", BTreeMap::new()).unwrap();
     s.pin(&v1, "plan:test").unwrap();
     let evicted = s.gc(0).unwrap();
     assert_eq!(evicted.len(), 1, "only the unpinned, non-current version goes");
@@ -204,7 +204,7 @@ fn pinned_versions_survive_gc_and_the_cache_returns_what_was_put() {
     assert_eq!(rows_of(&s.read(&v1, &RowFilter::default()).unwrap()).len(), 1, "a pinned version still reads");
     // A cache object by key.
     let key = Hash::of(b"bar view weeks(1) of close@v3");
-    let schema = s.schema("close").unwrap();
+    let schema = s.schema("equity.close").unwrap();
     let v = s.cache_put(&key, &schema, &[close_rows(&[(9, t, t, 9.0)])]).unwrap();
     assert_eq!(s.cache_get(&key), Some(v));
     assert_eq!(s.cache_get(&Hash::of(b"other")), None);
@@ -228,7 +228,7 @@ fn labels_are_interned_once_with_stable_codes() {
         ],
     )
     .unwrap();
-    let v = s.ingest("member", &[b], "x", BTreeMap::new()).unwrap();
+    let v = s.ingest("equity.member", &[b], "x", BTreeMap::new()).unwrap();
     let code = s.registry.label_code("SP500").unwrap();
     assert_eq!(s.registry.label("SP500"), code, "interning again gives the same code");
     let rows = s.read_all(&v).unwrap();
@@ -237,7 +237,7 @@ fn labels_are_interned_once_with_stable_codes() {
     let t_col = rows.column(1).as_primitive::<arrow::datatypes::TimestampNanosecondType>();
     assert!((0..rows.num_rows()).all(|i| r.value(i) == t_col.value(i)));
     // An answer decodes labels through the dictionary.
-    let ans = abt_data::rows::answer(&s.schema("member").unwrap(), &rows, s.registry.labels(), false).unwrap();
+    let ans = abt_data::rows::answer(&s.schema("equity.member").unwrap(), &rows, s.registry.labels(), false).unwrap();
     let dict = ans.column(2).as_dictionary::<arrow::datatypes::UInt32Type>();
     let values = dict.values().as_string::<i32>();
     let texts: Vec<&str> = (0..ans.num_rows()).map(|i| values.value(dict.keys().value(i) as usize)).collect();
@@ -314,7 +314,7 @@ fn reads_equal_a_naive_store_over_random_interleavings() {
             batch.push((e, t, r, price));
         }
         let rows: Vec<(u64, i64, i64, f64)> = batch.clone();
-        version = Some(s.ingest("close", &[close_rows(&rows)], "model", BTreeMap::new()).unwrap());
+        version = Some(s.ingest("equity.close", &[close_rows(&rows)], "model", BTreeMap::new()).unwrap());
         for (e, t, r, p) in batch {
             seq += 1;
             naive.rows.push((e, t, r, p, seq));

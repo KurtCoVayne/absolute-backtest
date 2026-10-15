@@ -5,12 +5,14 @@
 //! hold-out are the kernel's and the query layer's, expressed as filters on
 //! its queries.
 
+pub mod adapter;
 pub mod agg;
 pub mod catalog;
 pub mod error;
 pub mod query;
 pub mod registry;
 pub mod rows;
+pub mod service;
 pub mod store;
 pub mod stream;
 

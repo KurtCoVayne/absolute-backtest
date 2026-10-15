@@ -47,8 +47,8 @@ fn store() -> (Store, String, String) {
             rows.push((a, T0 + d * DAY, T0 + d * DAY, 10.0 * a as f64 + d as f64));
         }
     }
-    let v1 = s.ingest("close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
-    let v2 = s.ingest("close", &[close_rows(&[(1, T0 + 2 * DAY, T0 + 3 * DAY, 99.0)])], "test", BTreeMap::new()).unwrap();
+    let v1 = s.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+    let v2 = s.ingest("equity.close", &[close_rows(&[(1, T0 + 2 * DAY, T0 + 3 * DAY, 99.0)])], "test", BTreeMap::new()).unwrap();
     (s, v1, v2)
 }
 
@@ -131,7 +131,7 @@ fn point_answers_the_latest_admitted_revision_or_nothing() {
         run(
             &s,
             QueryForm::Point(Box::new(Point {
-                relation: "close".into(),
+                relation: "equity.close".into(),
                 identity: Some(Box::new(entity(1))),
                 t,
             })),
@@ -151,7 +151,7 @@ fn latest_is_the_as_of_read() {
         run(
             &s,
             QueryForm::Latest(Box::new(Latest {
-                relation: "close".into(),
+                relation: "equity.close".into(),
                 identity: Some(Box::new(entity(a))),
                 t_max,
             })),
@@ -166,7 +166,7 @@ fn latest_is_the_as_of_read() {
     let all = run(
         &s,
         QueryForm::Latest(Box::new(Latest {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             identity: None,
             t_max: T0 + DAY,
         })),
@@ -181,7 +181,7 @@ fn series_and_section() {
     let series = run(
         &s,
         QueryForm::Series(Box::new(Series {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             identity: Some(Box::new(entity(3))),
             t0: T0 + DAY,
             t1: T0 + 3 * DAY,
@@ -192,7 +192,7 @@ fn series_and_section() {
     let section = run(
         &s,
         QueryForm::Section(Box::new(Section {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t: T0 + 4 * DAY,
         })),
         None,
@@ -222,7 +222,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
     let scan = run(
         &s,
         QueryForm::Scan(Box::new(Scan {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: p(),
@@ -235,7 +235,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Exists(Box::new(Exists {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: p(),
@@ -250,7 +250,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Exists(Box::new(Exists {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: none,
@@ -264,7 +264,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::CountRows(Box::new(CountRows {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: p(),
@@ -280,7 +280,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::CountRows(Box::new(CountRows {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: p_in,
@@ -295,7 +295,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::CountRows(Box::new(CountRows {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: p_null,
@@ -310,7 +310,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Scan(Box::new(Scan {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0,
             predicate: None,
@@ -327,7 +327,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Distinct(Box::new(Distinct {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             column: "A".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
@@ -344,7 +344,7 @@ fn a_view_reads_its_versions_at_its_sequence_number() {
     let (mut s, v1, v2) = store();
     let form = || {
         QueryForm::Point(Box::new(Point {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             identity: Some(Box::new(entity(1))),
             t: T0 + 2 * DAY,
         }))
@@ -355,7 +355,7 @@ fn a_view_reads_its_versions_at_its_sequence_number() {
     };
     let pinned = View {
         versions: Some(vec![VersionRef {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             version: v1.clone(),
         }]),
         binding: None,
@@ -364,7 +364,7 @@ fn a_view_reads_its_versions_at_its_sequence_number() {
     assert_eq!(read(&s, &pinned), vec![(1, T0 + 2 * DAY, 12.0)], "the first version has no correction");
     let snap = View {
         versions: Some(vec![VersionRef {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             version: v2.clone(),
         }]),
         binding: None,
@@ -376,7 +376,7 @@ fn a_view_reads_its_versions_at_its_sequence_number() {
         .registry
         .record_binding(&Binding {
             pairs: Some(vec![VersionRef {
-                relation: "close".into(),
+                relation: "equity.close".into(),
                 version: v1.clone(),
             }]),
             point: None,
@@ -396,7 +396,7 @@ fn a_view_reads_its_versions_at_its_sequence_number() {
         .registry
         .record_binding(&Binding {
             pairs: Some(vec![VersionRef {
-                relation: "close".into(),
+                relation: "equity.close".into(),
                 version: v1,
             }]),
             point: None,
@@ -430,13 +430,13 @@ fn the_series_class_is_keyed_by_a_label() {
         ],
     )
     .unwrap();
-    s.ingest("value", &[b], "test", BTreeMap::new()).unwrap();
+    s.ingest("series.value", &[b], "test", BTreeMap::new()).unwrap();
     let id = Identity { values: vec![label("VIX")] };
     let (_, out) = execute(
         &s,
         &ResolvedView::default(),
         &QueryForm::Series(Box::new(Series {
-            relation: "value".into(),
+            relation: "series.value".into(),
             identity: Some(Box::new(id)),
             t0: T0,
             t1: T0 + DAY,
@@ -462,7 +462,7 @@ fn the_series_class_is_keyed_by_a_label() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Series(Box::new(Series {
-            relation: "value".into(),
+            relation: "series.value".into(),
             identity: Some(Box::new(id)),
             t0: T0,
             t1: T0 + DAY,
@@ -516,7 +516,7 @@ fn catalog_reads_the_registry_and_only_it() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Catalog(Box::new(Catalog {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             predicate: None,
         })),
         None,
@@ -532,7 +532,7 @@ fn explain_counts_what_a_query_touches() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Scan(Box::new(Scan {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0,
             t1: T0 + 4 * DAY,
             predicate: None,
@@ -547,7 +547,7 @@ fn explain_counts_what_a_query_touches() {
         &s,
         &ResolvedView::default(),
         &QueryForm::Scan(Box::new(Scan {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             t0: T0 + 400 * DAY,
             t1: T0 + 500 * DAY,
             predicate: None,
@@ -575,7 +575,7 @@ fn explain_counts_what_a_query_touches() {
 fn answers_are_deterministic_and_carry_seq_on_request() {
     let (s, _, _) = store();
     let form = QueryForm::Scan(Box::new(Scan {
-        relation: "close".into(),
+        relation: "equity.close".into(),
         t0: T0,
         t1: T0 + 4 * DAY,
         predicate: None,

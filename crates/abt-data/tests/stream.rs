@@ -91,7 +91,7 @@ fn events(batches: &[RecordBatch]) -> Vec<E> {
         let label = label.as_primitive::<arrow::datatypes::TimestampNanosecondType>();
         let at = col("at");
         let at = at.as_primitive::<arrow::datatypes::TimestampNanosecondType>();
-        let p = col("close.P");
+        let p = col("equity.close.P");
         let p = p.as_primitive::<arrow::datatypes::Float64Type>();
         for i in 0..b.num_rows() {
             match kinds.value(kind.keys().value(i) as usize) {
@@ -140,7 +140,7 @@ fn store() -> (Store, StreamSpec) {
     }
     rows.push((2, T0 + DAY, T0 + 3 * DAY + 5, 99.0));
     rows.push((3, T0 + 2 * DAY, T0 + 40 * DAY, 77.0));
-    let close = s.ingest("close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+    let close = s.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
     let mut cal = Vec::new();
     for d in 0..5 {
         cal.push(("1d", T0 + d * DAY, T0 + d * DAY + DAY - 1));
@@ -150,7 +150,7 @@ fn store() -> (Store, StreamSpec) {
     s.ingest("calendar_label", &[calendar_rows(&cal)], "test", BTreeMap::new()).unwrap();
     let spec = StreamSpec {
         relations: Some(vec![VersionRef {
-            relation: "close".into(),
+            relation: "equity.close".into(),
             version: close,
         }]),
         binding: None,
@@ -305,7 +305,7 @@ fn the_merge_is_the_sort_of_every_event() {
                 seq += 1;
                 naive.push((r, a, t, seq, p));
             }
-            version = s.ingest("close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+            version = s.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
         }
         if version.is_empty() {
             continue;
@@ -316,7 +316,10 @@ fn the_merge_is_the_sort_of_every_event() {
         }
         s.ingest("calendar_label", &[calendar_rows(&cal)], "test", BTreeMap::new()).unwrap();
         let spec = StreamSpec {
-            relations: Some(vec![VersionRef { relation: "close".into(), version }]),
+            relations: Some(vec![VersionRef {
+                relation: "equity.close".into(),
+                version,
+            }]),
             binding: None,
             calendars: Some(vec!["1d".into()]),
             receipt_filter: None,
@@ -355,9 +358,9 @@ fn a_stream_without_calendars_carries_tuples_only() {
     // A label column of a relation is a dictionary over the registry's labels.
     let res = resolve(&s, &spec).unwrap();
     let st = Stream::open(&s, res).unwrap();
-    assert!(st.schema().field_with_name("close.A").is_ok());
-    assert!(st.schema().field_with_name("close.T").is_err(), "times are the event's own columns");
-    assert!(st.schema().field_with_name("close.P").unwrap().is_nullable());
+    assert!(st.schema().field_with_name("equity.close.A").is_ok());
+    assert!(st.schema().field_with_name("equity.close.T").is_err(), "times are the event's own columns");
+    assert!(st.schema().field_with_name("equity.close.P").unwrap().is_nullable());
     let _ = st.schema().field_with_name("relation").unwrap().data_type().clone();
     assert!(!st.id.is_empty());
     let _: &dyn Array = &UInt64Array::from(vec![1u64]);

@@ -47,6 +47,10 @@ pub fn registry_schemas() -> Vec<RelationSchema> {
                 col("class", Label, L),
                 col("exchange", Label, L),
                 col("currency", Label, L),
+                // E-34: a contract's terms as its source declares them; null
+                // for a share.
+                col("multiplier", Num, V),
+                col("commission_per_contract", Num, V),
                 col("r", Time, R),
             ],
         ),
@@ -61,7 +65,8 @@ pub fn registry_schemas() -> Vec<RelationSchema> {
                 col("r", Time, R),
             ],
         ),
-        rs("ticker", vec![col("id", Entity, E), col("t", Time, T), col("symbol", Label, L), col("r", Time, R)]),
+        // E-34: a span of a symbol, from `t` until `to` (null while carried).
+        rs("ticker", vec![col("id", Entity, E), col("t", Time, T), col("symbol", Label, L), col("to", Time, V), col("r", Time, R)]),
         rs(
             "future_spec",
             vec![

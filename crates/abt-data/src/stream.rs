@@ -144,10 +144,10 @@ enum Ev {
     Barrier(Barrier),
 }
 
-/// The relation's identity columns and their kind (entity or label code).
+/// The first two columns of a row's key (entities, then labels by code).
 fn identity_of(s: &RelationSchema, lay: &Layout, b: &RecordBatch, i: usize) -> [u64; 2] {
     let mut out = [0u64; 2];
-    for (k, &c) in lay.identity.iter().take(2).enumerate() {
+    for (k, &c) in lay.key.iter().take(2).enumerate() {
         out[k] = match s.columns[c].ty {
             ColumnType::Entity => b.column(c).as_primitive::<arrow::datatypes::UInt64Type>().value(i),
             ColumnType::Label => b.column(c).as_primitive::<UInt32Type>().value(i) as u64,

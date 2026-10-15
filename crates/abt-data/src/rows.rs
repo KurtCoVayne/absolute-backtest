@@ -55,15 +55,31 @@ pub fn stored_schema(s: &RelationSchema) -> SchemaRef {
 pub struct Layout {
     pub t: usize,
     pub r: Option<usize>,
+    /// The entity columns: what the offset index and an identity filter read.
     pub identity: Vec<usize>,
+    /// The fact's key besides `t` (ERRATA E-35): the entity columns, then the
+    /// label columns, so that `member(A, T, "SPX")` and `member(A, T,
+    /// "SP500")` are two facts and not two revisions of one.
+    pub key: Vec<usize>,
     pub seq: usize,
 }
 
 pub fn layout(s: &RelationSchema) -> Layout {
     let t = s.columns.iter().position(|c| c.role == Role::EventTime).expect("a validated schema has an event time");
     let r = s.columns.iter().position(|c| c.role == Role::ReceiptTime);
-    let identity = s.columns.iter().enumerate().filter(|(_, c)| c.role == Role::Entity).map(|(i, _)| i).collect();
-    Layout { t, r, identity, seq: s.columns.len() }
+    let identity: Vec<usize> = s.columns.iter().enumerate().filter(|(_, c)| c.role == Role::Entity).map(|(i, _)| i).collect();
+    let key = identity
+        .iter()
+        .copied()
+        .chain(s.columns.iter().enumerate().filter(|(_, c)| c.role == Role::Label).map(|(i, _)| i))
+        .collect();
+    Layout {
+        t,
+        r,
+        identity,
+        key,
+        seq: s.columns.len(),
+    }
 }
 
 /// An input column's values as stored values of type `ty`, interning labels.
@@ -143,8 +159,8 @@ fn ty_name(ty: ColumnType) -> &'static str {
 
 /// Brings an input batch to the stored layout of `s` (D-8.1, schema
 /// conformance): columns by name, cast to their stored types, labels
-/// interned, a missing receipt time filled with the event time, nulls refused
-/// in the identity and the times; `seq` numbers the rows from `first_seq` in
+/// interned, a missing receipt time filled with the event time and a missing
+/// value column with nulls, nulls refused in the identity and the times; `seq` numbers the rows from `first_seq` in
 /// their input order.
 pub fn conform(s: &RelationSchema, input: &RecordBatch, reg: &mut Registry, first_seq: u64) -> Result<RecordBatch, DataError> {
     let lay = layout(s);
@@ -155,6 +171,9 @@ pub fn conform(s: &RelationSchema, input: &RecordBatch, reg: &mut Registry, firs
             (Some(col), _) => conform_column(&c.name, c.ty, &col, reg)?,
             // D-4.2: a relation's rows without a receipt time are received at t.
             (None, Role::ReceiptTime) => cols[lay.t].clone(),
+            // A value column the rows do not carry is null (the optional
+            // columns of the registry's relations).
+            (None, Role::Value) => arrow::array::new_null_array(&stored_type(c.ty), input.num_rows()),
             (None, _) => return Err(DataError::Schema(format!("`{}`: the rows have no column `{}`", s.name, c.name))),
         };
         if matches!(c.role, Role::Entity | Role::EventTime | Role::ReceiptTime) && col.null_count() > 0 {
@@ -173,7 +192,7 @@ pub fn conform(s: &RelationSchema, input: &RecordBatch, reg: &mut Registry, firs
     Ok(RecordBatch::try_new(stored_schema(s), cols)?)
 }
 
-/// The rows sorted by (t, identity, r, seq): the partitions' order (D-3.1).
+/// The rows sorted by (t, key, r, seq): the partitions' order (D-3.1).
 pub fn sort_rows(s: &RelationSchema, rows: &RecordBatch) -> Result<RecordBatch, DataError> {
     if rows.num_rows() < 2 {
         return Ok(rows.clone());
@@ -184,7 +203,7 @@ pub fn sort_rows(s: &RelationSchema, rows: &RecordBatch) -> Result<RecordBatch, 
         values: rows.column(lay.t).clone(),
         options: None,
     });
-    for &i in &lay.identity {
+    for &i in &lay.key {
         keys.push(SortColumn {
             values: rows.column(i).clone(),
             options: None,
@@ -210,7 +229,7 @@ pub fn concat(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch
 }
 
 /// Sorted rows with exact duplicates dropped (the same fact delivered twice)
-/// and conflicting ones refused: two rows of one identity, `t` and `r` with
+/// and conflicting ones refused: two rows of one key, `t` and `r` with
 /// different values are not revisions of one fact (Definition D-2.2), and the
 /// error names the row.
 pub fn dedupe(s: &RelationSchema, sorted: &RecordBatch) -> Result<RecordBatch, DataError> {
@@ -218,7 +237,7 @@ pub fn dedupe(s: &RelationSchema, sorted: &RecordBatch) -> Result<RecordBatch, D
         return Ok(sorted.clone());
     }
     let lay = layout(s);
-    let key_cols: Vec<usize> = std::iter::once(lay.t).chain(lay.identity.iter().copied()).chain(lay.r).collect();
+    let key_cols: Vec<usize> = std::iter::once(lay.t).chain(lay.key.iter().copied()).chain(lay.r).collect();
     let value_cols: Vec<usize> = (0..s.columns.len()).filter(|i| !key_cols.contains(i)).collect();
     let conv = |cols: &[usize]| -> Result<arrow::row::Rows, DataError> {
         let fields: Vec<SortField> = cols.iter().map(|&i| SortField::new(sorted.column(i).data_type().clone())).collect();
