@@ -525,8 +525,10 @@ impl SimExecutor {
             }
         }
         for (sym, at, rule) in day_exits {
-            // Entered at the session's last print: flat again at its close, now.
-            if k.session_last_bar(sym, at) == Some(tn) {
+            // Entered at the session's last print: flat again at its close,
+            // now; known once the session has closed (before it, a later
+            // print may still come, and the exit waits as a working `moc`).
+            if k.session_close(sym, at).is_none_or(|end| tn >= end) && k.session_last_bar(sym, at) == Some(tn) {
                 if let (Some(&pos), Some(p)) = (self.positions.get(&sym), k.bar_price(sym, tn)) {
                     let qty = -pos;
                     let m = k.multiplier(sym);
@@ -591,6 +593,12 @@ impl SimExecutor {
                 None => Trigger::Expire(format!("no price for {} at {}", name, time::format_timestamp(tn))),
             },
             OrderKind::Moc => {
+                // The session's last print is known once the session has
+                // closed: before it, the order waits (the fold has not seen
+                // the rest of the session; the batch driver must not use it).
+                if k.session_close(sym, w.t).is_some_and(|end| tn < end) {
+                    return Trigger::Wait;
+                }
                 let last = *w.session_last.get_or_insert_with(|| k.session_last_bar(sym, w.t));
                 match last {
                     None => Trigger::Expire(format!("moc: no price for {} in the session of {}", name, time::format_timestamp(w.t))),
@@ -1016,7 +1024,7 @@ impl Executor for SimExecutor {
         let settle = last.is_some_and(|l| {
             self.working
                 .values()
-                .any(|w| w.d.order.kind == OrderKind::Moc && k.session_last_bar(w.d.equity, w.t).is_some_and(|c| c <= l))
+                .any(|w| w.d.order.kind == OrderKind::Moc && k.session_close(w.d.equity, w.t).is_none_or(|end| end <= l) && k.session_last_bar(w.d.equity, w.t).is_some_and(|c| c <= l))
         });
         if let (true, Some(l)) = (settle, last) {
             self.pending_t = Some(l);

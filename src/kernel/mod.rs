@@ -1835,17 +1835,28 @@ impl<'p> Kernel<'p> {
         // A streaming kernel stores no fact yet, but its calendars are a
         // schedule the bundle carries: the keys of the bars and the sessions
         // are read from the dataset without storing a tuple.
+        // The prints a session-offset clock is placed on are read the same
+        // way: a streaming kernel's `close` store is still empty here.
+        let print_id = rel_ids.get("close").copied().filter(|_| prog.clock.offset.is_some());
+        let mut prints: FxHashMap<Sym, BTreeSet<i64>> = FxHashMap::default();
         if !load_facts {
             for (name, tuples) in &dataset.facts {
                 let Some(&id) = rel_ids.get(name.as_str()) else { continue };
-                if !own_bar[id] && Some(id) != session_id {
+                let is_print = Some(id) == print_id;
+                if !own_bar[id] && Some(id) != session_id && !is_print {
                     continue;
                 }
                 let key_pos = rels[id].key_pos;
+                let epos = rels[id].entity_positions.first().copied().unwrap_or(0);
                 for tu in tuples {
                     let Some(key) = tu[key_pos].as_time() else { continue };
                     if own_bar[id] {
                         base_bars.insert(key);
+                    }
+                    if is_print {
+                        if let Some(sym) = tu.get(epos).and_then(|v| v.as_equity()) {
+                            prints.entry(remap[sym as usize]).or_default().insert(key);
+                        }
                     }
                     if Some(id) == session_id {
                         if let (Some(sym), Some(open)) = (tu.iter().find_map(|v| v.as_equity()), tu.iter().skip(key_pos + 1).find_map(|v| v.as_time())) {
@@ -2220,6 +2231,7 @@ impl<'p> Kernel<'p> {
                         continue;
                     }
                     let bar = match print_rel {
+                        Some(_) if !load_facts => prints.get(sym).and_then(|ts| ts.range(target..=label).next().copied()),
                         Some(pid) => {
                             let epos = rels[pid].entity_positions.first().copied().unwrap_or(0);
                             stores[pid]
@@ -2637,16 +2649,31 @@ impl<'p> Kernel<'p> {
     /// the close a market-on-close order decided at `t` executes at (the
     /// session's last print; on a daily or coarser calendar, `t` itself).
     pub fn session_last_bar(&self, sym: Sym, t: i64) -> Option<i64> {
-        if !self.prog.base.is_sub_daily() || self.prog.decision_cal != Cal::Base {
-            return Some(t);
-        }
-        let end = match self.session_at(sym, t) {
-            Some((_, label)) => label,
-            None => time::floor_div(t, time::DAY) * time::DAY + time::DAY - 1,
-        };
+        let Some(end) = self.session_close(sym, t) else { return Some(t) };
         let domain = self.domains.get(&Cal::Base)?;
         let bars: Vec<i64> = domain.range(t..=end).rev().copied().collect();
         bars.into_iter().find(|&b| self.has_price(sym, b))
+    }
+
+    /// The instant a market-on-close order decided at `t` waits for: the
+    /// end of `sym`'s session holding `t` (its label), or, on a base without
+    /// sessions, the last base bar of `t`'s day in the schedule (the
+    /// calendar is known before the bars are, the prints are not). `None`
+    /// where `moc` executes at `t` itself: a daily or coarser base, or a
+    /// decision calendar coarser than the base. The session's last print is
+    /// known only once the stream has passed this instant (K-4.2: the
+    /// session close drives `moc`).
+    pub fn session_close(&self, sym: Sym, t: i64) -> Option<i64> {
+        if !self.prog.base.is_sub_daily() || self.prog.decision_cal != Cal::Base {
+            return None;
+        }
+        match self.session_at(sym, t) {
+            Some((_, label)) => Some(label),
+            None => {
+                let day_end = time::floor_div(t, time::DAY) * time::DAY + time::DAY - 1;
+                Some(self.schedule.get(&Cal::Base).and_then(|d| d.range(t..=day_end).next_back().copied()).unwrap_or(day_end))
+            }
+        }
     }
 
     /// Whether `sym` has a print at base bar `t`: a tuple of the price
