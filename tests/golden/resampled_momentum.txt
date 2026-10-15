@@ -1,0 +1,100 @@
+bars 30 2022-01-03T10:30:00 2022-02-11T10:30:00
+decision 2022-01-24T10:30:00 hold(BBB, 0.5)
+decision 2022-01-24T10:30:00 hold(DDD, 0.5)
+decision 2022-01-25T10:30:00 hold(BBB, 0.5)
+decision 2022-01-25T10:30:00 hold(DDD, 0.5)
+decision 2022-01-26T10:30:00 hold(BBB, 0.5)
+decision 2022-01-26T10:30:00 hold(DDD, 0.5)
+decision 2022-01-27T10:30:00 hold(BBB, 0.5)
+decision 2022-01-27T10:30:00 hold(DDD, 0.5)
+decision 2022-01-28T10:30:00 hold(BBB, 0.5)
+decision 2022-01-28T10:30:00 hold(DDD, 0.5)
+decision 2022-01-31T10:30:00 hold(BBB, 0)
+decision 2022-01-31T10:30:00 hold(DDD, 0.5)
+decision 2022-01-31T10:30:00 hold(XYZ, 0.5)
+decision 2022-02-01T10:30:00 hold(DDD, 0.5)
+decision 2022-02-01T10:30:00 hold(SPY, 0.5)
+decision 2022-02-01T10:30:00 hold(XYZ, 0)
+decision 2022-02-02T10:30:00 hold(DDD, 0.5)
+decision 2022-02-02T10:30:00 hold(SPY, 0.5)
+decision 2022-02-03T10:30:00 hold(DDD, 0.5)
+decision 2022-02-03T10:30:00 hold(SPY, 0.5)
+decision 2022-02-04T10:30:00 hold(DDD, 0.5)
+decision 2022-02-04T10:30:00 hold(SPY, 0.5)
+decision 2022-02-07T10:30:00 hold(BBB, 0.5)
+decision 2022-02-07T10:30:00 hold(DDD, 0)
+decision 2022-02-07T10:30:00 hold(SPY, 0.5)
+decision 2022-02-08T10:30:00 hold(BBB, 0.5)
+decision 2022-02-08T10:30:00 hold(SPY, 0.5)
+decision 2022-02-09T10:30:00 hold(BBB, 0.5)
+decision 2022-02-09T10:30:00 hold(SPY, 0.5)
+decision 2022-02-10T10:30:00 hold(BBB, 0.5)
+decision 2022-02-10T10:30:00 hold(SPY, 0.5)
+decision 2022-02-11T10:30:00 hold(BBB, 0.5)
+decision 2022-02-11T10:30:00 hold(SPY, 0.5)
+fill 2022-01-25T10:30:00 BBB qty 7154.0 price 71.24897623251559 at_last false commission 35.77 fee 0.0 slippage 454.2209945812869 impact 9768.674972835175 participation 0.03935028574886003 partial false forced false
+fill 2022-01-25T10:30:00 DDD qty 5253.0 price 96.75107237715993 at_last false commission 26.265 fee 0.0 slippage 784.5737605449852 impact 8308.749436676195 participation 0.026351432699253552 partial false forced false
+fill 2022-01-26T10:30:00 DDD qty -36.0 price 95.56159933702722 at_last false commission 1.0 fee 0.0 slippage 5.266368000277837 impact 4.756055866742519 participation 0.00019207683073229291 partial false forced false
+fill 2022-01-26T10:30:00 BBB qty 26.0 price 69.71341367338536 at_last false commission 1.0 fee 0.0 slippage 1.5982331526208629 impact 2.1305223553987465 participation 0.00013423650406839865 partial false forced false
+fill 2022-01-27T10:30:00 BBB qty -120.0 price 70.572872714918 at_last false commission 1.0 fee 0.0 slippage 8.175956183988417 impact 21.47931802585025 participation 0.0006128546257756441 partial false forced false
+fill 2022-01-27T10:30:00 DDD qty 3.0 price 95.82029067804602 at_last false commission 1.0 fee 0.0 slippage 0.4269145601493494 impact 0.11395747398870272 participation 1.4766831727030194e-5 partial false forced false
+fill 2022-01-28T10:30:00 BBB qty 4.0 price 70.80885422307628 at_last false commission 1.0 fee 0.0 slippage 0.2647176326647133 impact 0.1306992596403783 participation 2.2558214291756665e-5 partial false forced false
+fill 2022-01-28T10:30:00 DDD qty 49.0 price 95.03210081911682 at_last false commission 1.0 fee 0.0 slippage 6.8581339444164495 impact 7.454806192307705 participation 0.00026218070136012925 partial false forced false
+fill 2022-01-31T10:30:00 BBB qty -60.0 price 71.18559869847515 at_last false commission 1.0 fee 0.0 slippage 4.000185799533202 impact 7.66389229195807 participation 0.0003220024257516073 partial false forced false
+fill 2022-01-31T10:30:00 DDD qty -37.0 price 95.27842974840945 at_last false commission 1.0 fee 0.0 slippage 5.101934313426977 impact 4.946164995423484 participation 0.00021631228478389232 partial false forced false
+fill 2022-02-01T10:30:00 BBB qty -7004.0 price 69.38482375984327 at_last false commission 35.02 fee 0.0 slippage 463.09753478032343 impact 9588.8768512773 participation 0.03798553035479917 partial false forced false
+fill 2022-02-01T10:30:00 DDD qty 189.0 price 92.51798860467258 at_last false commission 1.0 fee 0.0 slippage 29.58801825012526 impact 55.0818280329932 participation 0.0010274642833844347 partial false forced false
+fill 2022-02-01T10:30:00 XYZ qty 9727.0 price 52.56345358387834 at_last false commission 48.635 fee 0.0 slippage 860.2657642043866 impact 11332.077246180212 participation 0.050532757716025334 partial false forced false
+fill 2022-02-02T10:30:00 XYZ qty -9727.0 price 49.67032498659995 at_last false commission 48.635 fee 0.0 slippage 823.9458006659564 impact 11234.37305467631 participation 0.051673395665108375 partial false forced false
+fill 2022-02-02T10:30:00 DDD qty 81.0 price 91.06068398214289 at_last false commission 1.0 fee 0.0 slippage 12.359393605565971 impact 15.23600894800831 participation 0.00044379184518787186 partial false forced false
+fill 2022-02-02T10:30:00 SPY qty 6730.0 price 75.7000958295013 at_last false commission 33.65 fee 0.0 slippage 749.8549631441257 impact 9480.389969399577 participation 0.034670169744738945 partial false forced false
+fill 2022-02-03T10:30:00 DDD qty -47.0 price 91.36593336038547 at_last false commission 1.0 fee 0.0 slippage 6.5426764167049605 impact 6.8084556451784115 participation 0.00024701220345396636 partial false forced false
+fill 2022-02-03T10:30:00 SPY qty -50.0 price 74.61491413340923 at_last false commission 1.0 fee 0.0 slippage 5.624798646692724 impact 6.129494682845028 participation 0.0002696609822131616 partial false forced false
+fill 2022-02-04T10:30:00 DDD qty 99.0 price 90.22731382782895 at_last false commission 1.0 fee 0.0 slippage 13.915223181229086 impact 20.46884577383661 participation 0.0005745892267421951 partial false forced false
+fill 2022-02-04T10:30:00 SPY qty 36.0 price 74.5443925390457 at_last false commission 1.0 fee 0.0 slippage 4.008265003452019 impact 3.709866402193447 participation 0.0001838657779820731 partial false forced false
+fill 2022-02-07T10:30:00 SPY qty -30.0 price 74.57235145913 at_last false commission 1.0 fee 0.0 slippage 3.3853075264822805 impact 2.844148699617574 participation 0.0001653202252763603 partial false forced false
+fill 2022-02-07T10:30:00 DDD qty 58.0 price 89.23733612273926 at_last false commission 1.0 fee 0.0 slippage 8.162601741862996 impact 9.082893377014043 participation 0.0003004371879079212 partial false forced false
+fill 2022-02-08T10:30:00 DDD qty -5612.0 price 87.54357329728612 at_last false commission 28.060000000000002 fee 0.0 slippage 782.585067205133 impact 8681.64158842524 participation 0.030464899137949752 partial false forced false
+fill 2022-02-08T10:30:00 SPY qty -52.0 price 75.12312757346041 at_last false commission 1.0 fee 0.0 slippage 5.783352318198258 impact 6.534013861860693 participation 0.0002714568357529534 partial false forced false
+fill 2022-02-08T10:30:00 BBB qty 7077.0 price 72.02071952258207 at_last false commission 35.385 fee 0.0 slippage 413.1800703084451 impact 9712.02199100484 participation 0.03828841014099137 partial false forced false
+fill 2022-02-09T10:30:00 BBB qty -15.0 price 70.67843110256234 at_last false commission 1.0 fee 0.0 slippage 0.8715575458367486 impact 0.951975915728032 participation 8.0307094328713e-5 partial false forced false
+fill 2022-02-09T10:30:00 SPY qty 75.0 price 74.66492062523253 at_last false commission 1.0 fee 0.0 slippage 7.178763051878088 impact 11.190283840561257 participation 0.00042658476239228736 partial false forced false
+fill 2022-02-10T10:30:00 BBB qty -94.0 price 71.5259830384112 at_last false commission 1.0 fee 0.0 slippage 5.919458030276657 impact 15.13813635907028 participation 0.0005001915627261505 partial false forced false
+fill 2022-02-10T10:30:00 SPY qty -75.0 price 75.10939784912351 at_last false commission 1.0 fee 0.0 slippage 7.437009831265598 impact 11.358151484470861 participation 0.00041519962798113334 partial false forced false
+fill 2022-02-11T10:30:00 BBB qty 18.0 price 71.63851677565928 at_last false commission 1.0 fee 0.0 slippage 1.0484262198783219 impact 1.2648757419885648 participation 9.661109739472073e-5 partial false forced false
+fill 2022-02-11T10:30:00 SPY qty 148.0 price 73.92966348373493 at_last false commission 1.0 fee 0.0 slippage 15.076317088690683 impact 30.753878504079253 participation 0.0007863013553072685 partial false forced false
+dropped 2022-02-11T10:30:00 hold(BBB, 0.5) no next bar
+dropped 2022-02-11T10:30:00 hold(SPY, 0.5) no next bar
+book 2022-01-03T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-04T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-05T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-06T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-07T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-10T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-11T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-12T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-13T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-14T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-17T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-18T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-19T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-20T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-21T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-24T10:30:00 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-25T10:30:00 cash -18010.594164637616 gross 998632.34 net 998632.34 equity 980621.7458353624 leverage 1.0183665049659845
+book 2022-01-26T10:30:00 cash -16387.392548692744 gross 999509.88 net 999509.88 equity 983122.4874513072 leverage 1.0166687190638637
+book 2022-01-27T10:30:00 cash -8210.353543231062 gross 999230.0 net 999230.0 equity 991019.6464567689 leverage 1.0082847535592114
+book 2022-01-28T10:30:00 cash -13153.286606224918 gross 998680.5 net 998680.5 equity 985527.213393775 leverage 1.0133464468839273
+book 2022-01-31T10:30:00 cash -5364.254243874395 gross 999863.1199999999 net 999863.1199999999 equity 994498.8657561255 leverage 1.005393926960184
+book 2022-02-01T10:30:00 cash -48248.95131594839 gross 998203.84 net 998203.84 equity 949954.8886840516 leverage 1.0507907816367854
+book 2022-02-02T10:30:00 cash -82033.1549517737 gross 998372.8400000001 net 998372.8400000001 equity 916339.6850482263 leverage 1.0895226478677025
+book 2022-02-03T10:30:00 cash -74021.44779565166 gross 999948.75 net 999948.75 equity 925927.3022043484 leverage 1.0799430447935052
+book 2022-02-04T10:30:00 cash -85649.68992036793 gross 998393.7999999999 net 998393.7999999999 equity 912744.1100796319 leverage 1.0938375706559154
+book 2022-02-07T10:30:00 cash -88625.48337441991 gross 999110.36 net 999110.36 equity 910484.87662558 leverage 1.097338775909032
+book 2022-02-08T10:30:00 cash -103191.7649347182 gross 999503.67 net 999503.67 equity 896311.9050652818 leverage 1.1151293030378777
+book 2022-02-09T10:30:00 cash -107747.59337328243 gross 999273.38 net 999273.38 equity 891525.7866267175 leverage 1.1208575175160878
+book 2022-02-10T10:30:00 cash -95407.70607328523 gross 999892.24 net 999892.24 equity 904484.5339267148 leverage 1.1054829601774214
+book 2022-02-11T10:30:00 cash -107653.85911961702 gross 998859.7000000001 net 998859.7000000001 equity 891205.840880383 leverage 1.1207957288669366
+final_cash -107653.85911961702
+position BBB 6986.0
+position SPY 6782.0
