@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use abt_wire::generated::abt::wire::{ColumnSpec, ColumnType, RelationSchema, Role};
+use abt_wire::canonical::Canonical;
+use abt_wire::generated::abt::wire::{Binding, ColumnSpec, ColumnType, RelationSchema, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog;
@@ -102,7 +103,8 @@ pub fn registry_schemas() -> Vec<RelationSchema> {
             ],
         ),
         rs("chain_index", vec![col("underlying", Entity, E), col("t", Time, T), col("id", Entity, V), col("r", Time, R)]),
-        rs("calendar_label", vec![col("calendar", Label, E), col("label", Time, T), col("r", Time, R)]),
+        // E-13: `at` is the instant the label's bucket closes, the barrier's.
+        rs("calendar_label", vec![col("calendar", Label, E), col("label", Time, T), col("at", Time, V), col("r", Time, R)]),
     ]
 }
 
@@ -138,6 +140,9 @@ struct State {
     cache: BTreeMap<String, (String, String)>,
     /// Pinned versions, with the bindings or plans that pin them (D-3.4).
     pins: BTreeMap<String, Vec<String>>,
+    /// Bindings by id (D-7.5): the versions a resolved demand fixed.
+    #[serde(default)]
+    bindings: BTreeMap<String, Binding>,
 }
 
 /// The registry of a store.
@@ -305,6 +310,26 @@ impl Registry {
 
     pub fn pinned(&self, version: &str) -> bool {
         self.state.pins.contains_key(version)
+    }
+
+    // ----------------------------------------------------------- bindings
+
+    /// Records a binding under its id, the hash of its canonical form
+    /// without the id (A-6), and pins its versions; returns the id.
+    pub fn record_binding(&mut self, b: &Binding) -> Result<String, DataError> {
+        let mut b = b.clone();
+        b.id = None;
+        let id = b.canonical_hash().map_err(|e| DataError::Malformed(e.to_string()))?.hex();
+        b.id = Some(id.clone());
+        for p in b.pairs.clone().unwrap_or_default() {
+            self.pin(&p.version, &format!("binding:{}", id));
+        }
+        self.state.bindings.insert(id.clone(), b);
+        Ok(id)
+    }
+
+    pub fn binding(&self, id: &str) -> Option<Binding> {
+        self.state.bindings.get(id).cloned()
     }
 
     /// Forgets a version (after gc removed its files).

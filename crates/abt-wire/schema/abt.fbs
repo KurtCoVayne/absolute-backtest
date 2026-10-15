@@ -201,8 +201,8 @@ table AggregateRequest {
   receipt_filter: ReceiptFilter;
   numerics: Numerics;
   calendar: string;
-  t0: long;
-  t1: long;
+  t0: long = null;
+  t1: long = null;
   output: string;
 }
 

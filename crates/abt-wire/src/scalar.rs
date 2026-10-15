@@ -30,6 +30,7 @@ pub struct Seq(pub u64);
 pub struct Time(pub i64);
 
 pub const NANOS_PER_SECOND: i64 = 1_000_000_000;
+pub const NANOS_PER_HOUR: i64 = 3_600 * NANOS_PER_SECOND;
 pub const NANOS_PER_DAY: i64 = 86_400 * NANOS_PER_SECOND;
 
 impl Time {
@@ -121,13 +122,40 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-fn days_in_month(y: i64, m: u32) -> u32 {
+pub fn days_in_month(y: i64, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
         _ if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
         _ => 28,
     }
+}
+
+/// `t` moved by `months` civil months, the day clamped to the month's last
+/// and the clock kept: what a calendar duration's month part means, for the
+/// kernel's windows and the data layer's alike (one implementation, A-D2).
+pub fn add_months(t: i64, months: i64) -> i64 {
+    if months == 0 {
+        return t;
+    }
+    let days = t.div_euclid(NANOS_PER_DAY);
+    let clock = t - days * NANOS_PER_DAY;
+    let (y, m, d) = civil_from_days(days);
+    let total = y * 12 + (m as i64 - 1) + months;
+    let ny = total.div_euclid(12);
+    let nm = (total - ny * 12) as u32 + 1;
+    days_from_civil(ny, nm, d.min(days_in_month(ny, nm))) * NANOS_PER_DAY + clock
+}
+
+/// `t − δ` for a calendar duration of `months`, `days` and `nanos`: months
+/// first (civil, the day clamped), then the fixed parts.
+pub fn sub_duration(t: i64, months: i64, days: i64, nanos: i64) -> i64 {
+    add_months(t, -months) - days * NANOS_PER_DAY - nanos
+}
+
+/// `t + δ`, the forward form of [`sub_duration`].
+pub fn add_duration(t: i64, months: i64, days: i64, nanos: i64) -> i64 {
+    add_months(t, months) + days * NANOS_PER_DAY + nanos
 }
 
 #[cfg(test)]

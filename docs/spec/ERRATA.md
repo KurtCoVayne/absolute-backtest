@@ -125,6 +125,43 @@ and the batch driver agree on every corpus program.
 - **E-20 (X-1, X-3).** `std::simd` is not stable; the column loops are plain
   loops the compiler vectorises, and `arrow::compute` kernels where they fit.
 
+- **E-31 (D-4.1, P-3.2; the query forms).** `latest` without an identity
+  answers every identity's latest row at or before `t_max`; `distinct` lists
+  the values in their first-seen (`t`, identity) order; `catalog` refuses a
+  relation outside the registry's class; a label constant names a label of
+  the registry, and one it never interned matches nothing. A view's
+  relation that it names no version of is read at its current version until
+  the resolver (M-6) binds every relation (the transitional resolver of
+  M-2). A binding is recorded under the hash of its canonical form and pins
+  its versions (D-3.4).
+- **E-32 (D-2.4, D-5.1, D-5.2, P-4; the clock and the event batches).**
+  `calendar_label` gains `at`, the instant a label's bucket closes (E-13),
+  so that the data layer reads the barrier's instant rather than computing
+  it. A stream's clock is the relation of its spec named `calendar_label`
+  or `<namespace>.calendar_label`, else the registry's current one: the
+  kernel computes its calendars' labels from the binding as it does today
+  (the base bars, the civil periods' last bars, the sessions) and puts them
+  as `kernel.<run>.calendar_label` before it subscribes, so that a barrier
+  is an event of the stream for every calendar the program declares, and a
+  pushed-down aggregate (K-4.5) walks the same labels (E-27). A barrier
+  whose `at` is past the receipt filter is not emitted. Replay emits no
+  marks until the live clock (M-6); `moo` and `moc` read the sessions from
+  the binding (E-2). In an event batch a relation's columns are named
+  `<relation>.<column>`, its event and receipt times are the event's `t` and
+  `r`, and `entity` is its first entity column; the identity of a relation
+  keyed by a label is ordered by the label's code.
+- **E-33 (D-6.1, D-6.2, P-4; the aggregate pass).** The answer is keyed like
+  the input: a row at each (group, `t`) where the group has a row and the
+  window holds at least `min` rows (`bucket` keys by the bucket's label), in
+  (`t`, group) order, with `t0`, `t1` bounding the answer. A row whose `t` is
+  not a label of the request's calendar is in no window, as in the kernel,
+  whose windows range over its time domain. The answer gains `error: Utf8?`,
+  the message of an aggregate whose arithmetic fails at that row (the
+  correlation of a constant series), which the kernel reports as its own.
+  `rows(N)` counts one entity's rows, so it groups per entity; per-label and
+  whole groups take time windows and buckets. A bucket of the per-instrument
+  sessions calendar is not served (E-12).
+
 ## Aggregates
 
 - **E-27 (P-1.2, Proposition 1.1; the running sums' rebuild points).** "The

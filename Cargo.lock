@@ -32,6 +32,7 @@ name = "abt-kernel"
 version = "0.2.0"
 dependencies = [
  "abt-agg",
+ "abt-wire",
  "arrow",
  "parquet",
  "serde",

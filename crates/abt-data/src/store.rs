@@ -16,8 +16,8 @@ use std::sync::Arc;
 use abt_wire::canonical::Canonical;
 use abt_wire::generated::abt::wire::{ColumnType, RelationSchema, Role};
 use abt_wire::hash::Hash;
-use abt_wire::scalar::{civil_from_days, NANOS_PER_DAY};
-use arrow::array::{Array, AsArray, BooleanArray, RecordBatch};
+use abt_wire::scalar::{civil_from_days, NANOS_PER_DAY, NANOS_PER_HOUR};
+use arrow::array::{AsArray, BooleanArray, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use arrow::ipc::writer::StreamWriter;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
@@ -85,7 +85,7 @@ fn bucket_of(calendar: Option<&str>, t: i64) -> String {
         Some("1d") | Some("1w") => format!("{:04}-{:02}", y, m),
         Some(c) if c.ends_with('m') || c.ends_with('h') => format!("{:04}-{:02}-{:02}", y, m, d),
         Some(c) if c.ends_with('s') => {
-            let hour = t.rem_euclid(NANOS_PER_DAY) / (3_600 * 1_000_000_000);
+            let hour = t.rem_euclid(NANOS_PER_DAY) / NANOS_PER_HOUR;
             format!("{:04}-{:02}-{:02}T{:02}", y, m, d, hour)
         }
         _ => format!("{:04}", y),
@@ -383,6 +383,18 @@ impl Store {
             return Ok(vec![latest_revisions(&lay, &all)?]);
         }
         Ok(out)
+    }
+
+    /// One partition's rows the filter admits, in the partition's order
+    /// (what the stream opens partition by partition, E-14).
+    pub fn read_partition_rows(&self, m: &Manifest, p: &PartitionRef, f: &RowFilter) -> Result<RecordBatch, DataError> {
+        let stored = stored_schema(&m.schema);
+        let lay = layout(&m.schema);
+        let mut out = Vec::new();
+        for b in self.read_partition(&stored, p, f.identity.as_deref())? {
+            out.push(filter_rows(&m.schema, &lay, &b, f)?);
+        }
+        rows::concat(&stored, &out)
     }
 
     /// Every row of a version as one batch.
@@ -707,6 +719,3 @@ pub fn entity_keyed(s: &RelationSchema) -> bool {
 pub fn stored(s: &RelationSchema) -> SchemaRef {
     Arc::clone(&stored_schema(s))
 }
-
-#[allow(dead_code)]
-fn _assert_array(_: &dyn Array) {}

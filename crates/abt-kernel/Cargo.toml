@@ -16,6 +16,7 @@ path = "src/bin/abt-kernel.rs"
 
 [dependencies]
 abt-agg.workspace = true
+abt-wire.workspace = true
 arrow.workspace = true
 parquet.workspace = true
 serde.workspace = true
