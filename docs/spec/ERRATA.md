@@ -112,6 +112,30 @@ and the batch driver agree on every corpus program.
 - **E-20 (X-1, X-3).** `std::simd` is not stable; the column loops are plain
   loops the compiler vectorises, and `arrow::compute` kernels where they fit.
 
+## Aggregates
+
+- **E-27 (P-1.2, Proposition 1.1; the running sums' rebuild points).** "The
+  rebuild points are a function of the window's row index." A rows window
+  the kernel solves lazily from a bar walks back N anchored bars plus a
+  checkpoint's span, not to the group's first row, so it cannot know a row's
+  index since the group began; it does know the bar's index among the labels
+  of the window's calendar. The running sums of a `rows(N)` window are
+  therefore rebuilt from the window's rows at every `max(N, 8)`-th label of
+  the window's calendar and advanced at every anchored label in between
+  (`abt_agg::checkpoint_period`, `abt_agg::RowsWindow`), as the kernel did
+  before the split. The data layer holds the same labels as `calendar_label`
+  rows, so a pushed-down aggregate walks the same labels and has the same
+  bits. The golden runs did not change.
+- **E-28 (P-1.2; `two_pass`).** "The two-pass formulas (Chan, Golub and
+  LeVeque)": the mode is the plain two-pass formula of that paper,
+  Σ(x − x̄)(y − ȳ)/(n − 1) with the mean summed in order, without the
+  corrected variant's second term; it is the form MW14's canonical returns
+  are reproduced with (G1), and the corrected form would change their bits.
+  `ols_beta` is `ols_slope` under the first formulation's name. Running sums
+  answer `sum`, `mean`, `std`, `cov`, `corr`, `ols_slope` and `ols_r` over
+  `rows(N)` windows; `var`, the order statistics and every other window are
+  reduced by the two-pass formulas in both modes.
+
 ## Query layer
 
 - **E-21 (Q-4.1, Q-4.4).** The starting set declares treatments the

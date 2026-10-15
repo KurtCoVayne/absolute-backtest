@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use abt_agg::{Function, ShiftedSums};
+
 use super::time;
 use super::value::{Ctor, Decision, Order, OrderKind, Tif, Value};
 use super::{CompiledRule, Env, Kernel, RunError, Sym, Tuple};
@@ -75,7 +77,7 @@ fn window_at(st: &RowsState, b: i64, n: usize) -> Option<(usize, usize)> {
 /// checkpoint window the buffer no longer holds; the sums are then built
 /// at `t` itself.
 fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], noncanonical: &mut usize) -> Option<f64> {
-    let k = n.max(8);
+    let k = abt_agg::checkpoint_period(n);
     let it = bars.binary_search(&t).ok()?;
     let ic = it - it % k;
     let rebuild = |st: &mut RowsState, b: i64, lo: usize, hi: usize| {
@@ -154,8 +156,9 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
 }
 
 /// Anchored bars a rows window group keeps beyond its N, so that a call a
-/// few bars back (a recursion reaching its previous row) is served too.
-const ROWS_SLACK: usize = 16;
+/// few bars back (a recursion reaching its previous row) is served too;
+/// abt-agg's rows windows keep the same.
+const ROWS_SLACK: usize = abt_agg::window::ROWS_SLACK;
 
 /// A rows window group's running state: its last N anchored bars and the
 /// rows among them (time, the row's locally bound slots in slot order, which
@@ -191,45 +194,18 @@ impl Default for RowsState {
     }
 }
 
-/// A compensated (Neumaier) sum.
-#[derive(Clone, Copy, Debug, Default)]
-struct Neumaier {
-    sum: f64,
-    c: f64,
-}
-
-impl Neumaier {
-    fn add(&mut self, x: f64) {
-        let t = self.sum + x;
-        if self.sum.abs() >= x.abs() {
-            self.c += (self.sum - t) + x;
-        } else {
-            self.c += (x - t) + self.sum;
-        }
-        self.sum = t;
-    }
-    fn value(&self) -> f64 {
-        self.sum + self.c
-    }
-}
-
-/// Running sums over the rows with ids in `lo..hi` of a group: of a and b
-/// (the aggregate's first two arguments) shifted by the window's first
-/// values at the last re-anchor, their squares and their product. Adding a
-/// row and removing one are O(1); at every checkpoint of the group's time
-/// domain (every `max(n, 8)`-th bar) the sums are rebuilt from the rows, so
-/// rounding cannot accumulate over a long history, and the walk from
-/// checkpoint to checkpoint is the same whatever bars were asked for
-/// (`running_value`).
+/// Running sums over the rows with ids in `lo..hi` of a group: abt-agg's
+/// shifted compensated sums (P-1.2), with the window they hold and the bar
+/// of the group's time domain they were last brought to. At every
+/// checkpoint of the domain (every `abt_agg::checkpoint_period(n)`-th bar)
+/// the sums are rebuilt from the rows, so rounding cannot accumulate over a
+/// long history, and the walk from checkpoint to checkpoint is the same
+/// whatever bars were asked for (`running_value`).
 #[derive(Clone, Debug)]
 struct RunningSums {
     lo: u64,
     hi: u64,
-    shift: (f64, f64),
-    s: [Neumaier; 5],
-    /// Rows in the window with a non-finite argument (the exact path then
-    /// answers, as it does for any window holding one).
-    nonfinite: usize,
+    sums: ShiftedSums,
     /// The bar of the group's time domain the sums were last brought to.
     at: i64,
 }
@@ -239,58 +215,24 @@ impl RunningSums {
         RunningSums {
             lo,
             hi: lo,
-            shift,
-            s: [Neumaier::default(); 5],
-            nonfinite: 0,
+            sums: ShiftedSums::new(shift),
             at: i64::MIN,
         }
     }
     fn apply(&mut self, vals: &[f64], sign: f64) {
-        let a = vals.first().copied().unwrap_or(0.0);
-        let b = vals.get(1).copied().unwrap_or(0.0);
-        if !a.is_finite() || !b.is_finite() {
-            if sign > 0.0 {
-                self.nonfinite += 1;
-            } else {
-                self.nonfinite -= 1;
-            }
-            return;
-        }
-        let (a, b) = (a - self.shift.0, b - self.shift.1);
-        for (k, x) in [a, b, a * a, b * b, a * b].into_iter().enumerate() {
-            self.s[k].add(sign * x);
-        }
+        self.sums.apply(vals, sign);
     }
     /// The aggregate over the window, or `None` where the exact path must
-    /// answer (too few rows, or a series too close to constant for its
-    /// centred sums to mean anything).
+    /// answer.
     fn aggregate(&self, agg: &str) -> Option<f64> {
-        let n = (self.hi - self.lo) as f64;
-        if n < 2.0 || self.nonfinite > 0 {
-            return None;
-        }
-        let [sa, sb, saa, sbb, sab] = self.s.map(|x| x.value());
-        let caa = saa - sa * sa / n;
-        let cbb = sbb - sb * sb / n;
-        let cab = sab - sa * sb / n;
-        // Centred sums below this share of the raw ones are rounding noise.
-        let flat = |c: f64, raw: f64| c <= 1e-10 * raw;
-        match agg {
-            "mean" => Some(self.shift.0 + sa / n),
-            "sum" => Some(self.shift.0 * n + sa),
-            "std" if !flat(caa, saa) => Some((caa / (n - 1.0)).sqrt()),
-            "cov" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (n - 1.0)),
-            "corr" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (caa * cbb).sqrt()),
-            "ols_slope" if !flat(cbb, sbb) => Some(cab / cbb),
-            "ols_r" if !flat(caa, saa) && !flat(cbb, sbb) => Some(cab / (caa * cbb).sqrt()),
-            _ => None,
-        }
+        let f = Function::parse(agg, None).ok()?;
+        self.sums.value(f, (self.hi - self.lo) as usize)
     }
 }
 
 /// The aggregates running sums answer.
 fn moment_aggregate(agg: &str) -> bool {
-    matches!(agg, "mean" | "sum" | "std" | "cov" | "corr" | "ols_slope" | "ols_r")
+    Function::parse(agg, None).map(|f| f.running()).unwrap_or(false)
 }
 
 /// An instance that met a partial operation while a body was solved: its
@@ -1779,7 +1721,7 @@ impl<'p> Kernel<'p> {
                         anchors += 1;
                     }
                     bars.push(t1);
-                    if anchors >= n + n.max(8) + ROWS_SLACK {
+                    if anchors >= n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
                         st.from_start = false;
                         break 'walk;
                     }
@@ -1858,8 +1800,8 @@ impl<'p> Kernel<'p> {
                     agg: agg.to_string(),
                     rows: count,
                     path: if running.is_some() { "running" } else { "two_pass" },
-                    shift: sums.map(|r| r.shift),
-                    sums: sums.map(|r| r.s.map(|x| x.value())),
+                    shift: sums.map(|r| r.sums.shift),
+                    sums: sums.map(|r| r.sums.s.map(|x| x.value())),
                     value: running,
                 });
             }
@@ -1888,7 +1830,7 @@ impl<'p> Kernel<'p> {
         // Keep N plus a checkpoint's span plus slack anchored bars (a call a
         // few bars back, and the rebuild at the checkpoint before any bar,
         // are served from the buffer).
-        while st.anchors.len() > n + n.max(8) + ROWS_SLACK {
+        while st.anchors.len() > n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
             st.anchors.pop_front();
             st.from_start = false;
         }
@@ -2440,19 +2382,8 @@ pub(crate) fn compare(op: CmpOp, a: &Value, b: &Value) -> bool {
     }
 }
 
-fn mean(xs: &[f64]) -> f64 {
-    xs.iter().sum::<f64>() / xs.len() as f64
-}
-
-fn sample_cov(xs: &[f64], ys: &[f64]) -> Result<f64, String> {
-    if xs.len() < 2 {
-        return Err("covariance of fewer than two observations".into());
-    }
-    let (mx, my) = (mean(xs), mean(ys));
-    Ok(xs.iter().zip(ys).map(|(x, y)| (x - mx) * (y - my)).sum::<f64>() / (xs.len() as f64 - 1.0))
-}
-
-/// The closed aggregate set (section 1). `Ok(None)` is "no tuple": an empty
+/// The closed aggregate set (section 1), reduced by abt-agg's two-pass
+/// formulas in the group's order (P-1.2). `Ok(None)` is "no tuple": an empty
 /// group for anything but `count`. Errors are partial arithmetic.
 pub fn aggregate(name: &str, cols: &[Vec<f64>]) -> Result<Option<Value>, String> {
     let xs = &cols[0];
@@ -2462,76 +2393,14 @@ pub fn aggregate(name: &str, cols: &[Vec<f64>]) -> Result<Option<Value>, String>
     if xs.is_empty() {
         return Ok(None);
     }
-    let sorted = |v: &[f64]| -> Vec<f64> {
-        let mut s = v.to_vec();
-        s.sort_by(|a, b| a.total_cmp(b));
-        s
+    let level = if name == "quantile" {
+        Some(cols.get(1).and_then(|c| c.first()).copied().ok_or("quantile needs a level")?)
+    } else {
+        None
     };
-    let v = match name {
-        "sum" => xs.iter().sum(),
-        "mean" => mean(xs),
-        "std" => {
-            if xs.len() < 2 {
-                return Err("std of fewer than two observations".into());
-            }
-            sample_cov(xs, xs)?.sqrt()
-        }
-        "median" => {
-            let s = sorted(xs);
-            let n = s.len();
-            if n % 2 == 1 {
-                s[n / 2]
-            } else {
-                (s[n / 2 - 1] + s[n / 2]) / 2.0
-            }
-        }
-        "quantile" => {
-            let q = cols.get(1).and_then(|c| c.first()).copied().ok_or("quantile needs a level")?;
-            if !(0.0..=1.0).contains(&q) {
-                return Err(format!("quantile level {} is outside [0, 1]", q));
-            }
-            let s = sorted(xs);
-            let pos = q * (s.len() as f64 - 1.0);
-            let lo = pos.floor() as usize;
-            let hi = pos.ceil() as usize;
-            s[lo] + (s[hi] - s[lo]) * (pos - lo as f64)
-        }
-        "max" => xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
-        "min" => xs.iter().cloned().fold(f64::INFINITY, f64::min),
-        "first" => xs[0],
-        "last" => xs[xs.len() - 1],
-        "corr" => {
-            let ys = &cols[1];
-            let c = sample_cov(xs, ys)?;
-            let (sx, sy) = (sample_cov(xs, xs)?.sqrt(), sample_cov(ys, ys)?.sqrt());
-            if sx == 0.0 || sy == 0.0 {
-                return Err("correlation of a constant series".into());
-            }
-            c / (sx * sy)
-        }
-        "cov" => sample_cov(xs, &cols[1])?,
-        "var" => sample_cov(xs, xs)?,
-        "ols_slope" => {
-            let ys = xs;
-            let x = &cols[1];
-            let vx = sample_cov(x, x)?;
-            if vx == 0.0 {
-                return Err("ols_slope against a constant regressor".into());
-            }
-            sample_cov(ys, x)? / vx
-        }
-        "ols_r" => {
-            let ys = &cols[1];
-            let c = sample_cov(xs, ys)?;
-            let (sx, sy) = (sample_cov(xs, xs)?.sqrt(), sample_cov(ys, ys)?.sqrt());
-            if sx == 0.0 || sy == 0.0 {
-                return Err("ols_r of a constant series".into());
-            }
-            c / (sx * sy)
-        }
-        _ => return Err(format!("unknown aggregate `{}`", name)),
-    };
-    Ok(Some(Value::Num(v)))
+    let f = Function::parse(name, level).map_err(|e| e.to_string())?;
+    let columns: Vec<&[f64]> = cols.iter().take(f.arity()).map(|c| c.as_slice()).collect();
+    abt_agg::reduce(f, abt_agg::Mode::TwoPass, &columns).map(|v| v.map(Value::Num)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
