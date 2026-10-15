@@ -223,8 +223,12 @@ library stat {
 - A corpus file's headers: `# expect: CODE` on a negative case, `# allow:
   Wn` on a strategy that is meant to warn.
 
-`abt check` prints each strategy's degrees of freedom (the counts the study
-report uses) and a summary line:
+`abt check` judges every strategy, and every library whether or not a
+strategy uses it: a library is instantiated in a probe that calls each of
+its relations once, with a parameter of its type for every value input and
+a stub of its shape for every relation input, and its own diagnostics are
+reported under its name. It prints each strategy's degrees of freedom (the
+counts the study report uses) and a summary line:
 
 ```
 sma_crossover: degrees of freedom: 5 params, 0 literals, 5 rules (+ 0 library literals)

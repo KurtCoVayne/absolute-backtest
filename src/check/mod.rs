@@ -483,10 +483,31 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut names: BTreeSet<&str> = BTreeSet::new();
+    // The positions of the libraries' diagnostics: a probe adds a
+    // diagnostic only where no strategy (and no earlier probe) reported
+    // one, while two strategies' different messages at one position are
+    // both kept (a window on two calendars).
+    let lib_names: BTreeSet<&str> = ws.libraries().map(|l| l.name.as_str()).collect();
+    let mut lib_seen: HashSet<(Code, String, u32, u32)> = HashSet::new();
     for s in ws.strategies() {
         if names.insert(&s.name) {
             for d in check_program(ws, &s.name).1 {
+                if lib_names.contains(d.unit.as_str()) {
+                    lib_seen.insert((d.code, d.unit.clone(), d.span.line, d.span.col));
+                }
                 if seen.insert(d.to_string()) {
+                    out.push(d);
+                }
+            }
+        }
+    }
+    // Every library is judged, whether or not a strategy uses it: in a
+    // probe that calls each of its relations once (`library_probe`), keeping
+    // what is the library's own.
+    for lib in ws.libraries() {
+        for (_, _, diags) in check_library_probe(ws, &lib.name) {
+            for d in diags.into_iter().filter(|d| d.unit == lib.name) {
+                if lib_seen.insert((d.code, d.unit.clone(), d.span.line, d.span.col)) && seen.insert(d.to_string()) {
                     out.push(d);
                 }
             }
@@ -524,36 +545,17 @@ pub fn class_program_at(ws: &Workspace, class: &str, base: Option<Resolution>) -
             ),
         }]);
     };
-    let mut needs: Vec<String> = vec![format!("need bars{}", base.map(|r| format!(" {}", r)).unwrap_or_default())];
-    for word in ["actions", "listing", "sessions", "point_value", "commission"] {
-        if cls.rels.iter().any(|r| Demand::need_for(&r.name) == word) {
-            needs.push(format!("need {}", word));
-        }
-    }
-    for (kind, items, _) in &cls.vocab {
-        if kind == "lists" && !items.is_empty() {
-            let names: Vec<String> = items.iter().map(|(s, _)| format!("\"{}\"", s)).collect();
-            needs.push(format!("need lists {}", names.join(", ")));
-        }
-    }
-    if let Some(sc) = ws.class("series") {
-        for (kind, items, _) in &sc.vocab {
-            if kind == "names" && !items.is_empty() {
-                let names: Vec<String> = items.iter().map(|(s, r)| format!("\"{}\"{}", s, r.map(|r| format!(" {}", r)).unwrap_or_default())).collect();
-                needs.push(format!("need series {}", names.join(", ")));
-            }
-        }
-    }
-    let universe = if cls.rels.iter().any(|r| r.name == "listed") {
-        "listed(A, T), traded@base(A, T)"
-    } else {
-        "traded@base(A, T)"
-    };
-    let src = format!(
-        "strategy __class_{class} {{\n  data {{ class {class}\n    {needs}\n    require tested\n    prefer latest }}\n  uses calendar\n  clock {{ decide on base }}\n  universe {{ universe(A, T) :- {universe}. }}\n  params {{ }}\n  rules {{ }}\n  decisions {{ silence hold   orders market   decide(T, hold(A, 0)) :- universe(A, T). }}\n  execution {{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission per_share 0.005 USD min 1 USD\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }}\n  report {{ calendar base   periods 252 per year }}\n}}\n",
-        class = class,
-        needs = needs.join("\n    "),
-        universe = universe
+    let src = class_strategy_source(
+        ws,
+        cls,
+        base,
+        &ClassStrategy {
+            name: format!("__class_{}", class),
+            uses: "calendar".into(),
+            params: String::new(),
+            rules: String::new(),
+            decides: "decide(T, hold(A, 0)) :- universe(A, T).".into(),
+        },
     );
     let mut ws2 = ws.clone();
     if ws2.library("calendar").is_none() {
@@ -583,6 +585,233 @@ pub fn class_program_at(ws: &Workspace, class: &str, base: Option<Resolution>) -
         Some(p) => Ok(p),
         None => Err(diags),
     }
+}
+
+/// The parts of a strategy over a class's whole demand that vary: its name,
+/// the libraries it uses, and its params, rules and decide rules.
+struct ClassStrategy {
+    name: String,
+    uses: String,
+    params: String,
+    rules: String,
+    decides: String,
+}
+
+/// The text of a strategy over a class's whole demand (every relation the
+/// class declares, every list and the series catalog), deciding nothing of
+/// consequence: what `class_program` checks, and the probe a library is
+/// judged in (`library_probe`).
+fn class_strategy_source(ws: &Workspace, cls: &ast::Class, base: Option<Resolution>, parts: &ClassStrategy) -> String {
+    let class = &cls.name;
+    let mut needs: Vec<String> = vec![format!("need bars{}", base.map(|r| format!(" {}", r)).unwrap_or_default())];
+    for word in ["actions", "listing", "sessions", "point_value", "commission"] {
+        if cls.rels.iter().any(|r| Demand::need_for(&r.name) == word) {
+            needs.push(format!("need {}", word));
+        }
+    }
+    for (kind, items, _) in &cls.vocab {
+        if kind == "lists" && !items.is_empty() {
+            let names: Vec<String> = items.iter().map(|(s, _)| format!("\"{}\"", s)).collect();
+            needs.push(format!("need lists {}", names.join(", ")));
+        }
+    }
+    if let Some(sc) = ws.class("series") {
+        for (kind, items, _) in &sc.vocab {
+            if kind == "names" && !items.is_empty() {
+                let names: Vec<String> = items.iter().map(|(s, r)| format!("\"{}\"{}", s, r.map(|r| format!(" {}", r)).unwrap_or_default())).collect();
+                needs.push(format!("need series {}", names.join(", ")));
+            }
+        }
+    }
+    let universe = if cls.rels.iter().any(|r| r.name == "listed") {
+        "listed(A, T), traded@base(A, T)"
+    } else {
+        "traded@base(A, T)"
+    };
+    format!(
+        "strategy {name} {{\n  data {{ class {class}\n    {needs}\n    require tested\n    prefer latest }}\n  uses {uses}\n  clock {{ decide on base }}\n  universe {{ universe(A, T) :- {universe}. }}\n  params {{\n{params}  }}\n  rules {{\n{rules}  }}\n  decisions {{ silence hold   orders market\n    {decides}\n  }}\n  execution {{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission per_share 0.005 USD min 1 USD\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }}\n  report {{ calendar base   periods 252 per year }}\n}}\n",
+        name = parts.name,
+        class = class,
+        needs = needs.join("\n    "),
+        uses = parts.uses,
+        universe = universe,
+        params = parts.params,
+        rules = parts.rules,
+        decides = parts.decides,
+    )
+}
+
+/// The type names a signature may write; any other uppercase name is a
+/// dimension variable (F-9).
+const CONCRETE_TYPES: &[&str] = &["Count", "Scalar", "Duration", "Notional", "Price", "Quantity", "Timestamp", "Label", "Entity", "Decision"];
+
+/// A placeholder of a written type for a library probe: the type the probe
+/// declares (a dimension variable is a Scalar) and a literal of it; `None`
+/// for a type the probe cannot supply.
+fn probe_value(ty: &ast::TyName, unit_word: &str) -> Option<(String, String)> {
+    let written = match &ty.arg {
+        Some(a) => format!("{}<{}>", ty.name, a),
+        None => ty.name.clone(),
+    };
+    Some(match (ty.name.as_str(), ty.arg.as_deref()) {
+        ("Count", _) => (written, "2".into()),
+        ("Scalar", _) => (written, "0.5".into()),
+        ("Duration", _) => (written, "20d".into()),
+        ("Notional", Some(c)) => (written, format!("1_000 {}", c)),
+        ("Price", Some(c)) => (written, format!("1 {}/unit", c)),
+        ("Quantity", _) => (written, format!("1 {}", unit_word)),
+        (n, None) if !CONCRETE_TYPES.contains(&n) => ("Scalar".into(), "0.5".into()),
+        _ => return None,
+    })
+}
+
+/// The classes a library is probed against: the one its data block names,
+/// or, for `class any` (written for every class), every class of the
+/// workspace that has bars.
+pub fn probe_classes<'w>(ws: &'w Workspace, lib: &ast::Library) -> Vec<&'w ast::Class> {
+    match lib.data.as_ref().and_then(|d| d.class.as_ref()).map(|(c, _)| c.as_str()) {
+        Some(c) if c != "any" => ws.class(c).into_iter().collect(),
+        _ => ws
+            .units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Class(c) if c.base.is_some() && c.rels.iter().any(|r| r.name == "close") => Some(c),
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
+/// A strategy that calls every relation of a library once, with a
+/// parameter of its type for each value input and a stub relation of its
+/// shape for each relation input, over the whole demand of a class the
+/// library is written for: the library's rules are instantiated and judged
+/// in it as in any strategy that uses them, so that a library is checked
+/// whether or not a strategy of the workspace uses it. `None` when there is
+/// nothing to probe.
+pub fn library_probe(ws: &Workspace, lib: &ast::Library, cls: &ast::Class) -> Option<(String, String)> {
+    // The class's entity sort: the type of the first argument of its
+    // relations that is not a value type.
+    let entity = cls
+        .rels
+        .iter()
+        .flat_map(|r| r.args.iter())
+        .filter(|a| !a.key)
+        .filter_map(|a| a.ty.as_ref().map(|t| t.name.clone()))
+        .find(|n| !CONCRETE_TYPES.contains(&n.as_str()))?;
+    let unit_word = cls.unit.clone().unwrap_or_else(|| "units".into());
+    let is_entity = |t: &ast::TyName| t.name == "Entity" || t.name == entity;
+    let (mut params, mut rules, mut decides) = (String::new(), String::new(), Vec::new());
+    'rel: for (k, d) in lib.rules.rels.iter().enumerate() {
+        if d.args.iter().any(|a| !a.cals.is_empty()) {
+            continue;
+        }
+        let mut brackets: Vec<String> = Vec::new();
+        let mut stubs = String::new();
+        let mut own_params = String::new();
+        for (j, input) in d.inputs.iter().enumerate() {
+            match &input.ty {
+                ast::InputTy::Value(ty) => {
+                    let Some((ty, lit)) = probe_value(ty, &unit_word) else { continue 'rel };
+                    let name = format!("probe_p{}_{}", k, j);
+                    own_params.push_str(&format!("    {} : {} = {}\n", name, ty, lit));
+                    brackets.push(name);
+                }
+                ast::InputTy::Rel(shape) => {
+                    let name = format!("probe_r{}_{}", k, j);
+                    let (mut args, mut terms, mut body) = (Vec::new(), Vec::new(), vec!["universe(A, T)".to_string()]);
+                    for (m, a) in shape.iter().enumerate() {
+                        match &a.ty {
+                            None => {
+                                args.push("@T".to_string());
+                                terms.push("T".to_string());
+                            }
+                            Some(t) if is_entity(t) => {
+                                args.push(format!("A: {}", entity));
+                                terms.push("A".to_string());
+                            }
+                            Some(t) => {
+                                let Some((ty, lit)) = probe_value(t, &unit_word) else { continue 'rel };
+                                args.push(format!("V{}: {}", m, ty));
+                                terms.push(format!("V{}", m));
+                                body.push(format!("V{} = {}", m, lit));
+                            }
+                        }
+                    }
+                    if !terms.contains(&"A".to_string()) || !terms.contains(&"T".to_string()) {
+                        continue 'rel;
+                    }
+                    stubs.push_str(&format!("    rel {}({})\n    {}({}) :- {}.\n", name, args.join(", "), name, terms.join(", "), body.join(", ")));
+                    brackets.push(name);
+                }
+            }
+        }
+        let terms: Vec<&str> = d
+            .args
+            .iter()
+            .map(|a| {
+                if a.key {
+                    "T"
+                } else if a.ty.as_ref().map(is_entity).unwrap_or(false) {
+                    "A"
+                } else {
+                    "_"
+                }
+            })
+            .collect();
+        let call = if brackets.is_empty() {
+            format!("{}({})", d.name, terms.join(", "))
+        } else {
+            format!("{}[{}]({})", d.name, brackets.join(", "), terms.join(", "))
+        };
+        params.push_str(&own_params);
+        rules.push_str(&stubs);
+        rules.push_str(&format!("    rel probe_{}(A: {}, @T)\n    probe_{}(A, T) :- universe(A, T), {}.\n", k, entity, k, call));
+        decides.push(format!("decide(T, hold(A, 0)) :- probe_{}(A, T).", k));
+    }
+    if decides.is_empty() {
+        return None;
+    }
+    let name = format!("__library_{}_{}", lib.name, cls.name);
+    let uses = if lib.name == "calendar" { "calendar".to_string() } else { format!("calendar, {}", lib.name) };
+    let src = class_strategy_source(
+        ws,
+        cls,
+        None,
+        &ClassStrategy {
+            name: name.clone(),
+            uses,
+            params,
+            rules,
+            decides: decides.join("\n    "),
+        },
+    );
+    Some((name, src))
+}
+
+/// The check of a library's probes (`library_probe`), one per class it is
+/// probed against: the class, the program and every diagnostic, the probe's
+/// own included. What `check_workspace` keeps of them is the library's.
+pub type ProbeCheck = (String, Option<Program>, Vec<Diagnostic>);
+
+pub fn check_library_probe(ws: &Workspace, lib: &str) -> Vec<ProbeCheck> {
+    let Some(lib) = ws.library(lib) else { return Vec::new() };
+    let mut out = Vec::new();
+    for cls in probe_classes(ws, lib) {
+        let Some((name, src)) = library_probe(ws, lib, cls) else { continue };
+        let mut ws2 = ws.clone();
+        if ws2.add_source(&src).is_err() {
+            continue;
+        }
+        let (prog, mut diags) = check_program(&ws2, &name);
+        // The probe is named by the library in what it reports.
+        let probe = format!("`{}`", name);
+        for d in &mut diags {
+            d.message = d.message.replace(&probe, &format!("`{}`", lib.name));
+        }
+        out.push((cls.name.clone(), prog, diags));
+    }
+    out
 }
 
 /// The `calendar` module of the standard library (corpus-v2/lib/calendar.dsl),
@@ -942,7 +1171,7 @@ impl<'a> Checker<'a> {
                 }
             }
             for decl in &lib.rules.rels {
-                if is_reserved(&decl.name) {
+                if is_reserved_relation(&decl.name, !decl.inputs.is_empty()) {
                     self.diag(
                         Code::U,
                         &lib.name,

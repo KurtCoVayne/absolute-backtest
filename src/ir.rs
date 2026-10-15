@@ -1101,6 +1101,14 @@ pub fn is_reserved(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
+/// Names a relation may not take. A function's name is admissible for a
+/// relation with bracketed inputs: every call of it is written `name[...]`,
+/// which no function call is (the xsec library's `decile[R]` beside the
+/// function `decile`).
+pub fn is_reserved_relation(name: &str, bracketed: bool) -> bool {
+    is_reserved(name) && !(bracketed && SCALAR_FUNCTIONS.contains(&name))
+}
+
 /// Names a parameter may not take: the keywords and temporal builtins that
 /// would be ambiguous as a bare identifier. A function, an aggregate, a
 /// decision constructor or an order kind is only ever written applied or

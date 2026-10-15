@@ -444,3 +444,73 @@ fn an_equity_literal_warns_w6_as_a_snapshot() {
     assert!(diags.iter().all(|d| d.code == Code::W6), "nothing else warns:\n{}", text(&diags));
     assert!(Code::W5.is_warning() && Code::W6.is_warning() && !Code::F.is_warning());
 }
+
+/// A library with an unbound head, an undeclared relation and a type error,
+/// which no strategy uses.
+const BROKEN_LIBRARY: &str = r#"
+library broken {
+  data { class any }
+  uses calendar
+  rules {
+    rel bad_head(A: Entity, @T, X: Scalar)
+    bad_head(A, T, X) :- universe(A, T).
+    rel bad_ref(A: Entity, @T)
+    bad_ref(A, T) :- universe(A, T), no_such_relation(A, T).
+    rel bad_type(A: Entity, @T, X: Scalar)
+    bad_type(A, T, X) :- universe(A, T), X = "text" + 1.
+  }
+}
+"#;
+
+/// A library is judged whether or not a strategy uses it: in a probe that
+/// calls each of its relations once, its errors are reported under its own
+/// name, the probe's never.
+#[test]
+fn a_library_no_strategy_uses_is_judged() {
+    let mut ws = common::base_workspace();
+    ws.add_source(BROKEN_LIBRARY).unwrap();
+    let diags = check_workspace(&ws);
+    let codes: Vec<Code> = diags.iter().filter(|d| d.unit == "broken" && d.severity == Severity::Error).map(|d| d.code).collect();
+    for code in [Code::B, Code::U, Code::T] {
+        assert!(codes.contains(&code), "{:?} missing: {}", code, common::text(&diags));
+    }
+    assert!(diags.iter().all(|d| d.unit == "broken"), "{}", common::text(&diags));
+    assert!(!common::text(&diags).contains("__library"), "{}", common::text(&diags));
+}
+
+/// Every module of the standard library checks clean on its own, and its
+/// probes instantiate every relation the module declares: a module written
+/// for every class (`class any`) on each class with bars, the catalog on
+/// the equity class it names.
+#[test]
+fn every_library_module_is_judged_clean_on_its_own() {
+    let ws = common::base_workspace();
+    let diags = check_workspace(&ws);
+    assert!(diags.is_empty(), "{}", common::text(&diags));
+    let mut probed = 0;
+    for lib in ws.libraries() {
+        let probes = absolute_backtest::check::check_library_probe(&ws, &lib.name);
+        assert!(!probes.is_empty(), "{} has no probe", lib.name);
+        let any = lib.data.as_ref().and_then(|d| d.class.as_ref()).map(|(c, _)| c == "any").unwrap_or(true);
+        let classes: Vec<&str> = probes.iter().map(|(c, _, _)| c.as_str()).collect();
+        if any {
+            assert!(classes.contains(&"equity") && classes.contains(&"future"), "{}: probed on {:?}", lib.name, classes);
+        }
+        for (class, prog, diags) in &probes {
+            let prog = prog.as_ref().unwrap_or_else(|| panic!("{} on {}: the probe does not check:\n{}", lib.name, class, common::text(diags)));
+            for d in &lib.rules.rels {
+                assert!(
+                    prog.relations
+                        .keys()
+                        .any(|n| n == &d.name || n.starts_with(&format!("{}[", d.name)) || n.starts_with(&format!("{}@", d.name))),
+                    "{} on {}: `{}` is not instantiated by the probe",
+                    lib.name,
+                    class,
+                    d.name
+                );
+            }
+        }
+        probed += 1;
+    }
+    assert_eq!(probed, ws.libraries().count());
+}

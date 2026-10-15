@@ -154,3 +154,38 @@ fn a_rows_window_counts_the_anchors_rows_and_aggregates_the_valid_ones() {
     // Day 2: the window is days 1 and 2, neither above 11: no value at all.
     assert_eq!(query(&mut k, "last3", days[1], "AAA"), None);
 }
+
+/// The xsec library's `decile[R]` is callable (a relation with bracketed
+/// inputs may share a function's name, `decile`), and ten names with
+/// increasing returns fall in the ten deciles in order.
+#[test]
+fn the_xsec_decile_ranks_ten_names_into_ten_tenths() {
+    let src = common::StrategyParts {
+        name: "tenths".into(),
+        uses: "calendar, bars, book, xsec".into(),
+        params: "    w : Scalar = 0.1".into(),
+        rules: "    rel dec(A: Equity, @T, K: Count)
+    dec(A, T, K) :- universe(A, T), decile[price_return](A, T, K)."
+            .into(),
+        decides: "    decide(T, hold(A, w)) :- dec(A, T, K), K >= 9.".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&src, "tenths");
+    let names: Vec<String> = (0..10).map(|i| format!("N{}", i)).collect();
+    let closes: Vec<[f64; 3]> = (0..10).map(|i| [10.0, 10.0 + 0.1 * (i + 1) as f64, 10.0 + 0.1 * (i + 1) as f64]).collect();
+    let series: Vec<(&str, &[f64])> = names.iter().zip(&closes).map(|(n, c)| (n.as_str(), &c[..])).collect();
+    let ds = common::markets((2024, 1, 8), &series);
+    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
+    k.run().unwrap();
+    let t = common::day("2024-01-09");
+    let mut got: Vec<(String, i64)> = k
+        .query("dec", t, &[])
+        .unwrap()
+        .iter()
+        .map(|tu| (k.show(&tu[0]), tu[2].as_f64().map(|x| x as i64).unwrap_or(-1)))
+        .collect();
+    got.sort();
+    let want: Vec<(String, i64)> = (0..10).map(|i| (format!("N{}", i), i + 1)).collect();
+    assert_eq!(got, want);
+}

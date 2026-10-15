@@ -1115,9 +1115,12 @@ impl Parser {
                 let expr = self.expr()?;
                 return Ok(Literal::Assign { var: name, expr, span });
             }
-            // An atom: a name followed by `(`, `[` or `@`, that is not a function.
-            let starts_atom = matches!(next, Tok::LParen | Tok::LBracket | Tok::At);
-            if starts_atom && !SCALAR_FUNCTIONS.contains(&name.as_str()) {
+            // An atom: a name followed by `[` or `@` (a function takes neither,
+            // so the xsec library's `decile[R]` is a relation although
+            // `decile` is also a function), or by `(` when it is not a
+            // function.
+            let starts_atom = matches!(next, Tok::LBracket | Tok::At) || (next == Tok::LParen && !SCALAR_FUNCTIONS.contains(&name.as_str()));
+            if starts_atom {
                 let atom = self.atom()?;
                 if self.eat_kw("asof") {
                     let at = self.term()?;

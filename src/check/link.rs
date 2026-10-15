@@ -224,7 +224,7 @@ impl<'a> Checker<'a> {
         let decls: Vec<ast::RelDecl> = root.rules.as_ref().map(|r| r.rels.clone()).unwrap_or_default();
         let rules: Vec<ast::Rule> = root.rules.as_ref().map(|r| r.rules.clone()).unwrap_or_default();
         for decl in &decls {
-            if is_reserved(&decl.name) {
+            if is_reserved_relation(&decl.name, !decl.inputs.is_empty()) {
                 self.diag(
                     Code::U,
                     &root_name,
