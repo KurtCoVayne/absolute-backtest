@@ -133,3 +133,20 @@ fn a_non_positive_price_is_rejected_at_load() {
     assert!(load_parquet_dir(&prog, &dir).is_err());
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A9 of docs/assessment.md: drift and volatility no longer grow with the
+/// number of names, so a market of hundreds of names stays priced over ten
+/// years (before, prices collapsed to the floor within months).
+#[test]
+fn a_large_synthetic_market_stays_priced() {
+    let names: Vec<String> = (0..200).map(|i| format!("N{:03}", i)).collect();
+    let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+    let ds = abt_kernel::data::synthetic_daily(&syms, (2010, 1, 4), 2_500, 3);
+    let closes: Vec<f64> = ds.facts["close"].iter().filter_map(|tu| tu[2].as_f64()).collect();
+    assert!(closes.len() > 400_000);
+    let floored = closes.iter().filter(|p| **p <= 0.01).count();
+    assert_eq!(floored, 0, "{} closes at the floor", floored);
+    let mut last: Vec<f64> = closes[closes.len() - 150..].to_vec();
+    last.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(last[75] > 1.0 && last[75] < 1e5, "median final close {}", last[75]);
+}

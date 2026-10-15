@@ -212,6 +212,20 @@ and the batch driver agree on every corpus program.
   calendar's bucket at its barrier, the running sums' walk reading the grown
   domain.
 
+- **E-38 (D-7.7, D-10, M-2; the first adapters and commands).** `abt data`
+  serves a store directory on a socket and ingests, catalogs, queries (the
+  text form `REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP
+  VALUE [and ...]] [r <= T]`, the typed request printed first), reports
+  statistics, pins and collects. The two adapters of M-2 read the present
+  formats with the kernel's loaders and generators (`bundle_v2`: a bundle
+  directory with its manifest, or a directory of one Parquet file per
+  relation; `synthetic`: the present generators) and ingest through the
+  data layer's adapter of keyed rows; they run in the front, which links
+  both layers, until the legacy formats retire (M-9). A9 of
+  docs/assessment.md is fixed: the synthetic drift and volatility cycle
+  through ten profiles, so markets of up to ten names, the golden runs',
+  are unchanged and larger ones stay priced.
+
 ## Aggregates
 
 - **E-27 (P-1.2, Proposition 1.1; the running sums' rebuild points).** "The

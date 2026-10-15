@@ -10,6 +10,7 @@ dependencies = [
  "abt-kernel",
  "abt-tests",
  "abt-wire",
+ "arrow",
  "serde_json",
 ]
 

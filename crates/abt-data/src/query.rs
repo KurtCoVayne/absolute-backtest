@@ -238,7 +238,11 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
     let version = view.version(store, &relation)?;
     let schema = store.manifest(&version)?.schema;
     let stored = stored_schema(&schema);
-    let mut parts = store.read(&version, &filter)?;
+    let lay = layout(&schema);
+    // `latest` of an identity that fixes the key reads back from `t_max` to
+    // the first bucket holding its rows; any other read takes the range.
+    let newest = matches!(form, QueryForm::Latest(_)) && filter.identity.is_some() && lay.key.len() == lay.identity.len();
+    let mut parts = if newest { store.read_newest(&version, &filter)? } else { store.read(&version, &filter)? };
     if let Some(p) = predicate_of(form) {
         parts = parts
             .iter()
@@ -246,7 +250,6 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
             .collect::<Result<_, DataError>>()?;
     }
     let all = rows::concat(&stored, &parts)?;
-    let lay = layout(&schema);
     let rows = match form {
         QueryForm::Latest(_) if all.num_rows() > 0 => {
             // The greatest t ≤ t_max per fact key: rows are in (t, key) order,

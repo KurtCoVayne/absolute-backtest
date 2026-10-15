@@ -399,6 +399,42 @@ impl Store {
         Ok(out)
     }
 
+    /// The latest admitted revisions in the newest bucket at or before `t1`
+    /// that holds a row the filter admits. This is `latest` for an identity
+    /// that fixes the fact's key: no older bucket can hold a later fact of it.
+    pub fn read_newest(&self, version: &str, f: &RowFilter) -> Result<Vec<RecordBatch>, DataError> {
+        let m = self.manifest(version)?;
+        let stored = stored_schema(&m.schema);
+        let lay = layout(&m.schema);
+        let mut buckets: BTreeMap<&str, Vec<&PartitionRef>> = BTreeMap::new();
+        for p in &m.partitions {
+            if f.t1.is_none_or(|t1| p.t_min <= t1) {
+                buckets.entry(&p.bucket).or_default().push(p);
+            }
+        }
+        let mut newest_first: Vec<Vec<&PartitionRef>> = buckets.into_values().collect();
+        newest_first.sort_by_key(|ps| std::cmp::Reverse(ps.iter().map(|p| p.t_min).min()));
+        for ps in newest_first {
+            let mut out = Vec::new();
+            for p in &ps {
+                for b in self.read_partition(&stored, p, f.identity.as_deref())? {
+                    let kept = filter_rows(&m.schema, &lay, &b, f)?;
+                    if kept.num_rows() > 0 {
+                        out.push(kept);
+                    }
+                }
+            }
+            if !out.is_empty() {
+                let mut all = rows::concat(&stored, &out)?;
+                if ps.len() > 1 {
+                    all = rows::sort_rows(&m.schema, &all)?;
+                }
+                return Ok(vec![latest_revisions(&lay, &all)?]);
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// One partition's rows the filter admits, in the partition's order
     /// (what the stream opens partition by partition, E-14).
     pub fn read_partition_rows(&self, m: &Manifest, p: &PartitionRef, f: &RowFilter) -> Result<RecordBatch, DataError> {

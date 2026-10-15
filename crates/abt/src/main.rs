@@ -6,5 +6,9 @@
 
 fn main() {
     abt::install();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("data") {
+        return abt::data_cli::main(&args[1..]);
+    }
     abt_kernel::cli::main()
 }

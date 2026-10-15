@@ -86,6 +86,65 @@ latches (`cumf`, `row`, `lp`, about a fifth) and the rolling features of
   per-instrument work is independent and can be split over threads.
 
 
+## Data layer budgets (D-9.1), measured at M-2, Oct 15, 2026
+
+The data layer of `docs/spec` (`crates/abt-data`) measured against the
+budgets of D-9.1 at the end of migration step M-2. These numbers are not the
+reference machine's: they come from a 4-core Intel Xeon at 2.8 GHz with
+15 GB in a cloud container, in a release build. G10 asserts the budgets on
+the owner's M4, after M-8.
+
+The measurements come from `crates/abt-data/tests/budgets.rs`, an ignored
+test, run with
+`cargo test -p abt-data --release --test budgets -- --ignored --nocapture`.
+The data:
+
+- 2,000 entities × 2,520 days of one numeric column, synthetic.
+- Ingested as ten yearly versions into monthly partitions.
+- Every query read from disk. M-2 has no resident layer: mmap, the CSR
+  index and the resident LRU come at M-8.
+
+| Operation | D-9.1 bound | Measured | |
+| --- | --- | ---: | --- |
+| Ingest | ≥ 200,000 rows/s | 2.70M rows/s | within, 13× |
+| Footprint | ≤ 16 B per value resident | 3.05 B per value **on disk** | resident not measurable yet |
+| `point` | ≤ 50 µs from disk | 847 µs median | 17× over |
+| `latest` | ≤ 50 µs from disk | 810 µs median | 16× over |
+| `series` of 252 rows | < 100 µs resident | 6.25 ms median from disk, 12 partitions | not comparable: from disk |
+| `section` | < 5 ms at 10,000 entities from a resident partition | 1.76 ms median at 2,000 entities from disk | |
+| Rolling 252-row mean, 10,000 × 7,560 | < 10 s on 1 thread, < 2 s on 8 | about 94 s on 1 thread, 80 s on 8 (`running`); 130 s and 89 s (`two_pass`) | 9–45× over |
+
+The rolling rows are scaled linearly from 2,000 × 2,520 (5.04M rows). That
+size took 6.3 s on one thread and 5.4 s on eight with `running`, and 8.5 s
+and 5.9 s with `two_pass`. "Eight threads" is eight threads on four cores.
+The barrier latency is a live budget and waits for M-6.
+
+**Where the time goes.** At M-2 `latest` read every partition from the start
+of the data up to `t_max`, and took 27 ms. It now reads back from `t_max` and
+stops at the first bucket that holds the entity's rows, when the identity
+fixes the fact's key. That leaves `point` and `latest` dominated by one
+partition's open: the manifest's JSON, the Parquet footer, the offset index
+and one row group's decode. A resident layer and mmap (M-8) remove all of
+that.
+
+The aggregate pass on 5.04M rows with `running` on one thread spends:
+
+| Stage | Share | Notes |
+| --- | ---: | --- |
+| Writing the answer as a cache object | 42% (2.7 s) | through the general `put` path: a bucket string formatted per row, a lexicographic sort of rows already in order, deduplication, the log and zstd Parquet |
+| The windows themselves | 23% (1.5 s) | 3.5 s with `two_pass`; the only stage that is parallel, 3.4× on four cores |
+| The output's sort into (t, entity) | 13% (0.8 s) | a comparison sort where a counting sort over the labels would do |
+| Reading and grouping the rows | 16% (1.1 s) | |
+| Building the answer batch | 5% (0.3 s) | |
+
+The pass is therefore bounded by its serial stages, not by the arithmetic.
+M-8's list:
+
+- a put path for rows already sorted;
+- bucket keys computed once per bucket;
+- a counting sort of the output;
+- columnar grouping instead of a map of row vectors.
+
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:
 

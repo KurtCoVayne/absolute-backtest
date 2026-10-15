@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+pub mod data_cli;
+
 use abt_data::adapter::{ingest_keyed, securities_of, terms_of};
 use abt_data::service::{inproc, DataService};
 use abt_data::Store;

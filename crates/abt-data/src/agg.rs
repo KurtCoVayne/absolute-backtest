@@ -280,8 +280,7 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     // sequence is computed in time order by one thread, and the output is
     // put in (t, group) order after (A-D11).
     let groups: Vec<(GroupKey, Series)> = groups.into_iter().collect();
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8);
-    let chunk = groups.len().div_ceil(threads).max(64);
+    let chunk = groups.len().div_ceil(threads()).max(if THREADS.load(std::sync::atomic::Ordering::Relaxed) == 0 { 64 } else { 1 });
     let ctx = Ctx {
         f,
         mode,
@@ -300,6 +299,21 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     });
     out.sort_by_key(|o| (o.t, o.group));
     Ok((out, names))
+}
+
+/// Threads the pass runs groups on; 0 is the machine's cores, at most eight.
+static THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Sets the pass's threads (G3 compares one with eight).
+pub fn set_threads(n: usize) {
+    THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn threads() -> usize {
+    match THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8),
+        n => n,
+    }
 }
 
 /// What every group's walk shares.

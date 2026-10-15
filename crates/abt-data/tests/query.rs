@@ -175,6 +175,35 @@ fn latest_is_the_as_of_read() {
     assert_eq!(all, vec![(1, T0 + DAY, 11.0), (2, T0 + DAY, 21.0), (3, T0 + DAY, 31.0)]);
 }
 
+/// `latest` of one entity reads back from `t_max` bucket by bucket: past a
+/// month the entity is absent from, and past a month whose row the receipt
+/// filter does not admit yet.
+#[test]
+fn latest_reads_back_across_buckets() {
+    let mut s = Store::temporary("query-latest").unwrap();
+    // Entity 1 closes in January only; entity 2 in January and March, its
+    // March row received in April.
+    let (jan, mar) = (T0 - 7 * DAY, T0 + 60 * DAY);
+    let rows = vec![(1, jan, jan, 1.0), (2, jan, jan, 2.0), (2, mar, mar + 30 * DAY, 3.0)];
+    s.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+    let latest = |a: u64, t_max: i64, r: Option<i64>| {
+        run(
+            &s,
+            QueryForm::Latest(Box::new(Latest {
+                relation: "equity.close".into(),
+                identity: Some(Box::new(entity(a))),
+                t_max,
+            })),
+            r,
+        )
+    };
+    assert_eq!(latest(1, mar + DAY, None), vec![(1, jan, 1.0)], "two buckets back");
+    assert_eq!(latest(2, mar + DAY, None), vec![(2, mar, 3.0)]);
+    assert_eq!(latest(2, mar + DAY, Some(mar + DAY)), vec![(2, jan, 2.0)], "the March row is not received yet");
+    assert_eq!(latest(2, jan - DAY, None), vec![], "nothing at or before t_max");
+    assert_eq!(latest(3, mar + DAY, None), vec![], "an entity with no rows");
+}
+
 #[test]
 fn series_and_section() {
     let (s, _, _) = store();

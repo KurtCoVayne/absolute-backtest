@@ -336,7 +336,9 @@ pub fn business_days(start: (i64, u32, u32), count: usize) -> Vec<i64> {
 /// fifths (its rows stop; `delisted` holds from then on), open, high and
 /// low around the close, every name listed and a member of `SPX` (and of
 /// `SP500`), a `sector` classification cycling over three codes, and two
-/// series: a daily `SPXTR` index level and a weekly `VIX`.
+/// series: a daily `SPXTR` index level and a weekly `VIX`. A name's drift
+/// and volatility come from one of ten profiles, so a market of hundreds of
+/// names stays priced.
 pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Dataset {
     let mut ds = Dataset::new();
     let mut rng = Rng::new(seed);
@@ -364,8 +366,12 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
             ds.add_security(&id, s, bars[0], None)
         };
         let mut price = 50.0 + 10.0 * i as f64;
-        let drift = 0.0002 * (i as f64 - n as f64 / 2.0);
-        let vol = 0.01 + 0.004 * i as f64;
+        // A9 of docs/assessment.md: drift and volatility bounded whatever
+        // the number of names (names cycle through ten profiles; up to ten
+        // names keep the profiles they always had).
+        let (k, m) = ((i % 10) as f64, n.min(10) as f64);
+        let drift = 0.0002 * (k - m / 2.0);
+        let vol = 0.01 + 0.004 * k;
         for (k, &t) in bars.iter().enumerate() {
             if i + 1 == n && n > 2 && k >= delist_bar {
                 ds.add("delisted", vec![Value::Equity(sym), Value::Time(t), Value::Label(bankrupt)]);
