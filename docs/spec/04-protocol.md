@@ -14,7 +14,7 @@ The source of truth for every wire type is the FlatBuffers schema `abt-wire/sche
 
 | Group | Types |
 | --- | --- |
-| Scalars | `Entity(u64)`, `Time(i64 ns)`, `Label(u32)`, `Num(f64)`, `Count(i64)`, `Bool`, `Bytes` (D-2.1) |
+| Scalars | `Entity(u64)`, `Time(i64 ns)`, `Label(u32)`, `Num(f64)`, `Tick(i64, scale)`, `Count(i64)`, `Bool`, `Bytes` (D-2.1; `Tick` travels as Arrow `Decimal128(18, s)`, ST-10.4) |
 | Schema | `ColumnSpec { name, ty, role }`, `RelationSchema { name, class, columns, calendar, constraints, attributes }` (D-2.2) |
 | Calendars | `CalendarSpec` (V-3.1 constructors), `CalendarId(Label)` |
 | Dimensions | `Dim { currency: i8, unit: i8, time: i8 }` with the currency and unit labels (S-2) |
@@ -55,6 +55,7 @@ Added by `07-storage.md` (A-D35, A-D36). The resident block format of Norgate an
 | `summary` | block summaries, cumulative summaries and cross-moments, sparse tables with argmin/argmax, the range rules of ST-5.1 to ST-5.3 |
 | `rank` | presence bitmaps with rank and select directories (ST-5.4) |
 | `wavelet` | wavelet matrices over rank-reduced offsets: k-th, count and listing over a row range (ST-5.7) |
+| `adjust` | piecewise evaluation of adjusted views between events, including the ordered `f64` definition for total return, shared so the kernel and the data layer compute the same value (ST-5.10) |
 
 The data layer builds and queries with it; the kernel decodes mapped segments with it (`map`, 3.1); `abt-agg`'s reductions run on its decoded blocks, and `abt-agg` gains the `exact` mode for tick columns (D-6.3). Property tests: encode then decode is the identity at every width with and without exceptions; extraction and row-range decoding equal full decoding; every range operation equals a direct reduction; exact sums equal a 128-bit rational reference (ST-13). [D] One implementation of the format shared by its writer and its readers, for the reason `abt-agg` is one implementation of the aggregates: a reader's decoder and the writer's encoder cannot drift.
 
@@ -173,7 +174,7 @@ A `run` with `to_seq` is the truncation G5 and Q-2.3 use; `embargo_mask` is the 
 
 ## 4. Arrow schemas
 
-Column types are D-2.1's; every table has `seq: UInt64` available on request. Field names are stable identifiers; a schema version string is in the IPC schema's metadata (`abt.schema = "1.0"`).
+Column types are D-2.1's; every table has `seq: UInt64` available on request. Price and quantity columns are `Float64` views by default and `Decimal128(18, s)` ticks when the request asks for `numerics = exact` or `ticks = true` (ST-10.4). Field names are stable identifiers; a schema version string is in the IPC schema's metadata (`abt.schema = "1.0"`).
 
 | Table | Columns |
 | --- | --- |

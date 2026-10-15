@@ -4,7 +4,7 @@ Oct 12, 2026 · specification for implementation. This document and its seven co
 
 Tags on claims: **[E]** an established result, with a reference. **[N]** a new proposition, with a proof or proof sketch. **[C]** a conjecture, with what would settle it. **[D]** a design decision, with the alternative it rejects and why.
 
-Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D40` and are cited by the companions; A-D35 to A-D40 were added with `07-storage.md` (Oct 15, 2026).
+Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D46` and are cited by the companions; A-D35 to A-D46 were added with `07-storage.md` (Oct 15, 2026).
 
 ---
 
@@ -73,7 +73,13 @@ Every decision below was taken in the design conversation of Oct 12, 2026 or fol
 | A-D37 | **Everything independent of a program is precomputed and hot** for Norgate and Databento: cumulative block summaries and cross-moments, block min/max with sparse tables, the full calendar ladder, presence with rank directories, catalog structures with interval indexes, standing event aggregates, a revision table for receipt-time reads, wavelet matrices for close and volume (ST-5). Every encoding and structure answers a range without decoding outside the blocks it covers (ST-6, audited and measured). Program-dependent results are recomputed in run-scoped memory. | Caching rolling results: unbounded in number and incompressible. |
 | A-D38 | **Data enters through a seven-stage staging pipeline** (land, normalise, classify, build, verify by decoding, publish atomically, export and collect) with content-addressed segments shared between versions (ST-7). | Rebuilding the store per update: minutes instead of milliseconds, and no structural sharing. |
 | A-D39 | **Appends are written in place into per-instrument tail blocks** and become visible by sequence number; revisions of history are copy-on-write versions (ST-8). | Appends as new versions: a version a minute live. |
-| A-D40 | **ORATS is not held hot**; its holding is a separate decision (ST-11). Norgate and Databento together are about 6.7 to 7.1 GB hot. | Any hot ORATS design: about 87 GB at the smallest lossless encoding. |
+| A-D40 | **ORATS is not held hot**; its holding is a separate decision (ST-11). Norgate and Databento together are about 6.8 to 7.2 GB hot. | Any hot ORATS design: about 87 GB at the smallest lossless encoding. |
+| A-D41 | **Durability comes from the log and a seal journal**; tails are never persisted on their own and are rebuilt from the log on restart, serving again within 30 s (ST-8.8). | Persisting tails in place: torn writes, and a second source of truth beside the log. |
+| A-D42 | **Sealed blocks go to append segments, and consolidation is the only compaction**: weekly, a byte-for-byte copy back into instrument order. Version ids are logical (block hashes), so bindings and pins follow a version across layouts (ST-8.7, ST-7.1). | Writing into base segments in place (breaks immutability and mapped readers); never consolidating (locality decays every day). |
+| A-D43 | **Adjusted series are views** (split, total return, continuous futures) evaluated piecewise between events over precomputed event-interval summaries; exact for splits and additive adjustments, a fixed `f64` definition for total return (ST-5.10). | Stored adjusted copies: one per adjustment, and every split or dividend rewrites an instrument's history. |
+| A-D44 | **Ticks cross the protocol as Arrow `Decimal128(18, s)`**, so `exact` aggregates agree bit for bit across layers (ST-10.4). | `Float64` only (`exact` could not cross layers); `Int64` with scale metadata (not a standard Arrow type). |
+| A-D45 | **Hot means locked**: the store is prefaulted and `mlock`ed; memory profiles (`dedicated`, `workstation`) and a fixed shedding order keep the peak inside the machine (ST-9.1, ST-9.2). | Relying on the page cache: a dropped page costs tens of microseconds and raises no error. |
+| A-D46 | **Futures calendars**: UTC-aligned intraday buckets, sessions and days by trade date, every receipt at its bucket's end, a Databento bar at its close (ST-5.3, ST-4.7). | Exchange-local alignment (identical for CME and ICE, but time-zone data on the hot path); UTC days (they cut every Globex session in two). |
 
 ---
 
@@ -162,8 +168,9 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 | Point lookup, range scan per entity | O(log n), O(log n + k) |
 | MW14 full replay (1991–2026) | ≤ 60 s, ≤ 1.5 GB (today 126 s, 3.1 GB) |
 | R8L full replay (2000–2026) | ≤ 3 s, ≤ 0.6 GB |
-| Storage per stored value | Norgate and Databento: ≤ 2 B resident on average with every precomputed structure, about 6.7 to 7.1 GB in all (ST-9); other sources: ≤ 16 B resident, ≤ 4 B on disk after compression |
-| Hot data layer + kernels + staging, peak | ≤ 14 GB on the 16 GB reference machine (ST-9) |
+| Storage per stored value | Norgate and Databento: ≤ 2 B resident on average with every precomputed structure, about 6.8 to 7.2 GB in all, locked (ST-9); other sources: ≤ 16 B resident, ≤ 4 B on disk after compression |
+| Hot data layer + kernels + staging, peak | ≈ 14 GB in the `dedicated` profile, ≈ 11 GB in `workstation` (ST-9.2) |
+| Restart to serving | ≤ 30 s (ST-8.8) |
 | Full-minute futures bundle (47M bars) | resident on the reference machine |
 
 ---
@@ -175,7 +182,11 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 | Vendor price lists (Databento per-GB and per-request, ORATS tier and rate limits) | cost vectors with symbolic unit prices `databento.gb`, `databento.req`, `orats.req`, resolved from a configuration file at start; a demand with money budget 0 never calls a vendor | D-7.3 |
 | Futures margin source (CME performance-bond files, IBKR's published table, or a hand-maintained relation) | `margin(instrument, t, initial, maintenance)` is a relation the data layer may hold from any source; when absent the kernel uses the approximation of K-5.6 (model 5) and warns | K-5.6 |
 | An options book with known results | gate G8 rests on hand-computed cases only | A-7.1 |
-| S3 as a second store tier | the local store only; the tier interface of D-3.7 is specified so S3 is an adapter | D-3.7 |
+| S3 as a second store tier | the local store only; the tier interface of D-3.7 is specified so S3 is an adapter; S6 of the staging pipeline already keeps cold copies of versions in S3 | D-3.7, ST-7 |
+| `exact` as the default numerics for new programs | `exact` for programs written after M-3; `two_pass` pinned for MW14 and R8L so G1 holds | ST-3, D-6.3, K-2.2 |
+| How ORATS is held | not hot; demand-driven: the chains a run binds are loaded hot before it, the full history on NVMe in pcodec chain-day blocks | ST-11 |
+| Retention | vendor objects kept in S3 indefinitely; the cold copy of every version a run, plan or claim names, at least 90 days; hot: current and pinned versions | ST-7.5 |
+| The reference machine's memory profile | `workstation` (at most two kernels at a time, ≈ 11 GB peak) until a dedicated machine exists | ST-9.2 |
 
 ---
 
@@ -183,4 +194,4 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 
 - [E] Conjunctive-query evaluation for demand resolution (V-3.12); Kleene conjunction for order-independent bodies (V-5); the causality theorem (F-7.1); BLAKE3 (O'Connor, Aumasson, Neves, Wilcox-O'Hearn 2020).
 - [N] Reproduction across processes (4.2); mode invariance of decisions (4.3); replay equals live across the boundary (4.4); observation and queries change nothing across layers (4.6).
-- [D] A-D1 to A-D40.
+- [D] A-D1 to A-D46.

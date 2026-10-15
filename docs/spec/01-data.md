@@ -23,6 +23,7 @@ The wire types of `abt-wire` (P-1.1), as the data layer stores them:
 | `Entity` | instrument id, `u64`, assigned by the identity registry (2.4), never reused | `UInt64` |
 | `Time` | nanoseconds since the Unix epoch, UTC, `i64` (A-D7) | `Timestamp(Nanosecond, "UTC")` |
 | `Num` | `f64`; a dimension is schema metadata, not a runtime tag | `Float64` |
+| `Tick` | an exact decimal: `i64` units of `10^(−s)`, `s ≤ 9` per batch (added by `07-storage.md`, ST-10.4) | `Decimal128(18, s)` |
 | `Count` | `i64` | `Int64` |
 | `Label` | `u32` into a dictionary owned by the registry (2.5) | `Dictionary(UInt32, Utf8)` |
 | `Bool` | | `Boolean` |
@@ -240,7 +241,7 @@ The answer is a relation keyed like the input (entity, `t`) with the aggregate a
 
 ### 6.3 Numerics
 
-The request's `numerics ∈ {exact, two_pass, running}` selects the `abt-agg` form (P-1.2); the cache key includes it. Results are bit-identical to the kernel's evaluation of the same aggregate over the same rows (6.5). `exact` (added by `07-storage.md`, ST-3, Proposition 3.3) applies to tick columns: sums and moments are exact integers in the instrument's finest exponent, accumulated in `i128`, so they are independent of order and vectorise; the `f64` result is one correctly rounded division. It is the default for new programs; the parity books (MW14, R8L) pin `two_pass`.
+The request's `numerics ∈ {exact, two_pass, running}` selects the `abt-agg` form (P-1.2); the cache key includes it. Results are bit-identical to the kernel's evaluation of the same aggregate over the same rows (6.5). `exact` (added by `07-storage.md`, ST-3, Proposition 3.3) applies to tick columns: sums and moments are exact integers in the instrument's finest exponent, accumulated in `i128`, so they are independent of order and vectorise; the `f64` result is one correctly rounded division. It is the default for new programs; the parity books (MW14, R8L) pin `two_pass`. In `exact` mode tick columns cross the protocol as `Tick` (`Decimal128`), so both layers reduce the same integers. Aggregates over adjusted series (split, total return, continuous futures) are evaluated piecewise between events (ST-5.10).
 
 ### 6.4 The algorithm
 

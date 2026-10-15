@@ -66,10 +66,12 @@ Gate: G1; `tests/fold_windows.rs` and `tests/window_order.rs` green; a before/af
 | `crates/abt-codec/tests/{roundtrip, extract, exact, summary, rank, wavelet}.rs` and `benches/` (the measurements of `scripts/study/encoding/` as Criterion benches) | 1,400 |
 | `crates/abt-data/src/hot/{directory, segment, ladder, presence, catalog, query}.rs` (ST-4 to ST-6) | 2,200 |
 | `crates/abt-data/src/staging/{land, normalise, classify, build, verify, publish, export}.rs` (ST-7) | 1,800 |
-| `crates/abt-data/src/hot/append.rs` (tails, visibility, sealing, ST-8) | 700 |
+| `crates/abt-data/src/hot/append.rs` (tails, visibility, sealing, append segments, seal journal, ST-8.3) | 900 |
+| `crates/abt-data/src/hot/{consolidate, recover, residency}.rs` (ST-8.7, ST-8.8, ST-9.1, ST-9.2) | 900 |
+| `crates/abt-codec/src/adjust.rs` and `crates/abt-data/src/hot/events.rs` (event-interval summaries, adjusted views, ST-5.10) | 700 |
 | `crates/abt-data/tests/{staging, append, ladder, hot_query}.rs` | 1,200 |
 
-The Norgate and Databento adapters of M-6 feed S0 and S1 of this pipeline; until M-6, `bundle_v2` stages the books' bundles through it. Additional gate: ST-13 (the whole staged store round-trips bit for bit; the hot store is within ST-9's budget).
+The Norgate and Databento adapters of M-6 feed S0 and S1 of this pipeline; until M-6, `bundle_v2` stages the books' bundles through it. Order inside M-2: `abt-codec` with its Criterion benches first, then **G-ST1** on the M4 (ST-13: mixed widths, reconstruction, a 7 GB working set, 10 threads; its fallbacks are applied before any store code depends on the format); then staging S0 to S4 and **G-ST2**, the sizing run over the full history (ST-7.4), which fixes the shedding level for the `workstation` profile; then the hot store, appends, consolidation and recovery. Additional gates: every test of ST-13.
 
 Gate: G1 (the books' bundles imported through `bundle_v2`); G5 in its new form; G3 in-process against socket, 1 against 8 data threads; D-9.1's budgets measured and recorded in `docs/assessment.md`. This is the largest step; M-3's parser and checker work can proceed in parallel from its second week since they touch neither the store nor the stream.
 

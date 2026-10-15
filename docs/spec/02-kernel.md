@@ -57,7 +57,7 @@ execution {
   oversize      halt | clamp | allow
   ruin          halt | continue
   late          send | reject               # a decision evaluated after its barrier's deadline (6.3)
-  numerics      two_pass | running
+  numerics      exact | two_pass | running      # exact: tick columns as integers (ST-3, ST-10.4); the default for new programs, two_pass pinned for MW14 and R8L
   limits        { gross <= X; net <= X; weight <= X per name; loss <= X per day; drawdown <= X; turnover <= X per PERIOD; participation <= X; names <= N; each with halt|reject|clamp|warn }   # optional; 3.5
 }
 ```
