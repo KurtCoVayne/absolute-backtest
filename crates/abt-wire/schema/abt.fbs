@@ -1,0 +1,52 @@
+// The wire schema of absolute-backtest (docs/spec/04-protocol.md, P-1.1).
+//
+// Every control frame (hello, request, response, error, ack) carries one
+// size-prefixed `Envelope`; anything whose size scales with the data travels
+// as Arrow IPC in its own frames (P-2.2). The schema is the source of truth:
+// `build.rs` compiles it with planus into zero-copy readers (`HelloRef`, ...)
+// and owned types (`Hello`, ...) that derive serde. A minor protocol version
+// only adds optional fields, frame kinds or request kinds (P-7).
+
+namespace abt.wire;
+
+// The layer a peer serves (A-2, Definition 2.1); `Front` is the `abt` binary.
+enum Layer : ubyte { Data = 0, Kernel = 1, Query = 2, Front = 3 }
+
+// The opening frame of a session (P-2.3). A peer refuses a different major
+// version with `Error { code: Version }`.
+table Hello {
+  protocol: string (required);
+  layer: Layer;
+  client: string;
+  capabilities: [string];
+}
+
+// P-2.5: what went wrong, for the caller to act on.
+enum ErrorCode : ubyte {
+  Version = 0,
+  Malformed = 1,
+  UnknownRelation = 2,
+  UnknownVersion = 3,
+  OutOfBudget = 4,
+  Unresolved = 5,
+  Refused = 6,
+  Halted = 7,
+  NotFound = 8,
+  Busy = 9,
+  Internal = 10
+}
+
+table Error {
+  code: ErrorCode;
+  message: string;
+}
+
+// Every control message; a frame's kind says which half (request, response)
+// the receiver expects, the correlation id pairs them (P-2.3).
+union Message { Hello, Error }
+
+table Envelope {
+  message: Message;
+}
+
+root_type Envelope;

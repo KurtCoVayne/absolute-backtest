@@ -1,0 +1,17 @@
+[package]
+name = "abt-wire"
+description = "The types and messages the three layers share: FlatBuffers messages, frames, canonical forms and BLAKE3 hashes (docs/spec/04-protocol.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+planus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+planus-codegen.workspace = true
+planus-translation.workspace = true

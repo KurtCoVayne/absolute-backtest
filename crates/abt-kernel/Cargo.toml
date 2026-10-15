@@ -1,0 +1,21 @@
+[package]
+name = "abt-kernel"
+description = "The kernel (docs/spec/02-kernel.md): the language of docs/language-v2.md, its checker and compiler, the evaluator, the market simulation and the query facility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "abt_kernel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "abt-kernel"
+path = "src/bin/abt-kernel.rs"
+
+[dependencies]
+arrow.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true

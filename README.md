@@ -43,30 +43,31 @@ silently misaligns every bucket.
 | `docs/compiler-design.md` | The compiler design: the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers and the observability tables; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
 | `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D34, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached). The implementation lands step by step on this branch; `docs/spec/ERRATA.md` records where it settles what the documents leave open. |
 | `docs/llm-observability.md`, `docs/llm-usability.md` | The two studies of models writing programs with the toolchain, both on the first formulation; their material is under `experiments/`. |
-| `src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
-| `src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
-| `src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
-| `src/compiler/` | Normalise (the normal form, canonical order and names, the SHA-256 program hash) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
-| `src/analysis/` | Analyse: strata, the open-loop partition, keyedness labels, demand, window lengths, and the abstract interpretation with its warnings. |
-| `src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
-| `src/plan/`, `src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt plan`). |
-| `src/verify/` | The verification tiers: exact linear feasibility, the SMT-LIB2 driver with replay files, constrained Horn clauses, translation validation, the runtime checks (`abt verify`). |
-| `src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, `abt explain --derivation`, `abt why-not`, `abt materialise`). |
-| `src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
-| `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation under the three-valued reading of section 5; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver, `ExecConfig::from_program` (the configuration the `execution`, `decisions` and `report` blocks fix), `explain` and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers, and its checkpoints; `time.rs` is calendar arithmetic and buckets; `value.rs` the runtime values. |
-| `src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
-| `src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
-| `src/bundle.rs`, `src/ingest.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests) and the vendor adapters behind `abt bundle build --from-norgate` and `--from-databento`. |
-| `src/dump.rs`, `src/study/` | `--dump DIR` (what `reference/` replays) and the study API (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness). |
-| `src/bin/abt.rs` | The command line. |
+| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
+| `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
+| `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
+| `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
+| `crates/abt-kernel/src/compiler/` | Normalise (the normal form, canonical order and names, the SHA-256 program hash) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
+| `crates/abt-kernel/src/analysis/` | Analyse: strata, the open-loop partition, keyedness labels, demand, window lengths, and the abstract interpretation with its warnings. |
+| `crates/abt-kernel/src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
+| `crates/abt-kernel/src/plan/`, `crates/abt-kernel/src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt plan`). |
+| `crates/abt-kernel/src/verify/` | The verification tiers: exact linear feasibility, the SMT-LIB2 driver with replay files, constrained Horn clauses, translation validation, the runtime checks (`abt verify`). |
+| `crates/abt-kernel/src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, `abt explain --derivation`, `abt why-not`, `abt materialise`). |
+| `crates/abt-kernel/src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
+| `crates/abt-kernel/src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation under the three-valued reading of section 5; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver, `ExecConfig::from_program` (the configuration the `execution`, `decisions` and `report` blocks fix), `explain` and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers, and its checkpoints; `time.rs` is calendar arithmetic and buckets; `value.rs` the runtime values. |
+| `crates/abt-kernel/src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
+| `crates/abt-kernel/src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
+| `crates/abt-kernel/src/bundle.rs`, `crates/abt-kernel/src/ingest.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests) and the vendor adapters behind `abt bundle build --from-norgate` and `--from-databento`. |
+| `crates/abt-kernel/src/dump.rs`, `crates/abt-kernel/src/study/` | `--dump DIR` (what `reference/` replays) and the study API (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness). |
+| `crates/abt-kernel/src/cli.rs`, `crates/abt/src/main.rs` | The command line, and `abt`, the front binary that dispatches to it (the layers' own command lines join it as they land). |
 | `corpus-v2/catalog/` | The three classes a program is written against: `equity` (bars as traded at a daily base; `listed`, `ticker`, `split`, `dividend`, `delisted`, `member`, `classification`; the vocabularies of lists, reasons and schemes), `future` (bars per root at a minute base, `session`, `point_value`, `commission`, `member`, `usable`) and `series` (`value` by name, each on its native calendar). A program never names them; its `data` block names what it needs. |
 | `corpus-v2/lib/` | The standard library of section 7, one module a file: `calendar` (`bar`, `prev_row`, `first_row`, `row_number`), `catalog` (`split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `total_return`, `log_return`, `tr_index`), `stat` (`mean_rows[N, R]` and the other rolling and recursive moments), `bars` (`true_range`, `range`, `gap_points`, `gap`, `price_return`, `log_price_return`, `dollar_volume`, `adv[N]`, `liquid[Floor]`), `xsec` (`decile[R]`, `zscore_xs[R]`, `share_above[R, Th]`), `state` (`latch[enter, stay]`, `bars_held`, `entry_price`, `high_since_entry`), `book` (`held`, `short`, `in_book`, `flat`, `weight_now`, `exposure`, `nav_return`, `peak_nav`, `drawdown`, `nav_vol[N]`, `bought_within[W]`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
 | `corpus-v2/strategies/` | 24 strategies that must check clean, among them the four stylized-fact strategies, `dividend_capture`, `opening_gap` on a minute base, `resampled_momentum`, `total_return_momentum` over the catalog module and `scale_in`, whose rules aggregate their own past. |
 | `corpus-v2/company/` | MW14 (`mw14.dsl`, the weekly S&P 1500 momentum book) and R8L (`r8l.dsl`, the intraday futures opening-range book) as section 9 gives them. |
-| `corpus-v2/negative/` | 35 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus_v2.rs`. |
-| `tests/corpus_v2.rs` | The acceptance test: the library checks clean; every strategy and company program checks clean modulo its `# allow:` lines; every negative case yields exactly its code and no program; every program runs on synthetic data of its class and decides something. |
-| `tests/common/mod.rs`, `tests/fixtures.rs` | The shared fixtures of the integration tests: the catalog and the library as the base workspace, strategies checked into programs, a strategy skeleton the tests fill in (`StrategyParts`, `strategy(name, params, rules, decides)`), crafted markets (`market`, `markets`, `market_from`); and the test that the skeleton checks and runs. |
-| `tests/*.rs` | The integration suites: the checker and its messages, the kernel's hand-computed outcomes, the executor's contracts, costs, liquidity, margin and policies, orders, actions, as-of joins, the fold with its windows, checkpoints and availability, the state tables, the compiler stages, translation validation and verification, the study, the command line. They are being ported from the first formulation's programs to this one. |
+| `corpus-v2/negative/` | 35 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `crates/abt-tests/tests/corpus_v2.rs`. |
+| `crates/abt-tests/tests/corpus_v2.rs` | The acceptance test: the library checks clean; every strategy and company program checks clean modulo its `# allow:` lines; every negative case yields exactly its code and no program; every program runs on synthetic data of its class and decides something. |
+| `crates/abt-tests/src/lib.rs`, `crates/abt-tests/tests/fixtures.rs` | The shared fixtures of the integration tests: the catalog and the library as the base workspace, strategies checked into programs, a strategy skeleton the tests fill in (`StrategyParts`, `strategy(name, params, rules, decides)`), crafted markets (`market`, `markets`, `market_from`); and the test that the skeleton checks and runs. |
+| `crates/abt-tests/tests/*.rs`, `crates/abt/tests/*.rs` | The integration suites (those that drive the `abt` binary are the front's): the checker and its messages, the kernel's hand-computed outcomes, the executor's contracts, costs, liquidity, margin and policies, orders, actions, as-of joins, the fold with its windows, checkpoints and availability, the state tables, the compiler stages, translation validation and verification, the study, the command line. They are being ported from the first formulation's programs to this one. |
 | `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies. |
 | `scripts/` | `ingest/norgate_lake_to_inputs.py` writes the Norgate-style inputs of `abt bundle build --from-norgate` from the NDLake lake; `parity/` holds the comparisons of the two books with their references; `bench.sh` is the performance ladder. `ingest/ndlake_weekly.py`, `ingest/tradestation_sessions.py` and `synth/` write the first formulation's layouts and are kept for the record. |
 
@@ -544,7 +545,7 @@ and then notes that its decisions are not causality-certified. `abt synth`,
 program whose demand covers the class whole (`check::class_program`). The
 crate depends on `serde`, `serde_json`, `arrow` and `parquet` for all this.
 
-Vendor exports become bundles through adapters (`src/ingest.rs`): `abt
+Vendor exports become bundles through adapters (`crates/abt-kernel/src/ingest.rs`): `abt
 bundle build --from-norgate DIR --class equity` reads a Norgate-style daily
 layout of Parquet files (`prices` as traded, `symbols` for the symbol
 history, `splits`, `dividends`, `delistings`, `membership`,
@@ -566,7 +567,7 @@ opening-range book (a minute base, `sessions` and `sessions of "ES"`
 calendars, `decide on base at session + 30min`, an `instruments` table of
 the 26 roots with their start years, allowed W9, and `futures_fixed_base`
 execution). `docs/language-v2.md` section 9 reads each file against the
-book's own rules and lists the known differences. `tests/corpus_v2.rs`
+book's own rules and lists the known differences. `crates/abt-tests/tests/corpus_v2.rs`
 checks both and runs both on synthetic data of their class (R8L with its
 session windows shortened to the synthetic market's thirty days). The
 parity of the first formulation's versions with the books' reference
@@ -614,7 +615,7 @@ short sample, a Sharpe ratio below its minimum track-record length,
 multiple testing, and a peak rather than a plateau. With `--walk-forward
 anchored:2y:6mo` (or `rolling`), each fold picks the grid's best point on
 its train window and judges it on the test window, every evaluation a
-logged trial. The metrics library behind it is `src/study/metrics.rs`;
+logged trial. The metrics library behind it is `crates/abt-kernel/src/study/metrics.rs`;
 returns are reported on the `report` block's calendar and annualised by its
 `periods`. A plain `abt run` is an untracked trial: logged when it names
 `--study DIR`, warned either way. `report` reads the lineage back as a bias
@@ -634,7 +635,7 @@ DIR` writes what a run saw and did (the data as Parquet, the configuration,
 decisions, fills, dropped decisions, actions, the book at every bar and the
 final state); `python3 reference/diff.py DIR` replays the decisions through
 the reference executor and compares fills, book, NAV and dropped count
-(`reference/README.md` gives the tolerances). `tests/reference.rs` runs
+(`reference/README.md` gives the tolerances). `crates/abt-tests/tests/reference.rs` runs
 the comparison over the daily corpus strategies and skips with a note where
 `python3` with pandas is absent. `.github/workflows/ci.yml` is the GitHub
 Actions workflow (format, clippy, tests with pandas installed so the
@@ -647,8 +648,8 @@ comparison runs).
 the index members, four tenths of the capital a leg: `momentum_12_1`,
 `low_volatility`, `short_term_reversal` and `size_proxy` (market
 capitalisation is not a catalog relation, so average dollar volume stands
-in). `tests/corpus_v2.rs` checks them and runs them on the synthetic daily
-market; `tests/stylized.rs` checks wide published ranges for each when
+in). `crates/abt-tests/tests/corpus_v2.rs` checks them and runs them on the synthetic daily
+market; `crates/abt-tests/tests/stylized.rs` checks wide published ranges for each when
 `ABT_BUNDLE_DIR` names a bundle of the point-in-time universe, and skips
 the ranges with a note without one.
 
@@ -689,19 +690,21 @@ strategies with an instrument literal allow W6, R8L allows W9, and a header
 whose code is not raised fails the test). It must also run on the synthetic
 market of its class and decide at least once. A negative case goes in
 `corpus-v2/negative/` with a `# expect: <code>` header and must produce
-errors of that code only, and no program. `tests/corpus_v2.rs` asserts all
+errors of that code only, and no program. `crates/abt-tests/tests/corpus_v2.rs` asserts all
 of this, with the counts (24 strategies, 2 company programs, 35 negative
-cases), and `tests/common/mod.rs` gives a new test the catalog and the
+cases), and `crates/abt-tests/src/lib.rs` gives a new test the catalog and the
 library as a workspace, a strategy skeleton to fill in and crafted markets.
 From Rust, a program is checked and run as the tests do it: a
 `check::Workspace` takes every unit's source with `add_source`,
 `check_workspace` judges every strategy in it, `check_program(&ws, name)`
 returns the linked `Program` with its diagnostics, `data::synthetic_for_program`
 builds the market of its class, `ExecConfig::from_program` the executor,
-and `kernel::run` the `RunResult`. The suites under `tests/` are being
-ported from the first formulation's programs to this one;
-`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy
---all-targets -- -D warnings` and `cargo test`.
+and `kernel::run` the `RunResult` (the crate is `abt_kernel`). The suites
+under `crates/abt-tests/tests/` and `crates/abt/tests/` run on this
+formulation's programs; `crates/abt-tests/tests/tv_golden.rs` holds every
+corpus program's run to its golden file (`docs/spec/ERRATA.md`, E-1);
+`.github/workflows/ci.yml` runs `cargo fmt --all --check`, `cargo clippy
+--workspace --all-targets -- -D warnings` and `cargo test --workspace`.
 
 ## Program
 

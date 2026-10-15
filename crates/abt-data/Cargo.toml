@@ -1,0 +1,9 @@
+[package]
+name = "abt-data"
+description = "The data layer (docs/spec/01-data.md): the store, the query engine, the stream with clock barriers and the resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

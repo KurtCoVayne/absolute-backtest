@@ -1,0 +1,2144 @@
+//! `abt`: the command line of the crate. `check` judges a workspace;
+//! `run` executes a strategy on data of its class under the program's own
+//! `execution` and `report` blocks (no option sets a cost, a policy or the
+//! periods); `explain`, `query`, `show`, `graph`, `table`, `why-not` and
+//! `materialise` read the model; `ir`, `plan`, `rewrite-log` and `verify`
+//! print the compiler's stages; `synth`, `bundle`, `study` and `briefs`
+//! manage data, bundles, studies and the briefs report. `usage()` holds
+//! the exact grammar of every command.
+// `RunError` carries the rule, the decision and the message of a halt; the
+// library allows the same lint for the same reason.
+#![allow(clippy::result_large_err)]
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::exit;
+use std::str::FromStr;
+
+use crate::check::{check_program, check_workspace, Severity, Workspace};
+use crate::data;
+use crate::kernel::time::{format_timestamp, parse_timestamp};
+use crate::kernel::{ExecConfig, Kernel, RunError, RunResult, Value};
+use crate::{observe, Term, Ty};
+
+struct Args {
+    cmd: String,
+    files: Vec<PathBuf>,
+    opts: HashMap<String, String>,
+    /// Repeatable options (`--bind`, `--param`), in the order given.
+    multi: HashMap<String, Vec<String>>,
+    flags: HashSet<String>,
+}
+
+const FLAGS: [&str; 10] = ["synthetic", "verify-causality", "quiet", "all", "fills", "untested", "timing", "explain", "json", "observed"];
+/// Options that may repeat.
+const MULTI: [&str; 4] = ["bind", "param", "grid", "require"];
+/// Every option. The executor's fields are not among them: a run is
+/// configured by the program's `execution` block, and its reporting by the
+/// `report` block (language-v2, 4.3 and 4.5); what remains here is what
+/// describes the run itself (its data, its window, the bundle date), the
+/// compiler's choices that keep the result, and the commands' arguments.
+const OPTIONS: [&str; 51] = [
+    "strategy",
+    "table",
+    "depth",
+    "tables",
+    "stage",
+    "plan",
+    "tier",
+    "solver",
+    "replay-dir",
+    "derivation",
+    "rel",
+    "symbol",
+    "ledger",
+    "ledger-out",
+    "threads",
+    "start",
+    "end",
+    "returns",
+    "dump",
+    "nav",
+    "briefs",
+    "from-norgate",
+    "from-databento",
+    "processing-delay",
+    "attempts",
+    "study",
+    "walk-forward",
+    "holdout",
+    "objective",
+    "reason",
+    "grid",
+    "require",
+    "checkpoint-every",
+    "checkpoint-dir",
+    "resume",
+    "kernel",
+    "bundle",
+    "from",
+    "version",
+    "as-of",
+    "bind",
+    "param",
+    "data",
+    "rule",
+    "at",
+    "class",
+    "base",
+    "out",
+    "days",
+    "symbols",
+    "seed",
+];
+
+fn parse_args() -> Args {
+    let mut it = std::env::args().skip(1);
+    let cmd = it.next().unwrap_or_else(|| usage(1));
+    let mut files = Vec::new();
+    let mut opts = HashMap::new();
+    let mut multi: HashMap<String, Vec<String>> = HashMap::new();
+    let mut flags = HashSet::new();
+    let mut rest: Vec<String> = it.collect();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = std::mem::take(&mut rest[i]);
+        if let Some(name) = a.strip_prefix("--") {
+            if FLAGS.contains(&name) {
+                flags.insert(name.to_string());
+            } else if OPTIONS.contains(&name) {
+                i += 1;
+                let v = rest.get(i).cloned().unwrap_or_else(|| {
+                    eprintln!("--{} needs a value", name);
+                    usage(1)
+                });
+                if MULTI.contains(&name) {
+                    multi.entry(name.to_string()).or_default().push(v);
+                } else {
+                    opts.insert(name.to_string(), v);
+                }
+            } else {
+                eprintln!(
+                    "unknown option --{} (the executor's fields are set by the program's execution block, the reporting by its report block)",
+                    name
+                );
+                usage(1)
+            }
+        } else {
+            files.push(PathBuf::from(a));
+        }
+        i += 1;
+    }
+    Args { cmd, files, opts, multi, flags }
+}
+
+/// The dataset a kept-kernel run reads: moved into the kernel when nothing
+/// reads it after the run, borrowed (copied into the kernel) when `--dump`,
+/// `--study` or `--verify-causality` will.
+enum Data<'a> {
+    Owned(Box<crate::kernel::Dataset>),
+    Borrowed(&'a crate::kernel::Dataset),
+}
+
+/// Run on the batch kernel and keep the kernel afterwards for what reads the
+/// model after the run: the explanations of the coverage report's root
+/// causes, and the ledger. The kernel is not freed tuple by tuple at the
+/// end, as in `run_owned`.
+fn run_keeping(
+    prog: &crate::check::Program,
+    lowered: Option<&crate::lower::Lowered>,
+    data: Data<'_>,
+    cfg: ExecConfig,
+    ledger: &[String],
+    ledger_out: Option<&Path>,
+    tables: Option<(&Path, &crate::plan::Plan)>,
+) -> Result<(RunResult, Vec<String>), RunError> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(s, || {
+                let mut k = match (data, lowered) {
+                    (Data::Owned(ds), Some(l)) => Kernel::from_dataset_planned(prog, l, *ds, cfg)?,
+                    (Data::Borrowed(ds), Some(l)) => Kernel::new_planned(prog, l, ds, cfg)?,
+                    (Data::Owned(ds), None) => Kernel::from_dataset(prog, *ds, cfg)?,
+                    (Data::Borrowed(ds), None) => Kernel::new(prog, ds, cfg)?,
+                };
+                if tables.is_some() {
+                    k.record_summaries(true);
+                }
+                let result = k.run()?;
+                let mut notes = Vec::new();
+                let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
+                for c in &causes {
+                    for ri in prog.rules_for(&c.relation) {
+                        let label = prog.rule_label(ri);
+                        let cal = prog.cal_of(&c.relation);
+                        let first = result.bars[0];
+                        let last = *result.bars.last().unwrap();
+                        let bars: Vec<i64> = k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect();
+                        let Some(&t) = bars.get(bars.len() / 2) else {
+                            notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, prog.cal_name(&cal)));
+                            continue;
+                        };
+                        match k.explain(ri, t, &[]) {
+                            Ok(ex) => notes.push(format!("{} (a sample bar; abt query --rel {} --at BAR --explain for another)", ex, c.relation)),
+                            Err(e) => notes.push(format!("rule {} at {}: {}", label, format_timestamp(t), e)),
+                        }
+                    }
+                }
+                if let Some(dir) = ledger_out {
+                    write_ledger(&mut k, prog, &result, ledger, dir)?;
+                }
+                if let Some((dir, plan)) = tables {
+                    let n = write_tables(&mut k, prog, &result, plan, dir)?;
+                    notes.push(format!(
+                        "tables: {} ({} Arrow IPC file(s): coverage, plan, book, summary, binding, extension/, carried/, derivation, failure)",
+                        dir.display(),
+                        n
+                    ));
+                }
+                std::mem::forget(k);
+                Ok((result, notes))
+            })
+            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+            .join()
+            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
+/// The program that covers a class whole (every relation, list and series
+/// the catalog declares), for the bundle and synthetic-market commands.
+fn class_program_or_exit(ws: &Workspace, class: &str, base: Option<crate::Resolution>) -> crate::check::Program {
+    crate::check::class_program_at(ws, class, base).unwrap_or_else(|diags| {
+        for d in &diags {
+            eprintln!("{}", d);
+        }
+        eprintln!(
+            "the catalog's class `{}` does not check as a program; pass the class file (and the standard library) among the files",
+            class
+        );
+        exit(1)
+    })
+}
+
+/// The strategy named on the command line, checked (every diagnostic
+/// printed; an error exits).
+fn checked_program(args: &Args) -> (crate::check::Program, Vec<crate::check::Diagnostic>) {
+    let ws = workspace(&args.files);
+    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+    let (prog, diags) = check_program(&ws, &name);
+    for d in &diags {
+        eprintln!("{}", d);
+    }
+    let Some(prog) = prog else {
+        eprintln!("strategy `{}` does not check; fix the errors above", name);
+        exit(1)
+    };
+    (prog, diags)
+}
+
+/// A kernel under the plan on a big-stack thread, for what reads the model
+/// after a run (the state tables and the provenance commands).
+fn with_kernel<T: Send>(
+    prog: &crate::check::Program,
+    dataset: &crate::kernel::Dataset,
+    lowered: &crate::lower::Lowered,
+    cfg: ExecConfig,
+    f: impl for<'k> FnOnce(&mut Kernel<'k>) -> Result<T, RunError> + Send,
+) -> Result<T, RunError> {
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .stack_size(512 << 20)
+            .spawn_scoped(s, || {
+                let mut k = Kernel::new_planned(prog, lowered, dataset, cfg)?;
+                f(&mut k)
+            })
+            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+            .join()
+            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+    })
+}
+
+/// `--at`, parsed.
+fn at_option(args: &Args) -> Option<i64> {
+    args.opts.get("at").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--at: `{}` is not a timestamp (YYYY-MM-DD, optionally THH:MM[:SS])", s);
+            exit(2)
+        })
+    })
+}
+
+/// The bar a query is about: `--at`, or the last bar of the relation's
+/// resolution inside the run.
+fn bar_for(k: &Kernel, prog: &crate::check::Program, rel: &str, at: Option<i64>, bars: &[i64]) -> Result<i64, RunError> {
+    let cal = prog.cal_of(rel);
+    let last = bars.last().copied().ok_or(RunError::NoBars)?;
+    let t = match at {
+        Some(t) => t,
+        None => k.bars_at(&cal).into_iter().rfind(|&b| b <= last).unwrap_or(last),
+    };
+    k.check_bar(&cal, t)?;
+    Ok(t)
+}
+
+/// `--symbol`, parsed as an instrument.
+fn symbol_for(k: &Kernel, args: &Args) -> Result<Option<Value>, RunError> {
+    match args.opts.get("symbol") {
+        Some(s) => k.parse_binding(s).map(Some).map_err(|m| RunError::Request(format!("--symbol {}: {}", s, m))),
+        None => Ok(None),
+    }
+}
+
+/// The relation named by --rel, or an input error.
+fn rel_option(args: &Args, what: &str) -> String {
+    args.opts.get("rel").cloned().unwrap_or_else(|| {
+        eprintln!("{} needs --rel RELATION", what);
+        usage(1)
+    })
+}
+
+/// Write the state tables of a run as Arrow IPC files under `dir`
+/// (compiler design, section 7.2): coverage, plan with the observed
+/// counts, book, summary, the extension of every demanded derived
+/// relation, the carried values of the recursive ones, and the derivation
+/// and failure tables of `decide` at the sampled bars. Returns the number
+/// of files.
+fn write_tables(k: &mut Kernel, prog: &crate::check::Program, result: &RunResult, plan: &crate::plan::Plan, dir: &Path) -> Result<usize, RunError> {
+    use crate::state::tables;
+    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("--tables {}: {}", dir.display(), e)))?;
+    let mut files = 0usize;
+    let mut write = |t: &tables::Table, name: &str| -> Result<(), RunError> {
+        let path = dir.join(format!("{}.arrow", name));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| RunError::Request(format!("{}: {}", parent.display(), e)))?;
+        }
+        t.write(&path).map_err(RunError::Request)?;
+        files += 1;
+        Ok(())
+    };
+    write(&tables::coverage(result), "coverage")?;
+    write(&tables::plan(&plan.clone().with_observed(k.literal_counts())), "plan")?;
+    write(&tables::book(result), "book")?;
+    write(&tables::summary(k, prog), "summary")?;
+    let graph = observe::program_graph(prog);
+    let names: Vec<String> = prog
+        .relations
+        .iter()
+        .filter(|(_, s)| matches!(s.kind, crate::Kind::Derived { .. } | crate::Kind::Output))
+        .filter(|(n, _)| plan.relations.iter().find(|r| &r.name == *n).map(|r| r.demanded && !r.elided).unwrap_or(false))
+        .map(|(n, _)| n.clone())
+        .collect();
+    for name in &names {
+        let ext = tables::extension(k, prog, name, &result.bars, None)?;
+        write(&ext, &format!("extension/{}", name))?;
+        if graph.node(name).map(|n| n.recursive).unwrap_or(false) {
+            let car = tables::carried(k, prog, name, &result.bars, None)?;
+            write(&car, &format!("carried/{}", name))?;
+        }
+    }
+    let mut derivation: Option<tables::Table> = None;
+    let mut failure: Option<tables::Table> = None;
+    for bar in tables::sampled_bars(&result.bars, 10) {
+        let d = tables::derivation(k, prog, "decide", bar, None)?;
+        let f = tables::failure(k, prog, "decide", bar, None, None)?;
+        match &mut derivation {
+            Some(t) => t.rows.extend(d.rows),
+            None => derivation = Some(d),
+        }
+        match &mut failure {
+            Some(t) => t.rows.extend(f.rows),
+            None => failure = Some(f),
+        }
+    }
+    if let Some(mut d) = derivation {
+        d.notes.push("the sampled bars of the run (section 7.3); `abt table --table derivation --at BAR` for another".into());
+        write(&d, "derivation")?;
+    }
+    if let Some(mut f) = failure {
+        f.notes.push("the sampled bars of the run (section 7.3); `abt table --table failure --at BAR` for another".into());
+        write(&f, "failure")?;
+    }
+    Ok(files)
+}
+
+/// Write every tuple of the named relations at every bar of the run (of the
+/// relation's own time domain inside the run's window) as DIR/<relation>.parquet,
+/// one column per argument of the signature, and the coverage as
+/// DIR/coverage.parquet.
+fn write_ledger(k: &mut Kernel, prog: &crate::check::Program, result: &RunResult, ledger: &[String], dir: &Path) -> Result<(), RunError> {
+    use crate::table::{write_table, Col};
+    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("--ledger-out {}: {}", dir.display(), e)))?;
+    let first = result.bars[0];
+    let last = *result.bars.last().unwrap();
+    for rel in ledger {
+        let Some(sig) = prog.relations.get(rel) else {
+            let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
+            return Err(RunError::Request(format!(
+                "--ledger: `{}` is not a relation of {}; its relations are {}",
+                rel,
+                prog.strategy,
+                names.join(", ")
+            )));
+        };
+        let bars: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
+        let width = sig.args.len();
+        let mut times: Vec<Option<i64>> = Vec::new();
+        let mut cols: Vec<Col> = sig
+            .args
+            .iter()
+            .map(|a| match a.ty {
+                Ty::Timestamp => Col::Time(Vec::new()),
+                Ty::Count => Col::Int(Vec::new()),
+                Ty::Quantity(_) => Col::Float(Vec::new()),
+                _ => Col::Str(Vec::new()),
+            })
+            .collect();
+        for t in bars {
+            for tu in k.query(rel, t, &[])? {
+                times.push(Some(t));
+                for j in 0..width {
+                    match (&mut cols[j], &tu[j]) {
+                        (Col::Time(v), Value::Time(x)) => v.push(Some(*x)),
+                        (Col::Time(v), _) => v.push(None),
+                        (Col::Int(v), Value::Count(x)) => v.push(Some(*x)),
+                        (Col::Int(v), _) => v.push(None),
+                        (Col::Float(v), Value::Num(x)) => v.push(Some(*x)),
+                        (Col::Float(v), Value::Count(x)) => v.push(Some(*x as f64)),
+                        (Col::Float(v), _) => v.push(None),
+                        (Col::Str(v), x) => v.push(Some(k.show(x))),
+                        (Col::Bool(v), _) => v.push(None),
+                    }
+                }
+            }
+        }
+        let mut table: Vec<(&str, Col)> = vec![("bar", Col::Time(times))];
+        for (a, c) in sig.args.iter().zip(cols) {
+            table.push((a.name.as_str(), c));
+        }
+        write_table(&dir.join(format!("{}.parquet", rel)), table).map_err(RunError::Request)?;
+    }
+    let cov = &result.coverage;
+    write_table(
+        &dir.join("coverage.parquet"),
+        vec![
+            ("relation", Col::Str(cov.iter().map(|c| Some(c.name.clone())).collect())),
+            ("derived", Col::Bool(cov.iter().map(|c| Some(c.derived)).collect())),
+            ("calls", Col::Int(cov.iter().map(|c| Some(c.calls as i64)).collect())),
+            ("nonempty", Col::Int(cov.iter().map(|c| Some(c.nonempty as i64)).collect())),
+            ("tuples", Col::Int(cov.iter().map(|c| Some(c.tuples as i64)).collect())),
+        ],
+    )
+    .map_err(RunError::Request)?;
+    Ok(())
+}
+
+/// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
+type Runner = dyn Fn(&crate::check::Program, &crate::kernel::Dataset, ExecConfig) -> Result<crate::kernel::RunResult, RunError> + Sync;
+
+fn usage(code: i32) -> ! {
+    eprintln!(
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised] [--kernel batch|fold]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report's metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --base RES            the bars a built bundle holds (default: the class's base; @1m with --from-databento)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
+    );
+    exit(code)
+}
+
+/// The value of `--name` parsed as `T`, or `default` when absent. A value
+/// that does not parse is an input error (exit 2), never a silent default.
+fn option<T: FromStr>(opts: &HashMap<String, String>, name: &str, what: &str, default: T) -> T {
+    match opts.get(name) {
+        None => default,
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            eprintln!("--{}: `{}` is not {}", name, v, what);
+            exit(2)
+        }),
+    }
+}
+
+fn workspace(files: &[PathBuf]) -> Workspace {
+    let mut ws = Workspace::new();
+    let mut paths = Vec::new();
+    for f in files {
+        if f.is_dir() {
+            collect_dsl(f, &mut paths);
+        } else {
+            paths.push(f.clone());
+        }
+    }
+    paths.sort();
+    for p in paths {
+        let src = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+            eprintln!("{}: {}", p.display(), e);
+            exit(2)
+        });
+        if let Err(e) = ws.add_source(&src) {
+            eprintln!("{}:{}: parse error: {}", p.display(), e.span, e.message);
+            exit(2)
+        }
+    }
+    ws
+}
+
+fn collect_dsl(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_dsl(&p, out);
+            } else if p.extension().map(|x| x == "dsl").unwrap_or(false) {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn synthetic_for(prog: &crate::check::Program, opts: &HashMap<String, String>) -> crate::kernel::Dataset {
+    // The instruments table names the market when the program writes one.
+    let symbols: Vec<String> = match opts.get("symbols") {
+        None if !prog.instruments.is_empty() => prog.instruments.iter().map(|(n, _)| n.clone()).collect(),
+        None => vec!["AAA".into(), "XYZ".into(), "BBB".into(), "SPY".into(), "DDD".into()],
+        Some(s) => {
+            let syms: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
+            if syms.iter().any(|x| x.is_empty()) {
+                eprintln!("--symbols: `{}` is not a comma-separated list of symbols", s);
+                exit(2)
+            }
+            syms
+        }
+    };
+    let syms: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
+    let seed: u64 = option(opts, "seed", "a non-negative integer", 7);
+    // The market of the program's class and base: minute futures with
+    // sessions, minute equities, or daily equities with the catalog.
+    let days: usize = option(opts, "days", "a number of days", if prog.base.is_sub_daily() { 40 } else { 500 });
+    let start = if prog.base.is_sub_daily() { (2024, 1, 2) } else { (2022, 1, 3) };
+    data::synthetic_for_program(prog, &syms, start, days, seed)
+}
+
+/// The dataset a run uses: synthetic, a bundle or a loose Parquet directory, as the options say.
+fn load_dataset(args: &Args, prog: &crate::check::Program) -> (crate::kernel::Dataset, Option<String>) {
+    let mut bundle_label: Option<String> = None;
+    let dataset = if args.flags.contains("synthetic") {
+        synthetic_for(prog, &args.opts)
+    } else if let Some(dir) = args.opts.get("bundle") {
+        let (ds, m) = crate::bundle::load_bundle(prog, Path::new(dir), args.flags.contains("untested")).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            exit(2)
+        });
+        if m.tests.is_none() {
+            eprintln!("note: bundle `{}@{}` has not passed its tests; its decisions are not causality-certified", m.name, m.version);
+        }
+        bundle_label = Some(format!("{}@{}", m.name, m.version));
+        ds
+    } else if let Some(dir) = args.opts.get("data") {
+        let (ds, notes) = data::load_parquet_dir(prog, Path::new(dir)).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            exit(2)
+        });
+        for n in notes {
+            eprintln!("note: {}", n);
+        }
+        ds
+    } else {
+        usage(1)
+    };
+    (dataset, bundle_label)
+}
+
+/// The executor configuration of a run: the program's `execution` block
+/// (every field that changes the result is in the program, language-v2
+/// 4.3), with what describes the run itself: its window, the bundle date a
+/// ticker literal resolves at, and parameter overrides.
+fn exec_config(args: &Args, prog: &crate::check::Program) -> ExecConfig {
+    let mut cfg = ExecConfig::from_program(prog);
+    cfg.as_of = args.opts.get("as-of").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--as-of: `{}` is not a timestamp (YYYY-MM-DD)", s);
+            exit(2)
+        })
+    });
+    cfg.start = args.opts.get("start").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--start: `{}` is not a timestamp (YYYY-MM-DD)", s);
+            exit(2)
+        })
+    });
+    cfg.end = args.opts.get("end").map(|s| {
+        parse_timestamp(s).unwrap_or_else(|| {
+            eprintln!("--end: `{}` is not a timestamp (YYYY-MM-DD)", s);
+            exit(2)
+        })
+    });
+    cfg.param_overrides = args
+        .multi
+        .get("param")
+        .map(|ps| {
+            ps.iter()
+                .map(|p| {
+                    let (name, raw) = p.split_once('=').unwrap_or_else(|| {
+                        eprintln!("--param takes NAME=VALUE, not `{}`", p);
+                        exit(1)
+                    });
+                    let (name, raw) = (name.trim(), raw.trim());
+                    // A literal in the language's grammar; a bare identifier is an instrument.
+                    let lit = crate::syntax::parse_lit(raw).unwrap_or_else(|e| {
+                        if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') && !raw.starts_with(|c: char| c.is_ascii_digit()) {
+                            crate::Lit::Str(raw.to_string())
+                        } else {
+                            eprintln!("--param {}: `{}` is not a literal (such as 20d, 100 shares, 0.02 or \"SPY\"): {}", name, raw, e.message);
+                            exit(1)
+                        }
+                    });
+                    (name.to_string(), lit)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    cfg
+}
+
+/// How the report block's calendar (4.5) partitions a run into periods:
+/// per decision bar when it is the decision calendar, per calendar day on
+/// `days`, and per session day on a sessions calendar (the days the root,
+/// or any root, had a session, read from the data's `session` rows).
+/// Another calendar reports per decision bar, with a note.
+fn report_periods(prog: &crate::check::Program, dataset: &crate::kernel::Dataset) -> (bool, Option<std::collections::BTreeSet<i64>>, Option<String>) {
+    use crate::Cal;
+    let cal = prog.report_cal();
+    if cal == prog.decision_cal {
+        return (false, None, None);
+    }
+    match &cal {
+        Cal::Days => (true, None, None),
+        Cal::Sessions | Cal::SessionsOf(_) => {
+            let root = match &cal {
+                Cal::SessionsOf(r) => Some(r.clone()),
+                _ => None,
+            };
+            let days: std::collections::BTreeSet<i64> = dataset
+                .facts
+                .get("session")
+                .map(|tus| {
+                    tus.iter()
+                        .filter(|tu| root.as_ref().map(|r| tu[0].as_equity().map(|s| dataset.symbols.name(s) == r).unwrap_or(false)).unwrap_or(true))
+                        .filter_map(|tu| tu.get(1).and_then(|v| v.as_time()))
+                        .map(time_day)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (true, Some(days), None)
+        }
+        other => (
+            false,
+            None,
+            Some(format!(
+                "report calendar `{}` is not the decision calendar, `days` or a sessions calendar; the periods are the decision bars",
+                prog.cal_name(other)
+            )),
+        ),
+    }
+}
+
+/// What runs the program: the batch kernel, the fold, or the fold with checkpoints.
+fn make_runner(args: &Args) -> Box<Runner> {
+    make_runner_with(args, None)
+}
+
+/// `make_runner` under a plan: the kernel applies it on both drivers.
+fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<Runner> {
+    let kernel_kind = args.opts.get("kernel").map(|s| s.as_str()).unwrap_or("batch");
+    let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
+        "month" => crate::kernel::CheckpointEvery::Month,
+        n => crate::kernel::CheckpointEvery::Bars(n.parse().unwrap_or_else(|_| {
+            eprintln!("--checkpoint-every: `{}` is not `month` or a number of bars", n);
+            exit(2)
+        })),
+    });
+    let checkpoint_dir = args.opts.get("checkpoint-dir").map(PathBuf::from);
+    let resume = args.opts.get("resume").map(PathBuf::from);
+    if (checkpoint_every.is_some() || resume.is_some()) && kernel_kind != "fold" {
+        eprintln!("--checkpoint-every and --resume need --kernel fold");
+        exit(2)
+    }
+    let runner: Box<Runner> = match kernel_kind {
+        "batch" => match lowered {
+            Some(l) => Box::new(move |prog, dataset, cfg| crate::kernel::run_planned(prog, &l, dataset, cfg)),
+            None => Box::new(crate::kernel::run),
+        },
+        "fold" if checkpoint_every.is_none() && resume.is_none() => match lowered {
+            Some(l) => Box::new(move |prog, dataset, cfg| crate::kernel::run_fold_planned(prog, &l, dataset, cfg)),
+            None => Box::new(crate::kernel::run_fold),
+        },
+        "fold" => Box::new(move |prog, dataset, cfg| {
+            use crate::kernel::{Checkpoint, Event, EventLog, Fold, Kernel, SimExecutor};
+            std::thread::scope(|s| {
+                std::thread::Builder::new()
+                    .stack_size(512 << 20)
+                    .spawn_scoped(s, || {
+                        let kernel = match &lowered {
+                            Some(l) => Kernel::new_streaming_planned(prog, l, dataset, cfg.clone())?,
+                            None => Kernel::new_streaming(prog, dataset, cfg.clone())?,
+                        };
+                        let log = EventLog::from_dataset(&kernel, dataset)?;
+                        let mut exec = SimExecutor::new(cfg.clone());
+                        let (mut fold, cursor) = match &resume {
+                            Some(path) => {
+                                let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                let cp: Checkpoint = serde_json::from_str(&text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                let cursor = cp.cursor;
+                                eprintln!("resuming from {} (checkpoint of {})", path.display(), format_timestamp(cp.last_bar));
+                                (Fold::restore(kernel, &mut exec, cp)?, cursor)
+                            }
+                            None => (Fold::new(kernel, &mut exec), i64::MIN),
+                        };
+                        if let Some(every) = checkpoint_every {
+                            fold = fold.with_checkpoints(every);
+                        }
+                        for ev in log.events {
+                            if let Event::Tuple { avail, .. } = &ev {
+                                if *avail < cursor {
+                                    continue;
+                                }
+                            }
+                            fold.step(ev)?;
+                            if let Some(cp) = fold.take_checkpoint() {
+                                if let Some(dir) = &checkpoint_dir {
+                                    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("{}: {}", dir.display(), e)))?;
+                                    let path = dir.join(format!("{}.json", format_timestamp(cp.last_bar)));
+                                    let text = serde_json::to_string(&cp).map_err(|e| RunError::Internal(e.to_string()))?;
+                                    std::fs::write(&path, text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                                    eprintln!("checkpoint {} written", path.display());
+                                }
+                            }
+                        }
+                        fold.finish().map(|(r, _)| r)
+                    })
+                    .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
+                    .join()
+                    .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+            })
+        }),
+        other => {
+            eprintln!("--kernel: `{}` is not one of batch, fold", other);
+            exit(2)
+        }
+    };
+    runner
+}
+
+/// The process's peak resident set in MB: `VmHWM` on Linux, `getrusage`'s
+/// `ru_maxrss` (bytes) on macOS, unavailable elsewhere.
+fn peak_rss_mb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
+        let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb / 1024.0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // struct rusage: two timevals, then ru_maxrss as the first long.
+        #[repr(C)]
+        struct Rusage {
+            times: [i64; 4],
+            longs: [i64; 14],
+        }
+        extern "C" {
+            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+        }
+        let mut u = Rusage { times: [0; 4], longs: [0; 14] };
+        // SAFETY: getrusage writes one struct rusage, whose layout on 64-bit macOS this mirrors.
+        let rc = unsafe { getrusage(0, &mut u) };
+        (rc == 0).then(|| u.longs[0] as f64 / (1024.0 * 1024.0))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+pub fn main() {
+    let args = parse_args();
+    if let Some(n) = args.opts.get("threads") {
+        let n: usize = n.parse().unwrap_or_else(|_| {
+            eprintln!("--threads: `{}` is not a count", n);
+            exit(2)
+        });
+        crate::study::set_threads(n);
+    }
+    match args.cmd.as_str() {
+        "check" => {
+            let ws = workspace(&args.files);
+            let diags = check_workspace(&ws);
+            for d in &diags {
+                println!("{}", d);
+            }
+            let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
+            let warnings = diags.len() - errors;
+            // Degrees of freedom per strategy (data-bundle doc, section 6):
+            // what the study report counts, printed for every strategy that
+            // checks.
+            let mut names: Vec<&str> = ws.strategies().map(|s| s.name.as_str()).collect();
+            names.sort_unstable();
+            for name in names {
+                if let (Some(p), _) = check_program(&ws, name) {
+                    println!("{}: {}", name, p.degrees_of_freedom.summary());
+                }
+            }
+            let strategies = ws.strategies().count();
+            println!("{} strategies, {} libraries checked: {} error(s), {} warning(s)", strategies, ws.libraries().count(), errors, warnings);
+            exit(if errors > 0 { 1 } else { 0 })
+        }
+        "ir" => {
+            // abt ir --strategy NAME --stage parsed|checked|normalised [--json] <files...>
+            let ws = workspace(&args.files);
+            let stage = args.opts.get("stage").cloned().unwrap_or_else(|| "normalised".into());
+            let json = args.flags.contains("json");
+            if stage == "parsed" {
+                if json {
+                    println!("{}", serde_json::json!({"stage": "parsed", "source": crate::compiler::print::render_parsed(&ws.units)}));
+                } else {
+                    print!("{}", crate::compiler::print::render_parsed(&ws.units));
+                }
+                return;
+            }
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let text = stage_text(&args, &prog, &stage, json).unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                exit(2)
+            });
+            print!("{}", text);
+        }
+        "plan" => {
+            // abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+            let observed = args.flags.contains("observed");
+            if observed && !has_data {
+                eprintln!("--observed runs the strategy: name --data DIR, --bundle DIR or --synthetic");
+                exit(2)
+            }
+            let loaded = if has_data { Some(load_dataset(&args, &prog)) } else { None };
+            let opts = match &loaded {
+                Some((ds, label)) => compile_options_with(
+                    &args,
+                    &prog,
+                    Some((ds, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+                ),
+                None => compile_options(&args, &prog),
+            };
+            let compiled = crate::compiler::compile(&prog, &opts);
+            let mut plan = compiled.plan.clone();
+            if observed {
+                let (ds, _) = loaded.as_ref().unwrap();
+                let cfg = exec_config(&args, &prog);
+                match crate::kernel::run_planned(&prog, &compiled.lowered, ds, cfg) {
+                    Ok(r) => plan = plan.with_observed(&r.literal_counts),
+                    Err(e) => {
+                        eprintln!("run halted: {}", e);
+                        exit(1)
+                    }
+                }
+            }
+            if args.flags.contains("json") {
+                println!("{}", serde_json::to_string_pretty(&plan.json()).unwrap_or_default());
+            } else {
+                print!("{}", plan.text());
+            }
+        }
+        "rewrite-log" => {
+            // abt rewrite-log --strategy NAME [--json] <files...>
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let opts = compile_options(&args, &prog);
+            let compiled = crate::compiler::compile(&prog, &opts);
+            if args.flags.contains("json") {
+                print!("{}", compiled.rewritten.log.json_lines());
+            } else {
+                print!("{}", compiled.rewritten.log.table());
+            }
+        }
+        "verify" => {
+            // abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let max_tier: u8 = option(&args.opts, "tier", "a tier from 0 to 6", 6);
+            if max_tier > 6 {
+                eprintln!("--tier: `{}` is not a tier from 0 to 6", max_tier);
+                exit(2)
+            }
+            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+            let loaded = if has_data { Some(load_dataset(&args, &prog)) } else { None };
+            let opts = match &loaded {
+                Some((ds, label)) => compile_options_with(
+                    &args,
+                    &prog,
+                    Some((ds, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+                ),
+                None => compile_options(&args, &prog),
+            };
+            let mut compiled = crate::compiler::compile(&prog, &opts);
+            let cfg = exec_config(&args, &prog);
+            let inputs = crate::verify::VerifyInputs {
+                prog: &prog,
+                diags: &diags,
+                opts: &opts,
+                max_tier,
+                data: loaded.as_ref().map(|(ds, _)| (ds, cfg.clone())),
+            };
+            let report = crate::verify::verify(&inputs, &mut compiled);
+            use crate::compiler::Stage;
+            if args.flags.contains("json") {
+                println!("{}", serde_json::to_string_pretty(&report.json()).unwrap_or_default());
+            } else {
+                print!("{}", report.text());
+            }
+            if report.refuted() {
+                exit(1)
+            }
+        }
+        "graph" => {
+            // abt graph --strategy NAME [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            let (prog, _) = checked_program(&args);
+            let opts = compile_options(&args, &prog);
+            let compiled = crate::compiler::compile(&prog, &opts);
+            print!("{}", observe::show_graph(&prog, &compiled));
+        }
+        "table" => {
+            // abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            let (prog, _) = checked_program(&args);
+            let which = args.opts.get("table").cloned().unwrap_or_else(|| {
+                eprintln!("table needs --table NAME (coverage, plan, book, binding, summary, extension, carried, derivation, failure)");
+                usage(1)
+            });
+            let (dataset, label) = load_dataset(&args, &prog);
+            let opts = compile_options_with(
+                &args,
+                &prog,
+                Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+            );
+            let compiled = crate::compiler::compile(&prog, &opts);
+            let cfg = exec_config(&args, &prog);
+            let at = at_option(&args);
+            let json = args.flags.contains("json");
+            let out = args.opts.get("out").map(PathBuf::from);
+            let needs_rel = matches!(which.as_str(), "extension" | "carried" | "derivation" | "failure");
+            let rel = if needs_rel { Some(rel_option(&args, "this table")) } else { args.opts.get("rel").cloned() };
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
+                use crate::state::tables;
+                if which == "summary" {
+                    k.record_summaries(true);
+                }
+                let result = k.run()?;
+                let bars = result.bars.clone();
+                let table = match which.as_str() {
+                    "coverage" => tables::coverage(&result),
+                    "plan" => tables::plan(&compiled.plan.clone().with_observed(k.literal_counts())),
+                    "book" => tables::book(&result),
+                    "binding" => tables::binding(&prog, &dataset),
+                    "summary" => tables::summary(k, &prog),
+                    "extension" | "carried" | "derivation" | "failure" => {
+                        let rel = rel.clone().unwrap();
+                        match which.as_str() {
+                            "extension" => tables::extension(k, &prog, &rel, &bars, None)?,
+                            "carried" => tables::carried(k, &prog, &rel, &bars, None)?,
+                            "derivation" => {
+                                let t = bar_for(k, &prog, &rel, at, &bars)?;
+                                tables::derivation(k, &prog, &rel, t, None)?
+                            }
+                            _ => {
+                                let t = bar_for(k, &prog, &rel, at, &bars)?;
+                                let sym = symbol_for(k, &args)?;
+                                tables::failure(k, &prog, &rel, t, None, sym)?
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(RunError::Request(format!(
+                            "--table: `{}` is not one of coverage, plan, book, binding, summary, extension, carried, derivation, failure",
+                            other
+                        )))
+                    }
+                };
+                if let Some(p) = &out {
+                    table.write(p).map_err(RunError::Request)?;
+                }
+                Ok(if json {
+                    format!("{}\n", serde_json::to_string_pretty(&table.json()).unwrap_or_default())
+                } else {
+                    table.text()
+                })
+            });
+            match text {
+                Ok(t) => print!("{}", t),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    exit(1)
+                }
+            }
+        }
+        "why-not" => {
+            // abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            let (prog, _) = checked_program(&args);
+            let rel = rel_option(&args, "why-not");
+            let (dataset, label) = load_dataset(&args, &prog);
+            let opts = compile_options_with(
+                &args,
+                &prog,
+                Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+            );
+            let compiled = crate::compiler::compile(&prog, &opts);
+            let cfg = exec_config(&args, &prog);
+            let at = at_option(&args);
+            let json = args.flags.contains("json");
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
+                let result = k.run()?;
+                let t = bar_for(k, &prog, &rel, at, &result.bars)?;
+                let sym = symbol_for(k, &args)?;
+                let w = crate::state::provenance::why_not(k, &prog, &rel, t, None, sym)?;
+                Ok(if json {
+                    format!("{}\n", serde_json::to_string_pretty(&w.json()).unwrap_or_default())
+                } else {
+                    format!("{}{}", w.text(), if w.absence_driven() { "verdict: absence-driven\n" } else { "" })
+                })
+            });
+            match text {
+                Ok(t) => print!("{}", t),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    exit(1)
+                }
+            }
+        }
+        "materialise" | "materialize" => {
+            // abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            let (prog, _) = checked_program(&args);
+            let rel = rel_option(&args, "materialise");
+            let (dataset, label) = load_dataset(&args, &prog);
+            let opts = compile_options_with(
+                &args,
+                &prog,
+                Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+            );
+            let compiled = crate::compiler::compile(&prog, &opts);
+            let cfg = exec_config(&args, &prog);
+            let at = at_option(&args);
+            let json = args.flags.contains("json");
+            let elided = compiled.rewritten.elided.contains(&rel);
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
+                let result = k.run()?;
+                let t = bar_for(k, &prog, &rel, at, &result.bars)?;
+                let table = crate::state::tables::materialise(k, &prog, &rel, t, None, elided)?;
+                Ok(if json {
+                    format!("{}\n", serde_json::to_string_pretty(&table.json()).unwrap_or_default())
+                } else {
+                    table.text()
+                })
+            });
+            match text {
+                Ok(t) => print!("{}", t),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    exit(1)
+                }
+            }
+        }
+        "explain" if args.opts.contains_key("derivation") => {
+            // abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            let (prog, _) = checked_program(&args);
+            let id = args.opts.get("derivation").cloned().unwrap_or_default();
+            let depth: usize = option(&args.opts, "depth", "a depth", 6);
+            let (dataset, label) = load_dataset(&args, &prog);
+            let opts = compile_options_with(
+                &args,
+                &prog,
+                Some((&dataset, label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+            );
+            let compiled = crate::compiler::compile(&prog, &opts);
+            let cfg = exec_config(&args, &prog);
+            let json = args.flags.contains("json");
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
+                k.run()?;
+                let d = crate::state::provenance::derive(k, &prog, &id, depth)?;
+                Ok(if json {
+                    format!("{}\n", serde_json::to_string_pretty(&d.json()).unwrap_or_default())
+                } else {
+                    d.text()
+                })
+            });
+            match text {
+                Ok(t) => print!("{}", t),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    exit(1)
+                }
+            }
+        }
+        "show" => {
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            print!("{}", observe::show_program(&prog));
+        }
+        "query" => {
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let (dataset, _) = load_dataset(&args, &prog);
+            let cfg = exec_config(&args, &prog);
+            let rel = args.opts.get("rel").cloned().unwrap_or_else(|| {
+                eprintln!("query needs --rel RELATION");
+                usage(1)
+            });
+            let at: Option<i64> = args.opts.get("at").map(|s| {
+                parse_timestamp(s).unwrap_or_else(|| {
+                    eprintln!("--at: `{}` is not a timestamp (YYYY-MM-DD, optionally THH:MM[:SS])", s);
+                    exit(2)
+                })
+            });
+            let symbol = args.opts.get("symbol").cloned();
+            let explain = args.flags.contains("explain");
+            let out = std::thread::Builder::new()
+                .stack_size(512 << 20)
+                .spawn(move || -> Result<String, RunError> {
+                    let mut k = Kernel::new(&prog, &dataset, cfg)?;
+                    let result = k.run()?;
+                    let Some(sig) = prog.relations.get(&rel) else {
+                        let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
+                        return Err(RunError::Request(format!("`{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
+                    };
+                    let cal = sig.cal.clone();
+                    let last = *result.bars.last().unwrap();
+                    let t = match at {
+                        Some(t) => t,
+                        None => k.bars_at(&cal).into_iter().rfind(|&b| b <= last).unwrap_or(last),
+                    };
+                    k.check_bar(&cal, t)?;
+                    let sym: Option<Value> = match &symbol {
+                        Some(s) => Some(k.parse_binding(s).map_err(|m| RunError::Request(format!("--symbol {}: {}", s, m)))?),
+                        None => None,
+                    };
+                    let tuples = k.query(&rel, t, &[])?;
+                    // A tuple is the symbol's when a field is the symbol, or a
+                    // decision on it (`decide(T, buy(A, Q))` holds A inside D).
+                    let is_sym = |v: &Value, s: &Value| match (v, s) {
+                        (Value::Decision(d), Value::Equity(e)) => d.equity == *e,
+                        _ => v == s,
+                    };
+                    let shown: Vec<&Vec<Value>> = tuples.iter().filter(|tu| sym.as_ref().map(|s| tu.iter().any(|v| is_sym(v, s))).unwrap_or(true)).collect();
+                    let mut text = format!(
+                        "{} at {} ({}): {} tuple(s){}\n",
+                        rel,
+                        format_timestamp(t),
+                        prog.cal_name(&cal),
+                        shown.len(),
+                        match &symbol {
+                            Some(s) => format!(" for {}", s),
+                            None => String::new(),
+                        }
+                    );
+                    for tu in shown.iter().take(200) {
+                        text.push_str(&format!("  {}({})\n", rel, tu.iter().map(|v| k.show(v)).collect::<Vec<_>>().join(", ")));
+                    }
+                    if shown.len() > 200 {
+                        text.push_str("  ... (the first 200 shown)\n");
+                    }
+                    if explain {
+                        let rules = prog.rules_for(&rel);
+                        if rules.is_empty() {
+                            text.push_str(&format!("{} has no rules: it is supplied, not derived\n", rel));
+                        }
+                        for ri in rules {
+                            let mut bindings: Vec<(String, Value)> = Vec::new();
+                            if let Some(s) = &sym {
+                                if let Some(pos) = sig.args.iter().position(|a| a.ty.is_entity()) {
+                                    if let Term::Var(v, _) = &prog.rules[ri].head.terms[pos] {
+                                        bindings.push((v.clone(), s.clone()));
+                                    }
+                                }
+                            }
+                            match k.explain_with(ri, t, &[], &bindings) {
+                                Ok(ex) => text.push_str(&format!("{}\n", ex)),
+                                Err(e) => text.push_str(&format!("{}\n", e)),
+                            }
+                        }
+                    }
+                    Ok(text)
+                })
+                .unwrap()
+                .join()
+                .unwrap();
+            match out {
+                Ok(text) => print!("{}", text),
+                Err(e) => {
+                    eprintln!("{}", e);
+                    exit(1)
+                }
+            }
+        }
+        "run" | "explain" => {
+            let started = std::time::Instant::now();
+            let ws = workspace(&args.files);
+            let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+            let (prog, diags) = check_program(&ws, &name);
+            for d in &diags {
+                eprintln!("{}", d);
+            }
+            let Some(prog) = prog else {
+                eprintln!("strategy `{}` does not check; fix the errors above", name);
+                exit(1)
+            };
+            let checked_at = started.elapsed().as_secs_f64();
+            let (mut dataset, bundle_label) = load_dataset(&args, &prog);
+            let loaded_at = started.elapsed().as_secs_f64();
+            let cfg = exec_config(&args, &prog);
+            if args.cmd == "explain" {
+                let label = args.opts.get("rule").cloned().unwrap_or_else(|| usage(1));
+                let at_text = args.opts.get("at").cloned().unwrap_or_else(|| usage(1));
+                let at = parse_timestamp(&at_text).unwrap_or_else(|| {
+                    eprintln!("--at: `{}` is not a timestamp (YYYY-MM-DD, optionally THH:MM[:SS])", at_text);
+                    exit(2)
+                });
+                let rule_idx = (0..prog.rules.len())
+                    .find(|&i| prog.rule_label(i) == label || prog.rule_label(i).ends_with(&format!("::{}", label)))
+                    .unwrap_or_else(|| {
+                        eprintln!("no rule labelled `{}`; labels are unit::head#n, e.g. {}", label, prog.rule_label(0));
+                        exit(1)
+                    });
+                let raw_binds: Vec<(String, String)> = args
+                    .multi
+                    .get("bind")
+                    .map(|bs| {
+                        bs.iter()
+                            .map(|b| {
+                                let (var, val) = b.split_once('=').unwrap_or_else(|| {
+                                    eprintln!("--bind takes VAR=VALUE, not `{}`", b);
+                                    exit(1)
+                                });
+                                (var.trim().to_string(), val.trim().to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let out = std::thread::Builder::new()
+                    .stack_size(512 << 20)
+                    .spawn(move || {
+                        let mut k = Kernel::new(&prog, &dataset, cfg)?;
+                        // Body variables from --bind.
+                        let bindings: Vec<(String, Value)> = raw_binds
+                            .iter()
+                            .map(|(var, raw)| k.parse_binding(raw).map(|v| (var.clone(), v)).map_err(|m| RunError::Request(format!("--bind {}: {}", var, m))))
+                            .collect::<Result<_, _>>()?;
+                        // Run up to and including `at`, so executor state exists, then explain.
+                        let _ = k.run()?;
+                        k.explain_with(rule_idx, at, &[], &bindings)
+                    })
+                    .unwrap()
+                    .join()
+                    .unwrap();
+                match out {
+                    Ok(ex) => println!("{}", ex),
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        exit(1)
+                    }
+                }
+                return;
+            }
+            let verify = args.flags.contains("verify-causality");
+            // What the report needs from the data, read before a run may take it over.
+            let tuple_count: usize = dataset.facts.values().map(|tus| tus.len()).sum();
+            let (by_day, calendar, period_note) = report_periods(&prog, &dataset);
+            // The plan (compiler design, "Lower"): the optimised one unless
+            // `--plan written` asks for the written order and no rewrite.
+            let opts = compile_options_with(
+                &args,
+                &prog,
+                Some((&dataset, bundle_label.as_deref().unwrap_or(if args.flags.contains("synthetic") { "synthetic" } else { "data" }))),
+            );
+            let compiled = crate::compiler::compile(&prog, &opts);
+            let lowered = compiled.lowered.clone();
+            // The batch kernel takes the facts over when nothing reads the
+            // dataset after the run (one copy of the data in memory).
+            let runner = make_runner_with(&args, Some(lowered.clone()));
+            let ledger: Vec<String> = args
+                .opts
+                .get("ledger")
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or_default();
+            let ledger_out = args.opts.get("ledger-out").map(PathBuf::from);
+            if !ledger.is_empty() && ledger_out.is_none() {
+                eprintln!("--ledger needs --ledger-out DIR");
+                exit(2)
+            }
+            let tables_out = args.opts.get("tables").map(PathBuf::from);
+            if let Some(dir) = &tables_out {
+                // The binding table reads the dataset, which the kernel may
+                // take over for the run: written first.
+                std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+                    eprintln!("--tables {}: {}", dir.display(), e);
+                    exit(2)
+                });
+                if let Err(e) = crate::state::tables::binding(&prog, &dataset).write(&dir.join("binding.arrow")) {
+                    eprintln!("--tables: {}", e);
+                    exit(2)
+                }
+            }
+            let batch = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true);
+            let reads_after = verify || args.opts.contains_key("dump") || args.opts.contains_key("study");
+            let owned = batch && !reads_after;
+            if !ledger.is_empty() && !batch {
+                eprintln!("--ledger runs on the batch kernel, not --kernel fold");
+                exit(2)
+            }
+            if tables_out.is_some() && !batch {
+                eprintln!("--tables runs on the batch kernel, not --kernel fold");
+                exit(2)
+            }
+            let mut notes: Vec<String> = Vec::new();
+            // The batch kernel is kept after the run for the coverage report's
+            // explanations and the ledger; it takes the facts over when
+            // nothing reads the dataset afterwards, and copies them otherwise.
+            let outcome = if batch {
+                let data = if owned { Data::Owned(Box::new(std::mem::take(&mut dataset))) } else { Data::Borrowed(&dataset) };
+                run_keeping(
+                    &prog,
+                    Some(&lowered),
+                    data,
+                    cfg.clone(),
+                    &ledger,
+                    ledger_out.as_deref(),
+                    tables_out.as_deref().map(|d| (d, &compiled.plan)),
+                )
+                .map(|(r, n)| {
+                    notes = n;
+                    r
+                })
+            } else {
+                runner(&prog, &dataset, cfg.clone())
+            };
+            let result = outcome.unwrap_or_else(|e| {
+                match e {
+                    RunError::Request(m) => eprintln!("{}", m),
+                    e => eprintln!("run halted: {}", e),
+                }
+                exit(1)
+            });
+            if args.flags.contains("timing") {
+                let total = started.elapsed().as_secs_f64();
+                let run_s = total - loaded_at;
+                let s = &result.stats;
+                eprintln!(
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={}",
+                    loaded_at - checked_at,
+                    checked_at,
+                    run_s,
+                    total,
+                    result.bars.len(),
+                    result.symbols.len(),
+                    tuple_count,
+                    result.decisions.len(),
+                    if run_s > 0.0 { result.bars.len() as f64 / run_s } else { 0.0 },
+                    peak_rss_mb().map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into()),
+                    s.window_calls,
+                    s.window_bars_solved,
+                    s.window_groups,
+                    s.window_rows_cached,
+                    s.late_tuples,
+                    s.memo_entries
+                );
+            }
+            println!(
+                "strategy {} over {} bars ({} to {}), {} symbols",
+                prog.strategy,
+                result.bars.len(),
+                format_timestamp(result.bars[0]),
+                format_timestamp(*result.bars.last().unwrap()),
+                result.symbols.len()
+            );
+            println!("decisions: {}   fills: {}   dropped: {}", result.decisions.len(), result.fills.len(), result.dropped.len());
+            println!(
+                "plan: {} ({} of {} rules reordered, {} infeasible, {} elided, {} rewrites; abt plan --observed prints the estimates against this run)",
+                lowered.label,
+                compiled.plan.totals.reordered,
+                compiled.plan.totals.rules,
+                compiled.plan.totals.infeasible,
+                compiled.plan.totals.elided,
+                compiled.rewritten.log.entries.len()
+            );
+            for n in &lowered.notes {
+                println!("plan note: {}", n);
+            }
+            for (k, v) in data::summarize(&result.metric_curve()) {
+                println!("{:>14}: {:.4}", k, v);
+            }
+            let ppy: f64 = prog.report.periods_per_year;
+            if let Some(n) = &period_note {
+                println!("note: {}", n);
+            }
+            let cm = crate::study::metrics::convention_metrics_on(&result, ppy, by_day, calendar.as_ref());
+            match result.base_capital {
+                Some(b) => println!("accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested); end_equity and total_return above compound those period returns, total_pnl below is additive on the base", b),
+                None => println!("accounting: compounding; a period's return is the NAV change over the previous NAV"),
+            }
+            println!(
+                "metrics per {} period ({} a year, {} periods): cagr {:.6}   max_drawdown {:.6}   sharpe {:.4} (population {:.4})   volatility {:.4}",
+                prog.report.calendar, ppy, cm.periods, cm.cagr, cm.max_drawdown, cm.sharpe, cm.sharpe_population, cm.volatility_population
+            );
+            println!(
+                "additive: annual_return {:.6}   max_drawdown {:.6}   total_pnl {:.2}   profit_factor {:.3} per period, {:.3} per trade   trades {}   win_rate {:.3}",
+                cm.annual_return, cm.max_drawdown_additive, cm.total_pnl, cm.profit_factor, cm.profit_factor_trades, cm.trades, cm.win_rate
+            );
+            if let Some(path) = args.opts.get("returns") {
+                let rows = crate::study::metrics::period_returns_on(&result, by_day, calendar.as_ref());
+                use crate::table::{write_table, Col};
+                write_table(
+                    Path::new(path),
+                    vec![
+                        ("t", Col::Time(rows.iter().map(|r| Some(r.0)).collect())),
+                        ("ret", Col::Float(rows.iter().map(|r| Some(r.1)).collect())),
+                        ("pnl", Col::Float(rows.iter().map(|r| Some(r.2)).collect())),
+                    ],
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("error: --returns: {}", e);
+                    std::process::exit(1);
+                });
+            }
+            println!(
+                "costs: commissions {:.2}   fees {:.2}   slippage {:.2}   impact {:.2}   turnover {:.2}",
+                result.costs.commissions, result.costs.fees, result.costs.slippage, result.costs.impact, result.costs.turnover
+            );
+            println!(
+                "liquidity: fill ratio {:.3}   participation avg {:.2}%   max {:.2}%",
+                result.liquidity.fill_ratio,
+                result.liquidity.avg_participation * 100.0,
+                result.liquidity.max_participation * 100.0
+            );
+            println!(
+                "funding: cash interest {:.2}   margin interest {:.2}   borrow fees {:.2}   short rebate {:.2}",
+                result.funding.cash_interest, result.funding.margin_interest, result.funding.borrow_fees, result.funding.short_rebate
+            );
+            let count = |f: &dyn Fn(&crate::kernel::Action) -> bool| result.actions.iter().filter(|a| f(&a.action)).count();
+            println!(
+                "actions: {} splits   {} dividends   {} delistings",
+                count(&|a| matches!(a, crate::kernel::Action::Split { .. })),
+                count(&|a| matches!(a, crate::kernel::Action::Dividend { .. })),
+                count(&|a| matches!(a, crate::kernel::Action::Delisting { .. }))
+            );
+            let max_lev = result.exposure.iter().map(|e| e.leverage).fold(0.0, f64::max);
+            let max_gross = result.exposure.iter().map(|e| e.gross).fold(0.0, f64::max);
+            println!("exposure: max gross {:.2}   max leverage {:.3}", max_gross, max_lev);
+            let (coverage_text, causes) = observe::coverage_report(&prog, &result.coverage, result.bars.len());
+            print!("{}", coverage_text);
+            for n in &notes {
+                println!("  {}", n);
+            }
+            if !causes.is_empty() && notes.is_empty() {
+                println!("  (abt query --rel RELATION --at BAR --explain names the first literal with no solution)");
+            }
+            if let Some(dir) = &ledger_out {
+                println!("ledger written to {}", dir.display());
+            }
+            if let Some(path) = args.opts.get("nav") {
+                crate::dump::write_nav(&result, Path::new(path)).unwrap_or_else(|e| {
+                    eprintln!("error: --nav: {}", e);
+                    std::process::exit(1);
+                });
+            }
+            for w in &result.warnings {
+                // The configuration's "commissions are zero" is false when a
+                // per-notional or per-contract commission was charged.
+                if w.bias == "transaction-cost neglect" && result.costs.commissions > 0.0 {
+                    continue;
+                }
+                println!("warning ({}): {}", w.bias, w.message);
+            }
+            if !args.flags.contains("quiet") {
+                let shown = if args.flags.contains("all") { result.decisions.len() } else { 20 };
+                for d in result.decisions.iter().take(shown) {
+                    println!("  {} {} (rule {})", format_timestamp(d.t), result.describe_decision(&d.decision), prog.rule_label(d.rule));
+                }
+                if result.decisions.len() > shown {
+                    println!("  ... {} more (--all prints every decision)", result.decisions.len() - shown);
+                }
+                if args.flags.contains("fills") {
+                    for f in &result.fills {
+                        println!(
+                            "  fill {} {} {:+} @ {:.4}{}",
+                            format_timestamp(f.t),
+                            result.symbols[f.equity as usize],
+                            f.quantity,
+                            f.price,
+                            match (f.forced, f.at_last_price, f.partial) {
+                                (true, _, _) => " (forced: margin call or delisting)".to_string(),
+                                (_, true, true) => format!(" (last price, partial at {:.1}% of volume)", f.participation * 100.0),
+                                (_, true, false) => " (last price)".to_string(),
+                                (_, false, true) => format!(" (partial at {:.1}% of volume)", f.participation * 100.0),
+                                (_, false, false) => String::new(),
+                            }
+                        );
+                    }
+                }
+                for (t, d, reason) in &result.dropped {
+                    println!("  dropped {} {}: {}", format_timestamp(*t), result.describe_decision(d), reason);
+                }
+            }
+            println!(
+                "final cash {:.2}; positions: {}",
+                result.final_cash,
+                result
+                    .final_positions
+                    .iter()
+                    .map(|(s, q)| format!("{}={}", result.symbols[*s as usize], q))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if let Some(dir) = args.opts.get("dump") {
+                crate::dump::write_dump(&prog, &dataset, &cfg, &result, Path::new(dir)).unwrap_or_else(|e| {
+                    eprintln!("{}", e);
+                    exit(2)
+                });
+                eprintln!("dump written to {}", dir);
+            }
+            // A run outside a study is an untracked trial (data-bundle doc,
+            // section 7): logged when the study directory is named, warned
+            // either way.
+            match args.opts.get("study") {
+                Some(dir) => {
+                    let project = crate::study::Project::open(Path::new(dir));
+                    match crate::study::log_untracked(&project, &prog, &result, &cfg, bundle_label.clone()) {
+                        Ok(t) => println!(
+                            "warning (data-snooping): logged as untracked trial #{} of lineage {} in {}; run it with `abt study run` to count it against a study",
+                            t.seq, t.lineage, dir
+                        ),
+                        Err(e) => {
+                            eprintln!("{}", e);
+                            exit(2)
+                        }
+                    }
+                }
+                None => println!("warning (data-snooping): this run is an untracked trial that nothing counts; run it with `abt study run --study DIR`, or name --study DIR here to log it"),
+            }
+            if verify {
+                let n = result.bars.len();
+                let samples: Vec<i64> = (1..=5).map(|i| result.bars[(n * i / 6).min(n - 1)]).collect();
+                match crate::kernel::verify_causality(&prog, &dataset, cfg, &samples) {
+                    Ok(m) if m.is_empty() => println!("causality verified at {} sampled bars", samples.len()),
+                    Ok(m) => {
+                        for x in m {
+                            println!("causality mismatch at {}: full {:?} vs truncated {:?}", format_timestamp(x.t), x.full, x.truncated);
+                        }
+                        exit(1)
+                    }
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        exit(1)
+                    }
+                }
+            }
+        }
+        "study" => {
+            use crate::study::{self, Holdout, Project, Threshold};
+            let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
+            let dir = args.opts.get("study").cloned().unwrap_or_else(|| usage(1));
+            let project = Project::open(Path::new(&dir));
+            let fail = |e: String| -> ! {
+                eprintln!("{}", e);
+                exit(2)
+            };
+            let checked = |ws: &Workspace, name: &str| -> crate::check::Program {
+                let (prog, diags) = check_program(ws, name);
+                for d in &diags {
+                    eprintln!("{}", d);
+                }
+                prog.unwrap_or_else(|| {
+                    eprintln!("strategy `{}` does not check; fix the errors above", name);
+                    exit(1)
+                })
+            };
+            match sub.as_str() {
+                "declare" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let holdout = Holdout::parse(args.opts.get("holdout").map(|s| s.as_str()).unwrap_or("none")).unwrap_or_else(|e| {
+                        eprintln!("--holdout: {}", e);
+                        exit(2)
+                    });
+                    let objective = args.opts.get("objective").cloned().unwrap_or_else(|| "sharpe".into());
+                    let thresholds: Vec<Threshold> = args
+                        .multi
+                        .get("require")
+                        .cloned()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|r| {
+                            Threshold::parse(r).unwrap_or_else(|e| {
+                                eprintln!("--require: {}", e);
+                                exit(2)
+                            })
+                        })
+                        .collect();
+                    let exec = exec_config(&args, &prog);
+                    let (spec, opened) = project.declare(&prog, holdout, &objective, thresholds, exec).unwrap_or_else(|e| fail(e));
+                    println!("study {} declared in {}", spec.id, dir);
+                    println!(
+                        "  strategy {} ({}) in lineage {}{}",
+                        spec.strategy,
+                        spec.hash,
+                        spec.lineage,
+                        match &opened.attachment {
+                            study::Attachment::Root => String::new(),
+                            study::Attachment::Revises(h) => format!(", revising {}", h),
+                            study::Attachment::Similarity { to, score } => format!(", attached by similarity {:.2} with {}", score, to),
+                        }
+                    );
+                    println!(
+                        "  hold-out {}   objective {}   thresholds: {}",
+                        spec.holdout.describe(),
+                        spec.objective,
+                        if spec.thresholds.is_empty() {
+                            "none".to_string()
+                        } else {
+                            spec.thresholds.iter().map(|t| t.describe()).collect::<Vec<_>>().join(", ")
+                        }
+                    );
+                    for w in &spec.warnings {
+                        println!("warning ({}): {}", w.bias, w.message);
+                    }
+                }
+                "run" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let opened = project.open_lineage(&prog).unwrap_or_else(|e| fail(e));
+                    let spec = project.study_for(&opened.lineage).unwrap_or_else(|e| fail(e)).unwrap_or_else(|| {
+                        eprintln!("no study is declared for lineage {} in {}; run `abt study declare` first", opened.lineage, dir);
+                        exit(2)
+                    });
+                    let (dataset, bundle_label) = load_dataset(&args, &prog);
+                    let mut axes = Vec::new();
+                    for g in args.multi.get("grid").cloned().unwrap_or_default() {
+                        axes.push(study::parse_grid_axis(&g).unwrap_or_else(|e| fail(e)));
+                    }
+                    let grid = study::Grid::new(axes, &exec_config(&args, &prog).param_overrides);
+                    let points = grid.points.clone();
+                    let scheme = args.opts.get("walk-forward").map(|s| {
+                        study::WalkForward::parse(s).unwrap_or_else(|e| {
+                            eprintln!("--walk-forward: {}", e);
+                            exit(2)
+                        })
+                    });
+                    let runner = make_runner(&args);
+                    let (outcomes, report) = study::run_study(&project, &spec, &prog, &dataset, &grid, &*runner, study::Provenance { bundle: bundle_label, scheme }).unwrap_or_else(|e| fail(e));
+                    println!(
+                        "study {} (lineage {}, objective {}, hold-out {}){}",
+                        spec.id,
+                        spec.lineage,
+                        spec.objective,
+                        spec.holdout.describe(),
+                        if report.embargo.is_empty() {
+                            String::new()
+                        } else if report.embargo.truncates {
+                            format!("; bars {} embargoed", report.embargo.describe())
+                        } else {
+                            format!("; metrics withhold the blocks {}", report.embargo.describe())
+                        }
+                    );
+                    for (i, o) in outcomes.iter().enumerate() {
+                        let shown: Vec<String> = points[i].iter().map(|(n, l)| format!("{}={}", n, l)).collect();
+                        println!(
+                            "point {}/{}{}: {} {:.3} (se {:.3})   cagr {:.4}   max drawdown {:.4}   turnover {:.2}   fills {}   trial #{}{}",
+                            i + 1,
+                            outcomes.len(),
+                            if shown.is_empty() { String::new() } else { format!(" [{}]", shown.join(", ")) },
+                            spec.objective,
+                            study::objective_value(&spec.objective, &o.metrics, &o.trading).unwrap_or(f64::NAN),
+                            o.metrics.sharpe_se,
+                            o.metrics.cagr,
+                            o.metrics.max_drawdown,
+                            o.trading.turnover,
+                            o.trading.fills,
+                            o.trial.seq,
+                            if i == report.best && outcomes.len() > 1 { " (best)" } else { "" }
+                        );
+                    }
+                    println!(
+                        "lineage {}: {} trials; deflated Sharpe ratio {:.3} for the best point (expected maximum per-period Sharpe {:.4})",
+                        spec.lineage, report.trials, report.dsr.dsr, report.dsr.expected_max_sr
+                    );
+                    if let Some(p) = &report.pbo {
+                        println!(
+                            "probability of backtest overfitting {:.3} over the grid ({} combinations of {} partitions)",
+                            p.pbo, p.combinations, p.partitions
+                        );
+                    }
+                    if let Some(sf) = &report.surface {
+                        println!(
+                            "parameter surface: smoothness {:.3}; {:.0}% of the best point's {} neighbours within {:.3} of it",
+                            sf.smoothness,
+                            sf.stability * 100.0,
+                            sf.neighbours,
+                            sf.tolerance
+                        );
+                    }
+                    if !report.subperiods.is_empty() {
+                        println!("sharpe by year: {}", report.subperiods.iter().map(|(y, s)| format!("{} {:.2}", y, s)).collect::<Vec<_>>().join("   "));
+                    }
+                    if let Some(wf) = &report.walk_forward {
+                        println!("walk-forward {}: {} folds", wf.scheme.describe(), wf.folds.len());
+                        for (k, f) in wf.folds.iter().enumerate() {
+                            let shown: Vec<String> = points[f.best].iter().map(|(n, l)| format!("{}={}", n, l)).collect();
+                            println!(
+                                "  fold {}: train {}..{} test {}..{}: point {} [{}] {} in {:.3} out {:.3}",
+                                k + 1,
+                                format_timestamp(f.train.0),
+                                format_timestamp(f.train.1),
+                                format_timestamp(f.test.0),
+                                format_timestamp(f.test.1),
+                                f.best + 1,
+                                shown.join(", "),
+                                spec.objective,
+                                f.in_sample,
+                                f.out_of_sample
+                            );
+                        }
+                        println!(
+                            "  efficiency {}; out-of-sample stitched: sharpe {:.3}   cagr {:.4}   max drawdown {:.4}",
+                            wf.efficiency.map(|e| format!("{:.3}", e)).unwrap_or_else(|| "undefined".into()),
+                            wf.out_of_sample.sharpe,
+                            wf.out_of_sample.cagr,
+                            wf.out_of_sample.max_drawdown
+                        );
+                    }
+                    for w in &report.warnings {
+                        println!("warning ({}): {}", w.bias, w.message);
+                    }
+                }
+                "reveal" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let hash = study::program_hash(&prog);
+                    let ls = project.lineages().unwrap_or_else(|e| fail(e));
+                    let lineage = ls.lineage_of(&hash).map(|l| l.id.clone()).unwrap_or_else(|| {
+                        eprintln!(
+                            "strategy `{}` ({}) is not a member of any lineage in {}: a reveal names a committed version, one the study has run",
+                            name, hash, dir
+                        );
+                        exit(2)
+                    });
+                    let spec = project.study_for(&lineage).unwrap_or_else(|e| fail(e)).unwrap_or_else(|| {
+                        eprintln!("no study is declared for lineage {} in {}", lineage, dir);
+                        exit(2)
+                    });
+                    let (dataset, bundle_label) = load_dataset(&args, &prog);
+                    let runner = make_runner(&args);
+                    let (o, embargo) = study::reveal(&project, &spec, &prog, &dataset, &*runner, study::Provenance { bundle: bundle_label, scheme: None }).unwrap_or_else(|e| fail(e));
+                    println!("reveal of {} ({}) over the hold-out {} (study {}): trial #{}", name, hash, embargo.describe(), spec.id, o.trial.seq);
+                    println!(
+                        "out of sample: {} bars; sharpe {:.3} (se {:.3})   cagr {:.4}   max drawdown {:.4}   cvar5 {:.4}   worst month {:.4}",
+                        o.metrics.n + 1,
+                        o.metrics.sharpe,
+                        o.metrics.sharpe_se,
+                        o.metrics.cagr,
+                        o.metrics.max_drawdown,
+                        o.metrics.cvar_5,
+                        o.metrics.worst_month
+                    );
+                    for t in &spec.thresholds {
+                        if let Some(ok) = t.holds(&o.metrics, &o.trading) {
+                            println!("  {} {}", t.describe(), if ok { "holds" } else { "fails" });
+                        }
+                    }
+                    let reveals = project
+                        .log()
+                        .for_lineage(&lineage)
+                        .unwrap_or_else(|e| fail(e))
+                        .iter()
+                        .filter(|t| t.kind == study::TrialKind::Reveal)
+                        .count();
+                    println!("{} reveal(s) of this lineage so far; each is an out-of-sample trial", reveals);
+                }
+                "metrics" => {
+                    let log = project.log();
+                    let trials = match args.opts.get("strategy") {
+                        Some(name) => {
+                            let ws = workspace(&rest);
+                            let prog = checked(&ws, name);
+                            let ls = project.lineages().unwrap_or_else(|e| fail(e));
+                            let hash = study::program_hash(&prog);
+                            match ls.lineage_of(&hash) {
+                                Some(l) => log.for_lineage(&l.id).unwrap_or_else(|e| fail(e)),
+                                None => {
+                                    println!("strategy {} ({}) has no lineage in {}", name, hash, dir);
+                                    vec![]
+                                }
+                            }
+                        }
+                        None => log.read_all().unwrap_or_else(|e| fail(e)),
+                    };
+                    for t in &trials {
+                        let params: Vec<String> = t.params.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+                        println!(
+                            "#{} {:?} {} {} [{}] {}..{} bars {}: sharpe {:.3} (se {:.3}, lo {:.3})   cagr {:.4}   max drawdown {:.4}   cvar5 {:.4}   worst month {:.4}   turnover {:.2}",
+                            t.seq,
+                            t.kind,
+                            t.strategy,
+                            &t.hash[..8.min(t.hash.len())],
+                            params.join(", "),
+                            t.period.as_ref().map(|p| p.0.as_str()).unwrap_or("-"),
+                            t.period.as_ref().map(|p| p.1.as_str()).unwrap_or("-"),
+                            t.bars,
+                            t.metrics.sharpe,
+                            t.metrics.sharpe_se,
+                            t.metrics.sharpe_lo,
+                            t.metrics.cagr,
+                            t.metrics.max_drawdown,
+                            t.metrics.cvar_5,
+                            t.metrics.worst_month,
+                            t.trading.turnover
+                        );
+                    }
+                    if let Some(last) = trials.last() {
+                        let same: Vec<_> = trials.iter().filter(|t| t.lineage == last.lineage).cloned().collect();
+                        let d = study::deflated_sharpe(
+                            last.metrics.sharpe_period,
+                            last.metrics.n,
+                            last.metrics.skew,
+                            last.metrics.kurtosis,
+                            same.len(),
+                            study::sharpe_variance(&same),
+                        );
+                        println!("lineage {}: {} trials; deflated Sharpe ratio of the latest {:.3}", last.lineage, same.len(), d.dsr);
+                    }
+                    println!("{} trials", trials.len());
+                }
+                "report" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let (prog, diags) = check_program(&ws, &name);
+                    let Some(prog) = prog else {
+                        for d in &diags {
+                            eprintln!("{}", d);
+                        }
+                        eprintln!("strategy `{}` does not check; fix the errors above", name);
+                        exit(1)
+                    };
+                    let report = study::build_report(&project, &prog, &diags).unwrap_or_else(|e| fail(e));
+                    print!("{}", report.render());
+                }
+                "dispute" => {
+                    let ws = workspace(&rest);
+                    let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
+                    let reason = args.opts.get("reason").cloned().unwrap_or_else(|| usage(1));
+                    let prog = checked(&ws, &name);
+                    let hash = study::program_hash(&prog);
+                    let mut ls = project.lineages().unwrap_or_else(|e| fail(e));
+                    ls.dispute(&hash, &reason, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+                        .unwrap_or_else(|e| fail(e));
+                    project.save_lineages(&ls).unwrap_or_else(|e| fail(e));
+                    println!("dispute of {}'s attachment logged; the attachment stands (section 6, lineage)", hash);
+                }
+                _ => usage(1),
+            }
+        }
+        "briefs" => {
+            let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
+            if sub != "report" {
+                usage(1)
+            }
+            let briefs = args.opts.get("briefs").cloned().unwrap_or_else(|| usage(1));
+            let attempts = args.opts.get("attempts").cloned().unwrap_or_else(|| usage(1));
+            let ws = workspace(&rest);
+            let report = crate::study::briefs::report(&ws, Path::new(&briefs), Path::new(&attempts)).unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                exit(2)
+            });
+            print!("{}", report.render());
+            if let Some(out) = args.opts.get("out") {
+                let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+                std::fs::write(out, text).unwrap_or_else(|e| {
+                    eprintln!("{}: {}", out, e);
+                    exit(2)
+                });
+                eprintln!("report written to {}", out);
+            }
+        }
+        "bundle" => {
+            // abt bundle build (--from DIR | --synthetic ...) --class CLASS --version V --out DIR <files...>
+            // abt bundle test DIR <files...>
+            let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+            let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
+            match sub.as_str() {
+                "build" => {
+                    let ws = workspace(&rest);
+                    let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
+                    let version = args.opts.get("version").cloned().unwrap_or_else(|| usage(1));
+                    let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
+                    // The bars the bundle holds: --base, else the class's own
+                    // base, or the minute bars the Databento adapter produces.
+                    let base = match args.opts.get("base") {
+                        Some(b) => Some(crate::Resolution::parse(b.trim_start_matches('@')).unwrap_or_else(|| {
+                            eprintln!("--base: `{}` is not a resolution (@1m, @5m, @15m, @30m, @1h, @1d, @1w)", b);
+                            exit(2)
+                        })),
+                        None if args.opts.contains_key("from-databento") => Some(crate::Resolution::M1),
+                        None => None,
+                    };
+                    let prog = class_program_or_exit(&ws, &env, base);
+                    let mut source: Option<String> = None;
+                    let mut exceptions = Vec::new();
+                    let processing_delay: i64 = option(&args.opts, "processing-delay", "a number of seconds", 0);
+                    let ds = if args.flags.contains("synthetic") {
+                        synthetic_for(&prog, &args.opts)
+                    } else if let Some(from) = args.opts.get("from-norgate") {
+                        let ingested = crate::ingest::norgate_daily(Path::new(from), &prog).unwrap_or_else(|e| {
+                            eprintln!("{}", e);
+                            exit(2)
+                        });
+                        for n in &ingested.notes {
+                            eprintln!("note: {}", n);
+                        }
+                        source = Some(ingested.source);
+                        exceptions = ingested.exceptions;
+                        ingested.dataset
+                    } else if let Some(from) = args.opts.get("from-databento") {
+                        let ingested = crate::ingest::databento_minute(Path::new(from), &prog, processing_delay).unwrap_or_else(|e| {
+                            eprintln!("{}", e);
+                            exit(2)
+                        });
+                        for n in &ingested.notes {
+                            eprintln!("note: {}", n);
+                        }
+                        source = Some(ingested.source);
+                        ingested.dataset
+                    } else if let Some(from) = args.opts.get("from") {
+                        let (ds, notes) = data::load_parquet_dir(&prog, Path::new(from)).unwrap_or_else(|e| {
+                            eprintln!("{}", e);
+                            exit(2)
+                        });
+                        for n in notes {
+                            eprintln!("note: {}", n);
+                        }
+                        ds
+                    } else {
+                        usage(1)
+                    };
+                    let m = crate::bundle::write_bundle(&prog, &ds, Path::new(&out), &env, &version).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    crate::bundle::write_exceptions(Path::new(&out), &exceptions).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    let m = if source.is_some() || processing_delay != 0 {
+                        crate::bundle::annotate_manifest(Path::new(&out), source, processing_delay).unwrap_or_else(|e| {
+                            eprintln!("{}", e);
+                            exit(2)
+                        })
+                    } else {
+                        m
+                    };
+                    println!(
+                        "wrote bundle `{}@{}` to {}: {} relations, untested (run `abt bundle test {}`)",
+                        m.name,
+                        m.version,
+                        out,
+                        m.relations.len(),
+                        out
+                    );
+                }
+                "test" => {
+                    let dir = rest.first().cloned().unwrap_or_else(|| usage(1));
+                    let files: Vec<PathBuf> = rest.iter().skip(1).cloned().collect();
+                    let ws = workspace(&files);
+                    let m = crate::bundle::read_manifest(&dir).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    let prog = class_program_or_exit(&ws, &m.name, None);
+                    let (m, results) = crate::bundle::test_bundle(&prog, &dir).unwrap_or_else(|e| {
+                        eprintln!("{}", e);
+                        exit(2)
+                    });
+                    for r in &results {
+                        println!("{} {}: {}", if r.passed { "pass" } else { "FAIL" }, r.name, r.detail);
+                    }
+                    let failed = results.iter().filter(|r| !r.passed).count();
+                    println!(
+                        "bundle `{}@{}`: {} tests, {} failed{}",
+                        m.name,
+                        m.version,
+                        results.len(),
+                        failed,
+                        if failed == 0 { "; recorded in the manifest" } else { "; not marked tested" }
+                    );
+                    if failed > 0 {
+                        exit(1)
+                    }
+                }
+                _ => usage(1),
+            }
+        }
+        "synth" => {
+            let ws = workspace(&args.files);
+            let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
+            let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
+            // The writer needs a program whose demand covers the class whole.
+            let prog = class_program_or_exit(&ws, &env, None);
+            let ds = synthetic_for(&prog, &args.opts);
+            data::write_parquet_dir(&prog, &ds, Path::new(&out)).unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                exit(2)
+            });
+            println!("wrote {} relations to {}", ds.facts.len(), out);
+        }
+        _ => usage(1),
+    }
+}
+
+/// The text or JSON of a compiler stage for `abt ir --stage`.
+fn stage_text(args: &Args, prog: &crate::check::Program, stage: &str, json: bool) -> Result<String, String> {
+    use crate::compiler::Stage;
+    let render = |s: &dyn Stage| -> String {
+        if json {
+            format!("{}\n", serde_json::to_string_pretty(&s.json()).unwrap_or_default())
+        } else {
+            s.text()
+        }
+    };
+    match stage {
+        "checked" => Ok(if json {
+            format!("{}\n", serde_json::to_string_pretty(&crate::compiler::print::checked_json(prog)).unwrap_or_default())
+        } else {
+            crate::compiler::print::render_checked(prog)
+        }),
+        "normalised" | "normalized" => {
+            let nir = crate::compiler::normalise(prog);
+            Ok(render(&crate::compiler::normalise::NirStage { nir: &nir, prog }))
+        }
+        "analysed" | "analyzed" => {
+            let opts = compile_options(args, prog);
+            let compiled = crate::compiler::compile(prog, &opts);
+            Ok(render(&compiled.analysis))
+        }
+        "rewritten" => {
+            let opts = compile_options(args, prog);
+            let compiled = crate::compiler::compile(prog, &opts);
+            Ok(render(&crate::rewrite::RewrittenStage { rewritten: &compiled.rewritten, prog }))
+        }
+        "planned" => {
+            let opts = compile_options(args, prog);
+            let compiled = crate::compiler::compile(prog, &opts);
+            Ok(if json {
+                format!("{}\n", serde_json::to_string_pretty(&compiled.plan.json()).unwrap_or_default())
+            } else {
+                compiled.plan.text()
+            })
+        }
+        other => Err(format!("--stage: `{}` is not one of parsed, checked, normalised, analysed, rewritten, planned", other)),
+    }
+}
+
+/// The compiler's options from the command line: the numerics setting
+/// (`--numerics`, or `--window-sums`), whether to optimise (`--plan
+/// written|optimised`), the statistics of the data when one is named, the
+/// solver and its budgets.
+fn compile_options(args: &Args, prog: &crate::check::Program) -> crate::compiler::CompileOptions {
+    compile_options_with(args, prog, None)
+}
+
+/// `compile_options` with a dataset already loaded (its statistics feed the
+/// planner and the bundle-relative verdicts).
+fn compile_options_with(args: &Args, prog: &crate::check::Program, loaded: Option<(&crate::kernel::Dataset, &str)>) -> crate::compiler::CompileOptions {
+    use crate::compiler::CompileOptions;
+    // The execution block's `numerics` field selects the aggregate implementation.
+    let numerics = crate::lower::Numerics::from_running_sums(exec_config(args, prog).running_sums);
+    let optimise = match args.opts.get("plan").map(|s| s.as_str()) {
+        None | Some("optimised") | Some("optimized") => true,
+        Some("written") => false,
+        Some(other) => {
+            eprintln!("--plan: `{}` is not one of written, optimised", other);
+            exit(2)
+        }
+    };
+    let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+    let stats = match loaded {
+        Some((ds, label)) => Some(crate::plan::cost::Statistics::from_dataset(prog, ds, label).with_start(prog, ds, exec_config(args, prog).start)),
+        None if has_data => {
+            let (ds, label) = load_dataset(args, prog);
+            let cfg = exec_config(args, prog);
+            Some(
+                crate::plan::cost::Statistics::from_dataset(prog, &ds, &label.unwrap_or_else(|| if args.flags.contains("synthetic") { "synthetic".into() } else { "data".into() }))
+                    .with_start(prog, &ds, cfg.start),
+            )
+        }
+        None => None,
+    };
+    CompileOptions {
+        numerics,
+        optimise,
+        stats,
+        solver: args.opts.get("solver").cloned(),
+        replay_dir: args.opts.get("replay-dir").map(PathBuf::from),
+        ..CompileOptions::default()
+    }
+}
+
+/// The midnight of a timestamp's day.
+fn time_day(t: i64) -> i64 {
+    crate::kernel::time::day_key(t) * crate::kernel::time::DAY
+}
