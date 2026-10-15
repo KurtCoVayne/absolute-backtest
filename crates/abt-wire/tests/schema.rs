@@ -22,6 +22,8 @@ fn messages_round_trip_through_a_control_payload() {
         Message::Error(Box::new(ErrorMessage {
             code: ErrorCode::Unresolved,
             message: Some("need 1: close@1d".into()),
+            need: None,
+            over_budget: None,
         })),
     ] {
         let payload = encode(m.clone());

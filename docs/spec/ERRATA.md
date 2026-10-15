@@ -136,6 +136,15 @@ and the batch driver agree on every corpus program.
   `rows(N)` windows; `var`, the order statistics and every other window are
   reduced by the two-pass formulas in both modes.
 
+- **E-29 (A-D2, P-2.1 to P-2.4; where the transport lives).** `abt-wire`
+  holds, besides the types and messages, the moving of frames: the
+  in-process channel pair and the Unix socket that carry the same encoded
+  frames, Arrow tables as schema, batch and end frames, and the request and
+  response exchange (hello, correlation, pipelining, cancel, ping) every
+  service and client speaks (`abt_wire::{transport, table, rpc}`). Each layer
+  keeps its own dispatch, what a request does. Three copies of one exchange
+  would be the duplication A-D2 rejects for types.
+
 ## Query layer
 
 - **E-21 (Q-4.1, Q-4.4).** The starting set declares treatments the

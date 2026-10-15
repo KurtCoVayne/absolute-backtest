@@ -46,6 +46,7 @@ dependencies = [
 name = "abt-wire"
 version = "0.2.0"
 dependencies = [
+ "arrow",
  "blake3",
  "planus",
  "planus-codegen",

@@ -36,14 +36,365 @@ enum ErrorCode : ubyte {
   Internal = 10
 }
 
+// The detail is the typed value the caller can act on (P-2.5): the need a
+// resolution could not satisfy, the plan over budget.
 table Error {
   code: ErrorCode;
   message: string;
+  need: Need;
+  over_budget: ResolvePlan;
 }
+
+// ---------------------------------------------------------------- schemas
+
+// D-2.1: the scalar types a column holds.
+enum ColumnType : ubyte { Entity = 0, Time = 1, Num = 2, Count = 3, Label = 4, Bool = 5, Bytes = 6 }
+
+// Definition D-2.1: a column's role. Exactly one EventTime, at most one
+// ReceiptTime; the identity of a relation is its Entity columns and t.
+enum Role : ubyte { Entity = 0, EventTime = 1, ReceiptTime = 2, Value = 3, Label = 4 }
+
+enum ConstraintKind : ubyte { NotNull = 0, Gt = 1, Ge = 2, Lt = 3, Le = 4, In = 5 }
+
+table Constraint {
+  column: string (required);
+  kind: ConstraintKind;
+  value: double;
+  labels: [string];
+}
+
+table Attribute {
+  key: string (required);
+  value: string (required);
+}
+
+table ColumnSpec {
+  name: string (required);
+  ty: ColumnType;
+  role: Role;
+  // The dimension of a Num column as the language writes it (`Price<USD>`).
+  dimension: string;
+}
+
+table RelationSchema {
+  name: string (required);
+  class: string (required);
+  columns: [ColumnSpec] (required);
+  // The base calendar the relation is keyed on (`1d`, `1m`), or empty.
+  calendar: string;
+  constraints: [Constraint];
+  attributes: [Attribute];
+  // The schema's own version (P-7).
+  schema_version: string;
+}
+
+// ------------------------------------------------- views, filters, queries
+
+// A relation at an immutable version (hex BLAKE3, D-2.6).
+table VersionRef {
+  relation: string (required);
+  version: string (required);
+}
+
+// D-4: what a query reads: versions or a binding, as of a sequence number.
+table View {
+  versions: [VersionRef];
+  binding: string;
+  as_of_seq: ulong = null;
+}
+
+// D-4.2: rows received by r_max.
+table ReceiptFilter {
+  r_max: long = null;
+}
+
+// A constant of a predicate atom or an identity.
+enum ConstantKind : ubyte { Num = 0, Count = 1, Time = 2, Entity = 3, Label = 4, Bool = 5 }
+
+table Constant {
+  kind: ConstantKind;
+  num: double;
+  int: long;
+  text: string;
+}
+
+enum Op : ubyte { Eq = 0, Ne = 1, Lt = 2, Le = 3, Gt = 4, Ge = 5, In = 6, IsNull = 7 }
+
+table Atom {
+  column: string (required);
+  op: Op;
+  values: [Constant];
+}
+
+table Disjunction {
+  atoms: [Atom] (required);
+}
+
+// Definition D-4.1: a conjunction of disjunctions of atoms.
+table Predicate {
+  all: [Disjunction];
+}
+
+// The identity of a row (E-16: an entity, or a label for the series class).
+table Identity {
+  values: [Constant] (required);
+}
+
+table Point { relation: string (required); identity: Identity; t: long; }
+table Latest { relation: string (required); identity: Identity; t_max: long; }
+table Series { relation: string (required); identity: Identity; t0: long; t1: long; }
+table Section { relation: string (required); t: long; }
+table Scan { relation: string (required); t0: long; t1: long; predicate: Predicate; columns: [string]; }
+table Exists { relation: string (required); t0: long; t1: long; predicate: Predicate; }
+table CountRows { relation: string (required); t0: long; t1: long; predicate: Predicate; }
+table Distinct { relation: string (required); column: string (required); t0: long; t1: long; }
+
+// D-4.4: the closed set of chain filters.
+table ChainFilters {
+  expiry_from: Duration;
+  expiry_to: Duration;
+  moneyness_lo: double = null;
+  moneyness_hi: double = null;
+  right: string;
+  style: string;
+  strike_lo: double = null;
+  strike_hi: double = null;
+  min_open_interest: long = null;
+}
+
+table Chain { underlying: ulong; t: long; filters: ChainFilters; spot: double = null; }
+
+// D-4.1 over the registry's relations.
+table Catalog { relation: string (required); predicate: Predicate; }
+
+union QueryForm { Point, Latest, Series, Section, Scan, Exists, CountRows, Distinct, Chain, Catalog }
+
+// A calendar duration: months, days and a clock part in nanoseconds.
+table Duration {
+  months: long;
+  days: long;
+  nanos: long;
+}
+
+// ---------------------------------------------------------------- aggregates
+
+enum WindowKind : ubyte { Rows = 0, PriorRows = 1, Span = 2, PriorSpan = 3, Bucket = 4 }
+enum Grouping : ubyte { PerEntity = 0, PerLabel = 1, Whole = 2 }
+enum Numerics : ubyte { TwoPass = 0, Running = 1 }
+
+// D-6.1. `calendar` names the calendar whose labels index the window's
+// checkpoints and the answer's rows (E-27); `bucket` the calendar of a
+// bucket window.
+table AggregateRequest {
+  relation: string (required);
+  column: string (required);
+  second_column: string;
+  function: string (required);
+  level: double = null;
+  window: WindowKind;
+  n: ulong;
+  min: ulong = null;
+  span: Duration;
+  bucket: string;
+  group: Grouping;
+  group_column: string;
+  receipt_filter: ReceiptFilter;
+  numerics: Numerics;
+  calendar: string;
+  t0: long;
+  t1: long;
+  output: string;
+}
+
+// ---------------------------------------------------------------- streams
+
+enum ClockSource : ubyte { Replay = 0, Live = 1 }
+
+// D-5.1: the relations a stream carries, the calendars it emits barriers on
+// (in the order barriers of one instant are emitted, E-13), its receipt
+// filter and its clock.
+table StreamSpec {
+  relations: [VersionRef];
+  binding: string;
+  calendars: [string];
+  receipt_filter: ReceiptFilter;
+  clock: ClockSource;
+}
+
+// ---------------------------------------------------------- demands, bindings
+
+enum ScopeKind : ubyte { All = 0, List = 1, Instruments = 2 }
+
+table InstrumentRef {
+  id: ulong = null;
+  symbol: string;
+  from: long = null;
+}
+
+table Scope {
+  kind: ScopeKind;
+  list: string;
+  instruments: [InstrumentRef];
+}
+
+// Definition D-7.1.
+table Need {
+  relations: [string] (required);
+  calendar: string;
+  from: long = null;
+  to: long = null;
+  scope: Scope;
+  attributes: [Attribute];
+}
+
+table Budget {
+  money: double = 0;
+  bytes: long = null;
+  requests: long = null;
+  seconds: double = null;
+}
+
+enum PreferenceKind : ubyte { Reviewed = 0, Latest = 1, Version = 2, Finest = 3, FewestSources = 4, Cheapest = 5 }
+
+table Preference {
+  kind: PreferenceKind;
+  version: string;
+}
+
+table DynamicNeed {
+  relation: string (required);
+  underlying: ulong;
+  filters: ChainFilters;
+  spot_relation: string;
+  spot_column: string;
+  horizon: Duration;
+}
+
+table Demand {
+  class: string (required);
+  needs: [Need];
+  require: [Attribute];
+  prefer: [Preference];
+  budget: Budget;
+  dynamic: [DynamicNeed];
+}
+
+// A parameter of the point a binding was resolved for, as its literal text.
+table ParamValue {
+  name: string (required);
+  value: string (required);
+}
+
+// Definition D-7.5: the (relation, version) pairs, the parameter point and
+// the dynamic needs' filters; `id` is the hash of the rest (A-6).
+table Binding {
+  pairs: [VersionRef];
+  point: [ParamValue];
+  dynamic: [DynamicNeed];
+  id: string;
+}
+
+// Definition D-7.2.
+table CostVector {
+  money: double;
+  seconds: double;
+  bytes: long;
+  requests: long;
+}
+
+table PlanStep {
+  need: uint;
+  source: string (required);
+  relation: string (required);
+  version: string;
+  cost: CostVector;
+}
+
+table ResolvePlan {
+  steps: [PlanStep];
+  cost: CostVector;
+}
+
+// ---------------------------------------------------------- data service (P-3.1)
+
+table SchemaRequest { class: string; relation: string; }
+table SchemaResponse { schemas: [RelationSchema]; }
+table ResolveRequest { demand: Demand (required); dry_run: bool; }
+table ResolveResponse { plan: ResolvePlan; cost: CostVector; binding: Binding; over_budget: ResolvePlan; }
+table ResolveDynamicRequest { binding: Binding (required); need: DynamicNeed (required); underlying: ulong; t: long; }
+table ResolveDynamicResponse { binding: Binding; }
+
+// A query, or with `explain` its estimate (D-4.1).
+table QueryRequest {
+  view: View;
+  form: QueryForm (required);
+  receipt_filter: ReceiptFilter;
+  with_seq: bool;
+  explain: bool;
+}
+
+table ExplainResponse {
+  rows: ulong;
+  bytes: ulong;
+  partitions: ulong;
+  cached: bool;
+  unresolved: bool;
+}
+
+table AggregateCall { view: View; request: AggregateRequest (required); }
+table AggregateResponse { cache_key: string (required); }
+
+table SubscribeRequest {
+  spec: StreamSpec (required);
+  from_seq: ulong;
+  paced: bool;
+  to_seq: ulong = null;
+  with_index: bool;
+}
+
+table SubscribeResponse { stream: string (required); }
+table StreamIndexRequest { spec: StreamSpec (required); }
+table AckMessage { seq: ulong; }
+
+// The rows follow as Arrow frames in the request's correlation.
+table PutRequest { relation: string (required); schema: RelationSchema (required); attributes: [Attribute]; }
+table PutResponse { version: string (required); seq_from: ulong; seq_to: ulong; }
+table GetRequest { cache_key: string; version: string; relation: string; }
+table PinRequest { version: string; binding: string; pin: bool; }
+table StatsRequest { relation: string; }
+
+// A table follows in this correlation: its schema frame, batch frames, end.
+table TableFollows { rows: ulong = null; }
+
+table Done {}
 
 // Every control message; a frame's kind says which half (request, response)
 // the receiver expects, the correlation id pairs them (P-2.3).
-union Message { Hello, Error }
+union Message {
+  Hello,
+  Error,
+  SchemaRequest,
+  SchemaResponse,
+  ResolveRequest,
+  ResolveResponse,
+  ResolveDynamicRequest,
+  ResolveDynamicResponse,
+  QueryRequest,
+  ExplainResponse,
+  AggregateCall,
+  AggregateResponse,
+  SubscribeRequest,
+  SubscribeResponse,
+  StreamIndexRequest,
+  AckMessage,
+  PutRequest,
+  PutResponse,
+  GetRequest,
+  PinRequest,
+  StatsRequest,
+  TableFollows,
+  Done
+}
 
 table Envelope {
   message: Message;
