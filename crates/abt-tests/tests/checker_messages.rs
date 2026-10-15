@@ -6,7 +6,8 @@ use abt_tests as common;
 
 use abt_kernel::check::{check_program, check_workspace, Code, Diagnostic, Severity, Workspace};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
+use abt_tests::run;
 
 fn errors(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
     diags.iter().filter(|d| d.severity == Severity::Error).collect()

@@ -5,7 +5,7 @@
 use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{ExecConfig, Kernel, Value};
+use abt_kernel::kernel::{ExecConfig, Value};
 use abt_kernel::observe::{coverage_report, program_graph, show_program};
 
 /// Buy 10 on an up bar when flat, sell the bar after the buy.
@@ -82,8 +82,7 @@ fn program_graph_reaches_and_annotates() {
 fn coverage_names_the_first_empty_relation() {
     let prog = common::program(&never(), "never");
     let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 60, 7);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let (result, mut k) = abt_tests::run_kernel(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let by_name = |n: &str| result.coverage.iter().find(|c| c.name == n).cloned().unwrap();
     assert_eq!(by_name("decide").tuples, 0);
     assert_eq!(by_name("decide").calls, 60);
@@ -113,8 +112,7 @@ fn coverage_names_the_first_empty_relation() {
 fn coverage_of_a_trading_strategy() {
     let prog = common::program(&up_down(), "up_down");
     let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 60, 7);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let result = abt_tests::run(&prog, &ds, ExecConfig::frictionless()).unwrap();
     assert!(!result.decisions.is_empty());
     let (text, causes) = coverage_report(&prog, &result.coverage, result.bars.len());
     assert!(causes.is_empty(), "{}", text);
@@ -129,8 +127,7 @@ fn coverage_of_a_trading_strategy() {
 fn explanation_reports_the_bindings() {
     let prog = common::program(&up_down(), "up_down");
     let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 60, 7);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let (result, mut k) = abt_tests::run_kernel(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let up = (0..prog.rules.len()).find(|&i| prog.rule_label(i) == "up_down::up#1").unwrap();
     // Find a bar where `up` fired, then read the bindings.
     let t = result.bars.iter().copied().find(|&t| !k.query("up", t, &[]).unwrap().is_empty()).unwrap();
@@ -155,8 +152,7 @@ fn explanation_reports_the_bindings() {
 fn query_every_bar_is_the_ledger() {
     let prog = common::program(&up_down(), "up_down");
     let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 60, 7);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let (result, mut k) = abt_tests::run_kernel(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let bars = k.bars_at(&prog.decision_cal);
     assert_eq!(bars, result.bars);
     let total: usize = bars.iter().map(|&t| k.query("up", t, &[]).unwrap().len()).sum();

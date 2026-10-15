@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use abt_kernel::check::Program;
 use abt_kernel::data::business_days;
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, Dataset, ExecConfig, Lot, OrderKind, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Lot, OrderKind, Value};
+use abt_tests::run;
 
 fn checked(src: &str, name: &str) -> (Option<Program>, Vec<String>) {
     let (p, diags) = common::check(src, name);

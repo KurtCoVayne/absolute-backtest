@@ -11,9 +11,10 @@ use std::fs;
 use abt_kernel::check::Code;
 use abt_kernel::data::{load_parquet_dir, write_parquet_dir};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, Dataset, ExecConfig, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Value};
 use abt_kernel::table::to_text;
 use abt_kernel::{Lit, Ty};
+use abt_tests::run;
 
 /// Buy the index members, sell a name delisted for the reason `why`.
 const EXIT_ON_BANKRUPTCY: &str = r#"

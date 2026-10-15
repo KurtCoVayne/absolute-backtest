@@ -15,7 +15,8 @@ use std::process::Command;
 use abt_kernel::check::Program;
 use abt_kernel::data::{business_days, synthetic_daily};
 use abt_kernel::dump::write_dump;
-use abt_kernel::kernel::{run, Dataset, ExecConfig, OnLeverage, OnOversize, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, OnLeverage, OnOversize, Value};
+use abt_tests::run;
 
 fn reference_dir() -> PathBuf {
     abt_tests::repo_root().join("reference")

@@ -1,9 +1,10 @@
 //! Availability time per tuple (data-bundle doc, sections 2 and 4, and the
-//! semantic model's v2 item 1): a tuple is available from its own
-//! availability time, which may be after its bar's close; the fold reads it
-//! from then on, nothing is rewound, and the causality theorem is judged on
-//! availability: the fold's decisions at t equal the batch kernel's on the
-//! tuples available at t.
+//! semantic model's v2 item 1): a tuple is received at its own receipt time
+//! `r` (D-4.2), which may be after its bar's close; the stream places it
+//! after the barriers before `r` (D-5.2), the fold reads it from then on,
+//! nothing is rewound, and the causality theorem is judged on receipt: the
+//! decisions at t of the whole stream equal those of the stream truncated at
+//! t's barrier (G5).
 
 use abt_tests as common;
 
@@ -12,14 +13,20 @@ use std::fs;
 
 use abt_kernel::data::{load_parquet_dir, synthetic_daily, write_parquet_dir};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, run_fold, verify_causality, Dataset, ExecConfig, Value};
+use abt_kernel::kernel::{run_on, Dataset, ExecConfig, Replay, Value};
+use abt_tests::{run, run_socket, verify_causality};
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+
+/// The synthetic market, every close received at its bar.
+fn on_time() -> Dataset {
+    synthetic_daily(&SYMS, (2022, 1, 3), 200, 7)
+}
 
 /// The synthetic market with every tenth close of each name available one
 /// bar late (at the next bar's close).
 fn delayed() -> Dataset {
-    let base = synthetic_daily(&SYMS, (2022, 1, 3), 200, 7);
+    let base = on_time();
     let mut bars: Vec<i64> = base.facts["close"].iter().map(|tu| tu[1].as_time().unwrap()).collect();
     bars.sort();
     bars.dedup();
@@ -44,12 +51,13 @@ fn delayed() -> Dataset {
 }
 
 #[test]
-fn the_fold_is_causal_on_availability_and_the_batch_kernel_is_not() {
+fn the_fold_is_causal_on_receipt() {
     let p = common::corpus_program("sma_crossover");
     let ds = delayed();
     assert!(ds.has_availability());
-    let full = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
-    let batch = run(&p, &ds, ExecConfig::frictionless()).unwrap();
+    let client = common::client(&p, &ds);
+    let full = run_on(&p, None, &client, ExecConfig::frictionless(), &Replay::default()).unwrap();
+    let prompt = run(&p, &on_time(), ExecConfig::frictionless()).unwrap();
     let describe = |r: &abt_kernel::kernel::RunResult, t: i64| -> Vec<String> {
         let mut v: Vec<String> = r.decisions_at(t).into_iter().map(|d| r.describe_decision(d)).collect();
         v.sort();
@@ -57,18 +65,27 @@ fn the_fold_is_causal_on_availability_and_the_batch_kernel_is_not() {
     };
     let mut differs = 0;
     for &t in &full.bars {
-        // What was available at t: the fold over that subset decides at t as
-        // the full fold did (the executor's own fills honour availability too,
-        // which the batch kernel's do not).
-        let available = ds.truncated(&p, t);
-        let partial = run_fold(&p, &available, ExecConfig::frictionless()).unwrap();
+        // What was received by t's barrier: the stream truncated there
+        // decides at t as the whole stream did (the executor's own fills
+        // honour receipt too).
+        let partial = run_on(
+            &p,
+            None,
+            &client,
+            ExecConfig::frictionless(),
+            &Replay {
+                horizon: Some(t),
+                ..Replay::default()
+            },
+        )
+        .unwrap();
         assert_eq!(describe(&full, t), describe(&partial, t), "at {}", format_timestamp(t));
-        if describe(&full, t) != describe(&batch, t) {
+        if describe(&full, t) != describe(&prompt, t) {
             differs += 1;
         }
     }
-    assert!(differs > 0, "the batch kernel read the late closes as if they were on time");
-    // The empirical check of the theorem uses the fold and availability.
+    assert!(differs > 0, "the late closes, received on time, would have changed decisions");
+    // The empirical check of the theorem.
     let samples: Vec<i64> = [50usize, 100, 150, 199].iter().map(|&i| full.bars[i]).collect();
     assert!(verify_causality(&p, &ds, ExecConfig::frictionless(), &samples).unwrap().is_empty());
 }
@@ -112,7 +129,7 @@ fn a_late_tuple_is_read_from_its_availability_on() {
     }
     .render();
     let p = common::program(&src, "reads");
-    let r = run_fold(
+    let r = run_socket(
         &p,
         &ds,
         ExecConfig {
@@ -125,10 +142,12 @@ fn a_late_tuple_is_read_from_its_availability_on() {
     // Day 2: its close is not available, so `today` fails. Day 3: today's
     // close and, by then, yesterday's late one. Days 4 and 5 as usual.
     assert_eq!(decided, vec!["2024-01-10", "2024-01-11", "2024-01-12"], "{:?}", decided);
-    // The batch kernel, blind to availability, decides on day 2 as well.
+    // Received at its bar, the close of day 2 is read on day 2.
+    let mut prompt = ds.clone();
+    prompt.available_at.clear();
     let b = run(
         &p,
-        &ds,
+        &prompt,
         ExecConfig {
             initial_cash: 1000.0,
             ..ExecConfig::frictionless()
@@ -152,14 +171,37 @@ fn availability_loads_from_parquet_and_truncation_follows_it() {
     let (loaded, _) = load_parquet_dir(&p, &dir).unwrap();
     assert!(loaded.has_availability());
     assert_eq!(loaded.availability_of("close").unwrap().len(), ds.facts["close"].len());
-    let a = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
-    let b = run_fold(&p, &loaded, ExecConfig::frictionless()).unwrap();
+    let a = run_socket(&p, &ds, ExecConfig::frictionless()).unwrap();
+    let b = run_socket(&p, &loaded, ExecConfig::frictionless()).unwrap();
     assert_eq!(a.decisions.len(), b.decisions.len());
     assert_eq!(a.final_cash.to_bits(), b.final_cash.to_bits());
-    // Truncation at t keeps what was available at t, not what was keyed at t.
+    // The receipt filter at t's barrier keeps what was received by then, not
+    // what was keyed at t (D-4.2).
     let t = a.bars[33];
     let keyed: usize = ds.facts["close"].iter().filter(|tu| tu[1].as_time().unwrap() <= t).count();
-    let available = ds.truncated(&p, t).facts["close"].len();
-    assert!(available < keyed, "{} available of {} keyed at {}", available, keyed, format_timestamp(t));
+    let client = common::client(&p, &ds);
+    let count = |r_max: Option<i64>| -> i64 {
+        use abt_wire::generated::abt::wire::{CountRows, Message, QueryForm, QueryRequest, ReceiptFilter};
+        let form = QueryForm::CountRows(Box::new(CountRows {
+            relation: "equity.close".into(),
+            t0: i64::MIN,
+            t1: t,
+            predicate: None,
+        }));
+        let b = client
+            .table(Message::QueryRequest(Box::new(QueryRequest {
+                view: None,
+                form,
+                receipt_filter: Some(Box::new(ReceiptFilter { r_max })),
+                with_seq: false,
+                explain: false,
+            })))
+            .unwrap();
+        use arrow::array::AsArray;
+        b[0].column(0).as_primitive::<arrow::datatypes::Int64Type>().value(0)
+    };
+    assert_eq!(count(None) as usize, keyed);
+    let received = count(Some(abt_kernel::kernel::bind::barrier_at(&p, t))) as usize;
+    assert!(received < keyed, "{} received of {} keyed at {}", received, keyed, format_timestamp(t));
     let _ = fs::remove_dir_all(&dir);
 }

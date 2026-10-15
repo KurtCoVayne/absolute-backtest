@@ -1,26 +1,28 @@
-//! The kernel as a fold over an availability-ordered stream (data-bundle
-//! doc, section 2): `state' = step(state, event)`. An event is a primitive
-//! tuple with its availability time, or a barrier, the close of a bar at
-//! some resolution, after which no tuple with availability at or before
-//! that instant is processed as belonging to the bar. Per-bar evaluation
-//! still goes through the memoised evaluator, which only ever looks back
-//! (`prev`, `lag`, windows, resample), so a time domain that grows as
-//! buckets open is observationally the up-front one; the decision barrier
-//! runs the executor's fill, the bar's open, the strategy's decisions and
-//! the executor's take, in that order, exactly as the batch driver does. A
-//! backtest is this fold replayed over the bundle's log; live is the same
-//! fold on a feed with another executor attached.
+//! The kernel as a fold over the data layer's stream (K-4.2): `state' =
+//! step(state, event)`. An event is a stored relation's tuple, received at
+//! its `r`, or a barrier, the close of a bucket of one of the program's
+//! calendars at an instant after every tuple received by then (D-5.2). A
+//! barrier opens its bucket in the calendar's time domain; a barrier of the
+//! decision calendar runs the bar: the executor's fill, the bar's open, the
+//! strategy's decisions and the executor's take, in that order. Per-bar
+//! evaluation goes through the memoised evaluator, which only ever looks
+//! back (`prev`, `lag`, windows, resample), so a time domain that grows as
+//! buckets open is observationally the whole one. A tuple whose decision
+//! bucket was already decided is late (K-4.4): it is stored, what was derived
+//! from its key on is recomputed on demand, and decisions taken stand. A
+//! backtest is this fold over a replayed stream; live is the same fold on a
+//! live stream with another executor attached.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
 use super::eval::{WindowKey, WindowRows};
-use super::executor::{Executor, SimExecutor};
+use super::executor::Executor;
 use super::time;
-use super::{Dataset, ExecConfig, Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
+use super::{ExecConfig, Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
 use crate::check::Program;
-use crate::ir::{Cal, Resolution};
+use crate::ir::Cal;
 
 /// When the fold takes a checkpoint (data-bundle doc, section 2): at the end
 /// of every calendar month of the decision bars, or every n decision bars.
@@ -30,10 +32,9 @@ pub enum CheckpointEvery {
     Bars(usize),
 }
 
-/// The fold's state at a decision barrier (data-bundle doc, section 2,
-/// "Checkpoints"): the facts, the time domains, the windowed groups' rows,
-/// the executor's book, the run so far, and the cursor the replay resumes
-/// from (every event with availability at or after it is still to come).
+/// The fold's state after a decision bar (K-4.7): the facts, the time
+/// domains, the windowed groups' rows, the executor's book, the run so far,
+/// and the stream's cursor, the seq of the first event still to come.
 /// Derived values are not kept: they are recomputed from the facts on
 /// demand.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,7 +42,7 @@ pub struct Checkpoint {
     /// Of the program, its parameters and the configuration; a restore into
     /// another is refused.
     pub fingerprint: u64,
-    pub cursor: i64,
+    pub cursor: u64,
     pub last_bar: i64,
     pub symbols: Vec<String>,
     pub labels: Vec<String>,
@@ -50,7 +51,6 @@ pub struct Checkpoint {
     pub last_price: Vec<(Sym, f64)>,
     pub windows: Vec<(WindowKey, Vec<(i64, WindowRows)>)>,
     pub stats: KernelStats,
-    pub open_buckets: Vec<(Cal, i64)>,
     pub decided_once: bool,
     pub result: RunResult,
     pub executor: serde_json::Value,
@@ -67,146 +67,30 @@ pub fn fingerprint(prog: &Program, cfg: &ExecConfig) -> u64 {
     h
 }
 
-/// One event of the stream.
+/// One event of the stream, as the fold takes it (D-5.1).
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// A primitive tuple, in the kernel's symbol order, available at `avail`.
-    Tuple { rel: usize, key: i64, avail: i64, tuple: Tuple },
-    /// The close of bucket `label` on a calendar.
-    Barrier { cal: Cal, label: i64 },
+    /// A stored relation's tuple, in the kernel's symbol order, keyed at
+    /// `key` and received at `r`; `seq` is its position in the stream.
+    Tuple { seq: u64, rel: usize, key: i64, r: i64, tuple: Tuple },
+    /// The close of bucket `label` of a calendar.
+    Barrier { seq: u64, cal: Cal, label: i64 },
 }
 
-/// The ordered stream of a dataset: every primitive tuple available at its
-/// own bar's close (the labelling convention), ordered by availability, then by
-/// relation, then by the order the dataset holds them in.
-pub struct EventLog {
-    pub events: Vec<Event>,
-}
-
-impl EventLog {
-    pub fn from_dataset(k: &Kernel, ds: &Dataset) -> Result<EventLog, RunError> {
-        let mut events: Vec<(i64, usize, usize, Event)> = Vec::new();
-        for (name, tuples) in &ds.facts {
-            let Some(rel) = k.relation_id(name) else { continue };
-            if !k.is_primitive(rel) {
-                continue;
-            }
-            let res = k.relation_native(rel);
-            let records = ds.availability_of(name).is_some();
-            for (i, tu) in tuples.iter().enumerate() {
-                let tuple = k.remap_tuple(tu);
-                let key = tuple[k.rels[rel].key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", name)))?;
-                // Available at its bar's close by convention, or when the
-                // bundle recorded it (never before its own bar).
-                let avail = if records { ds.available(name, i, key, res).max(key) } else { key };
-                events.push((avail, rel, i, Event::Tuple { rel, key, avail, tuple }));
-            }
+impl From<super::bind::StreamEvent> for Event {
+    fn from(e: super::bind::StreamEvent) -> Event {
+        match e {
+            super::bind::StreamEvent::Tuple { seq, rel, key, r, tuple } => Event::Tuple { seq, rel, key, r, tuple },
+            super::bind::StreamEvent::Barrier { seq, cal, label } => Event::Barrier { seq, cal, label },
         }
-        events.sort_by_key(|(avail, rel, i, _)| (*avail, *rel, *i));
-        Ok(EventLog {
-            events: events.into_iter().map(|(_, _, _, e)| e).collect(),
-        })
     }
 }
 
-/// The open bucket of every calendar of the program, and the barriers a
-/// tuple's arrival closes. The fold streams the base bars; every other
-/// calendar's buckets are the schedule's (the periods' last bars, the
-/// session labels), opened as the stream reaches them, so that a view or a
-/// window on any calendar sees the buckets the batch kernel would at that
-/// bar. A decision barrier is the close of a decision-calendar bucket.
-struct Scheduler {
-    needed: Vec<Cal>,
-    open: HashMap<Cal, i64>,
-    /// Each calendar's labels but the base's, in order (the schedule).
-    labels: HashMap<Cal, Vec<i64>>,
-}
-
-impl Scheduler {
-    fn new(k: &Kernel) -> Scheduler {
-        let mut needed: Vec<Cal> = k.schedule.keys().cloned().collect();
-        for c in [Cal::Base, k.prog.decision_cal.clone()] {
-            if !needed.contains(&c) {
-                needed.push(c);
-            }
-        }
-        needed.sort();
-        let labels = k.schedule.iter().filter(|(c, _)| **c != Cal::Base).map(|(c, d)| (c.clone(), d.iter().copied().collect())).collect();
-        Scheduler { needed, open: HashMap::new(), labels }
-    }
-
-    /// The bucket of a calendar holding an instant: its label, the first at
-    /// or after the instant; `None` past the calendar's last label.
-    fn label_of(&self, cal: &Cal, t: i64) -> Option<i64> {
-        if *cal == Cal::Base {
-            return Some(t);
-        }
-        let labels = self.labels.get(cal)?;
-        labels.get(labels.partition_point(|l| *l < t)).copied()
-    }
-
-    /// A tuple keyed `key` at native resolution `native`, available at
-    /// `avail`, arrived: the barriers its availability closes, after opening
-    /// the bucket the availability reaches. A bucket closes when the
-    /// stream's availability passes its end, never because of a key: a late
-    /// tuple falls into a closed bucket.
-    fn advance(&mut self, k: &mut Kernel, key: i64, avail: i64, native: Resolution) -> Vec<(Cal, i64)> {
-        let mut closed = Vec::new();
-        // The base buckets are the bars: only a tuple at the base resolution
-        // opens one (a catalog tuple keyed at a date on a minute base is
-        // not a bar); any tuple's availability closes the base bucket it
-        // passes, so a decision is taken when the stream reaches its end.
-        let base_tuple = native == k.prog.base;
-        let needed = self.needed.clone();
-        for r in &needed {
-            let front = self.label_of(r, avail);
-            // Past a calendar's last label the stream opens no bucket of it,
-            // and closes the open one.
-            let opens = if *r == Cal::Base { base_tuple } else { front.is_some() };
-            if !opens {
-                if let Some(l) = self.open.get(r).copied() {
-                    if front.map(|f| l < f).unwrap_or(true) {
-                        closed.push((r.clone(), l));
-                        self.open.remove(r);
-                    }
-                }
-                continue;
-            }
-            let Some(front) = front else { continue };
-            match self.open.get(r).copied() {
-                Some(l) if l == front => {}
-                Some(l) if l < front => {
-                    closed.push((r.clone(), l));
-                    self.open.insert(r.clone(), front);
-                    k.open_bucket(r, front);
-                }
-                Some(_) => {}
-                None => {
-                    self.open.insert(r.clone(), front);
-                    k.open_bucket(r, front);
-                }
-            }
-            // The tuple's own bucket exists whatever its availability.
-            if let Some(own) = self.label_of(r, key) {
-                k.open_bucket(r, own);
-            }
-        }
-        closed
-    }
-
-    fn close_all(&mut self) -> Vec<(Cal, i64)> {
-        let mut out: Vec<(Cal, i64)> = self.open.drain().collect();
-        out.sort();
-        out
-    }
-}
-
-/// The fold: a kernel, an executor, the scheduler and the run so far.
+/// The fold: a kernel, an executor and the run so far.
 pub struct Fold<'p, 'e> {
     pub kernel: Kernel<'p>,
     exec: &'e mut dyn Executor,
     result: RunResult,
-    sched: Scheduler,
     decided_once: bool,
     halted: bool,
     last_bar: Option<i64>,
@@ -215,11 +99,12 @@ pub struct Fold<'p, 'e> {
     pending_checkpoint: Option<Checkpoint>,
     /// Whether the current event's barriers ran a decision bar.
     ran_decision: bool,
+    /// The last decision bars, the memo kept for (see `evict_memo`).
+    recent: std::collections::VecDeque<i64>,
 }
 
 impl<'p, 'e> Fold<'p, 'e> {
     pub fn new(kernel: Kernel<'p>, exec: &'e mut dyn Executor) -> Fold<'p, 'e> {
-        let sched = Scheduler::new(&kernel);
         let result = RunResult {
             symbols: kernel.symbols.names().to_vec(),
             warnings: kernel.cfg.warnings().into_iter().chain(kernel.run_warnings.iter().cloned()).collect(),
@@ -233,7 +118,6 @@ impl<'p, 'e> Fold<'p, 'e> {
             kernel,
             exec,
             result,
-            sched,
             decided_once: false,
             halted: false,
             last_bar: None,
@@ -241,6 +125,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             bars_since_checkpoint: 0,
             pending_checkpoint: None,
             ran_decision: false,
+            recent: Default::default(),
         }
     }
 
@@ -255,8 +140,8 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.pending_checkpoint.take()
     }
 
-    /// The fold's state now, for a replay resuming at `cursor`.
-    pub fn checkpoint(&self, cursor: i64) -> Result<Checkpoint, RunError> {
+    /// The fold's state now, for a replay resuming at the stream's `cursor`.
+    pub fn checkpoint(&self, cursor: u64) -> Result<Checkpoint, RunError> {
         let k = &self.kernel;
         Ok(Checkpoint {
             fingerprint: fingerprint(k.prog, &k.cfg),
@@ -277,21 +162,16 @@ impl<'p, 'e> Fold<'p, 'e> {
             },
             windows: k.windows.iter().map(|(key, cache)| (key.clone(), cache.iter().map(|(t, rows)| (*t, rows.clone())).collect())).collect(),
             stats: k.stats(),
-            open_buckets: {
-                let mut v: Vec<(Cal, i64)> = self.sched.open.iter().map(|(r, l)| (r.clone(), *l)).collect();
-                v.sort();
-                v
-            },
             decided_once: self.decided_once,
             result: self.result.clone(),
             executor: self.exec.checkpoint().map_err(RunError::Internal)?,
         })
     }
 
-    /// A fold continuing from `cp`: `kernel` is a streaming kernel over the
-    /// same program, dataset and configuration (checked by fingerprint and
-    /// symbols), `exec` the same kind of executor. Replay the events with
-    /// availability at or after `cp.cursor`.
+    /// A fold continuing from `cp`: `kernel` is a bound kernel over the same
+    /// program, binding and configuration (checked by fingerprint and
+    /// symbols), `exec` the same kind of executor. The stream resumes at the
+    /// seq `cp.cursor`.
     pub fn restore(mut kernel: Kernel<'p>, exec: &'e mut dyn Executor, cp: Checkpoint) -> Result<Fold<'p, 'e>, RunError> {
         if cp.fingerprint != fingerprint(kernel.prog, &kernel.cfg) {
             return Err(RunError::Config("the checkpoint was taken by another program, parameters or configuration".into()));
@@ -314,14 +194,12 @@ impl<'p, 'e> Fold<'p, 'e> {
         kernel.memo.clear();
         kernel.asof_memo.clear();
         kernel.memo_errors.clear();
+        kernel.domain_vecs.clear();
         exec.restore(cp.executor).map_err(RunError::Config)?;
-        let mut sched = Scheduler::new(&kernel);
-        sched.open = cp.open_buckets.into_iter().collect();
         Ok(Fold {
             kernel,
             exec,
             result: cp.result,
-            sched,
             decided_once: cp.decided_once,
             halted: false,
             last_bar: if cp.last_bar == i64::MIN { None } else { Some(cp.last_bar) },
@@ -329,6 +207,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             bars_since_checkpoint: 0,
             pending_checkpoint: None,
             ran_decision: false,
+            recent: Default::default(),
         })
     }
 
@@ -347,14 +226,9 @@ impl<'p, 'e> Fold<'p, 'e> {
 
     fn step_inner(&mut self, ev: Event) -> Result<(), RunError> {
         match ev {
-            Event::Tuple { rel, key, avail, tuple } => {
-                let native = self.kernel.relation_native(rel);
-                self.ran_decision = false;
-                for (res, label) in self.sched.advance(&mut self.kernel, key, avail, native) {
-                    self.barrier(&res, label)?;
-                }
-                // A checkpoint at the end of a decision bar, before the tuple
-                // that closed it is stored: the replay resumes at this tuple.
+            Event::Tuple { seq, rel, key, tuple, .. } => {
+                // A checkpoint at the end of a decision bar, before the next
+                // tuple is stored: the replay resumes at this tuple.
                 if self.ran_decision {
                     let due = match (self.checkpoint_every, self.last_bar) {
                         (Some(CheckpointEvery::Month), Some(last)) => time::month_key(last) != time::month_key(key),
@@ -362,27 +236,23 @@ impl<'p, 'e> Fold<'p, 'e> {
                         _ => false,
                     };
                     if due {
-                        self.pending_checkpoint = Some(self.checkpoint(avail)?);
+                        self.pending_checkpoint = Some(self.checkpoint(seq)?);
                         self.bars_since_checkpoint = 0;
                     }
                 }
-                // A tuple keyed before the open decision bucket arrived after
-                // its bar closed: it is available from now on, and what was
-                // derived meanwhile is recomputed on demand.
+                self.ran_decision = false;
+                // A tuple whose decision bucket was decided arrived late
+                // (K-4.4): it is available from now on, and what was derived
+                // meanwhile is recomputed on demand.
                 let dcal = self.kernel.prog.decision_cal.clone();
-                let late = self
-                    .sched
-                    .open
-                    .get(&dcal)
-                    .map(|&open| self.sched.label_of(&dcal, key).map(|l| l < open).unwrap_or(false))
-                    .unwrap_or(false);
+                let late = self.last_bar.is_some_and(|last| self.kernel.label_on(&dcal, key).is_some_and(|l| l <= last));
                 self.kernel.insert_fact(rel, tuple)?;
                 if late {
                     self.kernel.invalidate_from(key);
                 }
                 Ok(())
             }
-            Event::Barrier { cal, label } => {
+            Event::Barrier { cal, label, .. } => {
                 self.kernel.open_bucket(&cal, label);
                 self.barrier(&cal, label)
             }
@@ -403,6 +273,13 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
         let by_equity = self.kernel.decide_at(label, &mut self.result)?;
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
+        // Bucketed by time, eviction costs only what it drops: every bar,
+        // keeping the last few decision bars' entries.
+        self.recent.push_back(label);
+        if self.recent.len() > 4 {
+            self.recent.pop_front();
+        }
+        self.kernel.evict_memo(label, self.recent.front().copied().unwrap_or(label));
         self.decided_once = true;
         self.last_bar = Some(label);
         self.ran_decision = true;
@@ -416,9 +293,6 @@ impl<'p, 'e> Fold<'p, 'e> {
         if self.halted {
             return Err(RunError::Internal("the fold halted on an earlier event".into()));
         }
-        for (res, label) in self.sched.close_all() {
-            self.barrier(&res, label)?;
-        }
         if !self.decided_once {
             return Err(RunError::NoBars);
         }
@@ -429,26 +303,4 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.result.plan = self.kernel.plan_label().to_string();
         Ok((self.result, self.kernel))
     }
-}
-
-/// Run `prog` on `dataset` as a fold over its event log with the simulated
-/// executor: the same decisions, fills and book as `run`.
-pub fn run_fold(prog: &Program, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let kernel = Kernel::new_streaming(prog, dataset, cfg.clone())?;
-                let log = EventLog::from_dataset(&kernel, dataset)?;
-                let mut exec = SimExecutor::new(cfg);
-                let mut fold = Fold::new(kernel, &mut exec);
-                for ev in log.events {
-                    fold.step(ev)?;
-                }
-                fold.finish().map(|(r, _)| r)
-            })
-            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-            .join()
-            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-    })
 }

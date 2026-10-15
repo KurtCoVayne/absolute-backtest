@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use abt_kernel::check::Program;
 use abt_kernel::data::load_parquet_dir;
-use abt_kernel::kernel::{ExecConfig, Kernel, Value};
+use abt_kernel::kernel::{ExecConfig, Value};
 use abt_kernel::table::write_text_table;
 
 /// A daily equity strategy that holds every name of the universe at a
@@ -92,7 +92,7 @@ fn daily_labels_with_a_time_of_day_are_the_date_bar() {
     let keys: Vec<Value> = ds.facts["close"].iter().map(|tu| tu[1].clone()).collect();
     assert_eq!(keys, vec![Value::Time(common::day("2022-01-03")), Value::Time(common::day("2022-01-04"))]);
     // One time domain: two bars, not four.
-    let bars = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap().decision_bars();
+    let bars = abt_tests::loaded_kernel(&prog, &ds, ExecConfig::default()).decision_bars();
     assert_eq!(bars, vec![common::day("2022-01-03"), common::day("2022-01-04")]);
     let _ = fs::remove_dir_all(&dir);
 }

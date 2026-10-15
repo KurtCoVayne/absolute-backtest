@@ -8,7 +8,8 @@
 use abt_tests as common;
 
 use abt_kernel::data::business_days;
-use abt_kernel::kernel::{run, run_fold, Dataset, ExecConfig, Kernel, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, Value};
+use abt_tests::{run, run_socket};
 
 fn rolling() -> String {
     common::strategy(
@@ -61,8 +62,7 @@ fn query(k: &mut Kernel, rel: &str, t: i64, sym: &str) -> Option<f64> {
 fn a_rows_window_counts_the_groups_own_bars_and_skips_its_gaps() {
     let p = common::program(&rolling(), "rolling");
     let (ds, days) = market();
-    let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
-    k.run().unwrap();
+    let (_, mut k) = abt_tests::run_kernel(&p, &ds, ExecConfig::frictionless()).unwrap();
     // AAA on day 3: its last three closes 10, 11, 12.
     assert_eq!(query(&mut k, "avg3", days[2], "AAA"), Some(11.0));
     // BBB has no bar on days 3 and 4; on day 5 its last three rows are days 1, 2 and 5.
@@ -77,8 +77,7 @@ fn a_rows_window_counts_the_groups_own_bars_and_skips_its_gaps() {
 fn rank_numbers_each_tuple_with_average_or_ordinal_ties() {
     let p = common::program(&rolling(), "rolling");
     let (ds, days) = market();
-    let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
-    k.run().unwrap();
+    let (_, mut k) = abt_tests::run_kernel(&p, &ds, ExecConfig::frictionless()).unwrap();
     // Day 1: BBB 20 first; AAA and CCC tie at 10 for places 2 and 3.
     assert_eq!(query(&mut k, "rk", days[0], "BBB"), Some(1.0));
     assert_eq!(query(&mut k, "rk", days[0], "AAA"), Some(2.5));
@@ -95,7 +94,7 @@ fn the_fold_and_the_uncached_evaluation_agree_with_the_batch_kernel() {
     let p = common::program(&rolling(), "rolling");
     let (ds, _) = market();
     let a = run(&p, &ds, ExecConfig::frictionless()).unwrap();
-    let b = run_fold(&p, &ds, ExecConfig::frictionless()).unwrap();
+    let b = run_socket(&p, &ds, ExecConfig::frictionless()).unwrap();
     let c = run(
         &p,
         &ds,
@@ -146,8 +145,7 @@ fn a_rows_window_counts_the_anchors_rows_and_aggregates_the_valid_ones() {
     );
     let p = common::program(&src, "sparse");
     let (ds, days) = market();
-    let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
-    k.run().unwrap();
+    let (_, mut k) = abt_tests::run_kernel(&p, &ds, ExecConfig::frictionless()).unwrap();
     // AAA closes 10, 11, 12, 13: on day 4 the window is days 2 to 4 and only
     // 12 and 13 have values.
     assert_eq!(query(&mut k, "last3", days[3], "AAA"), Some(12.5));
@@ -176,8 +174,7 @@ fn the_xsec_decile_ranks_ten_names_into_ten_tenths() {
     let closes: Vec<[f64; 3]> = (0..10).map(|i| [10.0, 10.0 + 0.1 * (i + 1) as f64, 10.0 + 0.1 * (i + 1) as f64]).collect();
     let series: Vec<(&str, &[f64])> = names.iter().zip(&closes).map(|(n, c)| (n.as_str(), &c[..])).collect();
     let ds = common::markets((2024, 1, 8), &series);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    k.run().unwrap();
+    let (_, mut k) = abt_tests::run_kernel(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let t = common::day("2024-01-09");
     let mut got: Vec<(String, i64)> = k
         .query("dec", t, &[])

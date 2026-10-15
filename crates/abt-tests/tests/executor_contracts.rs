@@ -6,8 +6,9 @@
 use abt_tests as common;
 
 use abt_kernel::data::{business_days, load_parquet_dir};
-use abt_kernel::kernel::{run, Action, Contract, Dataset, ExecConfig, Lot, Sym, Value};
+use abt_kernel::kernel::{Action, Contract, Dataset, ExecConfig, Lot, Sym, Value};
 use abt_kernel::table::write_text_table;
+use abt_tests::run;
 
 /// The decide rules of a round trip: buy `qty` once when flat, sell it all
 /// on the day `day3` is bound.

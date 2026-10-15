@@ -8,6 +8,8 @@
 //! the two company books run when `ABT_MW14_BUNDLE` and `ABT_R8L_BUNDLE`
 //! name their bundles, and are skipped with a note otherwise.
 
+#![allow(clippy::result_large_err)]
+
 use abt_tests as common;
 
 use std::collections::BTreeMap;
@@ -16,9 +18,10 @@ use std::path::Path;
 use abt_kernel::check::Program;
 use abt_kernel::compiler::{compile, CompileOptions};
 use abt_kernel::data::{synthetic_daily, synthetic_minute};
-use abt_kernel::kernel::{run, run_fold, run_fold_planned, run_planned, Dataset, ExecConfig, Kernel, RunError, RunResult, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, RunError, RunResult, Value};
 use abt_kernel::lower::{Lowered, Numerics};
 use abt_kernel::Kind;
+use abt_tests::{run, run_planned, run_socket};
 
 fn corpus_strategies() -> Vec<(String, Program)> {
     common::dsl_files("strategies")
@@ -160,8 +163,8 @@ fn the_written_plan_equals_the_plain_kernel() {
         let written = Lowered::written(&p, Numerics::from_running_sums(cfg.running_sums));
         let planned = run_planned(&p, &written, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{} (planned): {}", name, e));
         assert_same(&name, "batch runs", &digest(&plain), &digest(&planned));
-        let fold_plain = run_fold(&p, &ds, cfg.clone()).unwrap();
-        let fold_planned = run_fold_planned(&p, &written, &ds, cfg).unwrap();
+        let fold_plain = run_socket(&p, &ds, cfg.clone()).unwrap();
+        let fold_planned = run_planned(&p, &written, &ds, cfg).unwrap();
         assert_same(&name, "fold runs", &digest(&fold_plain), &digest(&fold_planned));
     }
 }
@@ -172,19 +175,9 @@ type Outcome = Result<(Vec<String>, BTreeMap<String, Vec<String>>), String>;
 /// A run under a plan: the digest and the ledgers (through the kernel kept
 /// after the run), or the halt.
 fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfig) -> Outcome {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::new_planned(p, lowered, ds, cfg).map_err(|e| e.to_string())?;
-                let r = k.run().map_err(|e| e.to_string())?;
-                let l = ledgers(&mut k, p, &r.bars);
-                Ok((digest(&r), l))
-            })
-            .unwrap()
-            .join()
-            .unwrap()
-    })
+    common::run_keeping(p, Some(lowered), ds, cfg, &Default::default(), |r, k| Ok((digest(r), ledgers(k, p, &r.bars))))
+        .map(|(_, x)| x)
+        .map_err(|e| e.to_string())
 }
 
 /// Section 6.6: the optimised plan equals the written plan on every corpus

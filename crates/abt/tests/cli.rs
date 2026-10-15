@@ -420,7 +420,7 @@ fn checkpoints_are_written_and_a_resumed_run_matches() {
     let _ = std::fs::remove_dir_all(&dir);
     let out = dir.to_string_lossy().to_string();
     let files = strategy_files("sma_crossover");
-    let base = ["run", "--strategy", "sma_crossover", "--synthetic", "--days", "130", "--quiet", "--kernel", "fold"];
+    let base = ["run", "--strategy", "sma_crossover", "--synthetic", "--days", "130", "--quiet"];
     let mut args: Vec<&str> = base.to_vec();
     args.extend(["--checkpoint-every", "month", "--checkpoint-dir", &out]);
     args.extend(files.iter().map(|s| s.as_str()));
@@ -441,21 +441,11 @@ fn checkpoints_are_written_and_a_resumed_run_matches() {
     let final_line = |o: &Output| text(o).0.lines().find(|l| l.starts_with("final cash")).unwrap_or_default().to_string();
     assert!(final_line(&full).contains("positions: E"), "{}", final_line(&full));
     assert_eq!(final_line(&full), final_line(&resumed));
-    // Checkpoints need the fold.
-    let mut args = vec![
-        "run",
-        "--strategy",
-        "sma_crossover",
-        "--synthetic",
-        "--days",
-        "130",
-        "--quiet",
-        "--checkpoint-every",
-        "month",
-        "--checkpoint-dir",
-        &out,
-    ];
+    // The batch kernel is gone: every run is the fold over the stream.
+    let mut args = vec!["run", "--strategy", "sma_crossover", "--synthetic", "--days", "130", "--quiet", "--kernel", "batch"];
     args.extend(files.iter().map(|s| s.as_str()));
-    assert_eq!(abt(&args).status.code(), Some(2));
+    let gone = abt(&args);
+    assert_eq!(gone.status.code(), Some(2));
+    assert!(text(&gone).1.contains("the batch kernel is gone"), "{}", text(&gone).1);
     let _ = std::fs::remove_dir_all(&dir);
 }

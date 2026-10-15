@@ -13,9 +13,10 @@ use std::collections::BTreeMap;
 use abt_kernel::check::Program;
 use abt_kernel::compiler::{compile, CompileOptions};
 use abt_kernel::data::synthetic_for_program;
-use abt_kernel::kernel::{run_planned, Dataset, ExecConfig};
+use abt_kernel::kernel::{Dataset, ExecConfig};
 use abt_kernel::lower::Lowered;
 use abt_kernel::verify::tv::{digest, first_difference, run_with_ledgers, Ledgers};
+use abt_tests::run_planned;
 
 fn corpus_strategies() -> Vec<(String, Program)> {
     common::dsl_files("strategies")
@@ -125,9 +126,18 @@ fn decisions_are_the_same_on_every_truncated_binding() {
         };
         let samples = abt_kernel::state::tables::sampled_bars(&full.bars, 10);
         assert!(!samples.is_empty(), "{}", name);
+        let client = abt_tests::client(&p, &ds);
         for t in samples {
-            let cut = ds.truncated(&p, t);
-            let partial = match run_planned(&p, &lowered, &cut, cfg.clone()) {
+            let partial = match abt_kernel::kernel::run_on(
+                &p,
+                Some(&lowered),
+                &client,
+                cfg.clone(),
+                &abt_kernel::kernel::Replay {
+                    horizon: Some(t),
+                    ..Default::default()
+                },
+            ) {
                 Ok(r) => r,
                 Err(abt_kernel::kernel::RunError::NoBars) => continue,
                 Err(e) => panic!("{} truncated at {}: {}", name, t, e),

@@ -8,7 +8,8 @@ use abt_tests as common;
 
 use abt_kernel::check::{Code, Program};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, run_fold, Dataset, ExecConfig, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Value};
+use abt_tests::{run, run_socket};
 
 const DAYS: [&str; 5] = ["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"];
 
@@ -40,7 +41,7 @@ fn decided(ds: &Dataset, prog: &Program, fold: bool) -> Vec<(String, f64)> {
         initial_cash: 10_000.0,
         ..ExecConfig::frictionless()
     };
-    let r = if fold { run_fold(prog, ds, cfg).unwrap() } else { run(prog, ds, cfg).unwrap() };
+    let r = if fold { run_socket(prog, ds, cfg).unwrap() } else { run(prog, ds, cfg).unwrap() };
     r.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect()
 }
 
@@ -107,9 +108,12 @@ fn the_fold_reads_an_asof_tuple_from_its_availability_on() {
     ds.add_available("value", late, common::day(DAYS[4]));
     let fold = decided(&ds, &prog, true);
     assert_eq!(fold.iter().map(|(_, q)| *q).collect::<Vec<_>>(), vec![1.0, 1.0, 1.0, 1.0, 3.0], "{:?}", fold);
-    // The batch kernel, blind to availability, reads it on its key.
-    let batch = decided(&ds, &prog, false);
-    assert_eq!(batch.iter().map(|(_, q)| *q).collect::<Vec<_>>(), vec![1.0, 1.0, 1.0, 3.0, 3.0], "{:?}", batch);
+    assert_eq!(decided(&ds, &prog, false), fold, "in process as over a socket");
+    // Received on its key, it is read on its key.
+    let mut prompt = ds.clone();
+    prompt.available_at.clear();
+    let on_key = decided(&prompt, &prog, false);
+    assert_eq!(on_key.iter().map(|(_, q)| *q).collect::<Vec<_>>(), vec![1.0, 1.0, 1.0, 3.0, 3.0], "{:?}", on_key);
 }
 
 // ---- well-formedness ----
@@ -285,7 +289,7 @@ fn a_minute_rule_reads_the_previous_days_bar_until_the_day_closes() {
 /// Both drivers agree on what a minute rule sees of the daily bars.
 #[test]
 fn the_fold_agrees_with_the_batch_kernel_on_a_minute_rule_reading_daily_bars() {
-    let f = run_fold(&intraday_daily(), &two_minute_days(), ExecConfig::frictionless()).unwrap();
+    let f = run_socket(&intraday_daily(), &two_minute_days(), ExecConfig::frictionless()).unwrap();
     let fold: Vec<(String, f64)> = f.decisions.iter().map(|d| (format_timestamp(d.t), d.decision.amount)).collect();
     let want: Vec<(String, f64)> = SEEN.iter().map(|(t, q)| (t.to_string(), *q)).collect();
     assert_eq!(fold, want, "{:?}", fold);

@@ -8,8 +8,9 @@ use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::time::parse_timestamp;
-use abt_kernel::kernel::{run, ExecConfig, Kernel, Value};
+use abt_kernel::kernel::{ExecConfig, Value};
 use abt_kernel::study::{block_bootstrap_sharpe, capacity, deflated_sharpe, min_track_record_length, newey_west_t, pbo_cscv, probabilistic_sharpe, return_metrics, trading_metrics, Returns};
+use abt_tests::run;
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol * b.abs().max(1.0)
@@ -174,8 +175,7 @@ fn guard() -> String {
 fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
     let prog = common::program(&guard(), "drawdown_guard");
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 200, 3);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap();
-    let r = k.run().unwrap();
+    let (r, mut k) = abt_tests::run_kernel(&prog, &ds, ExecConfig::default()).unwrap();
     assert!(!r.fills.is_empty());
     let rets = Returns::from_curve(&r.equity_curve, 252.0);
     let mut peak = f64::NEG_INFINITY;

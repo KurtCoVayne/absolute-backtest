@@ -326,6 +326,8 @@ fn zscore_strategy() -> String {
 /// state in the lowered plan (R3), which the comparison exercises.
 #[test]
 fn tiers_5_and_6_run_the_two_plans_on_a_binding() {
+    // Tiers 5 and 6 run the plans through the data service the front registers.
+    abt_tests::init();
     let (p, diags) = program(&zscore_strategy(), "zscore");
     let opts = CompileOptions::default();
     let mut compiled = compile(&p, &opts);

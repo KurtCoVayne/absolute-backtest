@@ -12,9 +12,10 @@ use std::path::Path;
 
 use abt_kernel::bundle::load_bundle;
 use abt_kernel::data::synthetic_daily_v2;
-use abt_kernel::kernel::{run, ExecConfig, RunResult};
+use abt_kernel::kernel::{ExecConfig, RunResult};
 use abt_kernel::study::{return_metrics, subperiod_sharpes, trading_metrics, ReturnMetrics};
 use abt_kernel::Lit;
+use abt_tests::run;
 
 const CANONICAL: [&str; 4] = ["momentum_12_1", "low_volatility", "short_term_reversal", "size_proxy"];
 

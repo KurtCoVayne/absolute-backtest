@@ -129,7 +129,8 @@ fn negative_cases_produce_their_code() {
 /// and base, with the execution block it writes, and decides something.
 fn runs_on_synthetic_data(dir: &str) {
     use abt_kernel::data::synthetic_for_program;
-    use abt_kernel::kernel::{run, ExecConfig};
+    use abt_kernel::kernel::ExecConfig;
+    use abt_tests::run;
     let mut failures = Vec::new();
     for f in files(&corpus().join(dir)) {
         let (ws, name) = workspace(&f);

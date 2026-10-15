@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{run, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
 use abt_kernel::study::{
     block_embargo, build_report, grid_points, parse_grid_axis, program_hash, reveal, run_study, subperiod_sharpes, surface, trailing_embargo, Attachment, Grid, Holdout, Lineages, Project, Provenance,
     Threshold, TrialKind, WalkForward, BIASES,
 };
+use abt_tests::run;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("abt-study-{}-{}", tag, std::process::id()));
@@ -161,12 +162,12 @@ fn a_study_counts_its_trials_deflates_by_them_and_embargoes_the_hold_out() {
         &project,
         &spec,
         &prog,
-        &ds,
+        &common::Sampled::new(&prog, &ds).sample(),
         &Grid {
             axes: vec![axis.clone()],
             points: points.clone(),
         },
-        &run,
+        &common::study_run,
         Provenance::default(),
     )
     .unwrap();
@@ -195,12 +196,12 @@ fn a_study_counts_its_trials_deflates_by_them_and_embargoes_the_hold_out() {
         &project,
         &spec,
         &prog,
-        &ds,
+        &common::Sampled::new(&prog, &ds).sample(),
         &Grid {
             axes: vec![],
             points: points[..2].to_vec(),
         },
-        &run,
+        &common::study_run,
         Provenance::default(),
     )
     .unwrap();
@@ -213,7 +214,16 @@ fn a_study_counts_its_trials_deflates_by_them_and_embargoes_the_hold_out() {
     assert_eq!(found.id, spec.id);
     // A strategy of another lineage cannot run under this study.
     let other = common::corpus_program("sma_crossover");
-    assert!(run_study(&project, &spec, &other, &ds, &Grid::single(&[]), &run, Provenance::default()).is_err());
+    assert!(run_study(
+        &project,
+        &spec,
+        &other,
+        &common::Sampled::new(&other, &ds).sample(),
+        &Grid::single(&[]),
+        &common::study_run,
+        Provenance::default()
+    )
+    .is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -226,7 +236,16 @@ fn a_study_without_a_hold_out_is_warned_and_runs_the_whole_sample() {
     assert!(spec.warnings.iter().any(|w| w.bias == "out-of-sample"));
     assert!(spec.warnings.iter().any(|w| w.bias == "transaction-cost neglect" || w.bias == "slippage"), "{:?}", spec.warnings);
     let ds = synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 300, 2);
-    let (outcomes, report) = run_study(&project, &spec, &prog, &ds, &Grid::single(&[]), &run, Provenance::default()).unwrap();
+    let (outcomes, report) = run_study(
+        &project,
+        &spec,
+        &prog,
+        &common::Sampled::new(&prog, &ds).sample(),
+        &Grid::single(&[]),
+        &common::study_run,
+        Provenance::default(),
+    )
+    .unwrap();
     assert_eq!(outcomes.len(), 1);
     assert!(report.embargo.is_empty());
     assert_eq!(outcomes[0].result.bars.len(), 300);
@@ -411,7 +430,16 @@ fn a_block_hold_out_withholds_its_metrics_and_a_reveal_reports_them() {
         .declare(&prog, Holdout::Blocks { count: 2, months: 2, seed: 3 }, "sharpe", vec![], ExecConfig::frictionless())
         .unwrap();
     let ds = synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 500, 4);
-    let (outcomes, report) = run_study(&project, &spec, &prog, &ds, &Grid::single(&[]), &run, Provenance::default()).unwrap();
+    let (outcomes, report) = run_study(
+        &project,
+        &spec,
+        &prog,
+        &common::Sampled::new(&prog, &ds).sample(),
+        &Grid::single(&[]),
+        &common::study_run,
+        Provenance::default(),
+    )
+    .unwrap();
     assert!(!report.embargo.truncates);
     assert_eq!(report.embargo.intervals.len(), 2);
     let o = &outcomes[0];
@@ -422,16 +450,16 @@ fn a_block_hold_out_withholds_its_metrics_and_a_reveal_reports_them() {
     assert_eq!(o.metrics.n + 1, 500 - blocked);
     assert!(o.trial.note.as_deref().unwrap().contains("exclude the embargoed blocks"));
     // The reveal reports the blocks only, as an out-of-sample trial.
-    let (r, embargo) = reveal(&project, &spec, &prog, &ds, &run, Provenance::default()).unwrap();
+    let (r, embargo) = reveal(&project, &spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &common::study_run, Provenance::default()).unwrap();
     assert_eq!(embargo, report.embargo);
     assert_eq!(r.metrics.n + 1, blocked);
     assert_eq!(r.trial.kind, TrialKind::Reveal);
     assert_eq!(r.trial.seq, 2);
     // A version the study never ran cannot be revealed; nor can a study without a hold-out.
     let stranger = common::program(&momentum("stranger", "").replace("n : Count = 2", "n : Count = 4"), "stranger");
-    assert!(reveal(&project, &spec, &stranger, &ds, &run, Provenance::default()).is_err());
+    assert!(reveal(&project, &spec, &stranger, &common::Sampled::new(&stranger, &ds).sample(), &common::study_run, Provenance::default()).is_err());
     let (open_spec, _) = project.declare(&prog, Holdout::None, "sharpe", vec![], ExecConfig::frictionless()).unwrap();
-    match reveal(&project, &open_spec, &prog, &ds, &run, Provenance::default()) {
+    match reveal(&project, &open_spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &common::study_run, Provenance::default()) {
         Err(e) => assert!(e.contains("nothing to reveal"), "{}", e),
         Ok(_) => panic!("a study without a hold-out revealed something"),
     }
@@ -453,9 +481,18 @@ fn a_trailing_reveal_reports_the_embargoed_tail() {
         )
         .unwrap();
     let ds = synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 600, 9);
-    let (_, report) = run_study(&project, &spec, &prog, &ds, &Grid::single(&[]), &run, Provenance::default()).unwrap();
+    let (_, report) = run_study(
+        &project,
+        &spec,
+        &prog,
+        &common::Sampled::new(&prog, &ds).sample(),
+        &Grid::single(&[]),
+        &common::study_run,
+        Provenance::default(),
+    )
+    .unwrap();
     let start = report.embargoed_from().unwrap();
-    let (r, _) = reveal(&project, &spec, &prog, &ds, &run, Provenance::default()).unwrap();
+    let (r, _) = reveal(&project, &spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &common::study_run, Provenance::default()).unwrap();
     assert_eq!(r.result.bars.len(), 600, "the reveal runs the whole sample");
     let tail = r.result.bars.iter().filter(|t| **t >= start).count();
     assert_eq!(r.metrics.n + 1, tail);
@@ -481,7 +518,16 @@ fn a_walk_forward_picks_per_fold_and_logs_every_evaluation() {
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD"], (2022, 1, 3), 520, 6);
     let grid = Grid::new(vec![parse_grid_axis("n=1,2").unwrap()], &[]);
     let scheme = WalkForward::parse("anchored:12mo:6mo").unwrap();
-    let (outcomes, report) = run_study(&project, &spec, &prog, &ds, &grid, &run, Provenance { bundle: None, scheme: Some(scheme) }).unwrap();
+    let (outcomes, report) = run_study(
+        &project,
+        &spec,
+        &prog,
+        &common::Sampled::new(&prog, &ds).sample(),
+        &grid,
+        &common::study_run,
+        Provenance { bundle: None, scheme: Some(scheme) },
+    )
+    .unwrap();
     assert_eq!(outcomes.len(), 2);
     let wf = report.walk_forward.as_ref().unwrap();
     // 520 bars from January 2022 end in December 2023: one twelve-month
@@ -509,10 +555,19 @@ fn a_trial_stops_before_the_trailing_embargo() {
     let prog = common::program(&momentum("bounded", ""), "bounded");
     let (spec, _) = project.declare(&prog, Holdout::Trailing { years: 1 }, "sharpe", vec![], ExecConfig::frictionless()).unwrap();
     let ds = synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 600, 9);
-    let (outcomes, report) = run_study(&project, &spec, &prog, &ds, &Grid::single(&[]), &run, Provenance::default()).unwrap();
+    let (outcomes, report) = run_study(
+        &project,
+        &spec,
+        &prog,
+        &common::Sampled::new(&prog, &ds).sample(),
+        &Grid::single(&[]),
+        &common::study_run,
+        Provenance::default(),
+    )
+    .unwrap();
     let start = report.embargoed_from().unwrap();
     assert!(*outcomes[0].result.bars.last().unwrap() < start, "the trial stops before the embargo");
-    let (r, _) = reveal(&project, &spec, &prog, &ds, &run, Provenance::default()).unwrap();
+    let (r, _) = reveal(&project, &spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &common::study_run, Provenance::default()).unwrap();
     let tail = r.result.bars.iter().filter(|t| **t >= start).count();
     assert_eq!(outcomes[0].result.bars.len() + tail, 600);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -582,10 +637,10 @@ fn the_report_counts_trials_reveals_and_marks_the_biases_warned() {
     // halts on a false ruin at the market's split until the executor
     // applies a split before the bar's fills (`a_split_is_applied_before_the_bar_fills`).
     let grid = Grid::new(vec![parse_grid_axis("n=2,3").unwrap()], &[]);
-    run_study(&project, &spec, &prog, &ds, &grid, &run, Provenance::default()).unwrap();
+    run_study(&project, &spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &grid, &common::study_run, Provenance::default()).unwrap();
     let r = run(&prog, &ds, exec()).unwrap();
     abt_kernel::study::log_untracked(&project, &prog, &r, &exec(), None).unwrap();
-    reveal(&project, &spec, &prog, &ds, &run, Provenance::default()).unwrap();
+    reveal(&project, &spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &common::study_run, Provenance::default()).unwrap();
     let report = build_report(&project, &prog, &diags).unwrap();
     assert_eq!(report.trials, 4);
     assert_eq!(report.study_trials, 2);

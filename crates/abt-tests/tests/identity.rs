@@ -11,8 +11,9 @@ use std::fs;
 use abt_kernel::check::Program;
 use abt_kernel::data::{business_days, check_identities, load_parquet_dir, write_parquet_dir};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, Dataset, ExecConfig, RunError, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, RunError, Value};
 use abt_kernel::table::{to_text, write_text_table};
+use abt_tests::run;
 
 /// Buy the security carrying `ticker` once, when flat, and hold it.
 fn hold_named(ticker: &str) -> Program {
@@ -227,7 +228,7 @@ fn the_security_table_loads_and_round_trips_through_parquet() {
 fn an_input_or_binding_names_a_security_by_id_or_by_ticker() {
     let ds = market();
     let p = hold_named("BBB");
-    let k = abt_kernel::kernel::Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
+    let k = abt_tests::loaded_kernel(&p, &ds, ExecConfig::frictionless());
     assert_eq!(k.parse_binding("E2").unwrap(), Value::Equity(ds.symbols.get("E2").unwrap()));
     assert_eq!(k.parse_binding("BBX").unwrap(), Value::Equity(ds.symbols.get("E2").unwrap()), "a ticker resolves as of the bundle date");
     assert_eq!(k.parse_binding("BBB").unwrap(), Value::Equity(ds.symbols.get("E3").unwrap()));

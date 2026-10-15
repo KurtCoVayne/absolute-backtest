@@ -131,22 +131,12 @@ pub struct Run {
 /// A run under a plan: the digest and the ledgers (through the kernel kept
 /// after the run), or the halt.
 pub fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfig) -> Result<Run, String> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::new_planned(p, lowered, ds, cfg).map_err(|e| e.to_string())?;
-                let r = k.run().map_err(|e| e.to_string())?;
-                let l = ledgers(&mut k, p, &r.bars);
-                Ok(Run {
-                    digest: digest(&r),
-                    ledgers: l,
-                    result: r,
-                })
-            })
-            .map_err(|e| format!("cannot spawn the kernel thread: {}", e))?
-            .join()
-            .map_err(|_| "the kernel thread panicked".to_string())?
+    let client = crate::kernel::connect_dataset(ds, p).map_err(|e| e.to_string())?;
+    let (r, l) = crate::kernel::run_keeping(p, Some(lowered), &client, cfg, &crate::kernel::Replay::default(), |r, k| Ok(ledgers(k, p, &r.bars))).map_err(|e| e.to_string())?;
+    Ok(Run {
+        digest: digest(&r),
+        ledgers: l,
+        result: r,
     })
 }
 

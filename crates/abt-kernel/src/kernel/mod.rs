@@ -14,11 +14,13 @@ use hash::{FxHashMap, FxHashSet};
 
 use crate::check::Program;
 use crate::ir::*;
+pub mod bind;
 pub mod executor;
 pub mod fold;
 pub mod hash;
+pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
 pub use executor::{Executor, SimExecutor};
-pub use fold::{fingerprint, run_fold, Checkpoint, CheckpointEvery, Event, EventLog, Fold};
+pub use fold::{fingerprint, Checkpoint, CheckpointEvery, Event, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 
 pub type Tuple = Vec<Value>;
@@ -301,53 +303,6 @@ impl Dataset {
             Some(&a) if a != i64::MIN => a,
             _ => time::bucket_range(res, key).1.max(key),
         }
-    }
-    /// The dataset restricted to tuples available at or before the close of
-    /// decision bar `t` (E|ₜ of section 7).
-    pub fn truncated(&self, prog: &Program, t: i64) -> Dataset {
-        let mut out = Dataset {
-            symbols: self.symbols.clone(),
-            labels: self.labels.clone(),
-            facts: BTreeMap::new(),
-            available_at: BTreeMap::new(),
-            securities: self.securities.clone(),
-            as_of: Some(self.bundle_date().unwrap_or(t).min(t)),
-            contracts: self.contracts.clone(),
-        };
-        // The close of the decision bar t: what a decision at t can have seen
-        // (a bar's label is its close instant; a daily label is its date). An
-        // instant that is no label bounds the sample at itself.
-        let horizon = if time::bucket(prog.base, t) == t { time::bucket_range(prog.base, t).1 } else { t };
-        for (name, tuples) in &self.facts {
-            // A relation the program does not read keeps its name and no
-            // tuple: what the data has is part of the run's warnings, what
-            // it held after `t` is not part of the sample.
-            let Some(sig) = prog.relations.get(name) else {
-                out.facts.entry(name.clone()).or_default();
-                continue;
-            };
-            let Some(k) = sig.key_pos() else { continue };
-            let res = sig.native.unwrap_or(prog.base);
-            let records = self.available_at.contains_key(name);
-            for (i, tu) in tuples.iter().enumerate() {
-                let key = tu[k].as_time().unwrap_or(i64::MAX);
-                let keep = if records {
-                    // Judged on availability (the v2 theorem).
-                    self.available(name, i, key, res) <= horizon
-                } else {
-                    key <= horizon
-                };
-                if keep {
-                    if records {
-                        out.add_available(name, tu.clone(), self.available(name, i, key, res));
-                    } else {
-                        out.add(name, tu.clone());
-                    }
-                }
-            }
-            out.facts.entry(name.clone()).or_default();
-        }
-        out
     }
 }
 
@@ -1457,9 +1412,8 @@ pub struct Kernel<'p> {
     pub(crate) low_rel: Option<(usize, usize)>,
     pub(crate) last_price: FxHashMap<Sym, f64>,
     pub(crate) params: FxHashMap<(String, String), Value>,
-    /// Dataset symbol and label ids to the kernel's (identifier order).
+    /// The bound instruments' symbols to the kernel's (identifier order).
     pub(crate) remap_syms: Vec<Sym>,
-    pub(crate) remap_labels: Vec<Sym>,
     /// The rows of every bar a windowed aggregation group has solved, by
     /// (rule, literal, the outer bindings the group reads), by bar.
     pub(crate) windows: FxHashMap<eval::WindowKey, eval::WindowCache>,
@@ -1539,32 +1493,20 @@ pub struct SummaryRow {
 }
 
 impl<'p> Kernel<'p> {
-    pub fn new(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        Kernel::build(prog, dataset, cfg, true, None)
+    /// A kernel over what Bind read of the data layer (K-4.1): the binding's
+    /// instruments, labels, ticker spans and contract terms, and every
+    /// calendar's labels as the schedule. It holds no fact yet: the fold
+    /// feeds the stream's tuples (`insert_fact`) and opens each calendar's
+    /// buckets at their barriers (`open_bucket`).
+    pub fn bound(prog: &'p Program, bound: &bind::Bound, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        Kernel::build(prog, bound, cfg)
     }
 
-    /// A kernel evaluating `prog` under a plan (compiler design, "Lower"):
-    /// the plan's literal orders, infeasible rules, shared window states
-    /// and folded constants are applied; everything else is `new`.
-    pub fn new_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        let mut k = Kernel::build(lowered.program_for(prog), dataset, cfg, true, None)?;
-        k.apply_plan(prog, lowered);
-        Ok(k)
-    }
-
-    /// The streaming counterpart of `new_planned` (see `new_streaming`).
-    pub fn new_streaming_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        let mut k = Kernel::build(lowered.program_for(prog), dataset, cfg, false, None)?;
-        k.apply_plan(prog, lowered);
-        Ok(k)
-    }
-
-    /// `from_dataset` under a plan (see `new_planned`).
-    pub fn from_dataset_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, mut dataset: Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        // The bundle date is read from the facts before they move.
-        dataset.as_of = dataset.bundle_date();
-        let facts = std::mem::take(&mut dataset.facts);
-        let mut k = Kernel::build(lowered.program_for(prog), &dataset, cfg, true, Some(facts))?;
+    /// A bound kernel evaluating `prog` under a plan (compiler design,
+    /// "Lower"): the plan's literal orders, infeasible rules, shared window
+    /// states and folded constants are applied; everything else is `bound`.
+    pub fn bound_planned(prog: &'p Program, lowered: &'p crate::lower::Lowered, bound: &bind::Bound, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        let mut k = Kernel::build(lowered.program_for(prog), bound, cfg)?;
         k.apply_plan(prog, lowered);
         Ok(k)
     }
@@ -1601,23 +1543,7 @@ impl<'p> Kernel<'p> {
         &self.plan_label
     }
 
-    /// A kernel over the dataset's symbols and tables but none of its facts:
-    /// the fold feeds them as events (`insert_fact`) and opens the time
-    /// domains' buckets as the stream reaches them (`open_bucket`).
-    pub fn new_streaming(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        Kernel::build(prog, dataset, cfg, false, None)
-    }
-
-    /// A kernel that takes the dataset's facts over instead of copying them:
-    /// one copy of the data in memory (what a run that does not need the
-    /// dataset afterwards should use).
-    pub fn from_dataset(prog: &'p Program, mut dataset: Dataset, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        dataset.as_of = dataset.bundle_date();
-        let facts = std::mem::take(&mut dataset.facts);
-        Kernel::build(prog, &dataset, cfg, true, Some(facts))
-    }
-
-    fn build(prog: &'p Program, dataset: &Dataset, cfg: ExecConfig, load_facts: bool, owned: Option<BTreeMap<String, Vec<Tuple>>>) -> Result<Kernel<'p>, RunError> {
+    fn build(prog: &'p Program, dataset: &bind::Bound, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
         // Resolve string overrides by their parameter's type, as the checker
         // did for the program's own literals.
         let mut cfg = cfg;
@@ -1717,7 +1643,7 @@ impl<'p> Kernel<'p> {
         let carried: Vec<&str> = if cfg.actions_in_prices { vec!["delisted"] } else { vec!["split", "dividend", "delisted"] };
         // Judged on the relations the data has, not on their tuples, so that
         // a truncated sample and a fold stopped early warn as the whole run.
-        let ignored: Vec<&str> = carried.into_iter().filter(|r| dataset.facts.contains_key(*r) && !prog.relations.contains_key(*r)).collect();
+        let ignored: Vec<&str> = carried.into_iter().filter(|r| dataset.has_relation(r) && !prog.relations.contains_key(*r)).collect();
         if !ignored.is_empty() {
             run_warnings.push(RunWarning {
                 bias: "corporate actions".into(),
@@ -1734,7 +1660,7 @@ impl<'p> Kernel<'p> {
             });
         }
         let (symbols, remap) = symbols.sorted();
-        let (labels, remap_labels) = labels.sorted();
+        let (labels, _) = labels.sorted();
         let literal_equities: HashMap<String, Sym> = literal_equities.into_iter().map(|(k, s)| (k, remap[s as usize])).collect();
         let securities: Vec<Security> = dataset
             .securities
@@ -1745,19 +1671,6 @@ impl<'p> Kernel<'p> {
             })
             .collect();
         let contracts: FxHashMap<Sym, Contract> = dataset.contracts.iter().map(|(s, c)| (remap[*s as usize], c.clone())).collect();
-        let remap_value = |v: &Value| -> Value {
-            match v {
-                Value::Equity(s) => Value::Equity(remap[*s as usize]),
-                Value::Label(s) => Value::Label(remap_labels[*s as usize]),
-                Value::Decision(d) => Value::Decision(Box::new(Decision {
-                    ctor: d.ctor,
-                    equity: remap[d.equity as usize],
-                    amount: d.amount,
-                    order: d.order,
-                })),
-                v => v.clone(),
-            }
-        };
         // Relation table.
         let mut rels = Vec::new();
         let mut rel_ids = HashMap::new();
@@ -1792,80 +1705,13 @@ impl<'p> Kernel<'p> {
             .iter()
             .map(|r| prog.relations.get(&r.name).map(|s| s.cal == Cal::Base && s.native.is_none()).unwrap_or(false))
             .collect();
-        let mut base_bars: BTreeSet<i64> = BTreeSet::new();
-        let mut session_rows: Vec<(Sym, i64, i64)> = Vec::new();
-        let session_id = rel_ids.get("session").copied();
-        let mut load = |name: &str, tu: Tuple| -> Result<(), RunError> {
-            let Some(&id) = rel_ids.get(name) else { return Ok(()) };
-            let info = &rels[id];
-            let key = tu[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", name)))?;
-            if own_bar[id] {
-                base_bars.insert(key);
-            }
-            if Some(id) == session_id {
-                if let (Some(sym), Some(open)) = (tu.iter().find_map(|v| v.as_equity()), tu.iter().skip(info.key_pos + 1).find_map(|v| v.as_time())) {
-                    session_rows.push((sym, open, key));
-                }
-            }
-            stores[id].insert(key, tu);
-            Ok(())
-        };
-        match owned {
-            // Taken over: each tuple is remapped in place and moved into its store.
-            Some(facts) => {
-                for (name, tuples) in facts {
-                    for mut tu in tuples {
-                        for v in tu.iter_mut() {
-                            if matches!(v, Value::Equity(_) | Value::Label(_) | Value::Decision(_)) {
-                                *v = remap_value(v);
-                            }
-                        }
-                        load(&name, tu)?;
-                    }
-                }
-            }
-            None => {
-                for (name, tuples) in dataset.facts.iter().filter(|_| load_facts) {
-                    for tu in tuples {
-                        load(name, tu.iter().map(remap_value).collect())?;
-                    }
-                }
-            }
-        }
-        // A streaming kernel stores no fact yet, but its calendars are a
-        // schedule the bundle carries: the keys of the bars and the sessions
-        // are read from the dataset without storing a tuple.
-        // The prints a session-offset clock is placed on are read the same
-        // way: a streaming kernel's `close` store is still empty here.
-        let print_id = rel_ids.get("close").copied().filter(|_| prog.clock.offset.is_some());
-        let mut prints: FxHashMap<Sym, BTreeSet<i64>> = FxHashMap::default();
-        if !load_facts {
-            for (name, tuples) in &dataset.facts {
-                let Some(&id) = rel_ids.get(name.as_str()) else { continue };
-                let is_print = Some(id) == print_id;
-                if !own_bar[id] && Some(id) != session_id && !is_print {
-                    continue;
-                }
-                let key_pos = rels[id].key_pos;
-                let epos = rels[id].entity_positions.first().copied().unwrap_or(0);
-                for tu in tuples {
-                    let Some(key) = tu[key_pos].as_time() else { continue };
-                    if own_bar[id] {
-                        base_bars.insert(key);
-                    }
-                    if is_print {
-                        if let Some(sym) = tu.get(epos).and_then(|v| v.as_equity()) {
-                            prints.entry(remap[sym as usize]).or_default().insert(key);
-                        }
-                    }
-                    if Some(id) == session_id {
-                        if let (Some(sym), Some(open)) = (tu.iter().find_map(|v| v.as_equity()), tu.iter().skip(key_pos + 1).find_map(|v| v.as_time())) {
-                            session_rows.push((remap[sym as usize], open, key));
-                        }
-                    }
-                }
-            }
-        }
+        // The calendars' sources, as Bind read them: the keys of the
+        // relations read at their own bars, the sessions, and the prints a
+        // session-offset clock is placed on (in the kernel's symbol order).
+        let _ = &own_bar;
+        let base_bars: BTreeSet<i64> = dataset.base_bars.clone();
+        let session_rows: Vec<(Sym, i64, i64)> = dataset.sessions.iter().map(|(s, open, label)| (remap[*s as usize], *open, *label)).collect();
+        let prints: FxHashMap<Sym, BTreeSet<i64>> = dataset.prints.iter().map(|(s, ts)| (remap[*s as usize], ts.clone())).collect();
         // The sessions by instrument, and the calendars' domains (3.1, 3.5):
         // a civil calendar's labels are the last base bar of each period;
         // the sessions calendar's labels are the session labels.
@@ -1908,14 +1754,12 @@ impl<'p> Kernel<'p> {
             };
             domains.insert(cal, dom);
         }
-        // The schedule is every calendar's labels over the whole dataset: a
-        // batch kernel's domains are the schedule; a streaming kernel's start
-        // empty and grow as the fold's stream reaches each bucket.
+        // The schedule is every calendar's labels over the binding; the
+        // domains start empty and grow as the stream's barriers open their
+        // buckets.
         let schedule = domains.clone();
-        if !load_facts {
-            for d in domains.values_mut() {
-                d.clear();
-            }
+        for d in domains.values_mut() {
+            d.clear();
         }
         // Compiled rules: variable slots.
         let mut compiled = Vec::new();
@@ -2231,15 +2075,7 @@ impl<'p> Kernel<'p> {
                         continue;
                     }
                     let bar = match print_rel {
-                        Some(_) if !load_facts => prints.get(sym).and_then(|ts| ts.range(target..=label).next().copied()),
-                        Some(pid) => {
-                            let epos = rels[pid].entity_positions.first().copied().unwrap_or(0);
-                            stores[pid]
-                                .by_time
-                                .range(target..=label)
-                                .find(|(_, tus)| tus.iter().any(|tu| tu[epos] == Value::Equity(*sym)))
-                                .map(|(t, _)| *t)
-                        }
+                        Some(_) => prints.get(sym).and_then(|ts| ts.range(target..=label).next().copied()),
                         None => base_bars.range(target..=label).next().copied(),
                     };
                     if let Some(b) = bar {
@@ -2297,7 +2133,6 @@ impl<'p> Kernel<'p> {
             last_price: Default::default(),
             params,
             remap_syms: remap,
-            remap_labels,
             windows: Default::default(),
             rows_floor: Default::default(),
             rows_anchor: Default::default(),
@@ -2350,23 +2185,6 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    /// A dataset tuple with its symbols and labels in the kernel's order.
-    pub fn remap_tuple(&self, tu: &[Value]) -> Tuple {
-        tu.iter()
-            .map(|v| match v {
-                Value::Equity(s) => Value::Equity(self.remap_syms[*s as usize]),
-                Value::Label(s) => Value::Label(self.remap_labels[*s as usize]),
-                Value::Decision(d) => Value::Decision(Box::new(Decision {
-                    ctor: d.ctor,
-                    equity: self.remap_syms[d.equity as usize],
-                    amount: d.amount,
-                    order: d.order,
-                })),
-                v => v.clone(),
-            })
-            .collect()
-    }
-
     /// Insert one primitive fact (already in the kernel's symbol order) and
     /// return its temporal key.
     pub fn insert_fact(&mut self, rel: usize, tuple: Tuple) -> Result<i64, RunError> {
@@ -2378,7 +2196,16 @@ impl<'p> Kernel<'p> {
 
     /// A bucket of a calendar exists from now on.
     pub fn open_bucket(&mut self, cal: &Cal, label: i64) {
-        self.domains.entry(cal.clone()).or_default().insert(label);
+        if self.domains.entry(cal.clone()).or_default().insert(label) {
+            // The running sums' walk reads the domain as a vector.
+            self.domain_vecs.retain(|(c, _), _| c != cal);
+        }
+    }
+
+    /// The label of the bucket of a calendar holding `t`: the first label at
+    /// or after it in the schedule.
+    pub fn label_on(&self, cal: &Cal, t: i64) -> Option<i64> {
+        self.schedule.get(cal)?.range(t..).next().copied()
     }
 
     /// A tuple keyed at `key` arrived after its bar closed: everything
@@ -2494,50 +2321,6 @@ impl<'p> Kernel<'p> {
 
     fn rel(&self, name: &str) -> Result<usize, RunError> {
         self.rel_ids.get(name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", name)))
-    }
-
-    /// Run the closed loop of section 7 over every decision bar.
-    /// Run the strategy bar by bar with the simulated executor (section 7,
-    /// the closed loop).
-    pub fn run(&mut self) -> Result<RunResult, RunError> {
-        let mut exec = SimExecutor::new(self.cfg.clone());
-        self.run_with(&mut exec)
-    }
-
-    /// Run the strategy bar by bar with any executor: at each decision bar,
-    /// the previous bar's orders are filled, the bar is opened (actions,
-    /// mark, margin), the strategy decides, and the executor takes the
-    /// decisions; the executor finishes when the data ends.
-    pub fn run_with(&mut self, exec: &mut dyn Executor) -> Result<RunResult, RunError> {
-        let bars = self.decision_bars();
-        if bars.is_empty() {
-            return Err(RunError::NoBars);
-        }
-        let mut result = RunResult {
-            symbols: self.symbols.names().to_vec(),
-            warnings: self.cfg.warnings().into_iter().chain(self.run_warnings.iter().cloned()).collect(),
-            price_relation: self.price_rel.map(|id| self.rels[id].name.clone()),
-            volume_relation: self.volume_rel.map(|id| self.rels[id].name.clone()),
-            base_capital: (!self.cfg.compounding).then_some(self.cfg.initial_cash),
-            multipliers: self.contracts.iter().map(|(s, c)| (*s, c.multiplier)).collect(),
-            ..Default::default()
-        };
-        for (k, &t) in bars.iter().enumerate() {
-            if k > 0 {
-                exec.fill(self, t, &mut result)?;
-            }
-            exec.open_bar(self, t, &mut result)?;
-            let by_equity = self.decide_at(t, &mut result)?;
-            exec.on_decisions(self, t, &by_equity, &mut result)?;
-            // Bucketed by time, eviction costs only what it drops: every bar.
-            self.evict_memo(t, bars[k.saturating_sub(3)]);
-        }
-        exec.finish(self, &mut result);
-        result.stats = self.stats();
-        result.coverage = self.coverage();
-        result.literal_counts = self.literal_counts.clone();
-        result.plan = self.plan_label.clone();
-        Ok(result)
     }
 
     /// The per-literal counters so far (see `RunResult::literal_counts`).
@@ -3248,79 +3031,173 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
     rule.body.iter().for_each(|l| lit(l, f));
 }
 
-/// Run a checked program over a dataset; the whole closed loop of section 7.
-/// Evaluation recurses one level per bar of strictly-earlier recursion, so it
-/// runs on a thread with a generous stack.
-pub fn run(prog: &Program, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
+/// How a run reads its stream (K-4.2, K-4.7): where it stops, whether it
+/// takes checkpoints, and the checkpoint it resumes from.
+#[derive(Clone, Debug, Default)]
+pub struct Replay {
+    /// Stop after the event with this seq (a truncated stream, G5).
+    pub to_seq: Option<u64>,
+    /// Stop after the decision at this bar: what the data received by its
+    /// barrier decides (the stream truncated at that barrier's seq).
+    pub horizon: Option<i64>,
+    pub checkpoint_every: Option<CheckpointEvery>,
+    pub from: Option<Checkpoint>,
+    /// Record the windowed groups' summaries (the `summary` state table).
+    pub record_summaries: bool,
+    /// Evict the memo at every bar however small (tests that prove eviction
+    /// changes nothing).
+    pub force_memo_eviction: bool,
+}
+
+/// The fold over a data service (K-4.1, K-4.2): Bind, the calendars put
+/// under the run's namespace, the subscription, and every event folded with
+/// `exec`; returns the run and the kernel at the end of the stream, and
+/// hands each checkpoint taken to `on_checkpoint`.
+pub fn replay<'p>(
+    prog: &'p Program,
+    lowered: Option<&'p crate::lower::Lowered>,
+    client: &DataClient,
+    mut cfg: ExecConfig,
+    exec: &mut dyn Executor,
+    opts: &Replay,
+    on_checkpoint: &mut dyn FnMut(Checkpoint),
+) -> Result<(RunResult, Kernel<'p>), RunError> {
+    let bound = bind::bind(prog, client)?;
+    // A truncated stream resolves ticker literals where it ends.
+    let probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
+    let run = bind::run_id(prog, &cfg, &bound.binding);
+    let (spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
+    let mut to_seq = opts.to_seq;
+    let mut end_label: Option<i64> = None;
+    if opts.horizon.is_some() || opts.to_seq.is_some() {
+        let dcal = prog.decision_cal.to_string();
+        let index = client.stream_index(spec.clone())?;
+        if let Some(h) = opts.horizon {
+            let at = index.iter().rfind(|r| r.calendar == dcal && r.label <= h);
+            to_seq = Some(to_seq.map_or(at.map(|r| r.seq).unwrap_or(0), |s| s.min(at.map(|r| r.seq).unwrap_or(0))));
+        }
+        end_label = index.iter().filter(|r| to_seq.is_none_or(|s| r.seq <= s)).map(|r| r.label).max();
+    }
+    drop(probe);
+    if let Some(end) = end_label.or(opts.horizon) {
+        cfg.as_of = Some(cfg.as_of.or(bound.bundle_date()).map_or(end, |a| a.min(end)));
+    }
+    let kernel = match lowered {
+        Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
+        None => Kernel::bound(prog, &bound, cfg.clone())?,
+    };
+    let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
+    let mut fold = match &opts.from {
+        Some(cp) => Fold::restore(kernel, exec, cp.clone())?,
+        None => Fold::new(kernel, exec),
+    };
+    if let Some(e) = opts.checkpoint_every {
+        fold = fold.with_checkpoints(e);
+    }
+    if opts.record_summaries {
+        fold.kernel.record_summaries(true);
+    }
+    if opts.force_memo_eviction {
+        fold.kernel.force_memo_eviction();
+    }
+    let from = opts.from.as_ref().map(|c| c.cursor).unwrap_or(1);
+    if to_seq.is_none_or(|t| t >= from) {
+        let mut sub = client.subscribe(spec, from, to_seq)?;
+        while let Some(b) = sub.next_batch()? {
+            for ev in decoder.events(&mut fold.kernel, &bound, &b)? {
+                fold.step(ev.into())?;
+                if let Some(cp) = fold.take_checkpoint() {
+                    on_checkpoint(cp);
+                }
+            }
+        }
+    }
+    fold.finish()
+}
+
+/// A kernel holding every tuple of the stream and every bucket opened, with
+/// no decision taken (what the query commands read the model from).
+pub fn load<'p>(prog: &'p Program, lowered: Option<&'p crate::lower::Lowered>, client: &DataClient, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+    let bound = bind::bind(prog, client)?;
+    let mut kernel = match lowered {
+        Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
+        None => Kernel::bound(prog, &bound, cfg.clone())?,
+    };
+    let run = bind::run_id(prog, &cfg, &bound.binding);
+    let (spec, cal_of) = bind::stream_spec(&kernel, &bound, client, &run)?;
+    let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
+    let mut sub = client.subscribe(spec, 1, None)?;
+    while let Some(b) = sub.next_batch()? {
+        for ev in decoder.events(&mut kernel, &bound, &b)? {
+            match ev {
+                bind::StreamEvent::Tuple { rel, tuple, .. } => {
+                    kernel.insert_fact(rel, tuple)?;
+                }
+                bind::StreamEvent::Barrier { cal, label, .. } => kernel.open_bucket(&cal, label),
+            }
+        }
+    }
+    Ok(kernel)
+}
+
+/// Runs `f` on a thread with the stack deep recursion needs (evaluation
+/// recurses one level per bar of strictly-earlier recursion).
+pub fn on_kernel_thread<T: Send>(f: impl FnOnce() -> Result<T, RunError> + Send) -> Result<T, RunError> {
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::new(prog, dataset, cfg)?;
-                k.run()
-            })
+            .spawn_scoped(s, f)
             .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
             .join()
             .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
     })
+}
+
+/// A run over a data service with the simulated executor: the closed loop
+/// of section 7 as the fold over the stream.
+pub fn run_on(prog: &Program, lowered: Option<&crate::lower::Lowered>, client: &DataClient, cfg: ExecConfig, opts: &Replay) -> Result<RunResult, RunError> {
+    on_kernel_thread(|| {
+        let mut exec = SimExecutor::new(cfg.clone());
+        replay(prog, lowered, client, cfg, &mut exec, opts, &mut |_| {}).map(|(r, k)| {
+            std::mem::forget(k);
+            r
+        })
+    })
+}
+
+/// A run over a data service that hands the kernel at the end of the stream
+/// to `f` (the explanations, the ledger and the state tables read it).
+pub fn run_keeping<T: Send>(
+    prog: &Program,
+    lowered: Option<&crate::lower::Lowered>,
+    client: &DataClient,
+    cfg: ExecConfig,
+    opts: &Replay,
+    f: impl for<'k> FnOnce(&RunResult, &mut Kernel<'k>) -> Result<T, RunError> + Send,
+) -> Result<(RunResult, T), RunError> {
+    on_kernel_thread(|| {
+        let mut exec = SimExecutor::new(cfg.clone());
+        let (r, mut k) = replay(prog, lowered, client, cfg, &mut exec, opts, &mut |_| {})?;
+        let out = f(&r, &mut k)?;
+        std::mem::forget(k);
+        Ok((r, out))
+    })
+}
+
+/// Run a checked program over a dataset held in memory: the data service
+/// the front registers holds it (E-36), and the run is the fold over its
+/// stream.
+pub fn run(prog: &Program, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
+    let client = bind::connect_dataset(dataset, prog)?;
+    run_on(prog, None, &client, cfg, &Replay::default())
 }
 
 /// `run` under a plan (compiler design, "Lower"): the kernel applies the
 /// plan's literal orders, infeasible rules, shared window states and folded
 /// constants.
 pub fn run_planned(prog: &Program, lowered: &crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::new_planned(prog, lowered, dataset, cfg)?;
-                k.run()
-            })
-            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-            .join()
-            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-    })
-}
-
-/// `run_fold` under a plan.
-pub fn run_fold_planned(prog: &Program, lowered: &crate::lower::Lowered, dataset: &Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let kernel = Kernel::new_streaming_planned(prog, lowered, dataset, cfg.clone())?;
-                let log = EventLog::from_dataset(&kernel, dataset)?;
-                let mut exec = SimExecutor::new(cfg);
-                let mut fold = Fold::new(kernel, &mut exec);
-                for ev in log.events {
-                    fold.step(ev)?;
-                }
-                fold.finish().map(|(r, _)| r)
-            })
-            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-            .join()
-            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-    })
-}
-
-/// `run` over a dataset the caller no longer needs: its facts move into the
-/// kernel (one copy in memory), and the kernel is not freed tuple by tuple
-/// at the end (the process is about to exit; a run of tens of millions of
-/// tuples spends seconds in deallocation otherwise).
-pub fn run_owned(prog: &Program, dataset: Dataset, cfg: ExecConfig) -> Result<RunResult, RunError> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::from_dataset(prog, dataset, cfg)?;
-                let out = k.run();
-                std::mem::forget(k);
-                out
-            })
-            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-            .join()
-            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-    })
+    let client = bind::connect_dataset(dataset, prog)?;
+    run_on(prog, Some(lowered), &client, cfg, &Replay::default())
 }
 
 /// A sampled timestamp at which the full run and the truncated run disagree.
@@ -3332,12 +3209,16 @@ pub struct CausalityMismatch {
 }
 
 /// The empirical check of the causality theorem (section 7): for each sampled
-/// t, decide(t) over E must equal decide(t) over E|ₜ.
+/// t, decide(t) over the whole stream must equal decide(t) over the stream
+/// truncated at t's barrier (Proposition K-4.1, G5).
 pub fn verify_causality(prog: &Program, dataset: &Dataset, cfg: ExecConfig, samples: &[i64]) -> Result<Vec<CausalityMismatch>, RunError> {
-    // Both runs are the fold, which honours availability (its executor's
-    // fills included); the truncated runs hold what was available at each
-    // sampled bar.
-    let full = run_fold(prog, dataset, cfg.clone())?;
+    let client = bind::connect_dataset(dataset, prog)?;
+    verify_causality_on(prog, &client, cfg, samples)
+}
+
+/// `verify_causality` over a data service.
+pub fn verify_causality_on(prog: &Program, client: &DataClient, cfg: ExecConfig, samples: &[i64]) -> Result<Vec<CausalityMismatch>, RunError> {
+    let full = run_on(prog, None, client, cfg.clone(), &Replay::default())?;
     let describe = |r: &RunResult, t: i64| -> Vec<String> {
         let mut v: Vec<String> = r.decisions_at(t).into_iter().map(|d| r.describe_decision(d)).collect();
         v.sort();
@@ -3345,8 +3226,16 @@ pub fn verify_causality(prog: &Program, dataset: &Dataset, cfg: ExecConfig, samp
     };
     let mut out = Vec::new();
     for &t in samples {
-        let trunc = dataset.truncated(prog, t);
-        let partial = run_fold(prog, &trunc, cfg.clone())?;
+        let partial = run_on(
+            prog,
+            None,
+            client,
+            cfg.clone(),
+            &Replay {
+                horizon: Some(t),
+                ..Replay::default()
+            },
+        )?;
         let a = describe(&full, t);
         let b = describe(&partial, t);
         if a != b {

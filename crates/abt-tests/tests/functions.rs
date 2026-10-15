@@ -4,7 +4,7 @@
 use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{ExecConfig, Kernel, Value};
+use abt_kernel::kernel::{ExecConfig, Value};
 
 fn capped() -> String {
     common::strategy(
@@ -22,8 +22,7 @@ fn capped() -> String {
 fn least_and_greatest_compare_integer_literals_numerically() {
     let prog = common::program(&capped(), "capped");
     let ds = synthetic_daily(&["AAA"], (2022, 1, 3), 5, 7);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let (result, mut k) = abt_tests::run_kernel(&prog, &ds, ExecConfig::frictionless()).unwrap();
     let t = result.bars[0];
     let w = k.query("w", t, &[]).unwrap();
     assert_eq!(w[0][2], Value::Num(1.0), "least(1, 2.5) is 1, a Scalar");

@@ -1,8 +1,10 @@
 //! `abt`, the front (docs/spec/00-architecture.md, Definition 2.2): every
 //! subcommand is a call on one layer; this binary parses nothing itself and
 //! dispatches. Until the layers serve their own commands (M-2 to M-5), the
-//! kernel's command line serves all of them.
+//! kernel's command line serves all of them, its data through the service
+//! `abt::install` registers.
 
 fn main() {
+    abt::install();
     abt_kernel::cli::main()
 }

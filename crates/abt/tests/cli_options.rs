@@ -114,7 +114,6 @@ fn usage_documents_every_option() {
         "--as-of",
         "--param",
         "--plan",
-        "--kernel",
         "--verify-causality",
         "--all",
         "--fills",

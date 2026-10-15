@@ -1,13 +1,19 @@
-//! The fold kernel (data-bundle doc, section 2) agrees with the batch kernel
-//! to the bit, and a fold stopped early is the batch run on the truncated
-//! dataset: the causality theorem, operationally.
+//! The fold over the data layer's stream (K-4.2): a run in process equals
+//! the run over a Unix socket to the bit on every corpus strategy and on
+//! crafted markets (Proposition P-5.1, G3); a stream truncated at a decision
+//! barrier decides as the whole run did up to that bar (Proposition K-4.1,
+//! G5, the causality theorem operationally); and the stream carries every
+//! tuple of the primitives the program reads, in receipt order, with the
+//! barriers of its calendars.
 
 use abt_tests as common;
 
 use abt_kernel::check::Program;
 use abt_kernel::data::{synthetic_daily, synthetic_minute};
-use abt_kernel::kernel::{run, run_fold, Dataset, Event, EventLog, ExecConfig, Fold, Kernel, RunResult, SimExecutor, Value};
+use abt_kernel::kernel::bind::{bind, stream_spec, Decoder, StreamEvent};
+use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, Replay, RunResult, Value};
 use abt_kernel::Kind;
+use abt_tests::{run, run_socket};
 
 fn corpus_strategies() -> Vec<(String, Program)> {
     common::dsl_files("strategies")
@@ -92,7 +98,7 @@ fn assert_same(name: &str, a: &RunResult, b: &RunResult) {
     if da != db {
         let first = da.iter().zip(&db).position(|(x, y)| x != y).unwrap_or(da.len().min(db.len()));
         panic!(
-            "{}: batch and fold differ at line {} of {} / {}:\n  batch: {}\n  fold:  {}",
+            "{}: in process and over a socket differ at line {} of {} / {}:\n  in process: {}\n  socket:     {}",
             name,
             first,
             da.len(),
@@ -103,9 +109,10 @@ fn assert_same(name: &str, a: &RunResult, b: &RunResult) {
     }
 }
 
-/// The fold against the batch kernel on the corpus strategies whose base
-/// matches `sub_daily`, every one of which must decide something.
-fn fold_equals_batch(sub_daily: bool) {
+/// The run in process against the run over a socket on the corpus
+/// strategies whose base matches `sub_daily`, every one of which must decide
+/// something.
+fn inproc_equals_socket(sub_daily: bool) {
     let mut seen = 0;
     for (name, p) in corpus_strategies() {
         if p.base.is_sub_daily() != sub_daily {
@@ -115,7 +122,7 @@ fn fold_equals_batch(sub_daily: bool) {
         let ds = dataset_for(&p, 11);
         let cfg = ExecConfig::from_program(&p);
         let a = run(&p, &ds, cfg.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
-        let b = run_fold(&p, &ds, cfg).unwrap_or_else(|e| panic!("{} (fold): {}", name, e));
+        let b = run_socket(&p, &ds, cfg).unwrap_or_else(|e| panic!("{} (socket): {}", name, e));
         assert_same(&name, &a, &b);
         assert!(!b.decisions.is_empty(), "{} decided nothing", name);
     }
@@ -123,19 +130,19 @@ fn fold_equals_batch(sub_daily: bool) {
 }
 
 #[test]
-fn the_fold_equals_the_batch_kernel_on_every_daily_corpus_strategy() {
-    fold_equals_batch(false);
+fn a_run_in_process_equals_the_run_over_a_socket_on_every_daily_corpus_strategy() {
+    inproc_equals_socket(false);
 }
 
 /// The strategies on a minute base (`opening_gap`, `resampled_momentum`),
 /// whose daily catalog is keyed at the date.
 #[test]
-fn the_fold_equals_the_batch_kernel_on_every_minute_corpus_strategy() {
-    fold_equals_batch(true);
+fn a_run_in_process_equals_the_run_over_a_socket_on_every_minute_corpus_strategy() {
+    inproc_equals_socket(true);
 }
 
 #[test]
-fn the_fold_equals_the_batch_kernel_on_crafted_markets() {
+fn a_run_in_process_equals_the_run_over_a_socket_on_crafted_markets() {
     // Missing prices, a liquidation at the last price, a delisting, a split
     // and a dividend: the crafted cases of the executor tests. The name is
     // in the universe while listed, so that a bar with no price is still a
@@ -167,7 +174,7 @@ fn the_fold_equals_the_batch_kernel_on_crafted_markets() {
         ..ExecConfig::frictionless()
     };
     let batch = run(&p, &ds, cfg.clone()).unwrap();
-    assert_same("round_trip", &batch, &run_fold(&p, &ds, cfg).unwrap());
+    assert_same("round_trip", &batch, &run_socket(&p, &ds, cfg).unwrap());
     assert!(!batch.decisions.is_empty());
     // The catalog market under the execution block, with a margin preset
     // and a tight participation cap too.
@@ -183,58 +190,83 @@ fn the_fold_equals_the_batch_kernel_on_crafted_markets() {
             ..block
         },
     ] {
-        assert_same("total_return_momentum", &run(&p, &ds, cfg.clone()).unwrap(), &run_fold(&p, &ds, cfg).unwrap());
+        assert_same("total_return_momentum", &run(&p, &ds, cfg.clone()).unwrap(), &run_socket(&p, &ds, cfg).unwrap());
     }
 }
 
 #[test]
-fn a_fold_stopped_early_is_the_batch_run_on_the_truncated_data() {
+fn a_stream_truncated_at_a_decision_barrier_decides_as_the_whole_run() {
     let p = common::corpus_program("momentum_top_n");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 200, 7);
     let cfg = ExecConfig::from_program(&p);
-    let kernel = Kernel::new_streaming(&p, &ds, cfg.clone()).unwrap();
-    let log = EventLog::from_dataset(&kernel, &ds).unwrap();
-    let bars: Vec<i64> = Kernel::new(&p, &ds, cfg.clone()).unwrap().decision_bars();
+    let client = common::client(&p, &ds);
+    let full = abt_kernel::kernel::run_on(&p, None, &client, cfg.clone(), &Replay::default()).unwrap();
+    let bars = full.bars.clone();
     for &cut in &[bars[60], bars[133], bars[199]] {
-        let kernel = Kernel::new_streaming(&p, &ds, cfg.clone()).unwrap();
-        let mut exec = SimExecutor::new(cfg.clone());
-        let mut fold = Fold::new(kernel, &mut exec);
-        for ev in &log.events {
-            if let Event::Tuple { avail, .. } = ev {
-                if *avail > cut {
-                    break;
-                }
-            }
-            fold.step(ev.clone()).unwrap();
+        let early = abt_kernel::kernel::run_on(
+            &p,
+            None,
+            &client,
+            cfg.clone(),
+            &Replay {
+                horizon: Some(cut),
+                ..Replay::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(*early.bars.last().unwrap(), cut, "the stream ends after the barrier of {}", cut);
+        assert_eq!(early.bars, bars.iter().copied().filter(|b| *b <= cut).collect::<Vec<_>>());
+        for &t in early.bars.iter() {
+            let d = |r: &RunResult| -> Vec<String> { r.decisions_at(t).into_iter().map(|d| r.describe_decision(d)).collect() };
+            assert_eq!(d(&early), d(&full), "decisions at {} with the stream cut at {}", t, cut);
         }
-        let (early, _) = fold.finish().unwrap();
-        let truncated = run(&p, &ds.truncated(&p, cut), cfg.clone()).unwrap();
-        assert_same(&format!("cut at {}", cut), &truncated, &early);
+        // The book before the cut bar is the whole run's.
+        let before = |r: &RunResult| -> Vec<(i64, u64)> { r.equity_curve.iter().filter(|(t, _)| *t < cut).map(|(t, e)| (*t, e.to_bits())).collect() };
+        assert_eq!(before(&early), before(&full));
     }
 }
 
 #[test]
-fn the_event_log_is_ordered_by_availability_then_relation() {
+fn the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers() {
     let p = common::corpus_program("sma_crossover");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 20, 1);
     let cfg = ExecConfig::from_program(&p);
-    let kernel = Kernel::new_streaming(&p, &ds, cfg).unwrap();
-    let log = EventLog::from_dataset(&kernel, &ds).unwrap();
-    let keys: Vec<(i64, usize)> = log
-        .events
+    let client = common::client(&p, &ds);
+    let bound = bind(&p, &client).unwrap();
+    let mut k = Kernel::bound(&p, &bound, cfg).unwrap();
+    assert!(k.decision_bars().is_empty(), "a bound kernel starts with no bars");
+    let (spec, cal_of) = stream_spec(&k, &bound, &client, "test").unwrap();
+    let mut decoder = Decoder::new(&k, &bound, cal_of);
+    let mut sub = client.subscribe(spec, 1, None).unwrap();
+    let mut events = Vec::new();
+    while let Some(b) = sub.next_batch().unwrap() {
+        events.extend(decoder.events(&mut k, &bound, &b).unwrap());
+    }
+    // Gap-free from 1; tuples in (receipt time, relation) order; a barrier
+    // of the decision calendar at every bar.
+    let seqs: Vec<u64> = events
         .iter()
         .map(|e| match e {
-            Event::Tuple { avail, rel, .. } => (*avail, *rel),
-            Event::Barrier { .. } => unreachable!("a dataset's log holds tuples only"),
+            StreamEvent::Tuple { seq, .. } | StreamEvent::Barrier { seq, .. } => *seq,
+        })
+        .collect();
+    assert_eq!(seqs, (1..=events.len() as u64).collect::<Vec<_>>());
+    let keys: Vec<(i64, usize)> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::Tuple { r, rel, .. } => Some((*r, *rel)),
+            _ => None,
         })
         .collect();
     let mut sorted = keys.clone();
     sorted.sort();
     assert_eq!(keys, sorted);
+    let barriers = events.iter().filter(|e| matches!(e, StreamEvent::Barrier { cal, .. } if *cal == p.decision_cal)).count();
+    assert_eq!(barriers, 20);
     // Every tuple of a primitive the program reads (the bars, the actions,
     // the listing and the tickers of five names over twenty bars), once;
     // the catalog the demand does not ask for (the index membership) is
-    // not in the log.
+    // not in the stream.
     let expected: usize = ds
         .facts
         .iter()
@@ -245,7 +277,6 @@ fn the_event_log_is_ordered_by_availability_then_relation() {
         ds.facts.contains_key("member") && !p.relations.contains_key("member"),
         "the market has a membership the demand does not read"
     );
-    assert_eq!(log.events.len(), expected);
+    assert_eq!(keys.len(), expected);
     assert!(expected >= 7 * 5 * 16, "open, high, low, close, volume, listed and ticker: {}", expected);
-    assert!(kernel.decision_bars().is_empty(), "a streaming kernel starts with no bars");
 }

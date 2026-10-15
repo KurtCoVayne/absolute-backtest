@@ -18,8 +18,7 @@ fn ts(s: &str) -> i64 {
 }
 
 fn ran<'p>(prog: &'p Program, ds: &Dataset) -> Kernel<'p> {
-    let mut k = Kernel::new(prog, ds, ExecConfig::default()).unwrap();
-    k.run().unwrap();
+    let (_, k) = abt_tests::run_kernel(prog, ds, ExecConfig::default()).unwrap();
     k
 }
 

@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use abt_kernel::bundle::{load_bundle, read_manifest, run_tests, run_tests_with, test_bundle, write_bundle, Exception};
 use abt_kernel::check::{class_program, Program};
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{run, Dataset, ExecConfig, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Value};
+use abt_tests::run;
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
 

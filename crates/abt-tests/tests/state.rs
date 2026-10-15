@@ -5,6 +5,8 @@
 //! and why-not with the absence-driven verdict; materialisation of an
 //! elided relation; the graph with the compiler's facts.
 
+#![allow(clippy::result_large_err)]
+
 use abt_tests as common;
 
 use std::fs;
@@ -31,22 +33,14 @@ fn ts(s: &str) -> i64 {
     common::day(s)
 }
 
-/// A run under the compiled plan, on a thread with the kernel's stack.
+/// A run under the compiled plan, the kernel kept at the end of the stream.
 fn with_run<T: Send>(p: &Program, ds: &Dataset, summaries: bool, f: impl for<'k> FnOnce(&mut Kernel<'k>, &abt_kernel::kernel::RunResult) -> T + Send) -> T {
     let compiled = compile(p, &CompileOptions::default());
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(256 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::new_planned(p, &compiled.lowered, ds, ExecConfig::default()).unwrap();
-                k.record_summaries(summaries);
-                let r = k.run().unwrap();
-                f(&mut k, &r)
-            })
-            .unwrap()
-            .join()
-            .unwrap()
-    })
+    let opts = abt_kernel::kernel::Replay {
+        record_summaries: summaries,
+        ..Default::default()
+    };
+    common::run_keeping(p, Some(&compiled.lowered), ds, ExecConfig::default(), &opts, |r, k| Ok(f(k, r))).unwrap().1
 }
 
 /// The corpus's z-score mean reversion with one relation of its own that

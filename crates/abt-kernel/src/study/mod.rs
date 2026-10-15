@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use crate::check::Program;
 use crate::ir::Lit;
 use crate::kernel::time::format_timestamp;
-use crate::kernel::{Dataset, ExecConfig, RunError, RunResult};
+use crate::kernel::{DataClient, Dataset, ExecConfig, RunError, RunResult};
 
 pub use lineage::{jaccard, normalized_rules, program_hash, Attachment, Lineage, Lineages, Opened, SIMILARITY_THRESHOLD};
 pub use log::{sharpe_variance, RunLog, RunRecord, Trial, TrialKind, TrialLog};
@@ -405,8 +405,18 @@ pub fn effective_params(prog: &Program, cfg: &ExecConfig) -> BTreeMap<String, St
     out
 }
 
-/// What runs a program on a dataset (the batch kernel, the fold, ...).
-pub type Runner<'a> = dyn Fn(&Program, &Dataset, ExecConfig) -> Result<RunResult, RunError> + Sync + 'a;
+/// What runs a program over a data service: the fold over its stream,
+/// truncated after the decision at the horizon when one is given (a
+/// trailing hold-out, a walk-forward window: the stream's `to_seq` at that
+/// barrier, G5).
+pub type Runner<'a> = dyn Fn(&Program, &DataClient, ExecConfig, Option<i64>) -> Result<RunResult, RunError> + Sync + 'a;
+
+/// A study's sample: the dataset its bars are read from, and the data
+/// service its runs read through.
+pub struct Sample<'a> {
+    pub ds: &'a Dataset,
+    pub client: &'a DataClient,
+}
 
 /// Grid points evaluated at once by a study (each point is an independent
 /// run over the same data); `set_threads` changes it. A run holds its own
@@ -535,10 +545,10 @@ struct Evaluated {
 /// `evaluate` for several configurations at once, on `threads()` workers,
 /// the results in the configurations' order (so a study logs its trials in
 /// grid order whatever finishes first).
-fn evaluate_all(prog: &Program, data: &Dataset, cfgs: &[ExecConfig], runner: &Runner, keep: &(dyn Fn(i64) -> bool + Sync)) -> Result<Vec<Evaluated>, String> {
+fn evaluate_all(prog: &Program, data: &Sample, horizon: Option<i64>, cfgs: &[ExecConfig], runner: &Runner, keep: &(dyn Fn(i64) -> bool + Sync)) -> Result<Vec<Evaluated>, String> {
     let workers = threads().min(cfgs.len()).max(1);
     if workers == 1 {
-        return cfgs.iter().map(|c| evaluate(prog, data, c.clone(), runner, keep)).collect();
+        return cfgs.iter().map(|c| evaluate(prog, data, horizon, c.clone(), runner, keep)).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let slots: Vec<std::sync::Mutex<Option<Result<Evaluated, String>>>> = cfgs.iter().map(|_| std::sync::Mutex::new(None)).collect();
@@ -549,7 +559,7 @@ fn evaluate_all(prog: &Program, data: &Dataset, cfgs: &[ExecConfig], runner: &Ru
                 if i >= cfgs.len() {
                     break;
                 }
-                let out = evaluate(prog, data, cfgs[i].clone(), runner, keep);
+                let out = evaluate(prog, data, horizon, cfgs[i].clone(), runner, keep);
                 *slots[i].lock().unwrap() = Some(out);
             });
         }
@@ -557,9 +567,9 @@ fn evaluate_all(prog: &Program, data: &Dataset, cfgs: &[ExecConfig], runner: &Ru
     slots.into_iter().map(|m| m.into_inner().unwrap().unwrap_or_else(|| Err("a study worker stopped".into()))).collect()
 }
 
-fn evaluate(prog: &Program, data: &Dataset, cfg: ExecConfig, runner: &Runner, keep: &dyn Fn(i64) -> bool) -> Result<Evaluated, String> {
+fn evaluate(prog: &Program, data: &Sample, horizon: Option<i64>, cfg: ExecConfig, runner: &Runner, keep: &dyn Fn(i64) -> bool) -> Result<Evaluated, String> {
     let ppy = periods_per_year(prog);
-    let result = runner(prog, data, cfg).map_err(|e| e.to_string())?;
+    let result = runner(prog, data.client, cfg, horizon).map_err(|e| e.to_string())?;
     let curve = masked_curve(&result.metric_curve(), keep);
     let metrics = return_metrics(&curve, ppy);
     let trading = trading_metrics(&result, ppy);
@@ -611,7 +621,7 @@ fn point_cfg(study: &StudySpec, point: &Point) -> ExecConfig {
 /// masks the metrics), then the lineage's deflated Sharpe ratio for the
 /// best point, the grid's PBO and parameter surface, the best point's
 /// sub-period stability, and the walk-forward folds when a scheme is given.
-pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset, grid: &Grid, runner: &Runner, from: Provenance) -> Result<(Vec<Outcome>, RunReport), String> {
+pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, data: &Sample, grid: &Grid, runner: &Runner, from: Provenance) -> Result<(Vec<Outcome>, RunReport), String> {
     let hash = program_hash(prog);
     let opened = project.open_lineage(prog)?;
     if opened.lineage != study.lineage {
@@ -623,10 +633,11 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
     if grid.points.is_empty() {
         return Err("no parameter point to run".into());
     }
-    let embargo = study.holdout.embargo(ds);
+    let embargo = study.holdout.embargo(data.ds);
+    // A trailing embargo truncates the stream before its first bar.
     let sample = match (embargo.truncates, embargo.start()) {
-        (true, Some(h)) => ds.truncated(prog, h - 1),
-        _ => ds.clone(),
+        (true, Some(h)) => Some(h - 1),
+        _ => None,
     };
     let keep = |t: i64| !embargo.contains(t);
     let ppy = periods_per_year(prog);
@@ -646,7 +657,7 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
         Some(format!("metrics exclude the embargoed blocks {}", embargo.describe()))
     };
     let cfgs: Vec<ExecConfig> = grid.points.iter().map(|p| point_cfg(study, p)).collect();
-    let evs = evaluate_all(prog, &sample, &cfgs, runner, &keep)?;
+    let evs = evaluate_all(prog, data, sample, &cfgs, runner, &keep)?;
     for (cfg, ev) in cfgs.iter().zip(evs) {
         let trial = record(&log, study, prog, &hash, cfg, &ev, TrialKind::Trial, &from, masked_note.clone())?;
         curves.push(ev.curve);
@@ -670,7 +681,7 @@ pub fn run_study(project: &Project, study: &StudySpec, prog: &Program, ds: &Data
     let surface = validate::surface(&grid.axes, &values, best);
     let subperiods = validate::subperiod_sharpes(&curves[best], ppy, 20);
     let walk_forward = match &from.scheme {
-        Some(scheme) => Some(walk_forward(&log, study, prog, &hash, &sample, grid, runner, &from, scheme, &keep)?),
+        Some(scheme) => Some(walk_forward(&log, study, prog, &hash, data, sample, grid, runner, &from, scheme, &keep)?),
         None => None,
     };
     let lineage_trials = log.for_lineage(&study.lineage)?;
@@ -799,14 +810,23 @@ fn walk_forward(
     study: &StudySpec,
     prog: &Program,
     hash: &str,
-    sample: &Dataset,
+    data: &Sample,
+    sample: Option<i64>,
     grid: &Grid,
     runner: &Runner,
     from: &Provenance,
     scheme: &WalkForward,
     keep: &(dyn Fn(i64) -> bool + Sync),
 ) -> Result<WalkForwardReport, String> {
-    let bars: Vec<i64> = sample.facts.values().flat_map(|tus| tus.iter()).filter_map(|tu| tu.iter().find_map(|v| v.as_time())).collect();
+    let bars: Vec<i64> = data
+        .ds
+        .facts
+        .values()
+        .flat_map(|tus| tus.iter())
+        .filter_map(|tu| tu.iter().find_map(|v| v.as_time()))
+        .filter(|t| sample.is_none_or(|h| *t <= h))
+        .collect();
+    let within = |h: i64| Some(sample.map_or(h, |s| s.min(h)));
     let (Some(first), Some(last)) = (bars.iter().min().copied(), bars.iter().max().copied()) else {
         return Err("the sample has no bars".into());
     };
@@ -824,11 +844,11 @@ fn walk_forward(
     let mut stitched: Vec<(i64, f64)> = Vec::new();
     let mut level = 1.0;
     for (k, &(train_from, train_to, test_from, test_to)) in folds.iter().enumerate() {
-        let train_data = sample.truncated(prog, test_from - 1);
+        let train_horizon = within(test_from - 1);
         let mut best: Option<(usize, f64, f64)> = None;
         let in_train = |t: i64| keep(t) && train_from <= t && t < train_to;
         let cfgs: Vec<ExecConfig> = grid.points.iter().map(|p| point_cfg(study, p)).collect();
-        let evs = evaluate_all(prog, &train_data, &cfgs, runner, &in_train)?;
+        let evs = evaluate_all(prog, data, train_horizon, &cfgs, runner, &in_train)?;
         for (i, (cfg, ev)) in cfgs.iter().zip(evs).enumerate() {
             record(
                 log,
@@ -849,9 +869,9 @@ fn walk_forward(
         }
         let Some((bi, is_v, is_cagr)) = best else { continue };
         let cfg = point_cfg(study, &grid.points[bi]);
-        let test_data = sample.truncated(prog, test_to - 1);
+        let test_horizon = within(test_to - 1);
         let in_test = |t: i64| keep(t) && test_from <= t && t < test_to;
-        let ev = evaluate(prog, &test_data, cfg.clone(), runner, &in_test)?;
+        let ev = evaluate(prog, data, test_horizon, cfg.clone(), runner, &in_test)?;
         record(
             log,
             study,
@@ -897,7 +917,7 @@ fn walk_forward(
 /// `holdout.reveal`: the committed program (a member of the study's
 /// lineage) runs over the whole sample and reports the embargoed bars
 /// only; logged as an out-of-sample trial, counted like any other.
-pub fn reveal(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset, runner: &Runner, from: Provenance) -> Result<(Outcome, Embargo), String> {
+pub fn reveal(project: &Project, study: &StudySpec, prog: &Program, data: &Sample, runner: &Runner, from: Provenance) -> Result<(Outcome, Embargo), String> {
     let hash = program_hash(prog);
     let ls = project.lineages()?;
     match ls.lineage_of(&hash) {
@@ -910,12 +930,12 @@ pub fn reveal(project: &Project, study: &StudySpec, prog: &Program, ds: &Dataset
             ))
         }
     }
-    let embargo = study.holdout.embargo(ds);
+    let embargo = study.holdout.embargo(data.ds);
     if embargo.is_empty() {
         return Err(format!("study {} declares no hold-out; there is nothing to reveal", study.id));
     }
     let cfg = study.exec.clone();
-    let ev = evaluate(prog, ds, cfg.clone(), runner, &|t| embargo.contains(t))?;
+    let ev = evaluate(prog, data, None, cfg.clone(), runner, &|t| embargo.contains(t))?;
     let log = project.log();
     let trial = record(
         &log,

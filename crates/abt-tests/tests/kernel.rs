@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 use abt_kernel::check::Program;
 use abt_kernel::data::{business_days, synthetic_daily, synthetic_for_program, synthetic_minute};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, verify_causality, Ctor, Dataset, ExecConfig, Kernel, OnLeverage, RunError, RunResult, Sym, Value};
+use abt_kernel::kernel::{Ctor, Dataset, ExecConfig, OnLeverage, RunError, RunResult, Sym, Value};
 use abt_kernel::{Duration, Lit};
+use abt_tests::{run, verify_causality};
 
 use common::day;
 
@@ -214,8 +215,7 @@ fn window_minimum_withholds_the_aggregate() {
 fn explain_names_the_first_failing_literal() {
     let prog = up_down();
     let ds = crafted_daily(&[10.0, 11.0, 10.0, 12.0, 13.0]);
-    let mut k = Kernel::new(&prog, &ds, hand(1000.0)).unwrap();
-    k.run().unwrap();
+    let (_, mut k) = abt_tests::run_kernel(&prog, &ds, hand(1000.0)).unwrap();
     let decide_buy = (0..prog.rules.len()).find(|&i| prog.rule_label(i) == "up_down::decide#1").unwrap();
     let ex = k.explain(decide_buy, day("2024-01-10"), &[]).unwrap();
     assert_eq!(ex.failed_at.as_ref().map(|(i, _)| *i), Some(0), "{}", ex);
@@ -385,10 +385,10 @@ fn causality_holds(name: &str) {
     let prog = common::corpus_program(name);
     let ds = dataset_for(&prog, 400, 5);
     let cfg = ExecConfig::from_program(&prog);
-    let bars = Kernel::new(&prog, &ds, cfg.clone()).unwrap().decision_bars();
+    let bars = abt_tests::loaded_kernel(&prog, &ds, cfg.clone()).decision_bars();
     let n = bars.len();
     let samples: Vec<i64> = [n / 3, n / 2, 2 * n / 3, n - 1].iter().map(|&i| bars[i]).collect();
-    let full = abt_kernel::kernel::run_fold(&prog, &ds, cfg.clone()).unwrap();
+    let full = abt_tests::run_socket(&prog, &ds, cfg.clone()).unwrap();
     assert!(!full.decisions.is_empty(), "{}: the fold decides nothing over {} bars", name, full.bars.len());
     let mismatches = verify_causality(&prog, &ds, cfg, &samples).unwrap();
     assert!(mismatches.is_empty(), "{}: {:?}", name, mismatches);
@@ -805,7 +805,7 @@ fn a_short_day_stays_in_the_domain_without_a_bar() {
     let prog = common::program(&src, "up_vs_prev");
     // Mon..Fri: full, full, half-day (150 bars), full, full.
     let ds = minute_days(&[300, 300, 150, 300, 300], 50.0, 1.0);
-    let bars = Kernel::new(&prog, &ds, ExecConfig::default()).unwrap().decision_bars();
+    let bars = abt_tests::loaded_kernel(&prog, &ds, ExecConfig::default()).decision_bars();
     // A daily label is the day's last minute bar.
     let days: Vec<String> = bars.iter().map(|t| format_timestamp(*t)[..10].to_string()).collect();
     assert_eq!(days, vec!["2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12"]);
@@ -910,7 +910,7 @@ fn a_run_window_warms_up_on_earlier_bars_and_trades_inside_it() {
     // The first decision bar sees day 2 through prev: it decides at once.
     assert_eq!(r.decisions.first().map(|d| d.t), Some(days[2]));
     assert_eq!(r.equity_curve.first().map(|(t, _)| *t), Some(days[2]));
-    let f = abt_kernel::kernel::run_fold(&prog, &ds, cfg).unwrap();
+    let f = abt_tests::run_socket(&prog, &ds, cfg).unwrap();
     assert_eq!(f.bars, r.bars);
     assert_eq!(f.final_cash.to_bits(), r.final_cash.to_bits());
 }

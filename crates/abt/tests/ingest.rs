@@ -14,8 +14,9 @@ use abt_kernel::bundle::{load_bundle, read_manifest, write_bundle};
 use abt_kernel::check::{class_program, Program};
 use abt_kernel::ingest::{databento_minute, norgate_daily};
 use abt_kernel::kernel::time::{format_timestamp, parse_timestamp};
-use abt_kernel::kernel::{run, ExecConfig, Value};
+use abt_kernel::kernel::{ExecConfig, Value};
 use abt_kernel::table::write_text_table;
+use abt_tests::run;
 
 /// The program files, relative to the crate root the commands run in.
 const CATALOG: &str = "corpus-v2/catalog";
@@ -214,7 +215,16 @@ fn a_databento_export_is_keyed_at_the_bar_close_with_recorded_availability() {
         .map(|(i, _)| i)
         .unwrap();
     assert_eq!(format_timestamp(avail[late]), "2024-01-02T09:32:35");
+    // Every bar is received seconds after its close, so after its own
+    // barrier (E-13, E-37): no decision at a bar reads that bar's close, and
+    // this program, whose universe is the names that traded at the bar,
+    // decides nothing. Received at the close, it trades.
     let r = run(&prog, ds, ExecConfig::frictionless()).unwrap();
+    assert_eq!(r.bars.len(), 5);
+    assert!(r.decisions.is_empty() && r.fills.is_empty(), "{:?}", r.decisions);
+    let mut prompt = ds.clone();
+    prompt.available_at.clear();
+    let r = run(&prog, &prompt, ExecConfig::frictionless()).unwrap();
     assert!(!r.fills.is_empty());
     // Without ts_recv, availability is the bar close plus the delay, or
     // plain bar close at zero delay.

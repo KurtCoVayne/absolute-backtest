@@ -132,77 +132,75 @@ fn parse_args() -> Args {
     Args { cmd, files, opts, multi, flags }
 }
 
-/// The dataset a kept-kernel run reads: moved into the kernel when nothing
-/// reads it after the run, borrowed (copied into the kernel) when `--dump`,
-/// `--study` or `--verify-causality` will.
-enum Data<'a> {
-    Owned(Box<crate::kernel::Dataset>),
-    Borrowed(&'a crate::kernel::Dataset),
+/// Whether a path is a Unix socket (`--data SOCKET`: a data service's).
+fn is_socket(p: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(p).map(|m| m.file_type().is_socket()).unwrap_or(false)
 }
 
-/// Run on the batch kernel and keep the kernel afterwards for what reads the
-/// model after the run: the explanations of the coverage report's root
-/// causes, and the ledger. The kernel is not freed tuple by tuple at the
-/// end, as in `run_owned`.
+/// The data service a run reads: the one at `--data SOCKET`, else one in
+/// this process holding the dataset the options loaded (E-36).
+static DATA_SOCKET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn data_client(prog: &crate::check::Program, dataset: &crate::kernel::Dataset) -> Result<crate::kernel::DataClient, RunError> {
+    match DATA_SOCKET.get() {
+        Some(path) => {
+            let conn = abt_wire::transport::Connection::connect(path).map_err(|e| RunError::Config(format!("--data {}: {}", path.display(), e)))?;
+            crate::kernel::DataClient::connect(conn)
+        }
+        None => crate::kernel::connect_dataset(dataset, prog),
+    }
+}
+
+/// Run and keep the kernel afterwards for what reads the model after the
+/// run: the explanations of the coverage report's root causes, the ledger
+/// and the state tables.
 fn run_keeping(
     prog: &crate::check::Program,
     lowered: Option<&crate::lower::Lowered>,
-    data: Data<'_>,
+    dataset: &crate::kernel::Dataset,
     cfg: ExecConfig,
     ledger: &[String],
     ledger_out: Option<&Path>,
     tables: Option<(&Path, &crate::plan::Plan)>,
 ) -> Result<(RunResult, Vec<String>), RunError> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = match (data, lowered) {
-                    (Data::Owned(ds), Some(l)) => Kernel::from_dataset_planned(prog, l, *ds, cfg)?,
-                    (Data::Borrowed(ds), Some(l)) => Kernel::new_planned(prog, l, ds, cfg)?,
-                    (Data::Owned(ds), None) => Kernel::from_dataset(prog, *ds, cfg)?,
-                    (Data::Borrowed(ds), None) => Kernel::new(prog, ds, cfg)?,
+    let client = data_client(prog, dataset)?;
+    let opts = crate::kernel::Replay {
+        record_summaries: tables.is_some(),
+        ..Default::default()
+    };
+    crate::kernel::run_keeping(prog, lowered, &client, cfg, &opts, |result, k| {
+        let mut notes = Vec::new();
+        let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
+        for c in &causes {
+            for ri in prog.rules_for(&c.relation) {
+                let label = prog.rule_label(ri);
+                let cal = prog.cal_of(&c.relation);
+                let first = result.bars[0];
+                let last = *result.bars.last().unwrap();
+                let bars: Vec<i64> = k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect();
+                let Some(&t) = bars.get(bars.len() / 2) else {
+                    notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, prog.cal_name(&cal)));
+                    continue;
                 };
-                if tables.is_some() {
-                    k.record_summaries(true);
+                match k.explain(ri, t, &[]) {
+                    Ok(ex) => notes.push(format!("{} (a sample bar; abt query --rel {} --at BAR --explain for another)", ex, c.relation)),
+                    Err(e) => notes.push(format!("rule {} at {}: {}", label, format_timestamp(t), e)),
                 }
-                let result = k.run()?;
-                let mut notes = Vec::new();
-                let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
-                for c in &causes {
-                    for ri in prog.rules_for(&c.relation) {
-                        let label = prog.rule_label(ri);
-                        let cal = prog.cal_of(&c.relation);
-                        let first = result.bars[0];
-                        let last = *result.bars.last().unwrap();
-                        let bars: Vec<i64> = k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect();
-                        let Some(&t) = bars.get(bars.len() / 2) else {
-                            notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, prog.cal_name(&cal)));
-                            continue;
-                        };
-                        match k.explain(ri, t, &[]) {
-                            Ok(ex) => notes.push(format!("{} (a sample bar; abt query --rel {} --at BAR --explain for another)", ex, c.relation)),
-                            Err(e) => notes.push(format!("rule {} at {}: {}", label, format_timestamp(t), e)),
-                        }
-                    }
-                }
-                if let Some(dir) = ledger_out {
-                    write_ledger(&mut k, prog, &result, ledger, dir)?;
-                }
-                if let Some((dir, plan)) = tables {
-                    let n = write_tables(&mut k, prog, &result, plan, dir)?;
-                    notes.push(format!(
-                        "tables: {} ({} Arrow IPC file(s): coverage, plan, book, summary, binding, extension/, carried/, derivation, failure)",
-                        dir.display(),
-                        n
-                    ));
-                }
-                std::mem::forget(k);
-                Ok((result, notes))
-            })
-            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-            .join()
-            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
+            }
+        }
+        if let Some(dir) = ledger_out {
+            write_ledger(k, prog, result, ledger, dir)?;
+        }
+        if let Some((dir, plan)) = tables {
+            let n = write_tables(k, prog, result, plan, dir)?;
+            notes.push(format!(
+                "tables: {} ({} Arrow IPC file(s): coverage, plan, book, summary, binding, extension/, carried/, derivation, failure)",
+                dir.display(),
+                n
+            ));
+        }
+        Ok(notes)
     })
 }
 
@@ -237,26 +235,22 @@ fn checked_program(args: &Args) -> (crate::check::Program, Vec<crate::check::Dia
     (prog, diags)
 }
 
-/// A kernel under the plan on a big-stack thread, for what reads the model
-/// after a run (the state tables and the provenance commands).
+/// A run under the plan whose kernel, at the end of the stream, `f` reads
+/// with the run (the state tables and the provenance commands).
 fn with_kernel<T: Send>(
     prog: &crate::check::Program,
     dataset: &crate::kernel::Dataset,
     lowered: &crate::lower::Lowered,
     cfg: ExecConfig,
-    f: impl for<'k> FnOnce(&mut Kernel<'k>) -> Result<T, RunError> + Send,
+    record_summaries: bool,
+    f: impl for<'k> FnOnce(&RunResult, &mut Kernel<'k>) -> Result<T, RunError> + Send,
 ) -> Result<T, RunError> {
-    std::thread::scope(|s| {
-        std::thread::Builder::new()
-            .stack_size(512 << 20)
-            .spawn_scoped(s, || {
-                let mut k = Kernel::new_planned(prog, lowered, dataset, cfg)?;
-                f(&mut k)
-            })
-            .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-            .join()
-            .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-    })
+    let client = data_client(prog, dataset)?;
+    let opts = crate::kernel::Replay {
+        record_summaries,
+        ..Default::default()
+    };
+    crate::kernel::run_keeping(prog, Some(lowered), &client, cfg, &opts, f).map(|(_, t)| t)
 }
 
 /// `--at`, parsed.
@@ -434,11 +428,11 @@ fn write_ledger(k: &mut Kernel, prog: &crate::check::Program, result: &RunResult
 }
 
 /// What runs a checked program on a dataset: the batch kernel, the fold, or the fold with checkpoints.
-type Runner = dyn Fn(&crate::check::Program, &crate::kernel::Dataset, ExecConfig) -> Result<crate::kernel::RunResult, RunError> + Sync;
+type Runner = crate::study::Runner<'static>;
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised] [--kernel batch|fold]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --kernel KIND         batch (default: the memoised evaluator bar by bar) or fold (the same evaluation driven by an availability-ordered event stream)\n  --checkpoint-every P  with --kernel fold: write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         with --kernel fold: continue from a checkpoint file over the same data and configuration\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report's metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --base RES            the bars a built bundle holds (default: the class's base; @1m with --from-databento)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>\n  abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (the derivation tree of a tuple, one witness per derived tuple, down to supplied tuples; ids as the derivation table prints them)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (per rule, the first excluding literal and its bindings for that instrument at that bar; absence-driven when a supplied relation has no tuple there)\n  abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a relation's tuples at a bar from its rules, whether or not the plan computed it)\n  abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>\n          (the tuples of a relation at a bar after the run, any relation, primitive or derived; --at defaults to the last decision bar; --symbol keeps one instrument's tuples; --explain adds, for every rule of the relation, whether it fired there and the first solution's variable bindings, or the first literal with no solution)\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>\n  abt bundle test DIR <files...>\n  abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>\n  abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--threads N] <files...>\n  abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>\n  abt study metrics --study DIR [--strategy NAME] <files...>\n  abt study report --study DIR --strategy NAME <files...>\n  abt study dispute --study DIR --strategy NAME --reason TEXT <files...>\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars into --checkpoint-dir DIR as <bar>.json\n  --resume FILE         continue from a checkpoint file over the same data and configuration (the stream resumes at its cursor)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); --untested admits one whose tests have not passed\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --study DIR           the study directory (lineages.json, studies/, trials.jsonl); with `abt run`, logs the run as an untracked trial\n  --holdout POLICY      none (warned), trailing:Ny (the last N years are truncated away until revealed) or blocks:K:Nmo[:SEED] (K random blocks of N months whose metrics are withheld until revealed)\n  --walk-forward SCHEME anchored:TRAIN:TEST or rolling:TRAIN:TEST (2y, 6mo): each fold picks the grid's best point on the train window and judges it on the test window\n  --objective METRIC    what a grid optimises (default sharpe; one of the report's metrics)\n  --require METRIC>=X   a threshold the report checks (repeatable; also METRIC<=X)\n  --grid NAME=V1,V2     a parameter axis of the grid (repeatable; the points are the cartesian product)\n  --threads N           study grid points (and walk-forward folds' points) run at once (default: the cores, at most 4; each holds its own kernel)\n  --reason TEXT         why a lineage attachment is disputed\n  --briefs DIR          the plain-language briefs (*.md); --attempts DIR holds attempts/<brief>/<n>.dsl, the model's successive attempts; --out FILE writes the report as JSON\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --derivation ID       a tuple id `R(v1, ..., vn)@BAR` for `explain`; --depth N bounds the tree (default 6)\n  --rel RELATION        the relation `query` reads; --symbol SYM keeps one instrument's tuples and binds the head's entity for --explain\n  --bind VAR=VALUE      pre-bind a body variable for explain (repeatable)\n  --from-norgate DIR    build from a Norgate-style daily export of Parquet files (prices, symbols, splits, dividends, delistings, membership, classification, exceptions: reviewed bundle-test exceptions)\n  --from-databento DIR  build from a Databento-style minute export of Parquet files (ohlcv-1m with optional ts_recv, symbology); --processing-delay S adds S seconds to every tuple's availability\n  --base RES            the bars a built bundle holds (default: the class's base; @1m with --from-databento)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics"
     );
     exit(code)
 }
@@ -530,6 +524,10 @@ fn load_dataset(args: &Args, prog: &crate::check::Program) -> (crate::kernel::Da
         }
         bundle_label = Some(format!("{}@{}", m.name, m.version));
         ds
+    } else if let Some(dir) = args.opts.get("data").filter(|d| is_socket(Path::new(d))) {
+        // A data service already holds the data: the run reads it there.
+        let _ = DATA_SOCKET.set(PathBuf::from(dir));
+        crate::kernel::Dataset::new()
     } else if let Some(dir) = args.opts.get("data") {
         let (ds, notes) = data::load_parquet_dir(prog, Path::new(dir)).unwrap_or_else(|e| {
             eprintln!("{}", e);
@@ -644,9 +642,14 @@ fn make_runner(args: &Args) -> Box<Runner> {
     make_runner_with(args, None)
 }
 
-/// `make_runner` under a plan: the kernel applies it on both drivers.
+/// `make_runner` under a plan. The fold over the data layer's stream is the
+/// only driver (M-2); `--checkpoint-every` writes its checkpoints and
+/// `--resume` continues one.
 fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<Runner> {
-    let kernel_kind = args.opts.get("kernel").map(|s| s.as_str()).unwrap_or("batch");
+    if let Some(k) = args.opts.get("kernel") {
+        eprintln!("--kernel {}: the batch kernel is gone; every run is the fold over the data layer's stream", k);
+        exit(2)
+    }
     let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
         "month" => crate::kernel::CheckpointEvery::Month,
         n => crate::kernel::CheckpointEvery::Bars(n.parse().unwrap_or_else(|_| {
@@ -656,74 +659,40 @@ fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<
     });
     let checkpoint_dir = args.opts.get("checkpoint-dir").map(PathBuf::from);
     let resume = args.opts.get("resume").map(PathBuf::from);
-    if (checkpoint_every.is_some() || resume.is_some()) && kernel_kind != "fold" {
-        eprintln!("--checkpoint-every and --resume need --kernel fold");
-        exit(2)
-    }
-    let runner: Box<Runner> = match kernel_kind {
-        "batch" => match lowered {
-            Some(l) => Box::new(move |prog, dataset, cfg| crate::kernel::run_planned(prog, &l, dataset, cfg)),
-            None => Box::new(crate::kernel::run),
-        },
-        "fold" if checkpoint_every.is_none() && resume.is_none() => match lowered {
-            Some(l) => Box::new(move |prog, dataset, cfg| crate::kernel::run_fold_planned(prog, &l, dataset, cfg)),
-            None => Box::new(crate::kernel::run_fold),
-        },
-        "fold" => Box::new(move |prog, dataset, cfg| {
-            use crate::kernel::{Checkpoint, Event, EventLog, Fold, Kernel, SimExecutor};
-            std::thread::scope(|s| {
-                std::thread::Builder::new()
-                    .stack_size(512 << 20)
-                    .spawn_scoped(s, || {
-                        let kernel = match &lowered {
-                            Some(l) => Kernel::new_streaming_planned(prog, l, dataset, cfg.clone())?,
-                            None => Kernel::new_streaming(prog, dataset, cfg.clone())?,
-                        };
-                        let log = EventLog::from_dataset(&kernel, dataset)?;
-                        let mut exec = SimExecutor::new(cfg.clone());
-                        let (mut fold, cursor) = match &resume {
-                            Some(path) => {
-                                let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
-                                let cp: Checkpoint = serde_json::from_str(&text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
-                                let cursor = cp.cursor;
-                                eprintln!("resuming from {} (checkpoint of {})", path.display(), format_timestamp(cp.last_bar));
-                                (Fold::restore(kernel, &mut exec, cp)?, cursor)
-                            }
-                            None => (Fold::new(kernel, &mut exec), i64::MIN),
-                        };
-                        if let Some(every) = checkpoint_every {
-                            fold = fold.with_checkpoints(every);
-                        }
-                        for ev in log.events {
-                            if let Event::Tuple { avail, .. } = &ev {
-                                if *avail < cursor {
-                                    continue;
-                                }
-                            }
-                            fold.step(ev)?;
-                            if let Some(cp) = fold.take_checkpoint() {
-                                if let Some(dir) = &checkpoint_dir {
-                                    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("{}: {}", dir.display(), e)))?;
-                                    let path = dir.join(format!("{}.json", format_timestamp(cp.last_bar)));
-                                    let text = serde_json::to_string(&cp).map_err(|e| RunError::Internal(e.to_string()))?;
-                                    std::fs::write(&path, text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
-                                    eprintln!("checkpoint {} written", path.display());
-                                }
-                            }
-                        }
-                        fold.finish().map(|(r, _)| r)
-                    })
-                    .map_err(|e| RunError::Internal(format!("cannot spawn kernel thread: {}", e)))?
-                    .join()
-                    .map_err(|_| RunError::Internal("kernel thread panicked".into()))?
-            })
-        }),
-        other => {
-            eprintln!("--kernel: `{}` is not one of batch, fold", other);
-            exit(2)
+    Box::new(move |prog, client, cfg, horizon| {
+        let mut opts = crate::kernel::Replay {
+            checkpoint_every,
+            horizon,
+            ..Default::default()
+        };
+        if let Some(path) = &resume {
+            let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+            let cp: crate::kernel::Checkpoint = serde_json::from_str(&text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+            eprintln!("resuming from {} (checkpoint of {})", path.display(), format_timestamp(cp.last_bar));
+            opts.from = Some(cp);
         }
-    };
-    runner
+        crate::kernel::on_kernel_thread(|| {
+            let mut exec = crate::kernel::SimExecutor::new(cfg.clone());
+            let mut written: Result<(), RunError> = Ok(());
+            let mut save = |cp: crate::kernel::Checkpoint| {
+                let Some(dir) = &checkpoint_dir else { return };
+                let r = (|| {
+                    std::fs::create_dir_all(dir).map_err(|e| RunError::Request(format!("{}: {}", dir.display(), e)))?;
+                    let path = dir.join(format!("{}.json", format_timestamp(cp.last_bar)));
+                    let text = serde_json::to_string(&cp).map_err(|e| RunError::Internal(e.to_string()))?;
+                    std::fs::write(&path, text).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
+                    eprintln!("checkpoint {} written", path.display());
+                    Ok(())
+                })();
+                if r.is_err() && written.is_ok() {
+                    written = r;
+                }
+            };
+            let (r, k) = crate::kernel::replay(prog, lowered.as_ref(), client, cfg.clone(), &mut exec, &opts, &mut save)?;
+            std::mem::forget(k);
+            written.map(|_| r)
+        })
+    })
 }
 
 /// The process's peak resident set in MB: `VmHWM` on Linux, `getrusage`'s
@@ -958,12 +927,10 @@ pub fn main() {
             let out = args.opts.get("out").map(PathBuf::from);
             let needs_rel = matches!(which.as_str(), "extension" | "carried" | "derivation" | "failure");
             let rel = if needs_rel { Some(rel_option(&args, "this table")) } else { args.opts.get("rel").cloned() };
-            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
+            let record = which == "summary";
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, record, |result, k| {
                 use crate::state::tables;
-                if which == "summary" {
-                    k.record_summaries(true);
-                }
-                let result = k.run()?;
+                let result = result.clone();
                 let bars = result.bars.clone();
                 let table = match which.as_str() {
                     "coverage" => tables::coverage(&result),
@@ -1025,8 +992,8 @@ pub fn main() {
             let cfg = exec_config(&args, &prog);
             let at = at_option(&args);
             let json = args.flags.contains("json");
-            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
-                let result = k.run()?;
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, false, |result, k| {
+                let result = result.clone();
                 let t = bar_for(k, &prog, &rel, at, &result.bars)?;
                 let sym = symbol_for(k, &args)?;
                 let w = crate::state::provenance::why_not(k, &prog, &rel, t, None, sym)?;
@@ -1059,8 +1026,8 @@ pub fn main() {
             let at = at_option(&args);
             let json = args.flags.contains("json");
             let elided = compiled.rewritten.elided.contains(&rel);
-            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
-                let result = k.run()?;
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, false, |result, k| {
+                let result = result.clone();
                 let t = bar_for(k, &prog, &rel, at, &result.bars)?;
                 let table = crate::state::tables::materialise(k, &prog, &rel, t, None, elided)?;
                 Ok(if json {
@@ -1091,8 +1058,7 @@ pub fn main() {
             let compiled = crate::compiler::compile(&prog, &opts);
             let cfg = exec_config(&args, &prog);
             let json = args.flags.contains("json");
-            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, |k| {
-                k.run()?;
+            let text = with_kernel(&prog, &dataset, &compiled.lowered, cfg, false, |_, k| {
                 let d = crate::state::provenance::derive(k, &prog, &id, depth)?;
                 Ok(if json {
                     format!("{}\n", serde_json::to_string_pretty(&d.json()).unwrap_or_default())
@@ -1149,8 +1115,17 @@ pub fn main() {
             let out = std::thread::Builder::new()
                 .stack_size(512 << 20)
                 .spawn(move || -> Result<String, RunError> {
-                    let mut k = Kernel::new(&prog, &dataset, cfg)?;
-                    let result = k.run()?;
+                    let client = data_client(&prog, &dataset)?;
+                    let (result, mut k) = crate::kernel::replay(
+                        &prog,
+                        None,
+                        &client,
+                        cfg.clone(),
+                        &mut crate::kernel::SimExecutor::new(cfg),
+                        &crate::kernel::Replay::default(),
+                        &mut |_| {},
+                    )?;
+                    let k = &mut k;
                     let Some(sig) = prog.relations.get(&rel) else {
                         let names: Vec<&str> = prog.relations.keys().map(|s| s.as_str()).collect();
                         return Err(RunError::Request(format!("`{}` is not a relation of {}; its relations are {}", rel, prog.strategy, names.join(", "))));
@@ -1237,7 +1212,7 @@ pub fn main() {
                 exit(1)
             };
             let checked_at = started.elapsed().as_secs_f64();
-            let (mut dataset, bundle_label) = load_dataset(&args, &prog);
+            let (dataset, bundle_label) = load_dataset(&args, &prog);
             let loaded_at = started.elapsed().as_secs_f64();
             let cfg = exec_config(&args, &prog);
             if args.cmd == "explain" {
@@ -1271,14 +1246,22 @@ pub fn main() {
                 let out = std::thread::Builder::new()
                     .stack_size(512 << 20)
                     .spawn(move || {
-                        let mut k = Kernel::new(&prog, &dataset, cfg)?;
+                        // Run, so executor state exists, then explain.
+                        let client = data_client(&prog, &dataset)?;
+                        let (_, mut k) = crate::kernel::replay(
+                            &prog,
+                            None,
+                            &client,
+                            cfg.clone(),
+                            &mut crate::kernel::SimExecutor::new(cfg),
+                            &crate::kernel::Replay::default(),
+                            &mut |_| {},
+                        )?;
                         // Body variables from --bind.
                         let bindings: Vec<(String, Value)> = raw_binds
                             .iter()
                             .map(|(var, raw)| k.parse_binding(raw).map(|v| (var.clone(), v)).map_err(|m| RunError::Request(format!("--bind {}: {}", var, m))))
                             .collect::<Result<_, _>>()?;
-                        // Run up to and including `at`, so executor state exists, then explain.
-                        let _ = k.run()?;
                         k.explain_with(rule_idx, at, &[], &bindings)
                     })
                     .unwrap()
@@ -1332,27 +1315,20 @@ pub fn main() {
                     exit(2)
                 }
             }
-            let batch = args.opts.get("kernel").map(|k| k == "batch").unwrap_or(true);
-            let reads_after = verify || args.opts.contains_key("dump") || args.opts.contains_key("study");
-            let owned = batch && !reads_after;
-            if !ledger.is_empty() && !batch {
-                eprintln!("--ledger runs on the batch kernel, not --kernel fold");
-                exit(2)
-            }
-            if tables_out.is_some() && !batch {
-                eprintln!("--tables runs on the batch kernel, not --kernel fold");
-                exit(2)
-            }
+            let keeps = !ledger.is_empty() || tables_out.is_some() || !args.opts.contains_key("checkpoint-every") && !args.opts.contains_key("resume");
             let mut notes: Vec<String> = Vec::new();
-            // The batch kernel is kept after the run for the coverage report's
-            // explanations and the ledger; it takes the facts over when
-            // nothing reads the dataset afterwards, and copies them otherwise.
-            let outcome = if batch {
-                let data = if owned { Data::Owned(Box::new(std::mem::take(&mut dataset))) } else { Data::Borrowed(&dataset) };
+            // The kernel is kept after the run for the coverage report's
+            // explanations, the ledger and the state tables; a run that
+            // writes or resumes checkpoints goes through the runner.
+            let outcome = if keeps {
+                if let Some(k) = args.opts.get("kernel") {
+                    eprintln!("--kernel {}: the batch kernel is gone; every run is the fold over the data layer's stream", k);
+                    exit(2)
+                }
                 run_keeping(
                     &prog,
                     Some(&lowered),
-                    data,
+                    &dataset,
                     cfg.clone(),
                     &ledger,
                     ledger_out.as_deref(),
@@ -1363,7 +1339,7 @@ pub fn main() {
                     r
                 })
             } else {
-                runner(&prog, &dataset, cfg.clone())
+                data_client(&prog, &dataset).and_then(|client| runner(&prog, &client, cfg.clone(), None))
             };
             let result = outcome.unwrap_or_else(|e| {
                 match e {
@@ -1680,7 +1656,9 @@ pub fn main() {
                         })
                     });
                     let runner = make_runner(&args);
-                    let (outcomes, report) = study::run_study(&project, &spec, &prog, &dataset, &grid, &*runner, study::Provenance { bundle: bundle_label, scheme }).unwrap_or_else(|e| fail(e));
+                    let client = data_client(&prog, &dataset).unwrap_or_else(|e| fail(e.to_string()));
+                    let sample = study::Sample { ds: &dataset, client: &client };
+                    let (outcomes, report) = study::run_study(&project, &spec, &prog, &sample, &grid, &*runner, study::Provenance { bundle: bundle_label, scheme }).unwrap_or_else(|e| fail(e));
                     println!(
                         "study {} (lineage {}, objective {}, hold-out {}){}",
                         spec.id,
@@ -1784,7 +1762,9 @@ pub fn main() {
                     });
                     let (dataset, bundle_label) = load_dataset(&args, &prog);
                     let runner = make_runner(&args);
-                    let (o, embargo) = study::reveal(&project, &spec, &prog, &dataset, &*runner, study::Provenance { bundle: bundle_label, scheme: None }).unwrap_or_else(|e| fail(e));
+                    let client = data_client(&prog, &dataset).unwrap_or_else(|e| fail(e.to_string()));
+                    let sample = study::Sample { ds: &dataset, client: &client };
+                    let (o, embargo) = study::reveal(&project, &spec, &prog, &sample, &*runner, study::Provenance { bundle: bundle_label, scheme: None }).unwrap_or_else(|e| fail(e));
                     println!("reveal of {} ({}) over the hold-out {} (study {}): trial #{}", name, hash, embargo.describe(), spec.id, o.trial.seq);
                     println!(
                         "out of sample: {} bars; sharpe {:.3} (se {:.3})   cagr {:.4}   max drawdown {:.4}   cvar5 {:.4}   worst month {:.4}",

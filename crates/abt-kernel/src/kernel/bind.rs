@@ -1,0 +1,923 @@
+//! The Bind stage (K-4.1) and the kernel's client of the data layer: the
+//! one place the kernel talks to another layer, through the protocol (A-D3).
+//! Bind sends the program's demand and receives the binding, then reads
+//! what the kernel needs before the stream: the binding's instruments with
+//! their keys, ticker spans and contract terms (E-34), the labels its
+//! relations hold, and its calendars' sources (the keys of the relations
+//! read at their own bars, the sessions, the prints a session-offset clock
+//! is placed on). The kernel then puts its calendars' labels and barrier
+//! instants as `kernel.<run>.calendar_label` (E-32) and subscribes; the
+//! fold consumes the stream's event batches.
+//!
+//! A caller holding a dataset in memory (the command line on a bundle, a
+//! study, a test) reaches a data service through the provider the front
+//! registers, which links the data layer the kernel may not depend on
+//! (ERRATA E-36).
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, OnceLock};
+
+use abt_wire::generated::abt::wire::{
+    Binding, Catalog, ColumnSpec, ColumnType, Demand, Distinct, Layer, Message, Need, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest,
+    StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
+};
+use abt_wire::rpc::{Client, Reply, WireError};
+use abt_wire::transport::Connection;
+use arrow::array::{Array, ArrayRef, AsArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
+
+use super::{time, Contract, Dataset, Kernel, RunError, Security, Sym, Symbols, Tuple, Value};
+use crate::check::Program;
+use crate::ir::{Cal, Kind, Ty};
+
+fn wire(e: WireError) -> RunError {
+    RunError::Config(format!("the data service: {}", e))
+}
+
+/// The kernel's client of a data service.
+pub struct DataClient {
+    client: Client,
+}
+
+/// One barrier of a stream's index: its calendar, label, instant and seq.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexRow {
+    pub calendar: String,
+    pub label: i64,
+    pub at: i64,
+    pub seq: u64,
+}
+
+/// A subscription being read.
+pub struct Subscription {
+    reply: Reply,
+    pub stream: String,
+}
+
+impl Subscription {
+    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, RunError> {
+        self.reply.next_batch().map_err(wire)
+    }
+}
+
+impl DataClient {
+    pub fn connect(conn: Connection) -> Result<DataClient, RunError> {
+        Ok(DataClient {
+            client: Client::connect(conn, Layer::Kernel, "abt-kernel").map_err(wire)?,
+        })
+    }
+
+    pub fn request(&self, m: Message) -> Result<Message, RunError> {
+        self.client.request(m).map_err(wire)
+    }
+
+    pub fn table(&self, m: Message) -> Result<Vec<RecordBatch>, RunError> {
+        self.client.request_table(m).map(|(_, b)| b).map_err(wire)
+    }
+
+    pub fn schemas(&self, class: Option<&str>) -> Result<Vec<RelationSchema>, RunError> {
+        match self.request(Message::SchemaRequest(Box::new(SchemaRequest {
+            class: class.map(str::to_string),
+            relation: None,
+        })))? {
+            Message::SchemaResponse(r) => Ok(r.schemas.unwrap_or_default()),
+            _ => Err(RunError::Config("the data service answered a schema request with another message".into())),
+        }
+    }
+
+    /// The binding of a demand for `relations` of `class` (the transitional
+    /// resolver of M-2: each at its current version).
+    pub fn resolve(&self, class: &str, relations: Vec<String>) -> Result<Binding, RunError> {
+        let demand = Demand {
+            class: class.to_string(),
+            needs: Some(vec![Need {
+                relations,
+                calendar: None,
+                from: None,
+                to: None,
+                scope: None,
+                attributes: None,
+            }]),
+            require: None,
+            prefer: None,
+            budget: None,
+            dynamic: None,
+        };
+        match self.request(Message::ResolveRequest(Box::new(ResolveRequest {
+            demand: Box::new(demand),
+            dry_run: false,
+        })))? {
+            Message::ResolveResponse(r) => r.binding.map(|b| *b).ok_or_else(|| RunError::Config("the data service resolved no binding".into())),
+            _ => Err(RunError::Config("the data service answered a resolve with another message".into())),
+        }
+    }
+
+    pub fn query(&self, view: &View, form: QueryForm) -> Result<Vec<RecordBatch>, RunError> {
+        self.table(Message::QueryRequest(Box::new(QueryRequest {
+            view: Some(Box::new(view.clone())),
+            form,
+            receipt_filter: None,
+            with_seq: false,
+            explain: false,
+        })))
+    }
+
+    /// Writes rows under the kernel's namespace (D-3.6); returns the version.
+    pub fn put(&self, schema: RelationSchema, rows: &[RecordBatch]) -> Result<String, RunError> {
+        let arrow_schema = rows.first().map(|b| b.schema()).ok_or_else(|| RunError::Internal("a put of no batch".into()))?;
+        let relation = schema.name.clone();
+        let mut reply = self
+            .client
+            .call_with_table(
+                Message::PutRequest(Box::new(PutRequest {
+                    relation,
+                    schema: Box::new(schema),
+                    attributes: None,
+                })),
+                &arrow_schema,
+                rows,
+            )
+            .map_err(wire)?;
+        match reply.message().map_err(wire)? {
+            Message::PutResponse(p) => Ok(p.version),
+            _ => Err(RunError::Config("the data service answered a put with another message".into())),
+        }
+    }
+
+    pub fn subscribe(&self, spec: StreamSpec, from: u64, to: Option<u64>) -> Result<Subscription, RunError> {
+        let mut reply = self
+            .client
+            .call(Message::SubscribeRequest(Box::new(SubscribeRequest {
+                spec: Box::new(spec),
+                from_seq: from,
+                paced: false,
+                to_seq: to,
+                with_index: false,
+            })))
+            .map_err(wire)?;
+        let stream = match reply.message().map_err(wire)? {
+            Message::SubscribeResponse(r) => r.stream,
+            _ => return Err(RunError::Config("the data service answered a subscription with another message".into())),
+        };
+        match reply.message().map_err(wire)? {
+            Message::TableFollows(_) => Ok(Subscription { reply, stream }),
+            _ => Err(RunError::Config("a subscription's events did not follow".into())),
+        }
+    }
+
+    pub fn stream_index(&self, spec: StreamSpec) -> Result<Vec<IndexRow>, RunError> {
+        let mut out = Vec::new();
+        for b in self.table(Message::StreamIndexRequest(Box::new(StreamIndexRequest { spec: Box::new(spec) })))? {
+            let cal = b.column(0).as_dictionary::<UInt32Type>();
+            let names = cal.values().as_string::<i32>();
+            let label = b.column(1).as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+            let at = b.column(2).as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+            let seq = b.column(3).as_primitive::<arrow::datatypes::UInt64Type>();
+            for i in 0..b.num_rows() {
+                out.push(IndexRow {
+                    calendar: names.value(cal.keys().value(i) as usize).to_string(),
+                    label: label.value(i),
+                    at: at.value(i),
+                    seq: seq.value(i),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every version's row count and span (the `stats` table).
+    pub fn stats(&self) -> Result<Vec<RecordBatch>, RunError> {
+        self.table(Message::StatsRequest(Box::new(StatsRequest { relation: None })))
+    }
+}
+
+/// How a caller holding a dataset in memory reaches a data service holding
+/// it: the front registers the data layer's in-process service (E-36).
+pub type Provider = dyn Fn(&Dataset, &Program) -> Result<Connection, String> + Send + Sync;
+
+static PROVIDER: OnceLock<Box<Provider>> = OnceLock::new();
+
+/// Registers the provider; the first registration wins.
+pub fn install_provider(p: Box<Provider>) -> bool {
+    PROVIDER.set(p).is_ok()
+}
+
+/// A client of a data service holding `ds`.
+pub fn connect_dataset(ds: &Dataset, prog: &Program) -> Result<DataClient, RunError> {
+    let p = PROVIDER
+        .get()
+        .ok_or_else(|| RunError::Config("no data service: the kernel reads its data through the data layer, and no in-process service is registered (abt::install, or --data SOCKET)".into()))?;
+    DataClient::connect(p(ds, prog).map_err(RunError::Config)?)
+}
+
+/// The short name of a stored relation (`equity.close` is `close`).
+fn short(stored: &str) -> &str {
+    stored.rsplit_once('.').map(|(_, s)| s).unwrap_or(stored)
+}
+
+/// The column of a schema with a role.
+fn column_of(s: &RelationSchema, role: Role) -> Option<&ColumnSpec> {
+    s.columns.iter().find(|c| c.role == role)
+}
+
+/// What the kernel holds of the data layer before the stream (K-4.1).
+#[derive(Clone, Debug)]
+pub struct Bound {
+    pub binding: Binding,
+    pub view: View,
+    pub class: String,
+    /// The program's primitive relations bound, by name, with the store's
+    /// name and schema.
+    pub stored: BTreeMap<String, (String, RelationSchema)>,
+    /// Every relation of the program's class the binding holds (what the
+    /// data has, whether or not the program reads it).
+    pub present: BTreeSet<String>,
+    /// The instruments by their keys, with the data layer's ids.
+    pub symbols: Symbols,
+    pub ids: Vec<u64>,
+    pub labels: Symbols,
+    pub securities: Vec<Security>,
+    pub contracts: BTreeMap<Sym, Contract>,
+    /// The last time any bound relation holds (the bundle date).
+    pub last_time: Option<i64>,
+    /// The keys of the relations read at their own bars (the base calendar),
+    /// the sessions by instrument, and the prints a session-offset clock is
+    /// placed on.
+    pub base_bars: BTreeSet<i64>,
+    pub sessions: Vec<(Sym, i64, i64)>,
+    pub prints: BTreeMap<Sym, BTreeSet<i64>>,
+}
+
+impl Bound {
+    /// The security carrying `ticker` at `as_of` (the ticker is the key when
+    /// the data has no security table).
+    pub fn has_relation(&self, name: &str) -> bool {
+        self.present.contains(name)
+    }
+
+    pub fn bundle_date(&self) -> Option<i64> {
+        self.last_time
+    }
+
+    pub fn resolve_ticker(&self, ticker: &str, as_of: Option<i64>) -> Result<Sym, String> {
+        let at = as_of.or(self.last_time).unwrap_or(0);
+        super::resolve_ticker(&self.securities, ticker, at)
+    }
+}
+
+/// A column of a batch as the strings it holds (a dictionary decoded).
+fn strings(c: &ArrayRef) -> Result<Vec<Option<String>>, RunError> {
+    let s = arrow::compute::cast(c, &DataType::Utf8).map_err(|e| RunError::Internal(e.to_string()))?;
+    let s = s.as_string::<i32>();
+    Ok((0..s.len()).map(|i| (!s.is_null(i)).then(|| s.value(i).to_string())).collect())
+}
+
+fn times(c: &ArrayRef) -> Vec<Option<i64>> {
+    let t = c.as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+    (0..t.len()).map(|i| (!t.is_null(i)).then(|| t.value(i))).collect()
+}
+
+fn col<'b>(b: &'b RecordBatch, name: &str) -> Result<&'b ArrayRef, RunError> {
+    b.column_by_name(name).ok_or_else(|| RunError::Internal(format!("the data service's answer has no column `{}`", name)))
+}
+
+/// The Bind stage: the binding of the program's demand and what the kernel
+/// reads before the stream.
+pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
+    let all = client.schemas(None)?;
+    let by_name: BTreeMap<String, RelationSchema> = all.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    // The store's name of a relation: the program's class's, else the one
+    // class that has it (the series class's `value`).
+    let stored_name = |name: &str| -> Option<String> {
+        let own = format!("{}.{}", prog.class, name);
+        if by_name.contains_key(&own) {
+            return Some(own);
+        }
+        let mut others = by_name
+            .keys()
+            .filter(|n| short(n) == name && n.contains('.') && !n.starts_with("kernel.") && !n.starts_with("query.") && !n.starts_with("cache."));
+        let first = others.next().cloned();
+        first.filter(|_| others.next().is_none())
+    };
+    let primitives: Vec<&str> = prog.relations.iter().filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. })).map(|(n, _)| n.as_str()).collect();
+    let mut wanted: BTreeSet<String> = all.iter().filter(|s| s.class == prog.class).map(|s| s.name.clone()).collect();
+    for p in &primitives {
+        if let Some(n) = stored_name(p) {
+            wanted.insert(n);
+        }
+    }
+    let binding = client.resolve(&prog.class, wanted.into_iter().collect())?;
+    let view = View {
+        versions: None,
+        binding: binding.id.clone(),
+        as_of_seq: None,
+    };
+    let pairs: BTreeMap<String, String> = binding.pairs.clone().unwrap_or_default().into_iter().map(|p| (p.relation, p.version)).collect();
+    let present: BTreeSet<String> = pairs.keys().filter(|r| r.starts_with(&format!("{}.", prog.class))).map(|r| short(r).to_string()).collect();
+    let mut stored = BTreeMap::new();
+    for p in &primitives {
+        if let Some(n) = stored_name(p) {
+            if pairs.contains_key(&n) {
+                stored.insert(p.to_string(), (n.clone(), by_name[&n].clone()));
+            }
+        }
+    }
+    // Instruments: their keys (vendor_id), class and contract terms.
+    let mut keys: BTreeMap<u64, String> = BTreeMap::new();
+    if pairs.contains_key("vendor_id") {
+        for b in client.query(
+            &view,
+            QueryForm::Catalog(Box::new(Catalog {
+                relation: "vendor_id".into(),
+                predicate: None,
+            })),
+        )? {
+            let ids = col(&b, "id")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+            let k = strings(col(&b, "key")?)?;
+            for i in 0..b.num_rows() {
+                if let Some(k) = &k[i] {
+                    keys.entry(ids.value(i)).or_insert_with(|| k.clone());
+                }
+            }
+        }
+    }
+    let mut symbols = Symbols::new();
+    let mut ids: Vec<u64> = Vec::new();
+    let mut by_id: HashMap<u64, Sym> = HashMap::new();
+    let mut contracts = BTreeMap::new();
+    if pairs.contains_key("instrument") {
+        for b in client.query(
+            &view,
+            QueryForm::Catalog(Box::new(Catalog {
+                relation: "instrument".into(),
+                predicate: None,
+            })),
+        )? {
+            let id_col = col(&b, "id")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+            let class = strings(col(&b, "class")?)?;
+            let mult = col(&b, "multiplier")?.as_primitive::<arrow::datatypes::Float64Type>().clone();
+            let comm = col(&b, "commission_per_contract")?.as_primitive::<arrow::datatypes::Float64Type>().clone();
+            for (i, class) in class.iter().enumerate() {
+                let id = id_col.value(i);
+                if by_id.contains_key(&id) {
+                    continue;
+                }
+                let key = keys.get(&id).cloned().unwrap_or_else(|| id.to_string());
+                let sym = symbols.intern(&key);
+                by_id.insert(id, sym);
+                if ids.len() <= sym as usize {
+                    ids.resize(sym as usize + 1, 0);
+                }
+                ids[sym as usize] = id;
+                if !mult.is_null(i) {
+                    contracts.insert(
+                        sym,
+                        Contract {
+                            multiplier: mult.value(i),
+                            future: class.as_deref() == Some("future"),
+                            commission_per_contract: (!comm.is_null(i)).then(|| comm.value(i)),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    // The security table, as ticker spans.
+    let mut securities = Vec::new();
+    if pairs.contains_key("ticker") {
+        for b in client.query(
+            &view,
+            QueryForm::Catalog(Box::new(Catalog {
+                relation: "ticker".into(),
+                predicate: None,
+            })),
+        )? {
+            let id_col = col(&b, "id")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+            let from = times(col(&b, "t")?);
+            let to = times(col(&b, "to")?);
+            let sym = strings(col(&b, "symbol")?)?;
+            for i in 0..b.num_rows() {
+                let Some(&s) = by_id.get(&id_col.value(i)) else { continue };
+                securities.push(Security {
+                    id: s,
+                    ticker: sym[i].clone().unwrap_or_default(),
+                    from: from[i].unwrap_or(i64::MIN),
+                    to: to[i],
+                });
+            }
+        }
+        securities.sort_by_key(|s| (s.id, s.from));
+    }
+    // The labels the bound relations hold.
+    let mut labels = Symbols::new();
+    for (stored_rel, version) in &pairs {
+        let Some(s) = by_name.get(stored_rel) else { continue };
+        if !(stored_rel.starts_with(&format!("{}.", prog.class)) || stored.values().any(|(n, _)| n == stored_rel)) {
+            continue;
+        }
+        let _ = version;
+        for c in s.columns.iter().filter(|c| c.ty == ColumnType::Label) {
+            let form = QueryForm::Distinct(Box::new(Distinct {
+                relation: stored_rel.clone(),
+                column: c.name.clone(),
+                t0: i64::MIN,
+                t1: i64::MAX,
+            }));
+            for b in client.query(&view, form)? {
+                for l in strings(b.column(0))?.into_iter().flatten() {
+                    labels.intern(&l);
+                }
+            }
+        }
+    }
+    // The bundle date: the last time of any bound relation of the data.
+    let bound_versions: BTreeSet<&String> = pairs.iter().filter(|(r, _)| !matches!(r.as_str(), "instrument" | "vendor_id" | "ticker")).map(|(_, v)| v).collect();
+    let mut last_time: Option<i64> = None;
+    for b in client.stats()? {
+        let v = strings(col(&b, "version")?)?;
+        let to = times(col(&b, "to")?);
+        for i in 0..b.num_rows() {
+            if v[i].as_ref().is_some_and(|v| bound_versions.contains(v)) {
+                if let Some(t) = to[i] {
+                    last_time = Some(last_time.map_or(t, |l: i64| l.max(t)));
+                }
+            }
+        }
+    }
+    // The calendars' sources.
+    let entity_sym = |b: &RecordBatch, name: &str, i: usize| -> Option<Sym> {
+        b.column_by_name(name)
+            .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>())
+            .and_then(|c| by_id.get(&c.value(i)).copied())
+    };
+    let mut base_bars = BTreeSet::new();
+    for (name, (stored_rel, s)) in &stored {
+        let sig = &prog.relations[name];
+        if sig.cal != Cal::Base || sig.native.is_some() {
+            continue;
+        }
+        let t = column_of(s, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
+        let form = QueryForm::Distinct(Box::new(Distinct {
+            relation: stored_rel.clone(),
+            column: t,
+            t0: i64::MIN,
+            t1: i64::MAX,
+        }));
+        for b in client.query(&view, form)? {
+            base_bars.extend(times(b.column(0)).into_iter().flatten());
+        }
+    }
+    let scan = |stored_rel: &str| -> Result<Vec<RecordBatch>, RunError> {
+        client.query(
+            &view,
+            QueryForm::Scan(Box::new(Scan {
+                relation: stored_rel.to_string(),
+                t0: i64::MIN,
+                t1: i64::MAX,
+                predicate: None,
+                columns: None,
+            })),
+        )
+    };
+    let mut sessions = Vec::new();
+    if let Some((stored_rel, s)) = stored.get("session") {
+        let e = column_of(s, Role::Entity).map(|c| c.name.clone()).unwrap_or_default();
+        let t = column_of(s, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
+        let t_pos = s.columns.iter().position(|c| c.role == Role::EventTime).unwrap_or(0);
+        let open = s
+            .columns
+            .iter()
+            .skip(t_pos + 1)
+            .find(|c| c.ty == ColumnType::Time && c.role != Role::ReceiptTime)
+            .map(|c| c.name.clone());
+        for b in scan(stored_rel)? {
+            let labels_t = times(col(&b, &t)?);
+            let opens = match &open {
+                Some(o) => times(col(&b, o)?),
+                None => vec![None; b.num_rows()],
+            };
+            for i in 0..b.num_rows() {
+                if let (Some(sym), Some(open), Some(label)) = (entity_sym(&b, &e, i), opens[i], labels_t[i]) {
+                    sessions.push((sym, open, label));
+                }
+            }
+        }
+    }
+    let mut prints: BTreeMap<Sym, BTreeSet<i64>> = BTreeMap::new();
+    if prog.clock.offset.is_some() {
+        if let Some((stored_rel, s)) = stored.get("close") {
+            let e = column_of(s, Role::Entity).map(|c| c.name.clone()).unwrap_or_default();
+            let t = column_of(s, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
+            for b in scan(stored_rel)? {
+                let ts = times(col(&b, &t)?);
+                for (i, t) in ts.into_iter().enumerate() {
+                    if let (Some(sym), Some(t)) = (entity_sym(&b, &e, i), t) {
+                        prints.entry(sym).or_default().insert(t);
+                    }
+                }
+            }
+        }
+    }
+    Ok(Bound {
+        binding,
+        view,
+        class: prog.class.clone(),
+        stored,
+        present,
+        symbols,
+        ids,
+        labels,
+        securities,
+        contracts,
+        last_time,
+        base_bars,
+        sessions,
+        prints,
+    })
+}
+
+/// The instant a calendar label's bucket closes (E-13): the base bar's
+/// close, the label itself on a calendar labelled at its close.
+pub fn barrier_at(prog: &Program, label: i64) -> i64 {
+    time::bucket_range(prog.base, label).1.max(label)
+}
+
+/// The calendars the fold receives barriers on, finer first and the decision
+/// calendar last (E-13), with every label and its instant.
+pub fn calendars(k: &Kernel) -> Vec<(Cal, Vec<i64>)> {
+    let mut needed: Vec<Cal> = k.schedule.keys().cloned().collect();
+    for c in [Cal::Base, k.prog.decision_cal.clone()] {
+        if !needed.contains(&c) {
+            needed.push(c);
+        }
+    }
+    needed.sort();
+    let d = k.prog.decision_cal.clone();
+    needed.retain(|c| *c != d);
+    needed.push(d);
+    needed
+        .into_iter()
+        .map(|c| (c.clone(), k.schedule.get(&c).map(|s| s.iter().copied().collect()).unwrap_or_default()))
+        .collect()
+}
+
+/// The schema of the kernel's calendar labels under its namespace.
+fn calendar_schema(run: &str) -> RelationSchema {
+    let col = |name: &str, ty: ColumnType, role: Role| ColumnSpec {
+        name: name.to_string(),
+        ty,
+        role,
+        dimension: None,
+    };
+    RelationSchema {
+        name: format!("kernel.{}.calendar_label", run),
+        class: "kernel".to_string(),
+        columns: vec![
+            col("calendar", ColumnType::Label, Role::Entity),
+            col("label", ColumnType::Time, Role::EventTime),
+            col("at", ColumnType::Time, Role::Value),
+            col("r", ColumnType::Time, Role::ReceiptTime),
+        ],
+        calendar: None,
+        constraints: None,
+        attributes: None,
+        schema_version: Some("1.0".to_string()),
+    }
+}
+
+/// The stream a kernel folds over: its relations, its calendars' labels put
+/// under the run's namespace, its calendars in barrier order.
+pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) -> Result<(StreamSpec, BTreeMap<String, Cal>), RunError> {
+    let cals = calendars(k);
+    let mut names = Vec::new();
+    let mut cal_of = BTreeMap::new();
+    let (mut c_col, mut l_col, mut a_col) = (Vec::new(), Vec::new(), Vec::new());
+    for (cal, labels) in &cals {
+        let name = cal.to_string();
+        for &l in labels {
+            c_col.push(name.clone());
+            l_col.push(l);
+            a_col.push(barrier_at(k.prog, l));
+        }
+        cal_of.insert(name.clone(), cal.clone());
+        names.push(name);
+    }
+    let mut relations: Vec<VersionRef> = Vec::new();
+    let pairs: BTreeMap<String, String> = bound.binding.pairs.clone().unwrap_or_default().into_iter().map(|p| (p.relation, p.version)).collect();
+    for (name, (stored_rel, _)) in &bound.stored {
+        if k.relation_id(name).is_some_and(|r| k.is_primitive(r)) {
+            relations.push(VersionRef {
+                relation: stored_rel.clone(),
+                version: pairs[stored_rel].clone(),
+            });
+        }
+    }
+    if !c_col.is_empty() {
+        let schema = calendar_schema(run);
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("calendar", DataType::Utf8, false),
+                Field::new("label", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+                Field::new("at", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(c_col)) as ArrayRef,
+                Arc::new(TimestampNanosecondArray::from(l_col)),
+                Arc::new(TimestampNanosecondArray::from(a_col)),
+            ],
+        )
+        .map_err(|e| RunError::Internal(e.to_string()))?;
+        let version = client.put(schema.clone(), &[batch])?;
+        relations.push(VersionRef { relation: schema.name, version });
+    }
+    Ok((
+        StreamSpec {
+            relations: Some(relations),
+            binding: None,
+            calendars: Some(names),
+            receipt_filter: None,
+            clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+        },
+        cal_of,
+    ))
+}
+
+/// How an event batch's columns become a kernel tuple of one relation.
+struct Converter {
+    rel: usize,
+    /// Per argument: the key, or a column of the batch with its kind.
+    args: Vec<Option<(usize, Ty)>>,
+}
+
+/// An event of the stream, as the fold takes it.
+#[derive(Clone, Debug)]
+pub enum StreamEvent {
+    Tuple { seq: u64, rel: usize, key: i64, r: i64, tuple: Tuple },
+    Barrier { seq: u64, cal: Cal, label: i64 },
+}
+
+/// Turns event batches into the fold's events: relation columns into the
+/// kernel's tuples, instrument ids into the kernel's symbols, label codes
+/// into its labels.
+pub struct Decoder {
+    converters: HashMap<String, Converter>,
+    cal_of: BTreeMap<String, Cal>,
+    entity_syms: HashMap<u64, Sym>,
+    label_syms: HashMap<String, Sym>,
+}
+
+impl Decoder {
+    pub fn new(k: &Kernel, bound: &Bound, cal_of: BTreeMap<String, Cal>) -> Decoder {
+        let mut entity_syms = HashMap::new();
+        for (bound_sym, id) in bound.ids.iter().enumerate() {
+            entity_syms.insert(*id, k.remap_syms[bound_sym]);
+        }
+        let label_syms = k.labels.names().iter().enumerate().map(|(i, n)| (n.clone(), i as Sym)).collect();
+        Decoder {
+            converters: HashMap::new(),
+            cal_of,
+            entity_syms,
+            label_syms,
+        }
+    }
+
+    fn converter(&mut self, k: &Kernel, bound: &Bound, batch: &RecordBatch, stored_rel: &str) -> Option<&Converter> {
+        if !self.converters.contains_key(stored_rel) {
+            let name = bound.stored.iter().find(|(_, (s, _))| s == stored_rel).map(|(n, _)| n.clone())?;
+            let rel = k.relation_id(&name)?;
+            let sig = &k.prog.relations[&name];
+            let key = sig.key_pos()?;
+            let schema = batch.schema();
+            let args = sig
+                .args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    if i == key {
+                        None
+                    } else {
+                        schema.index_of(&format!("{}.{}", stored_rel, a.name)).ok().map(|c| (c, a.ty.clone()))
+                    }
+                })
+                .collect();
+            self.converters.insert(stored_rel.to_string(), Converter { rel, args });
+        }
+        self.converters.get(stored_rel)
+    }
+
+    /// The events of a batch, in order.
+    pub fn events(&mut self, k: &mut Kernel, bound: &Bound, b: &RecordBatch) -> Result<Vec<StreamEvent>, RunError> {
+        let bad = |m: &str| RunError::Internal(format!("an event batch {}", m));
+        let seq = b.column_by_name("seq").ok_or_else(|| bad("without seq"))?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+        let kind = b.column_by_name("kind").ok_or_else(|| bad("without kind"))?.as_dictionary::<arrow::datatypes::UInt8Type>().clone();
+        let kinds = strings(kind.values())?;
+        let relation = b.column_by_name("relation").ok_or_else(|| bad("without relation"))?.as_dictionary::<UInt32Type>().clone();
+        let rel_names = strings(relation.values())?;
+        let t = times(b.column_by_name("t").ok_or_else(|| bad("without t"))?);
+        let r = times(b.column_by_name("r").ok_or_else(|| bad("without r"))?);
+        let calendar = b.column_by_name("calendar").ok_or_else(|| bad("without calendar"))?.as_dictionary::<UInt32Type>().clone();
+        let cal_names = strings(calendar.values())?;
+        let label = times(b.column_by_name("label").ok_or_else(|| bad("without label"))?);
+        let mut out = Vec::with_capacity(b.num_rows());
+        for i in 0..b.num_rows() {
+            let s = seq.value(i);
+            match kinds[kind.keys().value(i) as usize].as_deref() {
+                Some("tuple") => {
+                    let Some(stored_rel) = rel_names.get(relation.keys().value(i) as usize).cloned().flatten() else {
+                        continue;
+                    };
+                    let (key, rt) = (t[i].ok_or_else(|| bad("tuple without t"))?, r[i].unwrap_or(i64::MIN));
+                    let Some(conv) = self.converter(k, bound, b, &stored_rel) else { continue };
+                    let rel = conv.rel;
+                    let args = conv.args.clone();
+                    let mut tuple: Tuple = Vec::with_capacity(args.len());
+                    for a in &args {
+                        let v = match a {
+                            None => Value::Time(key),
+                            Some((c, ty)) => self.value(k, b.column(*c), i, ty)?,
+                        };
+                        tuple.push(v);
+                    }
+                    out.push(StreamEvent::Tuple { seq: s, rel, key, r: rt, tuple });
+                }
+                Some("barrier") => {
+                    let name = cal_names.get(calendar.keys().value(i) as usize).cloned().flatten().ok_or_else(|| bad("barrier without a calendar"))?;
+                    let cal = self.cal_of.get(&name).cloned().ok_or_else(|| bad("barrier of an unknown calendar"))?;
+                    out.push(StreamEvent::Barrier {
+                        seq: s,
+                        cal,
+                        label: label[i].ok_or_else(|| bad("barrier without a label"))?,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    fn value(&mut self, k: &mut Kernel, c: &ArrayRef, i: usize, ty: &Ty) -> Result<Value, RunError> {
+        let null = || RunError::Internal("a null in a stored relation's column the kernel reads".into());
+        if c.is_null(i) {
+            return Err(null());
+        }
+        Ok(match ty {
+            Ty::Entity => {
+                let id = c.as_primitive::<arrow::datatypes::UInt64Type>().value(i);
+                Value::Equity(*self.entity_syms.get(&id).ok_or_else(|| RunError::Internal(format!("instrument {} is not in the binding", id)))?)
+            }
+            Ty::Label => {
+                let d = c.as_dictionary::<UInt32Type>();
+                let text = d.values().as_string::<i32>().value(d.keys().value(i) as usize);
+                let sym = match self.label_syms.get(text) {
+                    Some(&s) => s,
+                    None => {
+                        let s = k.labels.intern(text);
+                        self.label_syms.insert(text.to_string(), s);
+                        s
+                    }
+                };
+                Value::Label(sym)
+            }
+            Ty::Timestamp => Value::Time(c.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i)),
+            Ty::Count => match c.data_type() {
+                DataType::Int64 => Value::Count(c.as_primitive::<arrow::datatypes::Int64Type>().value(i)),
+                _ => Value::Count(c.as_primitive::<arrow::datatypes::Float64Type>().value(i) as i64),
+            },
+            _ => match c.data_type() {
+                DataType::Int64 => Value::Num(c.as_primitive::<arrow::datatypes::Int64Type>().value(i) as f64),
+                _ => Value::Num(c.as_primitive::<arrow::datatypes::Float64Type>().value(i)),
+            },
+        })
+    }
+}
+
+/// The run's id: of the program, its configuration and the binding (K-7.1).
+pub fn run_id(prog: &Program, cfg: &super::ExecConfig, binding: &Binding) -> String {
+    let fp = super::fold::fingerprint(prog, cfg);
+    abt_wire::Hash::of_parts([fp.to_le_bytes().as_slice(), binding.id.as_deref().unwrap_or("").as_bytes()]).hex()[..16].to_string()
+}
+
+/// A dataset in memory as an adapter's keyed tables (E-34): its security
+/// table, its contract terms, and each relation's rows with instruments
+/// named by their keys and labels by their text, columns named as the
+/// store's schema names them; a relation the store has no schema of is
+/// refused.
+#[allow(clippy::type_complexity)]
+pub fn keyed_tables(ds: &Dataset, schema_of: &dyn Fn(&str) -> Option<RelationSchema>) -> Result<(RecordBatch, RecordBatch, Vec<(String, RecordBatch)>), String> {
+    let ns = DataType::Timestamp(TimeUnit::Nanosecond, None);
+    let securities = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("ticker", DataType::Utf8, false),
+            Field::new("from", ns.clone(), false),
+            Field::new("to", ns.clone(), true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(ds.securities.iter().map(|s| ds.symbols.name(s.id).to_string()).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(StringArray::from(ds.securities.iter().map(|s| s.ticker.clone()).collect::<Vec<_>>())),
+            Arc::new(TimestampNanosecondArray::from(ds.securities.iter().map(|s| s.from).collect::<Vec<_>>())),
+            Arc::new(TimestampNanosecondArray::from(ds.securities.iter().map(|s| s.to).collect::<Vec<_>>())),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let contracts: Vec<(&Sym, &Contract)> = ds.contracts.iter().collect();
+    let terms = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("class", DataType::Utf8, false),
+            Field::new("multiplier", DataType::Float64, true),
+            Field::new("commission_per_contract", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(StringArray::from(contracts.iter().map(|(s, _)| ds.symbols.name(**s).to_string()).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(StringArray::from(contracts.iter().map(|(_, c)| if c.future { "future" } else { "equity" }).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(contracts.iter().map(|(_, c)| Some(c.multiplier)).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(contracts.iter().map(|(_, c)| c.commission_per_contract).collect::<Vec<_>>())),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let mut relations = Vec::new();
+    for (name, tuples) in &ds.facts {
+        let schema = schema_of(name).ok_or_else(|| format!("the data layer has no relation `{}` in the dataset's classes", name))?;
+        let cols: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role != Role::ReceiptTime).collect();
+        if let Some(tu) = tuples.iter().find(|tu| tu.len() != cols.len()) {
+            return Err(format!("`{}` has {} columns in the data layer and a tuple of {} values", schema.name, cols.len(), tu.len()));
+        }
+        let mut fields = Vec::new();
+        let mut arrays: Vec<ArrayRef> = Vec::new();
+        for (i, c) in cols.iter().enumerate() {
+            let (field, array): (Field, ArrayRef) = match c.ty {
+                ColumnType::Entity => (
+                    Field::new(&c.name, DataType::Utf8, true),
+                    Arc::new(StringArray::from(tuples.iter().map(|tu| tu[i].as_equity().map(|s| ds.symbols.name(s).to_string())).collect::<Vec<_>>())),
+                ),
+                ColumnType::Label => (
+                    Field::new(&c.name, DataType::Utf8, true),
+                    Arc::new(StringArray::from(tuples.iter().map(|tu| ds.label_name(&tu[i]).map(str::to_string)).collect::<Vec<_>>())),
+                ),
+                ColumnType::Time => (
+                    Field::new(&c.name, ns.clone(), true),
+                    Arc::new(TimestampNanosecondArray::from(tuples.iter().map(|tu| tu[i].as_time()).collect::<Vec<_>>())),
+                ),
+                ColumnType::Count => (
+                    Field::new(&c.name, DataType::Int64, true),
+                    Arc::new(Int64Array::from(
+                        tuples
+                            .iter()
+                            .map(|tu| match &tu[i] {
+                                Value::Count(n) => Some(*n),
+                                v => v.as_f64().map(|x| x as i64),
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                ),
+                _ => (
+                    Field::new(&c.name, DataType::Float64, true),
+                    Arc::new(Float64Array::from(
+                        tuples
+                            .iter()
+                            .map(|tu| match &tu[i] {
+                                Value::Count(n) => Some(*n as f64),
+                                v => v.as_f64(),
+                            })
+                            .collect::<Vec<_>>(),
+                    )),
+                ),
+            };
+            fields.push(field);
+            arrays.push(array);
+        }
+        // The receipt time: what the dataset records, else the event time.
+        if let (Some(avail), Some(rc)) = (ds.availability_of(name), schema.columns.iter().find(|c| c.role == Role::ReceiptTime)) {
+            let key = cols.iter().position(|c| c.role == Role::EventTime).unwrap_or(0);
+            fields.push(Field::new(&rc.name, ns.clone(), false));
+            arrays.push(Arc::new(TimestampNanosecondArray::from(
+                tuples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tu)| {
+                        let t = tu[key].as_time().unwrap_or(i64::MIN);
+                        avail.get(i).copied().filter(|a| *a != i64::MIN).unwrap_or(t).max(t)
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        }
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|e| e.to_string())?;
+        relations.push((schema.name.clone(), batch));
+    }
+    Ok((securities, terms, relations))
+}
+
+/// The store's schema of a dataset relation of `class`: the class's own,
+/// else the one class that has it (the series class's `value`).
+pub fn schema_in(schemas: &[RelationSchema], class: &str, name: &str) -> Option<RelationSchema> {
+    let own = format!("{}.{}", class, name);
+    if let Some(s) = schemas.iter().find(|s| s.name == own) {
+        return Some(s.clone());
+    }
+    let mut others = schemas
+        .iter()
+        .filter(|s| short(&s.name) == name && s.name.contains('.') && matches!(s.class.as_str(), "equity" | "future" | "option" | "series"));
+    let first = others.next().cloned();
+    first.filter(|_| others.next().is_none())
+}

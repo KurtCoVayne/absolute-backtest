@@ -17,8 +17,8 @@ what this tree does.
   translation-validation golden files (`tests/tv_golden.rs`,
   `tests/golden/*.txt`: every corpus-v2 strategy and both company books on the
   seeded synthetic markets, decisions, fills, book and final state rendered
-  exactly, under the batch driver and the fold until the batch driver is
-  deleted) and by G6 (`tests/reference.rs`, the pandas reference). The owner
+  exactly; since M-2, by the fold over the stream of a data service holding
+  the market, the batch driver being deleted) and by G6 (`tests/reference.rs`, the pandas reference). The owner
   runs `scripts/parity/` for G1. A golden file changes only in a commit that
   names the semantic change it accepts; each such change is listed under
   "Blessed changes" below.
@@ -185,6 +185,32 @@ and the batch driver agree on every corpus program.
   facts, rows that differ in a value with equal `r` conflict, and the latest
   revision is taken per key. The entity offset index stays on the entity.
   A value column a source does not carry is null.
+
+- **E-36 (A-D3, M-2; how an in-process caller reaches the data layer).**
+  The kernel depends on no other layer, so a caller holding a dataset in
+  memory (the command line on a bundle, a study, a test builder) reaches a
+  data service through a provider the front registers (`abt::install`): the
+  dataset is ingested into a temporary store by the adapter of keyed rows
+  (E-34), and the kernel talks to the service over an in-process channel,
+  the same frames a socket carries. `abt run --data SOCKET` reads a running
+  service instead. The kernel's `Dataset` is that in-memory builder; the
+  kernel's own view of the data is Bind's (`kernel::bind::Bound`). A study's
+  runs read one service and are truncated by horizon (the stream's `to_seq`
+  at the decision barrier) instead of copying a truncated dataset; a run
+  truncated at t resolves ticker literals at t.
+- **E-37 (D-5.2, K-4.2, K-4.4; receipt after the close).** A barrier is
+  emitted at its bucket's close (E-13): a sub-daily bar received after its
+  close (a recorded `ts_recv` with a processing delay) is after its own
+  bar's barrier, so no decision at that bar reads it, and it is read from
+  the next barrier on; a daily bar received before the day ends is read at
+  that day's barrier. The fold before the split opened a bucket at a late
+  tuple's receipt instant, a phantom bar, which the explicit barriers
+  remove. Late tuples (K-4.4) are judged against the decision calendar: a
+  tuple whose decision bucket was already decided invalidates what was
+  derived from its key on. The fold also evicts the memo at every decision
+  bar, as the deleted batch loop did (memory, never results), and opens a
+  calendar's bucket at its barrier, the running sums' walk reading the grown
+  domain.
 
 ## Aggregates
 

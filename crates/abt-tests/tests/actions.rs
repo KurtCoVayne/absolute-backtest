@@ -9,7 +9,8 @@ use abt_tests as common;
 
 use abt_kernel::data::{business_days, synthetic_daily};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, Action, Dataset, ExecConfig, Lot, Sym, Value};
+use abt_kernel::kernel::{Action, Dataset, ExecConfig, Lot, Sym, Value};
+use abt_tests::run;
 
 /// A daily equity strategy over the catalog (bars, actions, the listing and
 /// the `SPX` list) with the `catalog` library in scope.

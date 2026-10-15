@@ -7,9 +7,10 @@ use abt_tests as common;
 
 use abt_kernel::check::{Code, Severity};
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
 use abt_kernel::parse_units;
 use abt_kernel::syntax::ast::Unit;
+use abt_tests::run;
 
 /// A strategy with a `Price<USD>` parameter `floor` whose default is
 /// `default`: buy a name whose close is above the floor, sell it the bar

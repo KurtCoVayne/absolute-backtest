@@ -6,7 +6,8 @@ use abt_tests as common;
 
 use abt_kernel::check::{Code, Severity};
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{run, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
+use abt_tests::run;
 
 fn strategy(order_a: bool) -> String {
     let conj = if order_a {

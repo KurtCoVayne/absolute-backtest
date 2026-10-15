@@ -98,6 +98,16 @@ pub struct Store {
     pub registry: Registry,
     next_seq: BTreeMap<(String, String), u64>,
     ordinal: u64,
+    /// A temporary store's directory is removed when the store is dropped.
+    temporary: bool,
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 }
 
 impl Store {
@@ -111,11 +121,13 @@ impl Store {
             registry,
             next_seq: BTreeMap::new(),
             ordinal,
+            temporary: false,
         })
     }
 
     /// A fresh store in a new directory under the system's temporary
-    /// directory (what tests and in-process runs without a store use).
+    /// directory (what tests and in-process runs without a store use),
+    /// removed when the store is dropped.
     pub fn temporary(tag: &str) -> Result<Store, DataError> {
         static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -123,7 +135,9 @@ impl Store {
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
-        Store::open(&dir)
+        let mut s = Store::open(&dir)?;
+        s.temporary = true;
+        Ok(s)
     }
 
     pub fn root(&self) -> &Path {

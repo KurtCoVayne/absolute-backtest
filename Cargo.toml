@@ -12,6 +12,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+abt = { path = "crates/abt" }
 abt-agg = { path = "crates/abt-agg" }
 abt-data = { path = "crates/abt-data" }
 abt-kernel = { path = "crates/abt-kernel" }
@@ -41,9 +42,11 @@ debug = "line-tables-only"
 # fast without the release profile's link time.
 [profile.dev]
 opt-level = 1
-# Line tables keep panics' locations; full debug info would make every one
-# of the fifty test binaries hundreds of megabytes.
+# Line tables keep panics' locations in the workspace's crates; the
+# dependencies carry none, since every one of the eighty test binaries links
+# Arrow and Parquet (full debug info would make each hundreds of megabytes).
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+debug = false

@@ -52,6 +52,9 @@ fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
 
 #[test]
 fn the_harness_records_attempts_diagnostics_and_verdicts() {
+    // The harness runs the valid attempts through the data service the
+    // front registers.
+    common::init();
     let (root, briefs, attempts) = fixture("harness");
     let ws = common::base_workspace();
     let r = report(&ws, &briefs, &attempts).unwrap();

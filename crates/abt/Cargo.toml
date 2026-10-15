@@ -6,12 +6,18 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "abt"
+path = "src/lib.rs"
+
 [[bin]]
 name = "abt"
 path = "src/main.rs"
 
 [dependencies]
+abt-data.workspace = true
 abt-kernel.workspace = true
+abt-wire.workspace = true
 
 [dev-dependencies]
 abt-tests.workspace = true

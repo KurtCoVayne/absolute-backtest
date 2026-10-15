@@ -4,7 +4,8 @@
 
 use abt_tests as common;
 
-use abt_kernel::kernel::{run, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
+use abt_tests::run;
 
 #[test]
 fn skeleton_checks_and_runs() {

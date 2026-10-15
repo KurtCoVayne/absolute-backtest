@@ -6,7 +6,8 @@
 use abt_tests as common;
 
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, Dataset, ExecConfig, Lot, OnLeverage, OnOversize, OnRuin, RunError, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Lot, OnLeverage, OnOversize, OnRuin, RunError, Value};
+use abt_tests::run;
 
 /// One symbol X over five weekdays; `None` leaves the bar's prices out (the
 /// bar still exists through the listing and the volume).

@@ -6,7 +6,8 @@ use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, ExecConfig, Value};
+use abt_kernel::kernel::{ExecConfig, Value};
+use abt_tests::run;
 
 /// Buy 10 on an up bar when flat, sell the bar after the buy.
 fn up_down() -> String {

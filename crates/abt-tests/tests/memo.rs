@@ -1,12 +1,13 @@
-//! Memo eviction (src/kernel/mod.rs `evict_memo`): forced at every bar, it
-//! changes no decision, fill or cash figure of any daily corpus strategy.
+//! Memo eviction (src/kernel/mod.rs `evict_memo`, run by the fold at every
+//! decision bar): forced at every bar, it changes no decision, fill or cash
+//! figure of any daily corpus strategy.
 
 #![allow(clippy::result_large_err)]
 
 use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{ExecConfig, Kernel};
+use abt_kernel::kernel::ExecConfig;
 
 #[test]
 fn forced_eviction_changes_no_result() {
@@ -21,12 +22,13 @@ fn forced_eviction_changes_no_result() {
             continue;
         }
         let p = common::program(&src, &name);
+        let client = common::client(&p, &ds);
         let run = |force: bool| {
-            let mut k = Kernel::new(&p, &ds, ExecConfig::frictionless()).unwrap();
-            if force {
-                k.force_memo_eviction();
-            }
-            k.run()
+            let opts = abt_kernel::kernel::Replay {
+                force_memo_eviction: force,
+                ..Default::default()
+            };
+            abt_kernel::kernel::run_on(&p, None, &client, ExecConfig::frictionless(), &opts)
         };
         let (a, b) = (run(false), run(true));
         match (a, b) {

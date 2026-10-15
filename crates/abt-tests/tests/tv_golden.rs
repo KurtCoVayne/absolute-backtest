@@ -2,8 +2,9 @@
 //! (`docs/spec/00-architecture.md`, section 7.1) while the books' parity
 //! inputs are not reachable from the build (`docs/spec/ERRATA.md`). Every
 //! corpus-v2 strategy and both company books run on the seeded synthetic
-//! market of their class, as `tests/corpus_v2.rs` runs them, under the batch
-//! driver and the fold; what each run decided, filled and held is rendered
+//! market of their class, as `tests/corpus_v2.rs` runs them, by the fold over
+//! the stream of a data service holding it (the batch driver the files were
+//! first written under is gone, M-2); what each run decided, filled and held is rendered
 //! as text (times ISO-8601, so the rendering does not depend on the time
 //! unit; floats in their shortest round-trip form, so it is exact) and
 //! compared with `tests/golden/<name>.txt` byte for byte. Every step of the
@@ -20,7 +21,8 @@ use std::path::{Path, PathBuf};
 use abt_kernel::check::{check_program, Workspace};
 use abt_kernel::data::synthetic_for_program;
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, run_fold, Action, ExecConfig, RunResult};
+use abt_kernel::kernel::{Action, ExecConfig, RunResult};
+use abt_tests::run;
 
 fn corpus() -> PathBuf {
     abt_tests::repo_root().join("corpus-v2")
@@ -148,16 +150,11 @@ fn golden_run(dir: &str, f: &Path) -> (String, String) {
             }
         }
     }
-    let batch = match run(&prog, &ds, cfg.clone()) {
+    let got = match run(&prog, &ds, cfg) {
         Ok(r) => render(&r),
         Err(e) => format!("error {}\n", e),
     };
-    let fold = match run_fold(&prog, &ds, cfg) {
-        Ok(r) => render(&r),
-        Err(e) => format!("error {}\n", e),
-    };
-    assert!(batch == fold, "{}/{}: the fold differs from the batch driver: {}", dir, name, first_difference(&batch, &fold));
-    (name, batch)
+    (name, got)
 }
 
 /// The first line where two renderings differ, with a little context.

@@ -5,7 +5,7 @@
 use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Value};
 
 /// Buy one share of a member of the list `list` when flat.
 fn member_of(name: &str, list: &str) -> String {
@@ -28,16 +28,14 @@ fn member_of(name: &str, list: &str) -> String {
 fn an_unknown_label_is_warned_at_run_start() {
     let prog = common::program(&member_of("wrong_label", "SP400"), "wrong_label");
     let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 40, 7);
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let result = abt_tests::run(&prog, &ds, ExecConfig::frictionless()).unwrap();
     assert!(result.decisions.is_empty());
     let w = result.warnings.iter().find(|w| w.bias == "vocabulary").expect("a vocabulary warning");
     assert!(w.message.contains("`SP400`") && w.message.contains("no relation of the data"), "{}", w.message);
     assert!(w.message.contains("SPX"), "{}", w.message);
     // The same program with the data's label runs without the warning.
     let prog = common::program(&member_of("right_label", "SPX"), "right_label");
-    let mut k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    let result = k.run().unwrap();
+    let result = abt_tests::run(&prog, &ds, ExecConfig::frictionless()).unwrap();
     assert!(result.warnings.iter().all(|w| w.bias != "vocabulary"));
 }
 
@@ -70,7 +68,7 @@ fn adv_at_a_minute_resolution_is_a_daily_volume() {
         ds.add("volume", vec![Value::Equity(x), Value::Time(t), Value::Num(100.0)]);
     }
     ds.derive_tickers();
-    let k = Kernel::new(&prog, &ds, ExecConfig::frictionless()).unwrap();
+    let k = abt_tests::loaded_kernel(&prog, &ds, ExecConfig::frictionless());
     let sym = k.symbols.get("X").unwrap();
     let bars = k.decision_bars();
     assert_eq!(bars.len(), 5);

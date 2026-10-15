@@ -8,7 +8,8 @@ use abt_tests as common;
 use abt_kernel::check::{check_program, check_workspace, Code, Diagnostic, Program, Severity};
 use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
+use abt_tests::run;
 
 fn check(src: &str, name: &str) -> Vec<Diagnostic> {
     common::check(src, name).1

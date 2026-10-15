@@ -7,7 +7,8 @@ use abt_tests as common;
 
 use abt_kernel::check::Program;
 use abt_kernel::data::{synthetic_daily, synthetic_minute};
-use abt_kernel::kernel::{run, run_fold, Dataset, ExecConfig, RunResult};
+use abt_kernel::kernel::{Dataset, ExecConfig, RunResult};
+use abt_tests::{run, run_socket};
 
 /// The names of the synthetic markets, in the order the acceptance test
 /// uses: the daily market renames its second name halfway and delists its
@@ -80,7 +81,7 @@ fn cache_is_exact(sub_daily: bool, only_evicts: bool) {
         };
         let a = run(&p, &ds, uncached.clone()).unwrap_or_else(|e| panic!("{}: {}", name, e));
         let b = run(&p, &ds, cached.clone()).unwrap_or_else(|e| panic!("{} (cached): {}", name, e));
-        let c = run_fold(&p, &ds, cached).unwrap_or_else(|e| panic!("{} (fold): {}", name, e));
+        let c = run_socket(&p, &ds, cached).unwrap_or_else(|e| panic!("{} (fold): {}", name, e));
         assert_eq!(digest(&a), digest(&b), "{}: the cache changed the batch run", name);
         assert_eq!(digest(&a), digest(&c), "{}: the cache changed the fold", name);
         let allowed = SPARSE_ROWS

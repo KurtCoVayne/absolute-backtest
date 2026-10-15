@@ -3,6 +3,8 @@
 //! into programs, a strategy skeleton the tests fill in, and crafted
 //! markets with the facts a program's demand reads.
 #![allow(dead_code)]
+// RunError is the kernel's, deliberately rich (see abt-kernel's lib.rs).
+#![allow(clippy::result_large_err)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -211,4 +213,104 @@ pub fn markets(start: (i64, u32, u32), names: &[(&str, &[f64])]) -> Dataset {
     }
     ds.derive_tickers();
     ds
+}
+
+/// Registers the in-process data service the kernel reads a dataset
+/// through (ERRATA E-36); every helper that runs a program calls it.
+pub fn init() {
+    abt::install();
+}
+
+/// A client of a data service holding `ds`.
+pub fn client(prog: &Program, ds: &Dataset) -> abt_kernel::kernel::DataClient {
+    init();
+    abt_kernel::kernel::connect_dataset(ds, prog).expect("an in-process data service")
+}
+
+/// A run over a dataset: the fold over the stream of a data service holding
+/// it.
+pub fn run(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> Result<abt_kernel::kernel::RunResult, abt_kernel::kernel::RunError> {
+    init();
+    abt_kernel::kernel::run(prog, ds, cfg)
+}
+
+/// `run` under a plan.
+pub fn run_planned(prog: &Program, lowered: &abt_kernel::lower::Lowered, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> Result<abt_kernel::kernel::RunResult, abt_kernel::kernel::RunError> {
+    init();
+    abt_kernel::kernel::run_planned(prog, lowered, ds, cfg)
+}
+
+/// A run that keeps the kernel at the end of the stream, on this thread.
+pub fn run_kernel<'p>(prog: &'p Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> Result<(abt_kernel::kernel::RunResult, abt_kernel::kernel::Kernel<'p>), abt_kernel::kernel::RunError> {
+    let c = client(prog, ds);
+    let mut exec = abt_kernel::kernel::SimExecutor::new(cfg.clone());
+    abt_kernel::kernel::replay(prog, None, &c, cfg, &mut exec, &abt_kernel::kernel::Replay::default(), &mut |_| {})
+}
+
+/// A kernel holding every tuple of the stream and every bucket, nothing
+/// decided.
+pub fn loaded_kernel<'p>(prog: &'p Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> abt_kernel::kernel::Kernel<'p> {
+    abt_kernel::kernel::load(prog, None, &client(prog, ds), cfg).expect("the stream loads")
+}
+
+/// The causality check (G5) over a data service holding `ds`.
+pub fn verify_causality(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig, samples: &[i64]) -> Result<Vec<abt_kernel::kernel::CausalityMismatch>, abt_kernel::kernel::RunError> {
+    init();
+    abt_kernel::kernel::verify_causality(prog, ds, cfg, samples)
+}
+
+/// A run over a data service on a Unix socket holding `ds`: the same frames
+/// as in process, so its result equals `run`'s (Proposition P-5.1, G3).
+pub fn run_socket(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> Result<abt_kernel::kernel::RunResult, abt_kernel::kernel::RunError> {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir().join(format!("abt-run-{}-{}.sock", std::process::id(), n));
+    let svc = abt::serve_dataset(ds, &prog.class).map_err(abt_kernel::kernel::RunError::Config)?;
+    let _server = abt_data::service::listen(&path, svc).map_err(|e| abt_kernel::kernel::RunError::Config(e.to_string()))?;
+    let conn = abt_wire::transport::Connection::connect(&path).map_err(|e| abt_kernel::kernel::RunError::Config(e.to_string()))?;
+    let client = abt_kernel::kernel::DataClient::connect(conn)?;
+    let out = abt_kernel::kernel::run_on(prog, None, &client, cfg, &abt_kernel::kernel::Replay::default());
+    let _ = fs::remove_file(&path);
+    out
+}
+
+/// A run that hands the kernel at the end of the stream to `f` (on the
+/// kernel's thread), recording the windowed groups' summaries when asked.
+pub fn run_keeping<T: Send>(
+    prog: &Program,
+    lowered: Option<&abt_kernel::lower::Lowered>,
+    ds: &Dataset,
+    cfg: abt_kernel::kernel::ExecConfig,
+    opts: &abt_kernel::kernel::Replay,
+    f: impl for<'k> FnOnce(&abt_kernel::kernel::RunResult, &mut abt_kernel::kernel::Kernel<'k>) -> Result<T, abt_kernel::kernel::RunError> + Send,
+) -> Result<(abt_kernel::kernel::RunResult, T), abt_kernel::kernel::RunError> {
+    let c = client(prog, ds);
+    abt_kernel::kernel::run_keeping(prog, lowered, &c, cfg, opts, f)
+}
+
+/// A study's sample over a data service holding `ds` (what `run_study` and
+/// `reveal` read their bars from and run through).
+pub struct Sampled<'a> {
+    ds: &'a Dataset,
+    client: abt_kernel::kernel::DataClient,
+}
+
+impl<'a> Sampled<'a> {
+    pub fn new(prog: &Program, ds: &'a Dataset) -> Sampled<'a> {
+        Sampled { ds, client: client(prog, ds) }
+    }
+
+    pub fn sample(&self) -> abt_kernel::study::Sample<'_> {
+        abt_kernel::study::Sample { ds: self.ds, client: &self.client }
+    }
+}
+
+/// The study runner: the fold over the service, truncated at the horizon.
+pub fn study_run(
+    prog: &Program,
+    client: &abt_kernel::kernel::DataClient,
+    cfg: abt_kernel::kernel::ExecConfig,
+    horizon: Option<i64>,
+) -> Result<abt_kernel::kernel::RunResult, abt_kernel::kernel::RunError> {
+    abt_kernel::kernel::run_on(prog, None, client, cfg, &abt_kernel::kernel::Replay { horizon, ..Default::default() })
 }
