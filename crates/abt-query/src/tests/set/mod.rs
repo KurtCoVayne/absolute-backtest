@@ -5,9 +5,21 @@ use std::sync::Arc;
 
 use super::framework::Test;
 
+pub mod coactivation;
+pub mod cost_realism;
+pub mod effective_rules;
+pub mod fama_macbeth;
+pub mod ic;
 pub mod regression;
 
 /// The starting set, in name order.
 pub fn starting_set() -> Vec<Arc<dyn Test>> {
-    vec![Arc::new(regression::Regression)]
+    vec![
+        Arc::new(coactivation::Coactivation),
+        Arc::new(cost_realism::CostRealism),
+        Arc::new(effective_rules::EffectiveRules),
+        Arc::new(fama_macbeth::FamaMacBeth),
+        Arc::new(ic::Ic),
+        Arc::new(regression::Regression),
+    ]
 }

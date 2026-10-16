@@ -145,6 +145,35 @@ impl Table {
     pub fn first(&self) -> Result<&[f64], TestError> {
         self.columns.values().next().map(|c| c.as_slice()).ok_or_else(|| TestError::Input("an empty table".into()))
     }
+
+    /// The rows of a panel by bar: each bar's time with its rows, the bars
+    /// in time order and each bar's rows in entity order, so that a
+    /// statistic summed over a bar does not depend on the order the rows
+    /// came in. A table without `time` and `entity`, whose columns or
+    /// vectors differ in length, or with an entity twice in one bar is
+    /// refused.
+    pub fn bars(&self) -> Result<Vec<(i64, Vec<usize>)>, TestError> {
+        let (Some(time), Some(entity)) = (&self.time, &self.entity) else {
+            return Err(TestError::Input("a panel needs the `time` and the `entity` of every row".into()));
+        };
+        let n = self.len();
+        if time.len() != n || entity.len() != n || self.columns.values().any(|c| c.len() != n) {
+            return Err(TestError::Input("the columns, `time` and `entity` of a panel differ in length".into()));
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| (time[i], entity[i]));
+        let mut bars: Vec<(i64, Vec<usize>)> = Vec::new();
+        for (k, &i) in order.iter().enumerate() {
+            if k > 0 && time[order[k - 1]] == time[i] && entity[order[k - 1]] == entity[i] {
+                return Err(TestError::Input(format!("entity {} has two rows at time {}", entity[i], time[i])));
+            }
+            match bars.last_mut() {
+                Some((t, rows)) if *t == time[i] => rows.push(i),
+                _ => bars.push((time[i], vec![i])),
+            }
+        }
+        Ok(bars)
+    }
 }
 
 /// A statistical test (Q-4.1).

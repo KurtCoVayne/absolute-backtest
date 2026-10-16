@@ -102,9 +102,10 @@ pub struct LeastSquares {
 
 /// Least squares by Householder QR with column pivoting, on the columns
 /// scaled to unit norm (equilibration, which keeps the pivoting meaningful
-/// on designs as ill-conditioned as Filip's polynomial). A column whose
-/// remaining norm falls below 1e-13 of its own is rank-deficient and
-/// refused, since a coefficient of a test is never arbitrary.
+/// on designs as ill-conditioned as Filip's polynomial), the solution then
+/// refined (`refine`). A column whose remaining norm falls below 1e-13 of
+/// its own is rank-deficient and refused, since a coefficient of a test is
+/// never arbitrary.
 pub fn least_squares(x: &Matrix, y: &[f64]) -> Result<LeastSquares, String> {
     let (n, p) = (x.rows, x.cols);
     if y.len() != n {
@@ -126,7 +127,7 @@ pub fn least_squares(x: &Matrix, y: &[f64]) -> Result<LeastSquares, String> {
     let mut qty = y.to_vec();
     let mut perm: Vec<usize> = (0..p).collect();
     let mut norms = vec![1.0; p];
-    let mut diag = vec![0.0; p];
+    let mut reflections: Vec<(Vec<f64>, f64)> = Vec::with_capacity(p);
     for k in 0..p {
         // The pivot: the column of largest remaining norm, recomputed
         // exactly (no downdating, which loses digits on ill-conditioned
@@ -157,39 +158,23 @@ pub fn least_squares(x: &Matrix, y: &[f64]) -> Result<LeastSquares, String> {
         let mut v: Vec<f64> = (k..n).map(|i| a[(i, k)]).collect();
         v[0] -= alpha;
         let vnorm2: f64 = v.iter().map(|x| x * x).sum();
-        diag[k] = alpha;
-        if vnorm2 > 0.0 {
-            for j in (k + 1)..p {
-                let dot: f64 = v.iter().enumerate().map(|(t, vt)| vt * a[(k + t, j)]).sum();
-                let f = 2.0 * dot / vnorm2;
-                for (t, vt) in v.iter().enumerate() {
-                    a[(k + t, j)] -= f * vt;
-                }
-            }
-            let dot: f64 = v.iter().enumerate().map(|(t, vt)| vt * qty[k + t]).sum();
-            let f = 2.0 * dot / vnorm2;
-            for (t, vt) in v.iter().enumerate() {
-                qty[k + t] -= f * vt;
-            }
+        for j in (k + 1)..p {
+            reflect(&v, vnorm2, k, &mut a.data[j * n..(j + 1) * n]);
         }
+        reflect(&v, vnorm2, k, &mut qty);
         a[(k, k)] = alpha;
         for i in (k + 1)..n {
             a[(i, k)] = 0.0;
         }
+        reflections.push((v, vnorm2));
     }
     // R b = (Q'y)[..p], by back-substitution; then undo the pivoting.
-    let mut b = vec![0.0; p];
-    for k in (0..p).rev() {
-        let mut s = qty[k];
-        for j in (k + 1)..p {
-            s -= a[(k, j)] * b[j];
-        }
-        b[k] = s / diag[k];
-    }
+    let b = solve_upper(&a, &qty[..p]);
     let mut beta = vec![0.0; p];
     for (k, &j) in perm.iter().enumerate() {
         beta[j] = b[k] / scale[j];
     }
+    let residuals = refine(x, y, &a, &reflections, &perm, &scale, &mut beta);
     // (X'X)⁻¹ = P R⁻¹ R⁻ᵀ Pᵀ.
     let mut rinv = Matrix::zeros(p, p);
     for c in 0..p {
@@ -208,8 +193,7 @@ pub fn least_squares(x: &Matrix, y: &[f64]) -> Result<LeastSquares, String> {
             xtx_inv[(i, j)] = inner[(r, c)] / (scale[i] * scale[j]);
         }
     }
-    let rss: f64 = qty[p..].iter().map(|v| v * v).sum();
-    let residuals: Vec<f64> = (0..n).map(|i| y[i] - (0..p).map(|j| x[(i, j)] * beta[j]).sum::<f64>()).collect();
+    let rss: f64 = residuals.iter().map(|v| v * v).sum();
     Ok(LeastSquares {
         beta,
         residuals,
@@ -217,6 +201,103 @@ pub fn least_squares(x: &Matrix, y: &[f64]) -> Result<LeastSquares, String> {
         xtx_inv,
         rank: p,
     })
+}
+
+/// The steps of iterative refinement `least_squares` takes: one brings
+/// every NIST StRD linear dataset to the rounding of its data, the second
+/// covers designs nearer the limit of double precision.
+const REFINEMENTS: usize = 2;
+
+/// Björck's iterative refinement of the least-squares solution through the
+/// augmented system r + Xβ = y, X'r = 0 (Björck 1967; Björck and Golub
+/// 1967), each step's residuals of that system computed in twice the
+/// working precision (`dot2`) and its correction solved with the QR factors
+/// already in hand. A backward-stable QR solution is accurate only to
+/// about κ²ε when the residuals are large (Wampler5 keeps under six
+/// digits); the refined one to the rounding of its data. Returns the
+/// residuals y − Xβ of the refined coefficients.
+fn refine(x: &Matrix, y: &[f64], r_factor: &Matrix, reflections: &[(Vec<f64>, f64)], perm: &[usize], scale: &[f64], beta: &mut [f64]) -> Vec<f64> {
+    let (n, p) = (x.rows, x.cols);
+    let residual = |beta: &[f64], i: usize, r: f64| dot2([(y[i], 1.0), (r, -1.0)].into_iter().chain((0..p).map(|j| (x[(i, j)], -beta[j]))));
+    let mut r: Vec<f64> = (0..n).map(|i| residual(beta, i, 0.0)).collect();
+    for _ in 0..REFINEMENTS {
+        // The augmented system's residuals: f = y − r − Xβ, and g = −X'r in
+        // the scaled, pivoted coordinates of the factors.
+        let mut d: Vec<f64> = (0..n).map(|i| residual(beta, i, r[i])).collect();
+        let g: Vec<f64> = perm.iter().map(|&j| -dot2(x.column(j).iter().copied().zip(r.iter().copied())) / scale[j]).collect();
+        // R'h = g; d = Q'f; R u = d₁ − h; δr = Q (h, d₂).
+        let h = solve_upper_transposed(r_factor, &g);
+        for (k, (v, norm2)) in reflections.iter().enumerate() {
+            reflect(v, *norm2, k, &mut d);
+        }
+        let top: Vec<f64> = d.iter().zip(&h).map(|(dk, hk)| dk - hk).collect();
+        let u = solve_upper(r_factor, &top);
+        d[..p].copy_from_slice(&h);
+        for (k, (v, norm2)) in reflections.iter().enumerate().rev() {
+            reflect(v, *norm2, k, &mut d);
+        }
+        r.iter_mut().zip(&d).for_each(|(ri, di)| *ri += di);
+        for (k, &j) in perm.iter().enumerate() {
+            beta[j] += u[k] / scale[j];
+        }
+    }
+    (0..n).map(|i| residual(beta, i, 0.0)).collect()
+}
+
+/// y[k..] ← H y[k..] for the Householder reflection H = I − 2vv'/(v'v).
+fn reflect(v: &[f64], norm2: f64, k: usize, y: &mut [f64]) {
+    if norm2 > 0.0 {
+        let dot: f64 = v.iter().zip(&y[k..]).map(|(vt, yt)| vt * yt).sum();
+        let f = 2.0 * dot / norm2;
+        for (yt, vt) in y[k..].iter_mut().zip(v) {
+            *yt -= f * vt;
+        }
+    }
+}
+
+/// The solution of R u = b for the upper-triangular R in the leading rows
+/// of `r`, by back-substitution.
+fn solve_upper(r: &Matrix, b: &[f64]) -> Vec<f64> {
+    let p = b.len();
+    let mut u = vec![0.0; p];
+    for k in (0..p).rev() {
+        let mut s = b[k];
+        for j in (k + 1)..p {
+            s -= r[(k, j)] * u[j];
+        }
+        u[k] = s / r[(k, k)];
+    }
+    u
+}
+
+/// The solution of R'h = g for the same R, by forward substitution.
+fn solve_upper_transposed(r: &Matrix, g: &[f64]) -> Vec<f64> {
+    let p = g.len();
+    let mut h = vec![0.0; p];
+    for k in 0..p {
+        let mut s = g[k];
+        for j in 0..k {
+            s -= r[(j, k)] * h[j];
+        }
+        h[k] = s / r[(k, k)];
+    }
+    h
+}
+
+/// A sum of products in twice the working precision, rounded once (Ogita,
+/// Rump and Oishi's Dot2, 2005): each product split exactly by a fused
+/// multiply-add, each addition by Knuth's TwoSum.
+fn dot2(terms: impl Iterator<Item = (f64, f64)>) -> f64 {
+    let (mut s, mut c) = (0.0f64, 0.0f64);
+    for (a, b) in terms {
+        let prod = a * b;
+        let prod_err = a.mul_add(b, -prod);
+        let t = s + prod;
+        let z = t - s;
+        c += (s - (t - z)) + (prod - z) + prod_err;
+        s = t;
+    }
+    s + c
 }
 
 /// The eigenvalues and eigenvectors of a symmetric matrix by cyclic Jacobi

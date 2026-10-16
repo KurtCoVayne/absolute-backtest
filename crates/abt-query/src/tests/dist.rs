@@ -177,6 +177,41 @@ pub fn t_two_sided(t: f64, nu: f64) -> f64 {
     beta_i(nu / 2.0, 0.5, nu / (nu + t * t))
 }
 
+/// The `p` quantile of Student's t(ν), by bisection on `t_sf` to the
+/// resolution of a double.
+pub fn t_ppf(p: f64, nu: f64) -> f64 {
+    if p.is_nan() || nu.is_nan() || nu <= 0.0 {
+        return f64::NAN;
+    }
+    if p <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p >= 1.0 {
+        return f64::INFINITY;
+    }
+    if p < 0.5 {
+        return -t_ppf(1.0 - p, nu);
+    }
+    let tail = 1.0 - p;
+    let mut hi = 1.0;
+    while t_sf(hi, nu) > tail && hi < 1e300 {
+        hi *= 2.0;
+    }
+    let mut lo = 0.0;
+    for _ in 0..2_000 {
+        let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        if t_sf(mid, nu) > tail {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
 /// P(F > f) for F ~ F(d1, d2).
 pub fn f_sf(f: f64, d1: f64, d2: f64) -> f64 {
     if f <= 0.0 {
@@ -265,6 +300,8 @@ mod tests {
         assert!((chi2_sf(3.841_458_820_694_124, 1.0) - 0.05).abs() < 1e-13);
         assert!((chi2_sf(18.307_038_053_275_146, 10.0) - 0.05).abs() < 1e-13);
         assert!((t_two_sided(2.228_138_851_986_274, 10.0) - 0.05).abs() < 1e-13);
+        assert!((t_ppf(0.975, 10.0) - 2.228_138_851_986_274).abs() < 1e-12);
+        assert!((t_ppf(0.025, 10.0) + 2.228_138_851_986_274).abs() < 1e-12);
         assert!((f_sf(3.325_834_530_413_011, 5.0, 10.0) - 0.05).abs() < 1e-12);
         assert!((norm_cdf(1.959_963_984_540_054) - 0.975).abs() < 1e-14);
         assert!((norm_ppf(0.975) - 1.959_963_984_540_054).abs() < 1e-12);

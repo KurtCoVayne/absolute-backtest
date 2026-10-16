@@ -43,6 +43,21 @@ pub fn newey_west_t(x: &[f64], lags: Option<usize>) -> f64 {
     }
 }
 
+/// The mean of `x` and its Newey–West standard error with the small-sample
+/// factor n/(n − 1): sqrt(LRV / (n − 1)), so that zero lags give the
+/// textbook s/√n. This is Fama and MacBeth's standard error of a premium
+/// (and Stata's `newey`), and with zero lags makes the t of a mean of
+/// differences the paired t. The standard error is NaN for fewer than two
+/// values.
+pub fn newey_west_mean(x: &[f64], lags: usize) -> (f64, f64) {
+    let n = x.len();
+    let m = x.iter().sum::<f64>() / n as f64;
+    if n < 2 {
+        return (m, f64::NAN);
+    }
+    (m, (long_run_variance(x, lags) / (n as f64 - 1.0)).sqrt())
+}
+
 /// The HAC covariance of OLS coefficients: (X'X)⁻¹ S (X'X)⁻¹ with
 /// S = Σ_l w_l Σ_t (x_t u_t)(x_{t−l} u_{t−l})' (both orders for l > 0),
 /// the Bartlett weights, rows in time order.
