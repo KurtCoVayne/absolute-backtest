@@ -5,7 +5,7 @@ strategy momentum_top_n {
     class   equity
     need    bars @1d
     need    actions, listing
-    require tested
+    require reviewed
     prefer  latest
   }
   uses  calendar, bars, book

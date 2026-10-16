@@ -4,7 +4,7 @@
 //! forms over surface atoms, which carry bracketed arguments and calendar
 //! instances until the elaborator links them.
 
-use crate::ir::{Cal, CmpOp, Dir, Expr, Lit, Resolution, Span, Term, Ties};
+use crate::ir::{Cal, CmpOp, Dir, Duration, Expr, Lit, Resolution, Span, Term, Ties};
 
 /// A vocabulary line of a class: its kind, its items (a series name with
 /// its calendar), and its span.
@@ -105,6 +105,32 @@ pub struct DataBlock {
     pub needs: Vec<Need>,
     pub require: Option<(Require, Span)>,
     pub prefer: Option<(Prefer, Span)>,
+    pub budget: Option<(Budget, Span)>,
+}
+
+/// `budget { money X; bytes Y; requests Z; seconds S }` (A-D22, D-7.1): caps
+/// on what resolving the demand may spend, each unbounded when absent but
+/// money, which is zero.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Budget {
+    pub money: Option<f64>,
+    pub bytes: Option<u64>,
+    pub requests: Option<u64>,
+    pub seconds: Option<f64>,
+}
+
+/// `need chain of UNDERLYING within EXPIRY_RANGE and MONEYNESS_RANGE [right
+/// R] [spot RELATION]` (D-7.2): the option contracts a program queries per
+/// barrier, by expiry from the bar and strike over the spot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChainNeed {
+    pub underlying: String,
+    pub expiry: (Duration, Duration),
+    pub moneyness: (f64, f64),
+    /// `call` or `put`; both when absent.
+    pub right: Option<String>,
+    /// The relation the spot is read from; the class's `close` when absent.
+    pub spot: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -118,6 +144,7 @@ pub enum NeedKind {
     PointValue,
     Commission,
     Instruments { attr: String, value: String },
+    Chain(ChainNeed),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,8 +156,11 @@ pub struct Need {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Require {
-    Tested,
-    AllowUntested,
+    /// Every version the binding names carries a reviewer's `reviewed`
+    /// attribute (K-2.1).
+    Reviewed,
+    /// Versions no reviewer vouched for are admitted, warned on every run.
+    AllowUnreviewed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

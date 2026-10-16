@@ -146,6 +146,13 @@ pub struct Dataset {
     /// future's multiplier and per-contract commission); a security absent
     /// here is a share with multiplier 1.
     pub contracts: BTreeMap<Sym, Contract>,
+    /// No reviewer vouched for the data (D-2.1's `reviewed` attribute): a
+    /// bundle whose tests have not passed, a loose Parquet directory. A
+    /// dataset the generators or a test build is complete by construction.
+    pub unreviewed: bool,
+    /// The bundle version it was loaded from (the `version` a demand's
+    /// `prefer version V` names).
+    pub version: Option<String>,
 }
 
 /// The contract terms of a security (data-bundle doc, section 3, the
@@ -1058,6 +1065,9 @@ pub enum RunError {
     Request(String),
     /// An executor configuration the program cannot honour.
     Config(String),
+    /// The demand has no binding (K-3.2): the data layer's refusal, naming
+    /// the need no version satisfies and what each held version lacks.
+    Unbound(String),
     /// A degenerate book state that the configured policy halts on
     /// (section 6, executor policy): ruin, leverage, or an oversize order.
     Risk {
@@ -1094,6 +1104,7 @@ impl std::fmt::Display for RunError {
                 }
             }
             RunError::Request(m) => write!(f, "{}", m),
+            RunError::Unbound(m) => write!(f, "the demand has no binding: {}", m),
             RunError::Config(m) => write!(f, "configuration error: {}", m),
             RunError::Risk { t, rule, decision, message } => write!(f, "risk policy halted the run at {}: {} (rule {}): {}", time::format_timestamp(*t), decision, rule, message),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
@@ -1611,7 +1622,7 @@ impl<'p> Kernel<'p> {
         if let Some(m) = unresolved.first() {
             return Err(RunError::Config(m.clone()));
         }
-        let mut run_warnings: Vec<RunWarning> = Vec::new();
+        let mut run_warnings: Vec<RunWarning> = dataset.warnings.clone();
         if !unknown_labels.is_empty() {
             unknown_labels.sort();
             unknown_labels.dedup();

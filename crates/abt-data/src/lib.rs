@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod error;
 pub mod query;
 pub mod registry;
+pub mod resolver;
 pub mod rows;
 pub mod service;
 pub mod store;

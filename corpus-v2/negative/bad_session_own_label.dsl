@@ -4,7 +4,7 @@
 # rule at a base bar may read the previous session's features through
 # `prev(S, S1)`, never the current session's.
 strategy bad_session_own_label {
-  data { class future   need bars @1m   need sessions, point_value, commission   require tested   prefer latest }
+  data { class future   need bars @1m   need sessions, point_value, commission   require reviewed   prefer latest }
   uses calendar, bars
   calendars { session = sessions   es_days = sessions of "ES" }
   clock { decide on base at session + 30min }

@@ -11,7 +11,7 @@ use abt_tests as common;
 use std::collections::BTreeMap;
 use std::fs;
 
-use abt_kernel::data::{load_parquet_dir, synthetic_daily, write_parquet_dir};
+use abt_kernel::data::{synthetic_daily, write_parquet_dir};
 use abt_kernel::kernel::time::format_timestamp;
 use abt_kernel::kernel::{run_on, Dataset, ExecConfig, Replay, Value};
 use abt_tests::{run, run_socket, verify_causality};
@@ -168,7 +168,7 @@ fn availability_loads_from_parquet_and_truncation_follows_it() {
     write_parquet_dir(&p, &ds, &dir).unwrap();
     let close = abt_kernel::table::to_text(&dir.join("close.parquet")).unwrap();
     assert!(close.lines().next().unwrap().ends_with(",available_at"), "{}", close.lines().next().unwrap());
-    let (loaded, _) = load_parquet_dir(&p, &dir).unwrap();
+    let (loaded, _) = abt_tests::load_fixture(&p, &dir).unwrap();
     assert!(loaded.has_availability());
     assert_eq!(loaded.availability_of("close").unwrap().len(), ds.facts["close"].len());
     let a = run_socket(&p, &ds, ExecConfig::frictionless()).unwrap();

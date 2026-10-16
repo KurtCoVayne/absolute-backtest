@@ -5,7 +5,7 @@
 # (WF-5). Negate `in_top`, a reduction, as regime_momentum does.
 # allow: W6
 strategy bad_negation_incomplete_derived {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, stat, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

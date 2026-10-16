@@ -3,7 +3,7 @@
 # momentum would tie, and the checker does not accept an order that is total
 # only because values happen to be distinct (WF-7).
 strategy bad_top_missing_identity {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

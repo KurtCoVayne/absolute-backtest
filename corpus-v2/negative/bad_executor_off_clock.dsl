@@ -4,7 +4,7 @@
 # label (WF-16). The book is read at the decision bar, where the kernel
 # supplies it: `session_of(A, T, S)` then relates the bar to its session.
 strategy bad_executor_off_clock {
-  data { class future   need bars @1m   need sessions, point_value, commission   require tested   prefer latest }
+  data { class future   need bars @1m   need sessions, point_value, commission   require reviewed   prefer latest }
   uses calendar
   calendars { session = sessions   es_days = sessions of "ES" }
   clock { decide on base at session + 30min }

@@ -83,7 +83,7 @@ strategy sma_crossover {
     class   equity
     need    bars @1d
     need    listing
-    require tested
+    require reviewed
     prefer  latest
   }
   uses  calendar, stat, book
@@ -141,9 +141,12 @@ library stat {
   `need actions` (split, dividend, delisted), `need listing` (listed,
   ticker), `need lists "L", ...` (member), `need series "S" @r
   [complete]`, `need sessions`, `need point_value`, `need commission`,
-  `need instruments where ATTR = VALUE`. `require tested` or `allow
-  untested`; `prefer latest`, `version V` or `base finest`. With `complete`
-  a missing bar means the instrument did not trade and the bar primitives
+  `need instruments where ATTR = VALUE`, `need chain of "U" within
+  D1..D2 and M1..M2` (options). `require reviewed` or `allow unreviewed`
+  (the versions' `reviewed` attribute, warned when admitted without it);
+  `prefer latest`, `version V` or `base finest`; an optional `budget {
+  money X; bytes Y; requests Z }`. With `complete` the versions must be
+  `reviewed = complete`: a missing bar means the instrument did not trade and the bar primitives
   are closed; without it a missing bar is unknown, so they may not be
   negated, directly or through a relation that reads them (N). A rule that
   reads a primitive the demand did not ask for is an E error; a label or
@@ -282,36 +285,33 @@ warning once and not once per strategy that uses it.
 
 ## Reading the kernel
 
-Two drivers share one evaluator and one executor. The batch driver
-(`kernel::run`, `abt run`) walks the decision bars of a fully loaded
-dataset. The fold (`kernel::run_fold`, `abt run --kernel fold`;
-`docs/data-bundle.md`, section 2) is `state' = step(state, event)` over the
-dataset's event log: every primitive tuple available at its own bar's close,
-ordered by availability, then relation; a tuple's arrival opens the buckets
-it falls in at every calendar the program has and closes the ones before
-them (a bar of the base calendar opens only with a tuple at the base
-resolution; every other calendar's buckets are the schedule the dataset
-carries, the periods' last bars and the sessions), and the barrier of a
-decision bucket runs the executor's fill of the previous bar's orders (after
-the bar's corporate actions, so an ex-date's orders fill against the
-post-split book), the bar's open (delistings, mark, margin), the strategy's
-decisions and the executor's take, in the batch driver's order.
-Because every temporal builtin looks back only, a time domain that grows as
-buckets open is observationally the up-front one. The fold's state is
-serialisable (`kernel::Checkpoint`): `--checkpoint-every month|N
---checkpoint-dir DIR` writes one at the end of every calendar month (or
-every N bars) as `DIR/<bar>.json`, and `--resume FILE` continues from it
-over the same data and configuration. The executor is a trait
-(`kernel::Executor`), so a live run attaches another executor to the same
-fold.
+The kernel reads its data through the data layer (`docs/spec`, M-2). Bind
+sends the program's demand, receives the binding, and subscribes to a stream
+of the bound relations' tuples in receipt order with explicit barriers of
+the program's calendars. The fold (`kernel::run`) is `state' = step(state,
+event)` over that stream: a tuple is stored at its `t` (late when its
+decision bucket was already decided), a barrier opens its bucket, and a
+barrier of the decision calendar runs the executor's fill of the previous
+bar's orders (after the bar's corporate actions, so an ex-date's orders fill
+against the post-split book), the bar's open (delistings, mark, margin), the
+strategy's decisions and the executor's take. Because every temporal
+builtin looks back only, a time domain that grows as buckets open is
+observationally the up-front one. The fold's state is serialisable
+(`kernel::Checkpoint`, with the stream's seq as its cursor):
+`--checkpoint-every month|N --checkpoint-dir DIR` writes one at the end of
+every calendar month (or every N bars) as `DIR/<bar>.json`, and `--resume
+FILE` continues from it over the same data and configuration. The executor
+is a trait (`kernel::Executor`), so a live run attaches another executor to
+the same fold.
 
-A tuple may carry its own availability time (`Dataset::add_available`; an
+A tuple carries its receipt time `r` (`Dataset::add_available`; an
 `available_at` column in a loose Parquet file or in a bundle's partitions):
-the fold reads it from then on, so a tuple that arrived after its bar closed
-is late in the backtest too. The batch kernel is blind to availability;
-`Dataset::truncated` keeps what was available at `t`, and `verify_causality`
-(`--verify-causality`) re-runs truncated instances for sampled bars and
-compares `decide(t)`, printing `causality verified at 5 sampled bars`.
+a decision at a barrier sees the tuples received by the barrier's instant,
+so a tuple that arrived after its bar closed is late in the backtest too. A
+run truncated at a decision is the stream's `to_seq` at that barrier, and
+`verify_causality` (`--verify-causality`) re-runs truncated streams for
+sampled bars and compares `decide(t)`, printing `causality verified at 5
+sampled bars`.
 
 Evaluation is top-down: `decide(t, D)` is requested for each bar `t` of the
 decision calendar, and every derived relation is requested with its key and
@@ -437,10 +437,10 @@ A = E1, F = 43.49, S = 43.95, T = 2022-04-07`).
 
 ```
 abt check <files...>
-abt run --strategy NAME (--data DIR | --bundle DIR [--untested] | --synthetic [--days N] [--symbols A,B,C] [--seed N])
-        [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised] [--kernel batch|fold]
+abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+        [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
         [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>
-abt run ... --kernel fold [--checkpoint-every month|N --checkpoint-dir DIR] [--resume FILE]
+abt run ... [--checkpoint-every month|N --checkpoint-dir DIR] [--resume FILE]
 abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt show --strategy NAME <files...>
@@ -457,7 +457,7 @@ abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files
 abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>
 abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>
-abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--kernel KIND] [--threads N] <files...>
+abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--threads N] <files...>
 abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>
 abt study metrics --study DIR [--strategy NAME] <files...>
 abt study report --study DIR --strategy NAME <files...>
@@ -538,9 +538,10 @@ where a close ratio outside [0.6, 1.67] between consecutive bars must be a
 split that day and every split must show one; delisting coverage, where a
 name that leaves the universe before the last bar has a `delisted` record;
 membership, where a member is in the universe that bar) and records a pass
-in the manifest. A program's `data` block says `require tested`; `abt run
---bundle` refuses a bundle that has not passed (exit 2) unless `--untested`,
-and then notes that its decisions are not causality-certified. `abt synth`,
+in the manifest; a bundle that passed is `reviewed = complete` in the data
+layer. A program's `data` block says `require reviewed`, so `abt run
+--bundle` refuses a bundle that has not passed (exit 2, naming the version
+and what it lacks); `allow unreviewed` runs on it with a warning. `abt synth`,
 `abt bundle build` and `abt bundle test` need no strategy: they work from a
 program whose demand covers the class whole (`check::class_program`). The
 crate depends on `serde`, `serde_json`, `arrow` and `parquet` for all this.

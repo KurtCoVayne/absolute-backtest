@@ -22,6 +22,8 @@ pub enum DataError {
     NotFound(String),
     /// A request the layer does not take, or takes otherwise.
     Malformed(String),
+    /// A demand no version of the store satisfies (D-7.4).
+    Unresolved(String),
 }
 
 impl fmt::Display for DataError {
@@ -31,7 +33,7 @@ impl fmt::Display for DataError {
             DataError::Json(e) => write!(f, "{}", e),
             DataError::Arrow(e) => write!(f, "{}", e),
             DataError::Parquet(e) => write!(f, "{}", e),
-            DataError::Schema(m) | DataError::Identity(m) | DataError::Order(m) | DataError::NotFound(m) | DataError::Malformed(m) => f.write_str(m),
+            DataError::Schema(m) | DataError::Identity(m) | DataError::Order(m) | DataError::NotFound(m) | DataError::Malformed(m) | DataError::Unresolved(m) => f.write_str(m),
             DataError::UnknownRelation(r) => write!(f, "unknown relation `{}`", r),
             DataError::UnknownVersion(v) => write!(f, "unknown version {}", v),
         }
@@ -73,6 +75,7 @@ impl DataError {
             DataError::NotFound(_) => ErrorCode::NotFound,
             DataError::Malformed(_) | DataError::Schema(_) => ErrorCode::Malformed,
             DataError::Identity(_) | DataError::Order(_) => ErrorCode::Refused,
+            DataError::Unresolved(_) => ErrorCode::Unresolved,
             _ => ErrorCode::Internal,
         };
         error(code, self.to_string())

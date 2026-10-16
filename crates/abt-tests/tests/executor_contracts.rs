@@ -177,7 +177,7 @@ fn a_back_adjusted_future_may_cross_zero_and_a_share_may_not() {
     };
     write("future");
     let p = common::program(&future_hold(), "contracts_hold");
-    let (ds, _) = load_parquet_dir(&p, &dir).unwrap();
+    let (ds, _) = abt_tests::load_fixture(&p, &dir).unwrap();
     let sym = ds.symbols.names().iter().position(|n| n == "CL1").unwrap() as u32;
     assert_eq!(ds.contract(sym).multiplier, 1000.0);
     assert!(ds.is_future(sym));

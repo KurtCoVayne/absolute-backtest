@@ -2,7 +2,7 @@
 # A parameter's default must lie within its declared range: 400d is outside
 # 5d..250d.
 strategy bad_param_out_of_range {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, stat, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

@@ -257,7 +257,7 @@ library booklib {
 "#;
     let src = r#"
 strategy off_clock {
-  data { class future   need bars @1m   need sessions, point_value, commission   require tested   prefer latest }
+  data { class future   need bars @1m   need sessions, point_value, commission   require reviewed   prefer latest }
   uses calendar, booklib
   calendars { session = sessions   es_days = sessions of "ES" }
   clock { decide on base at session + 30min }

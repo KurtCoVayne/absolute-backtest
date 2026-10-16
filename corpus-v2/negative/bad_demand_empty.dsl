@@ -2,7 +2,7 @@
 # The data block is a conjunctive query over the catalog and needs at least
 # one `need` (WF-17); with none, nothing binds the primitives the rules read.
 strategy bad_demand_empty {
-  data { class equity   require tested   prefer latest }
+  data { class equity   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

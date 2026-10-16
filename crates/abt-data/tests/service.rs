@@ -87,7 +87,7 @@ fn service() -> Arc<DataService> {
         rows.push(("E2", T0 + d * DAY, 20.0 + d as f64));
         rows.push(("E3", T0 + d * DAY, 30.0 + d as f64));
     }
-    let got = ingest_keyed(&mut s, "test", &secs, &[], &[("equity.close".to_string(), close_rows(&rows))], "test").unwrap();
+    let got = ingest_keyed(&mut s, "test", &secs, &[], &[("equity.close".to_string(), close_rows(&rows))], "test", &BTreeMap::new()).unwrap();
     assert_eq!(got.ids.len(), 3);
     s.ingest("calendar_label", &[calendar_rows(&(0..10).map(|d| T0 + d * DAY).collect::<Vec<_>>())], "test", BTreeMap::new())
         .unwrap();
@@ -109,6 +109,7 @@ fn keys_become_registry_ids_once() {
         &[],
         &[("equity.close".to_string(), close_rows(&[("E3", T0 + 20 * DAY, 1.0), ("E4", T0 + 20 * DAY, 2.0)]))],
         "test",
+        &BTreeMap::new(),
     )
     .unwrap();
     assert_eq!(again.ids["E3"], 3);
@@ -172,6 +173,7 @@ fn script(c: &Client) -> Vec<String> {
             to: None,
             scope: None,
             attributes: None,
+            label: None,
         }]),
         require: None,
         prefer: None,

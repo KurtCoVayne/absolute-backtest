@@ -245,6 +245,8 @@ table Need {
   to: long = null;
   scope: Scope;
   attributes: [Attribute];
+  // The need as the program writes it, for the resolver's messages.
+  label: string;
 }
 
 table Budget {
@@ -308,6 +310,11 @@ table PlanStep {
   relation: string (required);
   version: string;
   cost: CostVector;
+  // The version's span and attributes, what the kernel's preconditions on
+  // the binding read (K-3.2).
+  from: long = null;
+  to: long = null;
+  attributes: [Attribute];
 }
 
 table ResolvePlan {

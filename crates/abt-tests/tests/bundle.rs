@@ -63,10 +63,16 @@ fn a_bundle_round_trips_a_catalog_market_through_parquet() {
     assert!(m.tests.is_none(), "a freshly built bundle is untested");
     // The derived ticker relation is rebuilt, not stored.
     assert!(!m.relations.iter().any(|r| r.name == "ticker"));
-    // Loading needs the tests to have passed, unless asked otherwise.
-    let err = load_bundle(&p, &dir, false).err().unwrap();
-    assert!(err.contains("tests") && err.contains("--untested"), "{}", err);
-    let (loaded, m2) = load_bundle(&cls, &dir, true).unwrap();
+    // An untested bundle loads unreviewed, and a program that requires
+    // reviewed data is refused by the resolver, naming the attribute.
+    let (untested, _) = load_bundle(&p, &dir).unwrap();
+    assert!(untested.unreviewed);
+    assert_eq!(untested.version.as_deref(), Some("2026.10"));
+    let err = run(&p, &untested, ExecConfig::from_program(&p)).err().unwrap().to_string();
+    assert!(err.contains("no binding") && err.contains("no `reviewed` attribute"), "{}", err);
+    test_bundle(&cls, &dir).unwrap();
+    let (loaded, m2) = load_bundle(&cls, &dir).unwrap();
+    assert!(!loaded.unreviewed, "a bundle whose tests passed is reviewed");
     assert_eq!(m2.version, "2026.10");
     assert_eq!(loaded.securities, ds.securities);
     for rel in [
@@ -87,7 +93,7 @@ fn a_bundle_round_trips_a_catalog_market_through_parquet() {
     }
     // Same symbols, same values: the runs agree exactly, the strategy
     // reading its own slice of the bundle under its execution block.
-    let (slice, _) = load_bundle(&p, &dir, true).unwrap();
+    let (slice, _) = load_bundle(&p, &dir).unwrap();
     let cfg = ExecConfig::from_program(&p);
     let a = run(&p, &ds, cfg.clone()).unwrap();
     let b = run(&p, &slice, cfg).unwrap();
@@ -117,8 +123,8 @@ fn the_bundle_tests_pass_on_the_synthetic_catalog_and_are_recorded() {
     assert!(m.tests.as_ref().map(|t| !t.passed_at.is_empty()).unwrap_or(false), "{:?}", m.tests);
     let on_disk = read_manifest(&dir).unwrap();
     assert!(on_disk.tests.is_some(), "the manifest records the passing tests");
-    // Now the bundle loads without --untested.
-    load_bundle(&cls, &dir, false).unwrap();
+    // Now the bundle loads reviewed.
+    assert!(!load_bundle(&cls, &dir).unwrap().0.unreviewed);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -144,7 +150,7 @@ fn a_broken_bundle_fails_the_right_test_and_is_not_marked_tested() {
     let (m, results) = test_bundle(&cls, &dir).unwrap();
     assert!(results.iter().any(|r| !r.passed));
     assert!(m.tests.is_none());
-    assert!(load_bundle(&cls, &dir, false).is_err());
+    assert!(load_bundle(&cls, &dir).unwrap().0.unreviewed);
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -187,15 +193,18 @@ fn a_strategy_names_the_bundle_version_it_was_written_against() {
     let dir = scratch("version");
     write_bundle(&cls, &ds, &dir, "equity", "2026.10").unwrap();
     test_bundle(&cls, &dir).unwrap();
-    load_bundle(&p, &dir, false).unwrap();
-    load_bundle(&unpinned, &dir, false).unwrap();
+    // The resolver binds the version a program names, or any under `prefer
+    // latest`, and refuses a version the store does not hold.
+    let (ds, _) = load_bundle(&p, &dir).unwrap();
+    run(&p, &ds, ExecConfig::from_program(&p)).unwrap();
+    run(&unpinned, &ds, ExecConfig::from_program(&unpinned)).unwrap();
     let other = common::program(&pinned_src.replace("\"2026.10\"", "\"2026.11\""), "total_return_momentum");
-    let err = load_bundle(&other, &dir, false).err().unwrap();
-    assert!(err.contains("2026.11") && err.contains("2026.10"), "{}", err);
+    let err = run(&other, &ds, ExecConfig::from_program(&other)).err().unwrap().to_string();
+    assert!(err.contains("2026.11"), "{}", err);
     // The wrong class altogether: a futures book on an equity bundle.
     let futures = common::program(&common::corpus_source("company", "r8l"), "r8l");
     assert_eq!(futures.class, "future");
-    let err = load_bundle(&futures, &dir, false).err().unwrap();
+    let err = load_bundle(&futures, &dir).err().unwrap();
     assert!(err.contains("future") && err.contains("equity"), "{}", err);
     let _ = fs::remove_dir_all(&dir);
 }

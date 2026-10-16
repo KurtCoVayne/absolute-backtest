@@ -18,15 +18,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 
 use abt_wire::generated::abt::wire::{
-    Binding, Catalog, ColumnSpec, ColumnType, Demand, Distinct, Layer, Message, Need, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest,
-    StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
+    Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, PlanStep, Preference, PreferenceKind, PutRequest, QueryForm,
+    QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
 };
 use abt_wire::rpc::{Client, Reply, WireError};
 use abt_wire::transport::Connection;
 use arrow::array::{Array, ArrayRef, AsArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 
-use super::{time, Contract, Dataset, Kernel, RunError, Security, Sym, Symbols, Tuple, Value};
+use super::{time, Contract, Dataset, Kernel, RunError, RunWarning, Security, Sym, Symbols, Tuple, Value};
 use crate::check::Program;
 use crate::ir::{Cal, Kind, Ty};
 
@@ -85,29 +85,23 @@ impl DataClient {
         }
     }
 
-    /// The binding of a demand for `relations` of `class` (the transitional
-    /// resolver of M-2: each at its current version).
-    pub fn resolve(&self, class: &str, relations: Vec<String>) -> Result<Binding, RunError> {
-        let demand = Demand {
-            class: class.to_string(),
-            needs: Some(vec![Need {
-                relations,
-                calendar: None,
-                from: None,
-                to: None,
-                scope: None,
-                attributes: None,
-            }]),
-            require: None,
-            prefer: None,
-            budget: None,
-            dynamic: None,
-        };
-        match self.request(Message::ResolveRequest(Box::new(ResolveRequest {
+    /// The binding of a demand (D-7.2), with the plan's steps: the version
+    /// each need's relations are bound at, its span and its attributes.
+    pub fn resolve(&self, demand: Demand) -> Result<(Binding, Vec<PlanStep>), RunError> {
+        let answer = self.client.request(Message::ResolveRequest(Box::new(ResolveRequest {
             demand: Box::new(demand),
             dry_run: false,
-        })))? {
-            Message::ResolveResponse(r) => r.binding.map(|b| *b).ok_or_else(|| RunError::Config("the data service resolved no binding".into())),
+        })));
+        let answer = match answer {
+            Err(WireError::Remote(e)) if e.code == abt_wire::ErrorCode::Unresolved => return Err(RunError::Unbound(e.message.unwrap_or_default())),
+            other => other.map_err(wire)?,
+        };
+        match answer {
+            Message::ResolveResponse(r) => {
+                let steps = r.plan.and_then(|p| p.steps).unwrap_or_default();
+                let binding = r.binding.map(|b| *b).ok_or_else(|| RunError::Config("the data service resolved no binding".into()))?;
+                Ok((binding, steps))
+            }
             _ => Err(RunError::Config("the data service answered a resolve with another message".into())),
         }
     }
@@ -246,6 +240,10 @@ pub struct Bound {
     pub base_bars: BTreeSet<i64>,
     pub sessions: Vec<(Sym, i64, i64)>,
     pub prints: BTreeMap<Sym, BTreeSet<i64>>,
+    /// What the binding's preconditions warn of (K-3.2): versions no
+    /// reviewer vouched for under `allow unreviewed`, a span that starts
+    /// after the need's `from`.
+    pub warnings: Vec<RunWarning>,
 }
 
 impl Bound {
@@ -300,20 +298,30 @@ pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
         first.filter(|_| others.next().is_none())
     };
     let primitives: Vec<&str> = prog.relations.iter().filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. })).map(|(n, _)| n.as_str()).collect();
-    let mut wanted: BTreeSet<String> = all.iter().filter(|s| s.class == prog.class).map(|s| s.name.clone()).collect();
-    for p in &primitives {
-        if let Some(n) = stored_name(p) {
-            wanted.insert(n);
-        }
-    }
-    let binding = client.resolve(&prog.class, wanted.into_iter().collect())?;
+    let (binding, steps) = client.resolve(demand_of(prog, &stored_name))?;
+    let warnings = binding_warnings(prog, &steps);
     let view = View {
         versions: None,
         binding: binding.id.clone(),
         as_of_seq: None,
     };
     let pairs: BTreeMap<String, String> = binding.pairs.clone().unwrap_or_default().into_iter().map(|p| (p.relation, p.version)).collect();
-    let present: BTreeSet<String> = pairs.keys().filter(|r| r.starts_with(&format!("{}.", prog.class))).map(|r| short(r).to_string()).collect();
+    // What the data holds of the class, bound or not: the relations whose
+    // current version has rows (a run warns of actions it holds and does
+    // not load).
+    let mut present: BTreeSet<String> = BTreeSet::new();
+    for b in client.stats()? {
+        let rel = strings(col(&b, "relation")?)?;
+        let current = col(&b, "current")?.as_boolean().clone();
+        let rows = col(&b, "rows")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+        for (i, r) in rel.iter().enumerate() {
+            if let Some(r) = r {
+                if current.value(i) && rows.value(i) > 0 && r.starts_with(&format!("{}.", prog.class)) {
+                    present.insert(short(r).to_string());
+                }
+            }
+        }
+    }
     let mut stored = BTreeMap::new();
     for p in &primitives {
         if let Some(n) = stored_name(p) {
@@ -533,7 +541,194 @@ pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
         base_bars,
         sessions,
         prints,
+        warnings,
     })
+}
+
+/// The relations of a class each need of a data block admits (Definition
+/// 3.11; `Demand::need_for`).
+fn need_relations(word: &str) -> &'static [&'static str] {
+    match word {
+        "bars" => &["open", "high", "low", "close", "volume"],
+        "actions" => &["split", "dividend", "delisted"],
+        "listing" => &["listed", "ticker", "usable"],
+        "lists" => &["member", "classification"],
+        "series" => &["value"],
+        "sessions" => &["session"],
+        "point_value" => &["point_value"],
+        "commission" => &["commission"],
+        _ => &[],
+    }
+}
+
+/// The program's demand as the kernel sends it (D-7.1). One need per need
+/// its data block writes, naming the stored relations the need admits that
+/// the program holds as primitives, with the calendar and first time it
+/// asks for and the attributes their versions must carry (K-3.2:
+/// `reviewed = complete` for a `complete` need); `require reviewed` asks
+/// every version for a `reviewed` attribute (an empty value: any). A
+/// relation the store has no schema for is named in the program's class,
+/// so that the resolver refuses it by name.
+pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -> Demand {
+    let d = &prog.demand;
+    let mut needs = Vec::new();
+    let mut need = |word: &str, label: String, calendar: Option<String>, from: Option<i64>, complete: bool| {
+        let relations: Vec<String> = need_relations(word)
+            .iter()
+            .filter(|n| matches!(prog.relations.get(**n).map(|s| &s.kind), Some(Kind::Primitive { .. })))
+            .map(|n| stored_name(n).unwrap_or_else(|| format!("{}.{}", prog.class, n)))
+            .collect();
+        if relations.is_empty() {
+            return;
+        }
+        needs.push(Need {
+            relations,
+            calendar,
+            from,
+            to: None,
+            scope: None,
+            attributes: complete.then(|| {
+                vec![Attribute {
+                    key: "reviewed".into(),
+                    value: "complete".into(),
+                }]
+            }),
+            label: Some(label),
+        });
+    };
+    let done = |complete: bool| if complete { " complete" } else { "" };
+    if let Some(r) = d.bars {
+        let label = format!(
+            "bars {}{}{}",
+            r,
+            d.bars_from.map(|t| format!(" from {}", time::format_timestamp(t))).unwrap_or_default(),
+            done(d.bars_complete)
+        );
+        need("bars", label, Some(r.to_string().trim_start_matches('@').to_string()), d.bars_from, d.bars_complete);
+    }
+    if d.actions {
+        need("actions", "actions".into(), None, None, false);
+    }
+    if d.listing {
+        need("listing", "listing".into(), None, None, false);
+    }
+    if !d.lists.is_empty() {
+        let names: Vec<String> = d.lists.iter().map(|l| format!("\"{}\"", l)).collect();
+        need("lists", format!("lists {}", names.join(", ")), None, None, false);
+    }
+    if !d.series.is_empty() {
+        let names: Vec<String> = d.series.iter().map(|(n, r)| format!("\"{}\"{}", n, r.map(|r| format!(" {}", r)).unwrap_or_default())).collect();
+        need("series", format!("series {}{}", names.join(", "), done(d.series_complete)), None, None, d.series_complete);
+    }
+    if d.sessions {
+        need("sessions", "sessions".into(), None, None, false);
+    }
+    if d.point_value {
+        need("point_value", "point_value".into(), None, None, false);
+    }
+    if d.commission {
+        need("commission", "commission".into(), None, None, false);
+    }
+    let prefer = match d.prefer.as_str() {
+        "base finest" => Preference {
+            kind: PreferenceKind::Finest,
+            version: None,
+        },
+        p if p.starts_with("version ") => Preference {
+            kind: PreferenceKind::Version,
+            version: Some(p["version ".len()..].to_string()),
+        },
+        _ => Preference {
+            kind: PreferenceKind::Latest,
+            version: None,
+        },
+    };
+    let dynamic: Vec<DynamicNeed> = d
+        .chains
+        .iter()
+        .map(|c| DynamicNeed {
+            relation: "quote".into(),
+            underlying: 0,
+            filters: Some(Box::new(ChainFilters {
+                expiry_from: Some(Box::new(wire_duration(&c.expiry.0))),
+                expiry_to: Some(Box::new(wire_duration(&c.expiry.1))),
+                moneyness_lo: Some(c.moneyness.0),
+                moneyness_hi: Some(c.moneyness.1),
+                right: c.right.clone(),
+                style: None,
+                strike_lo: None,
+                strike_hi: None,
+                min_open_interest: None,
+            })),
+            spot_relation: Some(c.spot.clone()),
+            spot_column: None,
+            horizon: None,
+        })
+        .collect();
+    Demand {
+        class: prog.class.clone(),
+        needs: Some(needs),
+        require: d.require_reviewed.then(|| {
+            vec![Attribute {
+                key: "reviewed".into(),
+                value: String::new(),
+            }]
+        }),
+        prefer: Some(vec![prefer]),
+        budget: Some(Box::new(Budget {
+            money: d.budget.as_ref().and_then(|b| b.money).unwrap_or(0.0),
+            bytes: d.budget.as_ref().and_then(|b| b.bytes).map(|x| x as i64),
+            requests: d.budget.as_ref().and_then(|b| b.requests).map(|x| x as i64),
+            seconds: d.budget.as_ref().and_then(|b| b.seconds),
+        })),
+        dynamic: (!dynamic.is_empty()).then_some(dynamic),
+    }
+}
+
+fn wire_duration(d: &crate::ir::Duration) -> abt_wire::generated::abt::wire::Duration {
+    abt_wire::generated::abt::wire::Duration {
+        months: d.months,
+        days: d.days,
+        nanos: d.nanos,
+    }
+}
+
+/// The preconditions on a binding that warn (K-3.2): a version no reviewer
+/// vouched for, admitted by `allow unreviewed` (warned on every run, V-3.11);
+/// a span that starts after the need's `from`, so the first decisions read
+/// less history than the program asked for.
+fn binding_warnings(prog: &Program, steps: &[PlanStep]) -> Vec<RunWarning> {
+    let mut out = Vec::new();
+    let reviewed = |s: &PlanStep| s.attributes.iter().flatten().any(|a| a.key == "reviewed");
+    let unreviewed: Vec<String> = steps.iter().filter(|s| !reviewed(s)).map(|s| format!("{} ({})", s.relation, s.source)).collect();
+    if !prog.demand.require_reviewed && !unreviewed.is_empty() {
+        out.push(RunWarning {
+            bias: "unreviewed data".into(),
+            message: format!(
+                "the program allows unreviewed data, and no reviewer vouched for {}: a gap in them may be missing data rather than an instrument that did not trade",
+                unreviewed.join(", ")
+            ),
+        });
+    }
+    if let Some(from) = prog.demand.bars_from {
+        let late: Vec<String> = steps
+            .iter()
+            .filter(|s| matches!(short(&s.relation), "open" | "high" | "low" | "close" | "volume"))
+            .filter_map(|s| s.from.filter(|f| *f > from).map(|f| (s.relation.clone(), f)))
+            .map(|(r, f)| format!("{} from {}", r, time::format_timestamp(f)))
+            .collect();
+        if !late.is_empty() {
+            out.push(RunWarning {
+                bias: "warm-up".into(),
+                message: format!(
+                    "the data block needs bars from {}, and the binding holds {}: the first decisions read less history than the program asks for",
+                    time::format_timestamp(from),
+                    late.join(", ")
+                ),
+            });
+        }
+    }
+    out
 }
 
 /// The instant a calendar label's bucket closes (E-13): the base bar's

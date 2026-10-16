@@ -7,7 +7,7 @@ strategy opening_gap {
     class   equity
     need    bars @1m
     need    actions, listing
-    require tested
+    require reviewed
     prefer  latest
   }
   uses  calendar, book

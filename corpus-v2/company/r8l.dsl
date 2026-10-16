@@ -29,7 +29,7 @@ strategy r8l {
     class    future
     need     bars @1m from 2000-01-01 complete
     need     sessions, point_value, commission
-    require  tested
+    require  reviewed
     prefer   latest
   }
   uses      calendar, bars

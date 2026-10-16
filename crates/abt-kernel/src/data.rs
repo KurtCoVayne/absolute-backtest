@@ -35,6 +35,9 @@ pub fn load_parquet_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<Stri
         return Err(format!("{}: directory not found", dir.display()));
     }
     let mut ds = Dataset::new();
+    // A loose directory carries no review: a reviewer marks its versions
+    // (`abt data ingest --attributes reviewed=complete`).
+    ds.unreviewed = true;
     let mut notes = Vec::new();
     // The security table (data-bundle doc, section 3): `securities.parquet`
     // with `id,ticker,from,to` (`to` null while the ticker is still carried)

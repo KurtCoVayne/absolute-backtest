@@ -58,7 +58,7 @@ fn identical_duplicate_rows_are_dropped() {
         "A,T,P\nAAA,2022-01-03,10.0\nAAA,2022-01-03,10.0\n",
         &[("volume", "A,T,V\nAAA,2022-01-03,1000\n"), ("listed", "A,T\nAAA,2022-01-03\nAAA,2022-01-03\n")],
     );
-    let (ds, _) = load_parquet_dir(&prog, &dir).unwrap();
+    let (ds, _) = abt_tests::load_fixture(&prog, &dir).unwrap();
     assert_eq!(ds.facts["close"].len(), 1);
     assert_eq!(ds.facts["listed"].len(), 1);
     let _ = fs::remove_dir_all(&dir);
@@ -73,7 +73,7 @@ fn two_symbols_on_one_day_are_distinct_tuples() {
         "A,T,P\nAAA,2022-01-03,10.0\nBBB,2022-01-03,20.0\n",
         &[("volume", "A,T,V\nAAA,2022-01-03,1000\nBBB,2022-01-03,2000\n"), ("listed", "A,T\nAAA,2022-01-03\nBBB,2022-01-03\n")],
     );
-    let (ds, notes) = load_parquet_dir(&prog, &dir).unwrap();
+    let (ds, notes) = abt_tests::load_fixture(&prog, &dir).unwrap();
     assert!(notes.is_empty(), "{:?}", notes);
     assert_eq!(ds.facts["close"].len(), 2);
     assert_eq!(ds.facts["listed"].len(), 2);
@@ -88,7 +88,7 @@ fn daily_labels_with_a_time_of_day_are_the_date_bar() {
         "A,T,P\nAAA,2022-01-03T16:00:00,10.0\nAAA,2022-01-04 16:00,11.0\n",
         &[("volume", "A,T,V\nAAA,2022-01-03,1000\nAAA,2022-01-04,1000\n"), ("listed", "A,T\nAAA,2022-01-03\nAAA,2022-01-04\n")],
     );
-    let (ds, _) = load_parquet_dir(&prog, &dir).unwrap();
+    let (ds, _) = abt_tests::load_fixture(&prog, &dir).unwrap();
     let keys: Vec<Value> = ds.facts["close"].iter().map(|tu| tu[1].clone()).collect();
     assert_eq!(keys, vec![Value::Time(common::day("2022-01-03")), Value::Time(common::day("2022-01-04"))]);
     // One time domain: two bars, not four.
@@ -114,7 +114,7 @@ fn a_time_of_day_does_not_hide_a_conflicting_duplicate() {
 fn an_empty_table_is_noted() {
     let prog = program();
     let dir = table_dir("headeronly", "A,T,P\n", &[("volume", "A,T,V\nAAA,2022-01-03,1000\n"), ("listed", "A,T\nAAA,2022-01-03\n")]);
-    let (ds, notes) = load_parquet_dir(&prog, &dir).unwrap();
+    let (ds, notes) = abt_tests::load_fixture(&prog, &dir).unwrap();
     assert!(!ds.facts.contains_key("close") || ds.facts["close"].is_empty());
     assert!(notes.iter().any(|n| n.contains("close.parquet") && n.contains("no rows")), "{:?}", notes);
     let _ = fs::remove_dir_all(&dir);

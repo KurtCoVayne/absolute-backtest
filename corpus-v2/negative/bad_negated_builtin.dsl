@@ -3,7 +3,7 @@
 # does not resolve. The idiom is a derived relation over the builtin,
 # `mstart(T) :- bar(T), month_start(T).`, which is closed and can be negated.
 strategy bad_negated_builtin {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

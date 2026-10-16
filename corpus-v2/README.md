@@ -26,7 +26,7 @@ libraries a unit reads directly.
 
 ```
 strategy NAME {
-  data       { class CLASS   need ...   require tested | allow untested   prefer latest | version V | base finest }
+  data       { class CLASS   need ...   require reviewed | allow unreviewed   prefer latest | version V | base finest   [budget { ... }] }
   uses       LIB, LIB, ...
   calendars  { NAME = base | days | weeks(n) | months(n) | years(n) | sessions | sessions of "ROOT"   ... }
   clock      { decide on CALENDAR [at session + OFFSET] }
@@ -44,12 +44,18 @@ defines it: `need bars @r [from DATE] [complete]` (open, high, low, close,
 volume at resolution r or finer, from the date on), `need actions` (split,
 dividend, delisted), `need listing` (listed, ticker), `need lists "L", ...`
 (member), `need series "S" @r [complete]`, `need sessions`, `need
-point_value`, `need commission`, `need instruments where ATTR = VALUE`.
-Several needs may share a line, comma-separated. With `complete` the program
-requires a bundle whose bars (or series) are reviewed complete, so that a
-missing bar means the instrument did not trade and WF-5 treats the primitives
-as closed; without it a missing bar is unknown, and the bar primitives may
-not be negated, directly or through a relation that reads them. A library's
+point_value`, `need commission`, `need instruments where ATTR = VALUE`, and
+for options `need chain of "U" within D1..D2 and M1..M2 [right call|put]
+[spot RELATION]` (docs/spec/01-data.md, 7.2). Several needs may share a
+line, comma-separated. With `complete` the program requires versions a
+reviewer marked `reviewed = complete`, so that a missing bar means the
+instrument did not trade and WF-5 treats the primitives as closed; without it
+a missing bar is unknown, and the bar primitives may not be negated, directly
+or through a relation that reads them. `require reviewed` asks every version
+the binding names for a reviewer's `reviewed` attribute; `allow unreviewed`
+admits the others, warned on every run. An optional `budget { money X; bytes
+Y; requests Z; seconds S }` caps what resolving the demand may spend (money
+is zero unless written). A library's
 `data` block says what the library needs; a strategy's demand must cover its
 libraries'. `class any` in a library means the module is written for every
 class, with `Entity` as the class's entity sort and `units` as its unit. A

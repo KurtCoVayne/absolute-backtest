@@ -104,7 +104,7 @@ fn close_rows(n_entities: u64, days: i64) -> RecordBatch {
 #[test]
 fn the_aggregate_pass_on_one_thread_and_on_eight_gives_the_same_bits() {
     let mut store = Store::temporary("determinism").unwrap();
-    abt_data::adapter::ingest_keyed(&mut store, "test", &[], &[], &[("equity.close".to_string(), close_rows(200, 120))], "test").unwrap();
+    abt_data::adapter::ingest_keyed(&mut store, "test", &[], &[], &[("equity.close".to_string(), close_rows(200, 120))], "test", &Default::default()).unwrap();
     let mut answers = Vec::new();
     for (threads, numerics) in [(1, Numerics::TwoPass), (8, Numerics::TwoPass), (1, Numerics::Running), (8, Numerics::Running)] {
         set_threads(threads);

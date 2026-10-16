@@ -7,7 +7,7 @@ strategy price_floor {
     class   equity
     need    bars @1d
     need    actions, listing
-    require tested
+    require reviewed
     prefer  latest
   }
   uses  calendar, stat, book

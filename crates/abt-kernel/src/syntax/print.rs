@@ -298,8 +298,35 @@ fn render_need(n: &Need) -> String {
         NeedKind::PointValue => "point_value".into(),
         NeedKind::Commission => "commission".into(),
         NeedKind::Instruments { attr, value } => format!("instruments where {} = \"{}\"", attr, value),
+        NeedKind::Chain(c) => format!(
+            "chain of \"{}\" within {}..{} and {}..{}{}{}",
+            c.underlying,
+            c.expiry.0,
+            c.expiry.1,
+            amount(c.moneyness.0),
+            amount(c.moneyness.1),
+            c.right.as_ref().map(|r| format!(" right {}", r)).unwrap_or_default(),
+            c.spot.as_ref().map(|r| format!(" spot {}", r)).unwrap_or_default()
+        ),
     };
     format!("need {}{}", body, if n.complete { " complete" } else { "" })
+}
+
+fn render_budget(b: &Budget) -> String {
+    let mut items = Vec::new();
+    if let Some(m) = b.money {
+        items.push(format!("money {}", amount(m)));
+    }
+    if let Some(x) = b.bytes {
+        items.push(format!("bytes {}", x));
+    }
+    if let Some(x) = b.requests {
+        items.push(format!("requests {}", x));
+    }
+    if let Some(x) = b.seconds {
+        items.push(format!("seconds {}", amount(x)));
+    }
+    format!("budget {{ {} }}", items.join("; "))
 }
 
 fn render_observe(o: &Observe) -> String {
@@ -359,8 +386,8 @@ pub fn render_strategy(s: &Strategy, opts: &Options) -> String {
             out.push_str(&format!("    {}\n", render_need(n)));
         }
         match d.require {
-            Some((Require::Tested, _)) => out.push_str("    require tested\n"),
-            Some((Require::AllowUntested, _)) => out.push_str("    allow untested\n"),
+            Some((Require::Reviewed, _)) => out.push_str("    require reviewed\n"),
+            Some((Require::AllowUnreviewed, _)) => out.push_str("    allow unreviewed\n"),
             None => {}
         }
         match &d.prefer {
@@ -368,6 +395,9 @@ pub fn render_strategy(s: &Strategy, opts: &Options) -> String {
             Some((Prefer::Version(v), _)) => out.push_str(&format!("    prefer version \"{}\"\n", v)),
             Some((Prefer::BaseFinest, _)) => out.push_str("    prefer base finest\n"),
             None => {}
+        }
+        if let Some((b, _)) = &d.budget {
+            out.push_str(&format!("    {}\n", render_budget(b)));
         }
         out.push_str("  }\n");
     }
@@ -499,7 +529,7 @@ mod tests {
     fn a_strategy_round_trips_through_its_rendering() {
         let src = r#"
 strategy s {
-  data { class equity   need bars @1d from 1990-01-01 complete   need actions, listing   need lists "SP500", "SP400"   need series "SPXTR" @1d, "VIX" @1w complete   require tested   prefer version "2026.10" }
+  data { class equity   need bars @1d from 1990-01-01 complete   need actions, listing   need lists "SP500", "SP400"   need series "SPXTR" @1d, "VIX" @1w complete   require reviewed   prefer version "2026.10" }
   uses calendar, stat
   calendars { weekly = weeks(1)   es = sessions of "ES" }
   clock { decide on weekly at session + 5min }

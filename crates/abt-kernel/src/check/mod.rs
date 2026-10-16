@@ -330,9 +330,40 @@ pub struct Demand {
     pub commission: bool,
     pub usable: bool,
     pub instruments_where: Vec<(String, String)>,
-    pub require_tested: bool,
+    /// `require reviewed`: every version bound carries a reviewer's
+    /// `reviewed` attribute; `allow unreviewed` admits the others, warned.
+    pub require_reviewed: bool,
     pub prefer: String,
     pub needs: usize,
+    /// The data block's `budget`, when it writes one (A-D22).
+    pub budget: Option<BudgetSpec>,
+    /// The dynamic needs (D-7.2): the option chains read per barrier.
+    pub chains: Vec<ChainSpec>,
+}
+
+/// A duration's nominal length in days (a month as 365.25 / 12), to order
+/// the ends of a range written in mixed units.
+fn duration_days(d: &crate::ir::Duration) -> f64 {
+    d.months as f64 * 365.25 / 12.0 + d.days as f64 + d.nanos as f64 / crate::kernel::time::DAY as f64
+}
+
+/// A demand's budget: the caps the resolver keeps under (D-7.1).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BudgetSpec {
+    pub money: Option<f64>,
+    pub bytes: Option<u64>,
+    pub requests: Option<u64>,
+    pub seconds: Option<f64>,
+}
+
+/// A dynamic need of a chain (D-7.2).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChainSpec {
+    pub underlying: String,
+    pub expiry: (crate::ir::Duration, crate::ir::Duration),
+    pub moneyness: (f64, f64),
+    pub right: Option<String>,
+    pub spot: String,
 }
 
 impl Demand {
@@ -629,7 +660,7 @@ fn class_strategy_source(ws: &Workspace, cls: &ast::Class, base: Option<Resoluti
         "traded@base(A, T)"
     };
     format!(
-        "strategy {name} {{\n  data {{ class {class}\n    {needs}\n    require tested\n    prefer latest }}\n  uses {uses}\n  clock {{ decide on base }}\n  universe {{ universe(A, T) :- {universe}. }}\n  params {{\n{params}  }}\n  rules {{\n{rules}  }}\n  decisions {{ silence hold   orders market\n    {decides}\n  }}\n  execution {{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission per_share 0.005 USD min 1 USD\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }}\n  report {{ calendar base   periods 252 per year }}\n}}\n",
+        "strategy {name} {{\n  data {{ class {class}\n    {needs}\n    require reviewed\n    prefer latest }}\n  uses {uses}\n  clock {{ decide on base }}\n  universe {{ universe(A, T) :- {universe}. }}\n  params {{\n{params}  }}\n  rules {{\n{rules}  }}\n  decisions {{ silence hold   orders market\n    {decides}\n  }}\n  execution {{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission per_share 0.005 USD min 1 USD\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }}\n  report {{ calendar base   periods 252 per year }}\n}}\n",
         name = parts.name,
         class = class,
         needs = needs.join("\n    "),
@@ -1146,6 +1177,7 @@ impl<'a> Checker<'a> {
                             NeedKind::PointValue => !self.demand.point_value,
                             NeedKind::Commission => !self.demand.commission,
                             NeedKind::Instruments { .. } => false,
+                            NeedKind::Chain(_) => self.demand.chains.is_empty(),
                         };
                         if missing {
                             let word = match &n.kind {
@@ -1158,6 +1190,7 @@ impl<'a> Checker<'a> {
                                 NeedKind::PointValue => "point_value",
                                 NeedKind::Commission => "commission",
                                 NeedKind::Instruments { .. } => "instruments",
+                                NeedKind::Chain(_) => "chain",
                             };
                             self.diag(
                                 Code::E,
@@ -1487,6 +1520,38 @@ impl<'a> Checker<'a> {
                 NeedKind::PointValue => d.point_value = true,
                 NeedKind::Commission => d.commission = true,
                 NeedKind::Instruments { attr, value } => d.instruments_where.push((attr.clone(), value.clone())),
+                NeedKind::Chain(c) => {
+                    // A chain is the option class's (A-D23): its contracts
+                    // are the class's instruments, its spot the
+                    // underlying's price.
+                    if class != "option" {
+                        self.unit_diag(
+                            Code::Q,
+                            *span,
+                            format!("`need chain` reads the option class's chains, and this program's class is `{}` (write `class option`)", class),
+                        );
+                    }
+                    if duration_days(&c.expiry.0) > duration_days(&c.expiry.1) {
+                        self.unit_diag(Code::Q, *span, format!("the expiry range {}..{} of a chain is empty", c.expiry.0, c.expiry.1));
+                    }
+                    if !(c.moneyness.0 > 0.0 && c.moneyness.0 <= c.moneyness.1) {
+                        self.unit_diag(
+                            Code::Q,
+                            *span,
+                            format!("the moneyness range {}..{} of a chain is not a positive interval (strike over spot)", c.moneyness.0, c.moneyness.1),
+                        );
+                    }
+                    if *complete {
+                        self.unit_diag(Code::Q, *span, "a chain is not `complete`: which contracts list is the exchange's, not a review's");
+                    }
+                    d.chains.push(ChainSpec {
+                        underlying: c.underlying.clone(),
+                        expiry: c.expiry,
+                        moneyness: c.moneyness,
+                        right: c.right.clone(),
+                        spot: c.spot.clone().unwrap_or_else(|| "close".into()),
+                    });
+                }
             }
         }
         // A classification is a point-in-time membership, read with the
@@ -1494,9 +1559,17 @@ impl<'a> Checker<'a> {
         d.classification = !d.lists.is_empty();
         d.usable = d.listing;
         if let Some((r, _)) = &data.require {
-            d.require_tested = *r == Require::Tested;
+            d.require_reviewed = *r == Require::Reviewed;
         } else {
-            self.unit_diag(Code::Q, data.span, "the data block says neither `require tested` nor `allow untested`");
+            self.unit_diag(Code::Q, data.span, "the data block says neither `require reviewed` nor `allow unreviewed`");
+        }
+        if let Some((b, _)) = &data.budget {
+            d.budget = Some(BudgetSpec {
+                money: b.money,
+                bytes: b.bytes,
+                requests: b.requests,
+                seconds: b.seconds,
+            });
         }
         if let Some((p, _)) = &data.prefer {
             d.prefer = match p {

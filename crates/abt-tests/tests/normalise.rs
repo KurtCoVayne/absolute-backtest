@@ -59,7 +59,7 @@ fn the_canonical_form_round_trips_on_the_corpus() {
 
 const BASE: &str = r#"
 strategy canon {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, bars, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

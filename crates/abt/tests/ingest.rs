@@ -131,7 +131,7 @@ fn a_norgate_export_becomes_the_catalog_with_identities_membership_and_status() 
     assert!(r.actions.iter().any(|a| matches!(a.action, abt_kernel::kernel::Action::Delisting { .. })));
     let out = dir.join("bundle");
     write_bundle(&cls, ds, &out, "equity", "2026.10").unwrap();
-    let (loaded, _) = load_bundle(&cls, &out, true).unwrap();
+    let (loaded, _) = load_bundle(&cls, &out).unwrap();
     assert_eq!(loaded.facts["member"].len(), 17);
     // A symbol no identifier carries is an error, not a silent new equity.
     write_text_table(

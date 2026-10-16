@@ -356,6 +356,7 @@ impl Parser {
             needs: vec![],
             require: None,
             prefer: None,
+            budget: None,
         };
         while !self.at(&Tok::RBrace) {
             let sp = self.span();
@@ -411,6 +412,8 @@ impl Parser {
                             break;
                         }
                         NeedKind::Series(items)
+                    } else if self.eat_kw("chain") {
+                        NeedKind::Chain(self.chain_need()?)
                     } else if self.eat_kw("instruments") {
                         self.expect_kw("where")?;
                         let (attr, _) = self.ident()?;
@@ -425,7 +428,7 @@ impl Parser {
                         NeedKind::Instruments { attr, value }
                     } else {
                         return self.err(format!(
-                            "expected a need (bars, actions, listing, lists, series, sessions, point_value, commission, instruments), found {}",
+                            "expected a need (bars, actions, listing, lists, series, sessions, point_value, commission, instruments, chain), found {}",
                             self.peek()
                         ));
                     };
@@ -439,15 +442,24 @@ impl Parser {
                     d.needs.push(Need { kind, complete, span: isp });
                 }
             } else if self.eat_kw("require") {
-                let r = if self.eat_kw("tested") {
-                    Require::Tested
-                } else {
-                    return self.err("expected `tested` after `require`");
-                };
-                d.require = Some((r, sp));
+                if self.at_kw("tested") {
+                    return self.err("`require reviewed` is now `require reviewed`: bundle tests became the `reviewed` attribute of a version (docs/spec/02-kernel.md, 2.1)");
+                }
+                if !self.eat_kw("reviewed") {
+                    return self.err("expected `reviewed` after `require`");
+                }
+                d.require = Some((Require::Reviewed, sp));
             } else if self.eat_kw("allow") {
-                self.expect_kw("untested")?;
-                d.require = Some((Require::AllowUntested, sp));
+                if self.at_kw("untested") {
+                    return self.err("`allow unreviewed` is now `allow unreviewed`: bundle tests became the `reviewed` attribute of a version (docs/spec/02-kernel.md, 2.1)");
+                }
+                self.expect_kw("unreviewed")?;
+                d.require = Some((Require::AllowUnreviewed, sp));
+            } else if self.eat_kw("budget") {
+                if d.budget.is_some() {
+                    return self.err("the data block has one `budget`");
+                }
+                d.budget = Some((self.budget()?, sp));
             } else if self.eat_kw("prefer") {
                 let p = if self.eat_kw("latest") {
                     Prefer::Latest
@@ -483,11 +495,139 @@ impl Parser {
                 };
                 d.prefer = Some((p, sp));
             } else {
-                return self.err(format!("expected `class`, `need`, `require`, `allow` or `prefer` in a data block, found {}", self.peek()));
+                return self.err(format!("expected `class`, `need`, `require`, `allow`, `prefer` or `budget` in a data block, found {}", self.peek()));
             }
         }
         self.expect(Tok::RBrace)?;
         Ok(d)
+    }
+
+    /// `of "U" within D1..D2 and M1..M2 [right call|put] [spot RELATION]`.
+    fn chain_need(&mut self) -> PResult<ChainNeed> {
+        self.expect_kw("of")?;
+        let (underlying, _) = self.string()?;
+        self.expect_kw("within")?;
+        let duration = |p: &mut Parser| -> PResult<Duration> {
+            match p.peek().clone() {
+                Tok::Duration(d) => {
+                    p.bump();
+                    Ok(d)
+                }
+                t => p.err(format!("expected a duration from the bar to the expiry (`20d`, `3mo`), found {}", t)),
+            }
+        };
+        let lo = duration(self)?;
+        self.expect(Tok::DotDot)?;
+        let hi = duration(self)?;
+        self.expect_kw("and")?;
+        let (m_lo, _) = self.number()?;
+        self.expect(Tok::DotDot)?;
+        let (m_hi, _) = self.number()?;
+        let right = if self.eat_kw("right") {
+            let (r, rsp) = self.ident()?;
+            if r != "call" && r != "put" {
+                return Err(ParseError {
+                    span: rsp,
+                    message: format!("a chain's right is `call` or `put`, not `{}`", r),
+                });
+            }
+            Some(r)
+        } else {
+            None
+        };
+        let spot = if self.eat_kw("spot") { Some(self.ident()?.0) } else { None };
+        Ok(ChainNeed {
+            underlying,
+            expiry: (lo, hi),
+            moneyness: (m_lo, m_hi),
+            right,
+            spot,
+        })
+    }
+
+    /// `{ money X [CUR]; bytes N [B|KB|MB|GB|TB]; requests N; seconds S }`.
+    fn budget(&mut self) -> PResult<Budget> {
+        self.expect(Tok::LBrace)?;
+        let mut b = Budget::default();
+        while !self.at(&Tok::RBrace) {
+            let (field, fsp) = self.ident()?;
+            let twice = |set: bool| -> PResult<()> {
+                if set {
+                    Err(ParseError {
+                        span: fsp,
+                        message: format!("`{}` is written twice in the budget", field),
+                    })
+                } else {
+                    Ok(())
+                }
+            };
+            match field.as_str() {
+                "money" => {
+                    twice(b.money.is_some())?;
+                    let (x, _) = self.number()?;
+                    // A currency word may follow the amount.
+                    if let Tok::Ident(c) = self.peek().clone() {
+                        if c.len() == 3 && c.chars().all(|ch| ch.is_ascii_uppercase()) {
+                            self.bump();
+                        }
+                    }
+                    b.money = Some(x);
+                }
+                "bytes" => {
+                    twice(b.bytes.is_some())?;
+                    let (x, xsp) = self.number()?;
+                    let scale = match self.peek().clone() {
+                        Tok::Ident(u) => {
+                            let s = match u.as_str() {
+                                "B" => 1.0,
+                                "KB" => 1e3,
+                                "MB" => 1e6,
+                                "GB" => 1e9,
+                                "TB" => 1e12,
+                                _ => 0.0,
+                            };
+                            if s > 0.0 {
+                                self.bump();
+                                s
+                            } else {
+                                1.0
+                            }
+                        }
+                        _ => 1.0,
+                    };
+                    if x < 0.0 {
+                        return Err(ParseError {
+                            span: xsp,
+                            message: "a budget of bytes is not negative".into(),
+                        });
+                    }
+                    b.bytes = Some((x * scale).round() as u64);
+                }
+                "requests" => {
+                    twice(b.requests.is_some())?;
+                    b.requests = Some(self.uint()?.0 as u64);
+                }
+                "seconds" => {
+                    twice(b.seconds.is_some())?;
+                    b.seconds = Some(self.number()?.0);
+                }
+                other => {
+                    return Err(ParseError {
+                        span: fsp,
+                        message: format!("`{}` is not a budget (money, bytes, requests, seconds)", other),
+                    })
+                }
+            }
+            if b.money.is_some_and(|m| m < 0.0) || b.seconds.is_some_and(|x| x < 0.0) {
+                return Err(ParseError {
+                    span: fsp,
+                    message: format!("a budget of {} is not negative", field),
+                });
+            }
+            self.eat(&Tok::Semi);
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(b)
     }
 
     // ---- calendars, clock ----
@@ -1606,7 +1746,7 @@ mod tests {
     fn parses_a_strategy_with_every_block() {
         let src = r#"
 strategy s {
-  data { class equity   need bars @1d from 1990-01-01 complete   need actions, listing   need lists "SP500", "SP400"   need series "SPXTR" @1d, "VIX" @1w complete   require tested   prefer latest }
+  data { class equity   need bars @1d from 1990-01-01 complete   need actions, listing   need lists "SP500", "SP400"   need series "SPXTR" @1d, "VIX" @1w complete   require reviewed   prefer latest }
   uses calendar, stat
   calendars { weekly = weeks(1)   es = sessions of "ES" }
   clock { decide on weekly }

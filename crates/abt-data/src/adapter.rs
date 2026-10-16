@@ -145,8 +145,18 @@ pub struct Ingested {
 /// relation's rows, entity columns as text keys or as registry ids.
 /// Relation names are the store's (`equity.close`); a key first seen in a
 /// relation's rows becomes an instrument of that relation's class, listed
-/// from its first row.
-pub fn ingest_keyed(store: &mut Store, vendor: &str, securities: &[Security], terms: &[Terms], relations: &[(String, RecordBatch)], source: &str) -> Result<Ingested, DataError> {
+/// from its first row. The relations' versions carry `attributes` (what the
+/// adapter or a reviewer states of them: `reviewed = complete`, the
+/// `calendar` of the bars, D-2.1).
+pub fn ingest_keyed(
+    store: &mut Store,
+    vendor: &str,
+    securities: &[Security],
+    terms: &[Terms],
+    relations: &[(String, RecordBatch)],
+    source: &str,
+    attributes: &BTreeMap<String, String>,
+) -> Result<Ingested, DataError> {
     let mut ids = known_ids(store, vendor)?;
     // New keys, in the order the source names them: its security table,
     // then its relations' rows.
@@ -321,10 +331,33 @@ pub fn ingest_keyed(store: &mut Store, vendor: &str, securities: &[Security], te
             }
         }
         let b = RecordBatch::try_new(b.schema(), cols)?;
-        let v = store.ingest(&relation, &[b], source, BTreeMap::new())?;
+        let v = store.ingest(&relation, &[b], source, attributes.clone())?;
         versions.insert(relation, v);
     }
     Ok(Ingested { versions, ids })
+}
+
+/// A relation a source provides with no rows (a market without
+/// delistings), as a version of its own, so that a demand naming it is
+/// answered (D-7.2) and reads it empty. A relation the source already holds
+/// a version of is left as it is.
+pub fn ingest_empty(store: &mut Store, relation: &str, source: &str, attributes: &BTreeMap<String, String>) -> Result<Option<String>, DataError> {
+    if store.registry.current(relation, Some(source)).is_some() {
+        return Ok(None);
+    }
+    let s = store.schema(relation)?;
+    let input = |ty: ColumnType| match ty {
+        ColumnType::Entity => DataType::UInt64,
+        ColumnType::Time => DataType::Timestamp(TimeUnit::Nanosecond, None),
+        ColumnType::Num => DataType::Float64,
+        ColumnType::Count => DataType::Int64,
+        ColumnType::Label => DataType::Utf8,
+        ColumnType::Bool => DataType::Boolean,
+        ColumnType::Bytes => DataType::Binary,
+    };
+    let fields: Vec<Field> = s.columns.iter().filter(|c| c.role != Role::ReceiptTime).map(|c| Field::new(&c.name, input(c.ty), true)).collect();
+    let empty = RecordBatch::new_empty(Arc::new(Schema::new(fields)));
+    Ok(Some(store.ingest(relation, &[empty], source, attributes.clone())?))
 }
 
 /// The instruments of a store: id, key (of the first vendor naming it),

@@ -4,7 +4,7 @@
 # as of the bar, `value("VIX", T, V)`, and the checker picks the direction
 # from the calendars (3.4).
 strategy bad_bucket_finer {
-  data { class equity   need bars @1d   need listing   need series "VIX" @1w   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   need series "VIX" @1w   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

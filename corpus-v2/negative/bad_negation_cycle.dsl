@@ -3,7 +3,7 @@
 # does not step back in time has no stratification (WF-8, temporal
 # stratification admits only cycles every path of which steps strictly back).
 strategy bad_negation_cycle {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

@@ -9,7 +9,7 @@ strategy size_proxy {
     need    bars @1d
     need    actions, listing
     need    lists "SPX"
-    require tested
+    require reviewed
     prefer  latest
   }
   uses  calendar, catalog, stat, bars, book

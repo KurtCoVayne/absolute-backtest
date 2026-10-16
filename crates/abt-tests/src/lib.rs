@@ -134,7 +134,7 @@ impl StrategyParts {
         // A preset name, a preset with overrides, or a block of fields.
         let execution = format!("  execution {}\n", self.execution);
         format!(
-            "strategy {name} {{\n  data {{ class {class}   {needs}   require tested   prefer latest }}\n  uses {uses}\n{calendars}  clock {{ {clock} }}\n  universe {{ {universe} }}\n  params {{\n{params}\n  }}\n  rules {{\n{rules}\n  }}\n  decisions {{\n    silence {silence}\n    orders {orders}\n{decides}\n  }}\n{execution}  report {{ {report} }}\n}}\n",
+            "strategy {name} {{\n  data {{ class {class}   {needs}   require reviewed   prefer latest }}\n  uses {uses}\n{calendars}  clock {{ {clock} }}\n  universe {{ {universe} }}\n  params {{\n{params}\n  }}\n  rules {{\n{rules}\n  }}\n  decisions {{\n    silence {silence}\n    orders {orders}\n{decides}\n  }}\n{execution}  report {{ {report} }}\n}}\n",
             name = self.name,
             class = self.class,
             needs = self.needs,
@@ -253,6 +253,15 @@ pub fn loaded_kernel<'p>(prog: &'p Program, ds: &Dataset, cfg: abt_kernel::kerne
     abt_kernel::kernel::load(prog, None, &client(prog, ds), cfg).expect("the stream loads")
 }
 
+/// A Parquet directory the test wrote, loaded: the test vouches for what it
+/// wrote, so the dataset is reviewed (a loose directory otherwise is not,
+/// ERRATA E-39).
+pub fn load_fixture(prog: &Program, dir: &std::path::Path) -> Result<(Dataset, Vec<String>), String> {
+    let (mut ds, notes) = abt_kernel::data::load_parquet_dir(prog, dir)?;
+    ds.unreviewed = false;
+    Ok((ds, notes))
+}
+
 /// The causality check (G5) over a data service holding `ds`.
 pub fn verify_causality(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig, samples: &[i64]) -> Result<Vec<abt_kernel::kernel::CausalityMismatch>, abt_kernel::kernel::RunError> {
     init();
@@ -265,7 +274,7 @@ pub fn run_socket(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecCon
     static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!("abt-run-{}-{}.sock", std::process::id(), n));
-    let svc = abt::serve_dataset(ds, &prog.class).map_err(abt_kernel::kernel::RunError::Config)?;
+    let svc = abt::serve_dataset(ds, prog).map_err(abt_kernel::kernel::RunError::Config)?;
     let _server = abt_data::service::listen(&path, svc).map_err(|e| abt_kernel::kernel::RunError::Config(e.to_string()))?;
     let conn = abt_wire::transport::Connection::connect(&path).map_err(|e| abt_kernel::kernel::RunError::Config(e.to_string()))?;
     let client = abt_kernel::kernel::DataClient::connect(conn)?;

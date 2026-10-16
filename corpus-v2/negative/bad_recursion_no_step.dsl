@@ -2,7 +2,7 @@
 # `trend` refers to itself at the same T: a cycle with no strictly earlier
 # step through prev, prev_row or lag (WF-4).
 strategy bad_recursion_no_step {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, stat, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

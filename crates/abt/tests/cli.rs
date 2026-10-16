@@ -52,7 +52,10 @@ fn up_down_strategy(dir: &std::path::Path, name: &str, up_body: &str, execution:
         execution: execution.into(),
         ..Default::default()
     }
-    .render();
+    .render()
+    // The fixtures are loose Parquet directories, which no reviewer vouched
+    // for (K-2.1): the program admits them, warned.
+    .replace("require reviewed", "allow unreviewed");
     let path = dir.join(format!("{}.dsl", name));
     std::fs::write(&path, src).unwrap();
     path.to_string_lossy().into_owned()
@@ -372,7 +375,8 @@ fn nav_writes_the_book_per_bar_and_reg_t_is_a_leverage_value() {
 
 /// Data-bundle doc, sections 2 and 3: build a bundle of the equity class
 /// from a synthetic catalog market, run its tests, and run a strategy on it;
-/// an untested bundle is refused without --untested.
+/// an untested bundle is unreviewed (K-2.1), refused under `require
+/// reviewed` and admitted, warned, under `allow unreviewed`.
 #[test]
 fn bundle_build_test_and_run() {
     let dir = scratch("bundle");
@@ -385,17 +389,21 @@ fn bundle_build_test_and_run() {
     assert_eq!(built.status.code(), Some(0), "{}\n{}", text(&built).0, text(&built).1);
     assert!(text(&built).0.contains("wrote bundle `equity@2026.10`"), "{}", text(&built).0);
     assert!(dir.join("manifest.json").exists() && dir.join("log").join("close").exists());
-    // Untested: refused.
+    // Untested: refused under `require reviewed`, naming what is missing.
     let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet"];
     args.extend(files.iter().map(|s| s.as_str()));
     let refused = abt(&args);
     assert_eq!(refused.status.code(), Some(2));
-    assert!(text(&refused).1.contains("--untested"), "{}", text(&refused).1);
-    let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--untested", "--quiet"];
-    args.extend(files.iter().map(|s| s.as_str()));
-    let ran = abt(&args);
+    let why = text(&refused).1;
+    assert!(why.contains("no binding") && why.contains("no `reviewed` attribute") && why.contains("need `bars @1d`"), "{}", why);
+    // Admitted under `allow unreviewed`, warned.
+    let src = std::fs::read_to_string(&files[2]).unwrap().replace("require reviewed", "allow unreviewed");
+    let unreviewed = dir.join("unreviewed.dsl");
+    std::fs::write(&unreviewed, src).unwrap();
+    let unreviewed = unreviewed.to_string_lossy().to_string();
+    let ran = abt(&["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet", &files[0], &files[1], &unreviewed]);
     assert_eq!(ran.status.code(), Some(0), "{}", text(&ran).1);
-    assert!(text(&ran).1.contains("not causality-certified"), "{}", text(&ran).1);
+    assert!(text(&ran).0.contains("warning (unreviewed data)"), "{}", text(&ran).0);
     // Tested: recorded, then runs without the flag.
     let mut args = vec!["bundle", "test", &out];
     args.extend(files.iter().map(|s| s.as_str()));

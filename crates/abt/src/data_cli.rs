@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! abt data serve   [--store DIR] [--socket PATH]
-//! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C <files...>
+//! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--attributes K=V,...] <files...>
 //! abt data ingest  [--store DIR] --adapter synthetic --class C [--days N] [--symbols A,B] [--seed N] <files...>
 //! abt data catalog [--store DIR] [--class C]
 //! abt data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--json]
@@ -16,7 +16,10 @@
 //! manifest, or a directory of one Parquet file per relation) with the
 //! kernel's loaders and ingests them through the adapter of keyed rows; the
 //! class files among `<files...>` name the relations (ERRATA E-38).
-//! `synthetic` is the present generators, ingested the same way.
+//! `synthetic` is the present generators, ingested the same way. The versions
+//! carry the calendar of the bars, `reviewed = complete` for a bundle whose
+//! tests passed and for the generators' markets, the bundle's `version`, and
+//! what `--attributes` states (a reviewer vouching for a directory, D-2.1).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -75,7 +78,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)"
     );
     exit(1)
 }
@@ -148,8 +151,8 @@ pub fn main(args: &[String]) {
                     let from = a.opts.get("from").cloned().unwrap_or_else(|| fail("--from DIR names the bundle"));
                     let dir = Path::new(&from);
                     if dir.join("manifest.json").exists() {
-                        let (ds, m) = abt_kernel::bundle::load_bundle(&prog, dir, true).unwrap_or_else(|e| fail(&e));
-                        eprintln!("bundle {}@{}", m.name, m.version);
+                        let (ds, m) = abt_kernel::bundle::load_bundle(&prog, dir).unwrap_or_else(|e| fail(&e));
+                        eprintln!("bundle {}@{}{}", m.name, m.version, if ds.unreviewed { ", its tests not passed: unreviewed" } else { "" });
                         ds
                     } else {
                         let (ds, notes) = load_parquet_dir(&prog, dir).unwrap_or_else(|e| fail(&e));
@@ -177,8 +180,16 @@ pub fn main(args: &[String]) {
                 }
                 _ => fail("--adapter is bundle_v2 or synthetic"),
             };
+            // A reviewer's statements of the versions: `--attributes
+            // reviewed=complete,receipt=recorded`.
+            let mut extra = BTreeMap::new();
+            for kv in a.opts.get("attributes").map(|s| s.split(',').map(str::to_string).collect::<Vec<_>>()).unwrap_or_default() {
+                let (k, v) = kv.split_once('=').unwrap_or_else(|| fail("--attributes takes KEY=VALUE[,KEY=VALUE...]"));
+                extra.insert(k.trim().to_string(), v.trim().to_string());
+            }
+            let attributes = crate::dataset_attributes(&ds, &prog.base.to_string(), &extra);
             let mut store = open(&a);
-            crate::ingest_dataset(&mut store, &ds, &prog.class).unwrap_or_else(|e| fail(&e));
+            crate::ingest_dataset(&mut store, &ds, &prog.class, &attributes).unwrap_or_else(|e| fail(&e));
             for (r, s, v) in store.registry.currents() {
                 println!("{} {} {}", r, s, v);
             }

@@ -9,7 +9,7 @@ use abt_tests as common;
 use std::fs;
 
 use abt_kernel::check::Code;
-use abt_kernel::data::{load_parquet_dir, write_parquet_dir};
+use abt_kernel::data::write_parquet_dir;
 use abt_kernel::kernel::time::format_timestamp;
 use abt_kernel::kernel::{Dataset, ExecConfig, Value};
 use abt_kernel::table::to_text;
@@ -19,7 +19,7 @@ use abt_tests::run;
 /// Buy the index members, sell a name delisted for the reason `why`.
 const EXIT_ON_BANKRUPTCY: &str = r#"
 strategy exit_on_bankruptcy {
-  data { class equity   need bars @1d   need actions, listing   need lists "SPX"   require tested   prefer latest }
+  data { class equity   need bars @1d   need actions, listing   need lists "SPX"   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }
@@ -165,7 +165,7 @@ fn a_label_column_loads_from_parquet_and_round_trips() {
     write_parquet_dir(&p, &market(), &dir).unwrap();
     let delisted = to_text(&dir.join("delisted.parquet")).unwrap();
     assert!(delisted.contains("BBB,2024-01-10,bankruptcy"), "{}", delisted);
-    let (ds, notes) = load_parquet_dir(&p, &dir).unwrap();
+    let (ds, notes) = abt_tests::load_fixture(&p, &dir).unwrap();
     // The demand brings `split`, `dividend` and `classification` into the
     // program too; the market carries no such facts, so their files are
     // absent and noted. Nothing else is noted.

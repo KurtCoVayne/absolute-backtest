@@ -375,28 +375,18 @@ fn int_at(col: &ArrayRef, row: usize, path: &Path) -> Result<i64, String> {
         .value(row))
 }
 
-/// Load a bundle for `prog`: the manifest must name the program's
-/// environment and, when the program pins one, its version; the tests must
-/// have passed unless `allow_untested`.
-pub fn load_bundle(prog: &Program, dir: &Path, allow_untested: bool) -> Result<(Dataset, Manifest), String> {
+/// Load a bundle for `prog`: the manifest must name the program's class.
+/// The dataset is unreviewed unless the bundle's tests passed, and carries
+/// the bundle's version; the program's `require` and `prefer` are the
+/// resolver's to judge (K-2.1, D-7.2).
+pub fn load_bundle(prog: &Program, dir: &Path) -> Result<(Dataset, Manifest), String> {
     let m = read_manifest(dir)?;
     if m.name != prog.class {
         return Err(format!("bundle {} is `{}@{}`, but the strategy reads class `{}`", dir.display(), m.name, m.version, prog.class));
     }
-    if let Some(v) = prog.demand.prefer.strip_prefix("version ") {
-        if v != m.version {
-            return Err(format!("bundle {} is `{}@{}`, but the strategy prefers version `{}`", dir.display(), m.name, m.version, v));
-        }
-    }
-    if m.tests.is_none() && !allow_untested {
-        return Err(format!(
-            "bundle {} (`{}@{}`) has not passed its bundle tests; run `abt bundle test` on it, or pass --untested to run on unvouched data",
-            dir.display(),
-            m.name,
-            m.version
-        ));
-    }
-    let ds = read_facts(prog, dir, &m)?;
+    let mut ds = read_facts(prog, dir, &m)?;
+    ds.unreviewed = m.tests.is_none();
+    ds.version = Some(m.version.clone());
     Ok((ds, m))
 }
 

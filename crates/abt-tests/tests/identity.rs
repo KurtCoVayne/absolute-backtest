@@ -199,7 +199,7 @@ fn the_security_table_loads_and_round_trips_through_parquet() {
     assert!(securities.contains("E2,BBB,2024-01-08,2024-01-11\n") && securities.contains("E2,BBX,2024-01-11,\n"), "{}", securities);
     // The derived ticker relation is not written: it is rebuilt from the table.
     assert!(!dir.join("ticker.parquet").exists());
-    let (ds, notes) = load_parquet_dir(&p, &dir).unwrap();
+    let (ds, notes) = abt_tests::load_fixture(&p, &dir).unwrap();
     assert!(notes.is_empty(), "{:?}", notes);
     assert_eq!(ds.securities.len(), 4);
     assert_eq!(ds.facts["ticker"].len(), 14);

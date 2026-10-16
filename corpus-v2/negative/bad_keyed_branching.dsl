@@ -4,7 +4,7 @@
 # rule fire, two values at one key, so the relation is not keyed (WF-11).
 # The keyed form is one rule with a case: `X = case { P > X0 -> P ; else -> X0 }`.
 strategy bad_keyed_branching {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

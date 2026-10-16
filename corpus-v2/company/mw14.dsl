@@ -37,7 +37,7 @@ strategy mw14 {
     need     actions, listing
     need     lists "SP500", "SP400", "SP600", "ETF"
     need     series "SPXTR" @1d, "VIX" @1w complete
-    require  tested
+    require  reviewed
     prefer   latest
   }
   uses      calendar, catalog, bars, state, book

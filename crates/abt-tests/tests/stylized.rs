@@ -115,7 +115,7 @@ fn the_canonical_premiums_land_in_their_published_ranges_on_the_bundle() {
     let mut problems = Vec::new();
     for range in &RANGES {
         let prog = common::corpus_program(range.name);
-        let (ds, manifest) = load_bundle(&prog, Path::new(&dir), false).unwrap_or_else(|e| panic!("{}", e));
+        let (ds, manifest) = load_bundle(&prog, Path::new(&dir)).unwrap_or_else(|e| panic!("{}", e));
         let cfg = ExecConfig {
             param_overrides: vec![("n".to_string(), Lit::Int(n))],
             ..ExecConfig::default()

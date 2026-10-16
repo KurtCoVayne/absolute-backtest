@@ -1,7 +1,7 @@
 # expect: U
 # `rsi` is declared nowhere: not in the strategy, its libraries or the class.
 strategy bad_undeclared {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

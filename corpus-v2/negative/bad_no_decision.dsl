@@ -2,7 +2,7 @@
 # A decisions block with no decide rule produces nothing: at least one decide
 # rule is required (the one judgment of WF-9 the second formulation keeps).
 strategy bad_no_decision {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

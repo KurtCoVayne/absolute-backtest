@@ -226,6 +226,59 @@ and the batch driver agree on every corpus program.
   through ten profiles, so markets of up to ten names, the golden runs',
   are unchanged and larger ones stay priced.
 
+- **E-39 (K-2.1, K-3.2, D-2.1, V-3.11; `require reviewed`).** `require
+  reviewed` asks every version the binding names for a `reviewed` attribute
+  (a demand's `require` attribute with an empty value asks for the key with
+  any value); a `complete` need asks for `reviewed = complete`, under either
+  stance, since WF-5's negation rests on it. `allow untested` becomes `allow
+  unreviewed`, which admits versions without the attribute and warns on
+  every run. `require tested` and `allow untested` are parse errors that
+  name their replacement. Who states `reviewed`: an adapter or a reviewer.
+  `bundle_v2` states `reviewed = complete` for a bundle whose tests passed;
+  the generators' markets are complete by construction; `abt data ingest
+  --attributes K=V,...` records a reviewer's statement. The kernel's
+  in-memory datasets (the command line, studies, tests) are reviewed unless
+  they say otherwise (a bundle whose tests have not passed, a loose Parquet
+  directory). `abt run --untested` is retired: the program's `require` and
+  the version's attributes decide, and the refusal is the resolver's
+  (`RunError::Unbound`, exit 2).
+- **E-40 (D-7.1, D-7.2, P-3.3; the demand on the wire).** The kernel sends one
+  need per need its data block writes, naming the stored relations of the
+  need that the program holds as primitives, with the need's calendar,
+  `from` and attributes. A relation the store has no schema for is named in
+  the program's class, so that the refusal names it. `Need` gains `label`,
+  the need as the program writes it, for the resolver's messages. `PlanStep`
+  gains the version's span and attributes, what the bind-time preconditions
+  of K-3.2 read in the kernel. `prefer version V` matches a version's
+  `version` attribute (a bundle's version) or a prefix of its id of at least
+  eight characters; `base finest` takes the finest calendar; `latest` the
+  current version, the first source by name when several hold one. A
+  version's calendar is its `calendar` attribute (an adapter's statement of
+  the bars it ingested), else its schema's.
+- **E-41 (K-3.2; the span of a need).** A version whose span starts after
+  the need's `from` is K-3.2's warm-up clause (warn), not a refusal: the
+  store is the only source until M-6, and covering a span by fetching is
+  the cost model's.
+- **E-42 (D-2.6, D-7.2; a relation provided empty).** A source that offers a
+  relation and holds no row of it (a market without delistings) states it as
+  a version with no rows (`adapter::ingest_empty`), so that a demand naming
+  it is answered and reads it empty. The front's in-memory datasets provide
+  every relation of their class and of the series class, as a dataset's
+  relations always were. What the data holds, for the warning of actions a
+  program does not load, is a relation whose current version has rows.
+- **E-43 (K-2.1, D-7.1; the budget and the chain need).** `budget { money X
+  [CUR]; bytes N [B|KB|MB|GB|TB]; requests N; seconds S }`, every item
+  optional and money zero when absent; `seconds` is D-7.1's fourth cap.
+  `need chain of "U" within D1..D2 and M1..M2 [right call|put] [spot R]`
+  reads the option class's chains: the checker refuses it in another class
+  (Q), an empty expiry or moneyness range (Q), and `complete` on it (Q).
+  The transitional resolver refuses a dynamic need until the option class
+  lands (M-7).
+- **E-44 (K-9.1, M-3; the parity scripts).** M-3's step lists the parity
+  scripts reading `kernel.<run>.events` and `book` from the store, and K-9.1
+  says they are updated in M-4. They change at M-4, with the outputs they
+  read.
+
 ## Aggregates
 
 - **E-27 (P-1.2, Proposition 1.1; the running sums' rebuild points).** "The

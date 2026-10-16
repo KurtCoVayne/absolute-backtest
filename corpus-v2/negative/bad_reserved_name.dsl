@@ -3,7 +3,7 @@
 # builtin, a block or a keyword (`window`, `rows`, `session` included), and
 # the rules that mention it are not judged.
 strategy bad_reserved_name {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

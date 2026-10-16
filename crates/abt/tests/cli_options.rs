@@ -130,7 +130,6 @@ fn usage_documents_every_option() {
         "--at",
         "--bind",
         "--bundle",
-        "--untested",
         "--checkpoint-every",
         "--checkpoint-dir",
         "--resume",
@@ -145,6 +144,7 @@ fn usage_documents_every_option() {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }
     for gone in [
+        "--untested",
         "--cash",
         "--capital",
         "--commission",

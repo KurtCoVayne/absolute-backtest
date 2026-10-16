@@ -229,7 +229,11 @@ fn the_optimised_plan_equals_the_written_plan_on_the_books() {
             continue;
         };
         let p = common::program(&common::corpus_source("company", name), name);
-        let (ds, _) = abt_kernel::bundle::load_bundle(&p, Path::new(&dir), true).unwrap_or_else(|e| panic!("{}: {}", var, e));
+        let (mut ds, _) = abt_kernel::bundle::load_bundle(&p, Path::new(&dir)).unwrap_or_else(|e| panic!("{}: {}", var, e));
+        // The books' bundles run unreviewed in the parity runs (their action
+        // reconciliation is calibrated on the S&P 500, docs/parity-mw14.md);
+        // two plans compared on one dataset need no review of it.
+        ds.unreviewed = false;
         let cfg = ExecConfig::from_program(&p);
         let numerics = Numerics::from_running_sums(cfg.running_sums);
         let compiled = compile(

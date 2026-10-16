@@ -10,19 +10,16 @@
 //! current version, with the registry's identity relations; D-7's cost model
 //! and plans come with M-6.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use abt_wire::generated::abt::wire::{AggregateResponse, Binding, Done, ExplainResponse, Layer, Message, PutResponse, ResolveResponse, SchemaResponse, SubscribeResponse, VersionRef};
+use abt_wire::generated::abt::wire::{AggregateResponse, Binding, Done, ExplainResponse, Layer, Message, PutResponse, ResolveResponse, SchemaResponse, SubscribeResponse};
 use abt_wire::rpc::{error, serve, Request, Responder, Service, WireError};
 use abt_wire::transport::{bind, channel_pair, Connection};
 use abt_wire::{ErrorCode, ErrorMessage};
 use arrow::array::{ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array};
 
-use crate::adapter::REGISTRY_SOURCE;
 use crate::agg;
-use crate::catalog::qualified;
 use crate::error::DataError;
 use crate::query::{self, ResolvedView};
 use crate::store::Store;
@@ -30,10 +27,6 @@ use crate::stream::{self, Stream, BATCH_EVENTS};
 
 /// Frames in flight per direction of an in-process connection.
 const INPROC_BOUND: usize = 64;
-
-/// The registry's relations a binding always carries: what the kernel reads
-/// an instrument's key, ticker spans and contract terms from.
-const IDENTITY: [&str; 3] = ["instrument", "vendor_id", "ticker"];
 
 pub struct DataService {
     store: RwLock<Store>,
@@ -62,50 +55,17 @@ impl DataService {
         self.store.write().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The binding of the transitional resolver: every relation the demand
-    /// names (each need's relations, or all of its class's when it names
-    /// none) at its current version, and the registry's identity relations.
-    fn resolve(&self, demand: &abt_wire::generated::abt::wire::Demand, dry_run: bool) -> Result<Binding, DataError> {
-        let mut pairs: BTreeMap<String, String> = BTreeMap::new();
+    /// The binding of a demand (crate::resolver), recorded under its id
+    /// unless the request is a dry run.
+    fn resolve(&self, demand: &abt_wire::generated::abt::wire::Demand, dry_run: bool) -> Result<(Binding, abt_wire::generated::abt::wire::ResolvePlan), DataError> {
         let mut st = self.store_mut();
-        let named: Vec<String> = demand.needs.iter().flatten().flat_map(|n| n.relations.iter().cloned()).collect();
-        let wanted: Vec<String> = if named.is_empty() {
-            st.registry.schemas(Some(&demand.class)).into_iter().map(|s| s.name).collect()
-        } else {
-            named.iter().map(|r| if r.contains('.') { r.clone() } else { qualified(&demand.class, r) }).collect()
-        };
-        for rel in wanted {
-            let Some(by) = st
-                .registry
-                .currents()
-                .into_iter()
-                .filter(|(r, _, _)| *r == rel)
-                .map(|(_, s, v)| (s, v))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .reduce(|a, b| if a.0 <= b.0 { a } else { b })
-            else {
-                continue;
-            };
-            pairs.insert(rel, by.1);
-        }
-        for rel in IDENTITY {
-            if let Some(v) = st.registry.current(rel, Some(REGISTRY_SOURCE)) {
-                pairs.insert(rel.to_string(), v.to_string());
-            }
-        }
-        let mut b = Binding {
-            pairs: Some(pairs.into_iter().map(|(relation, version)| VersionRef { relation, version }).collect()),
-            point: None,
-            dynamic: None,
-            id: None,
-        };
+        let (mut b, plan) = crate::resolver::resolve(&st, demand)?;
         if !dry_run {
             let id = st.registry.record_binding(&b)?;
             st.registry.save()?;
             b.id = Some(id);
         }
-        Ok(b)
+        Ok((b, plan))
     }
 
     fn stats(&self, relation: Option<&str>) -> Result<RecordBatch, DataError> {
@@ -173,10 +133,11 @@ impl Service for DataService {
                 out.respond(Message::SchemaResponse(Box::new(SchemaResponse { schemas: Some(schemas) }))).map_err(wire)
             }
             Message::ResolveRequest(r) => {
-                let b = self.resolve(&r.demand, r.dry_run).map_err(data)?;
+                let (b, plan) = self.resolve(&r.demand, r.dry_run).map_err(data)?;
+                let cost = plan.cost.clone();
                 out.respond(Message::ResolveResponse(Box::new(ResolveResponse {
-                    plan: None,
-                    cost: None,
+                    plan: Some(Box::new(plan)),
+                    cost,
                     binding: Some(Box::new(b)),
                     over_budget: None,
                 })))
