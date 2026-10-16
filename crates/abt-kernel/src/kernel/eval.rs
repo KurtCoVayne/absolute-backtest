@@ -1332,7 +1332,18 @@ impl<'p> Kernel<'p> {
                     return Ok(());
                 }
                 if !in_order {
-                    rows.sort_by(|a, b| a.0.cmp(&b.0));
+                    // A window's rows are read in its time order (P-1.2;
+                    // Definition V-3.5: `first` and `last` are the window's
+                    // end rows), the rows of one bar in the order of their
+                    // other bindings (ERRATA E-46).
+                    let wslot = conj.iter().find_map(|l| match l {
+                        Literal::Window { var: Term::Var(v, _), .. } => cr.slots.get(v).copied(),
+                        _ => None,
+                    });
+                    match wslot {
+                        Some(w) => rows.sort_by(|a, b| a.0[w].cmp(&b.0[w]).then_with(|| a.0.cmp(&b.0))),
+                        None => rows.sort_by(|a, b| a.0.cmp(&b.0)),
+                    }
                 }
                 if grouped {
                     let mut groups: BTreeMap<Vec<Option<Value>>, Vec<usize>> = BTreeMap::new();
@@ -1682,10 +1693,11 @@ impl<'p> Kernel<'p> {
         }
         let t = self.time_of(cr, &plan.base, env)?;
         let n = self.eval_expr(cr, &plan.dur, env)?.as_f64().unwrap_or(0.0).max(0.0) as usize;
-        // The slots the rows bind; their values order the rows exactly as
-        // the general path's sort of whole environments does.
+        // The slots the rows bind. A window is read in its time order, the
+        // general path's sort (E-46), and a bar holds one row here, so the
+        // rows' order is the bars'.
         let locals: Vec<usize> = plan.conj_slots.iter().copied().filter(|&s| env[s].is_none()).collect();
-        let time_first = locals.first() == Some(&plan.wslot);
+        let time_first = true;
         let key = WindowKey {
             rule: cr.idx,
             literal: plan.literal,

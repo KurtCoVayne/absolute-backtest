@@ -25,8 +25,28 @@ what this tree does.
 
 ## Blessed changes of the golden files
 
-None yet. The baseline was taken after E-2 and E-3 below, which made the fold
-and the batch driver agree on every corpus program.
+The baseline was taken after E-2 and E-3 below, which made the fold and the
+batch driver agree on every corpus program. Each bless since:
+
+- **E-46 (P-1.2, D-6.1, Definition V-3.5; the order an aggregate reads its
+  window in).** The kernel gave an aggregate its window's rows sorted by the
+  rule's variables in order of appearance, and an aggregate's arguments
+  appear before its window's time: a window was read in the order of its
+  values. `last` of a bar view was therefore the bucket's largest close and
+  `first` its smallest open, `last` over a window its largest value, and
+  sums added in value order. The data layer's pass, which reads a window in
+  time order as D-6.1 says, disagreed with it, which is how pushdown's G3
+  found it. A window is now read in its time order, the rows of one bar in
+  the order of their other bindings, on every path (the general solve, the
+  cached bars, the rows windows; `tests/aggregate_order.rs` holds the
+  hand-computed week). Blessed with it: `resampled_momentum` (its daily
+  close), `scale_in` (the last lot's close), `mw14` (the weekly close of the
+  price floor), `r8l` (the close at minute 20 and 30 of a session), and in
+  the last bits of their weights `low_vol_portfolio` and
+  `volatility_targeting` (sums in time order). The parity runs of the books
+  (G1, the owner's) were made with the first formulation's books on weekly
+  and session bundles, which read no bar view; the second formulation's
+  books are compared with this order.
 
 ## Kernel
 
