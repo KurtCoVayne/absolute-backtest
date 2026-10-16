@@ -13,5 +13,8 @@ fn main() {
     if args.first().map(String::as_str) == Some("kernel") {
         return abt_kernel::kernel_cli::main(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("metrics") {
+        std::process::exit(abt::query_cli::metrics(&args[1..]));
+    }
     abt_kernel::cli::main()
 }

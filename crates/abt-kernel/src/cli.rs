@@ -598,67 +598,6 @@ fn exec_config(args: &Args, prog: &crate::check::Program) -> ExecConfig {
     cfg
 }
 
-/// How the report block's calendar (4.5) partitions a run into periods:
-/// per decision bar when it is the decision calendar, per calendar day on
-/// `days`, and per session day on a sessions calendar (the days the root,
-/// or any root, had a session, read from the data's `session` rows).
-/// Another calendar reports per decision bar, with a note.
-fn report_periods(prog: &crate::check::Program, dataset: &crate::kernel::Dataset) -> (bool, Option<std::collections::BTreeSet<i64>>, Option<String>) {
-    use crate::Cal;
-    let cal = prog.report_cal();
-    if cal == prog.decision_cal {
-        return (false, None, None);
-    }
-    match &cal {
-        Cal::Days => (true, None, None),
-        Cal::Sessions | Cal::SessionsOf(_) => {
-            let root = match &cal {
-                Cal::SessionsOf(r) => Some(r.clone()),
-                _ => None,
-            };
-            if let Some(path) = DATA_SOCKET.get() {
-                // The sessions are in the data service's store, not in a
-                // dataset this process holds.
-                let days = data_client(prog, dataset)
-                    .and_then(|client| {
-                        let bound = crate::kernel::bind(prog, &client)?;
-                        let rows = bound.scan(&client, "session", None)?;
-                        Ok(rows
-                            .iter()
-                            .filter(|r| root.as_ref().is_none_or(|root| r.sym.is_some_and(|s| bound.symbols.name(s) == root)))
-                            .map(|r| time_day(r.t))
-                            .collect())
-                    })
-                    .unwrap_or_else(|e| {
-                        eprintln!("--data {}: the report calendar's sessions: {}", path.display(), e);
-                        exit(2)
-                    });
-                return (true, Some(days), None);
-            }
-            let days: std::collections::BTreeSet<i64> = dataset
-                .facts
-                .get("session")
-                .map(|tus| {
-                    tus.iter()
-                        .filter(|tu| root.as_ref().map(|r| tu[0].as_equity().map(|s| dataset.symbols.name(s) == r).unwrap_or(false)).unwrap_or(true))
-                        .filter_map(|tu| tu.get(1).and_then(|v| v.as_time()))
-                        .map(time_day)
-                        .collect()
-                })
-                .unwrap_or_default();
-            (true, Some(days), None)
-        }
-        other => (
-            false,
-            None,
-            Some(format!(
-                "report calendar `{}` is not the decision calendar, `days` or a sessions calendar; the periods are the decision bars",
-                prog.cal_name(other)
-            )),
-        ),
-    }
-}
-
 /// What runs the program: the batch kernel, the fold, or the fold with checkpoints.
 fn make_runner(args: &Args) -> Box<Runner> {
     make_runner_with(args, None)
@@ -1202,7 +1141,6 @@ pub fn main() {
             let verify = args.flags.contains("verify-causality");
             // What the report needs from the data, read before a run may take it over.
             let tuple_count: usize = dataset.facts.values().map(|tus| tus.len()).sum();
-            let (by_day, calendar, period_note) = report_periods(&prog, &dataset);
             // The plan (compiler design, "Lower"): the optimised one unless
             // `--plan written` asks for the written order and no rewrite.
             let opts = compile_options_with(
@@ -1326,6 +1264,12 @@ pub fn main() {
                 println!("{:>14}: {:.4}", k, v);
             }
             let ppy: f64 = prog.report.periods_per_year;
+            // How the report block partitions the run, as the run states it.
+            let (by_day, calendar, period_note) = (
+                result.periods.by_day,
+                result.periods.days.as_ref().map(|d| d.iter().copied().collect::<std::collections::BTreeSet<i64>>()),
+                result.periods.note.clone(),
+            );
             if let Some(n) = &period_note {
                 println!("note: {}", n);
             }
@@ -2051,9 +1995,4 @@ fn compile_options_with(args: &Args, prog: &crate::check::Program, loaded: Optio
         replay_dir: args.opts.get("replay-dir").map(PathBuf::from),
         ..CompileOptions::default()
     }
-}
-
-/// The midnight of a timestamp's day.
-fn time_day(t: i64) -> i64 {
-    crate::kernel::time::day_key(t) * crate::kernel::time::DAY
 }

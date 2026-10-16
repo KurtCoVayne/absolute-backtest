@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 abt-data.workspace = true
 abt-kernel.workspace = true
+abt-query.workspace = true
 abt-wire.workspace = true
 arrow.workspace = true
 parquet.workspace = true

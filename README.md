@@ -43,7 +43,7 @@ silently misaligns every bucket.
 | `docs/compiler-design.md` | The compiler design: the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers and the observability tables; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
 | `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D34, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached). The implementation lands step by step on this branch; `docs/spec/ERRATA.md` records where it settles what the documents leave open. |
 | `docs/llm-observability.md`, `docs/llm-usability.md` | The two studies of models writing programs with the toolchain, both on the first formulation; their material is under `experiments/`. |
-| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
+| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer: so far the metrics, computed from a run's tables in the store, `abt metrics`), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
 | `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
 | `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
 | `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
@@ -506,6 +506,13 @@ prints each key, `--resume KEY` runs from one, and `abt kernel control
 complete the commands (`--kernel SOCKET` names the service; ERRATA E-54,
 E-56).
 
+The query layer reads a run back from the store (`docs/spec/03-query.md`).
+`abt metrics --run RUN --data SOCKET` (or `--store DIR`) computes the run's
+metrics from the tables it wrote. These are the return metrics of its NAV
+curve, its trading metrics, its capacity, the metrics per period of its
+report block, and the Sharpe ratio of each calendar year, each printed
+with the versions of the tables it read (ERRATA E-58).
+
 ## The command line
 
 ```
@@ -523,6 +530,7 @@ abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--da
 abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>
+abt metrics --run RUN (--data SOCKET | --store DIR) [--json]
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]

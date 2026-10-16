@@ -799,6 +799,36 @@ batch driver agree on every corpus program. Each bless since:
   with their SHA-256.
 - **E-25 (Q-2.2, A-D6, A-D19).** Section cross-references: feed statistics
   are Q-6, activation statistics Q-7, the test framework Q-4.
+- **E-58 (Q-3.1, K-7.1, P-4; the metrics from the store).** The query
+  layer computes a run's metrics from the tables the kernel wrote:
+  - the NAV curve and the exposure from `book`;
+  - the fills from `fills`, and the decisions from `decisions`;
+  - the dropped decisions from `events`;
+  - the cost, liquidity and funding summaries, the base capital and the
+    report block's periods from `report`.
+
+  Two tables gain fields for this:
+  - `report` gains `periods_per_year` (the report block's) and
+    `period_by_day` (whether a period is a calendar day rather than a
+    decision bar). On a sessions calendar it gains `period_days`, the
+    days of the root's sessions as each day's first instant. When the
+    report calendar is neither the decision calendar, `days` nor a
+    sessions calendar, it gains `period_note`. The kernel computes these
+    once per run (`RunResult.periods`), from the program's report block
+    and the binding's `session` rows, and `abt run` prints from them.
+  - `fills` gains `multiplier`, the instrument's contract multiplier (1
+    for an equity). A round trip's cash flow needs it.
+
+  The metrics are the kernel study's, moved without change in substance.
+  `tests/metrics_store.rs` shows them equal to the bit on every corpus
+  program and both books. Covered are the return metrics, the trading
+  metrics, the capacity at a 5 % impact drag, the period metrics and the
+  sub-period Sharpe ratios.
+
+  `abt metrics --run RUN (--data SOCKET | --store DIR) [--json]` prints
+  them with the version of every table of the run they read. The front
+  serves a store directory to the query layer in its own process. The
+  surface's grid axes are the literal texts of the plan's values.
 
 ## Layout
 

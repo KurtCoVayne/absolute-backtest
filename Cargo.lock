@@ -8,6 +8,7 @@ version = "0.2.0"
 dependencies = [
  "abt-data",
  "abt-kernel",
+ "abt-query",
  "abt-tests",
  "abt-wire",
  "arrow",
@@ -46,6 +47,12 @@ dependencies = [
 [[package]]
 name = "abt-query"
 version = "0.2.0"
+dependencies = [
+ "abt-wire",
+ "arrow",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "abt-tests"
@@ -54,8 +61,10 @@ dependencies = [
  "abt",
  "abt-data",
  "abt-kernel",
+ "abt-query",
  "abt-wire",
  "arrow",
+ "serde",
  "serde_json",
 ]
 

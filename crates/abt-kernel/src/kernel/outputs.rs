@@ -334,6 +334,11 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
             .col("impact", Role::Value, Col::Num(fills.iter().map(|f| Some(f.1.impact)).collect()))
             .col("participation", Role::Value, Col::Num(fills.iter().map(|f| Some(f.1.participation)).collect()))
             .col("order_id", Role::Value, Col::Count(fills.iter().map(|f| f.2.map(|o| o as i64)).collect()))
+            .col(
+                "multiplier",
+                Role::Value,
+                Col::Num(fills.iter().map(|f| Some(result.multipliers.get(&f.1.equity).copied().unwrap_or(1.0))).collect()),
+            )
             .col("forced", Role::Value, Col::Bool(fills.iter().map(|f| Some(f.1.forced)).collect()))
             .col("partial", Role::Value, Col::Bool(fills.iter().map(|f| Some(f.1.partial)).collect()))
             .col("source", Role::Value, Col::Label(fills.iter().map(|_| Some("sim".to_string())).collect()))
@@ -530,12 +535,20 @@ fn summaries(run: &str, prog: &Program, bound: &Bound, cfg: &ExecConfig, result:
             ("bars".into(), serde_json::json!(result.bars.len()).to_string(), None),
             ("final_cash".into(), serde_json::json!(result.final_cash).to_string(), None),
             ("base_capital".into(), serde_json::json!(result.base_capital).to_string(), None),
+            ("periods_per_year".into(), serde_json::json!(result.periods.periods_per_year).to_string(), None),
+            ("period_by_day".into(), serde_json::json!(result.periods.by_day).to_string(), None),
             ("costs".into(), serde_json::to_string(&result.costs).unwrap_or_default(), None),
             ("liquidity".into(), serde_json::to_string(&result.liquidity).unwrap_or_default(), None),
             ("funding".into(), serde_json::to_string(&result.funding).unwrap_or_default(), None),
             ("stats".into(), serde_json::to_string(&result.stats).unwrap_or_default(), None),
             ("plan".into(), serde_json::json!(result.plan).to_string(), None),
         ];
+        if let Some(days) = &result.periods.days {
+            rows.push(("period_days".into(), serde_json::json!(days).to_string(), None));
+        }
+        if let Some(note) = &result.periods.note {
+            rows.push(("period_note".into(), serde_json::json!(note).to_string(), None));
+        }
         for (i, w) in result.warnings.iter().enumerate() {
             rows.push((format!("warning.{}", i), serde_json::json!(w.message).to_string(), Some(w.bias.clone())));
         }

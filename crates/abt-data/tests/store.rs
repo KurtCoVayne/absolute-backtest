@@ -404,3 +404,22 @@ fn reads_equal_a_naive_store_over_random_interleavings() {
     }];
     let _ = RelationSchema::default;
 }
+
+/// A temporary store left by a process that ended is removed; one of a
+/// running process is kept.
+#[test]
+fn the_temporary_stores_of_ended_processes_are_reaped() {
+    let tmp = std::env::temp_dir();
+    let dead = tmp.join("abt-store-reap-4294967295-0");
+    let alive = tmp.join(format!("abt-store-reap-{}-999", std::process::id()));
+    for d in [&dead, &alive] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    abt_data::store::reap_temporary();
+    if cfg!(unix) {
+        assert!(!dead.exists(), "the store of an ended process is removed");
+    }
+    let _ = std::fs::remove_dir_all(&dead);
+    assert!(alive.exists(), "a running process's store is kept");
+    let _ = std::fs::remove_dir_all(&alive);
+}

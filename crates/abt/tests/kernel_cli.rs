@@ -120,10 +120,28 @@ fn a_kernel_service_runs_and_answers_over_a_data_service() {
     let final_line = |s: &str| s.lines().find(|l| l.starts_with("final cash")).unwrap_or_default().to_string();
     assert!(!final_line(&out).is_empty(), "{}", out);
     assert_eq!(final_line(&out), final_line(&rout));
+    // The query layer's metrics of the run, from the tables in the store (Q-3.1).
+    let o = abt(&["metrics", "--run", &run, "--data", &d]);
+    let (m, merr) = text(&o);
+    assert!(o.status.success(), "{}\n{}", m, merr);
+    assert!(
+        m.starts_with(&format!("run {}", run)) && m.contains("returns (") && m.contains(&format!("decisions {}", decisions)),
+        "{}",
+        m
+    );
+    let o = abt(&["metrics", "--run", &run, "--data", &d, "--json"]);
+    let j: serde_json::Value = serde_json::from_str(&text(&o).0).unwrap();
+    assert_eq!(j["run"], serde_json::json!(run));
+    assert!(j["versions"].as_object().is_some_and(|v| v.keys().any(|k| k.ends_with(".book"))), "{}", j);
+    let o = abt(&["metrics", "--run", &"0".repeat(64), "--data", &d]);
+    assert_eq!(o.status.code(), Some(1), "{:?}", text(&o));
 
     let _ = kernel_service.kill();
     let _ = data_service.kill();
     let _ = kernel_service.wait();
     let _ = data_service.wait();
+    // The same metrics over the store directory, served in this process.
+    let o = abt(&["metrics", "--run", &run, "--store", &store]);
+    assert!(text(&o).0.contains(&format!("decisions {}", decisions)), "{:?}", text(&o));
     let _ = std::fs::remove_dir_all(&dir);
 }

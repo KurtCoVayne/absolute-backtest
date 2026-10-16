@@ -102,6 +102,38 @@ pub struct Store {
     temporary: bool,
 }
 
+/// Removes the temporary stores (`abt-store-<tag>-<pid>-<n>`) of processes
+/// that are no longer running.
+pub fn reap_temporary() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("abt-store-")) else { continue };
+        let mut fields = rest.rsplitn(3, '-');
+        let (_, pid) = (fields.next(), fields.next());
+        let Some(pid) = pid.and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if pid != std::process::id() && !process_alive(pid) {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Whether a process is running: Linux's `/proc`, else `kill -0` on a Unix;
+/// elsewhere every process counts as running, so nothing is reaped.
+fn process_alive(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        Path::new(&format!("/proc/{}", pid)).exists()
+    } else if cfg!(unix) {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_or(true, |s| s.success())
+    } else {
+        true
+    }
+}
+
 impl Drop for Store {
     fn drop(&mut self) {
         if self.temporary {
@@ -127,9 +159,14 @@ impl Store {
 
     /// A fresh store in a new directory under the system's temporary
     /// directory (what tests and in-process runs without a store use),
-    /// removed when the store is dropped.
+    /// removed when the store is dropped. A process that ends while it still
+    /// holds one (a service it never dropped) leaves the directory behind:
+    /// the first temporary store of a process removes those of processes
+    /// that are no longer running.
     pub fn temporary(tag: &str) -> Result<Store, DataError> {
         static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static REAP: std::sync::Once = std::sync::Once::new();
+        REAP.call_once(reap_temporary);
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("abt-store-{}-{}-{}", tag, std::process::id(), n));
         if dir.exists() {

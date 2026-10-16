@@ -1290,6 +1290,62 @@ pub struct RunResult {
     /// The binding the run read (β, D-7.5).
     #[serde(default)]
     pub binding_id: String,
+    /// How the report block's calendar partitions the run (what the query
+    /// layer's period metrics read, Q-3.1).
+    #[serde(default)]
+    pub periods: ReportPeriods,
+}
+
+/// How the report block's calendar (V-4.5) partitions a run into periods:
+/// per decision bar when it is the decision calendar, per calendar day on
+/// `days`, per session day on a sessions calendar (the days the root, or
+/// any root, had a session), and per decision bar, with a note, on another
+/// calendar.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReportPeriods {
+    pub periods_per_year: f64,
+    pub by_day: bool,
+    /// The days of a sessions calendar, each as its first instant.
+    pub days: Option<Vec<i64>>,
+    pub note: Option<String>,
+}
+
+/// The periods of a run of `prog` over its binding: the days of a sessions
+/// calendar are read from the binding's `session` rows (labelled at each
+/// session's close).
+pub fn report_periods(prog: &Program, bound: &Bound, client: &DataClient) -> Result<ReportPeriods, RunError> {
+    let mut p = ReportPeriods {
+        periods_per_year: prog.report.periods_per_year,
+        ..Default::default()
+    };
+    let cal = prog.report_cal();
+    if cal == prog.decision_cal {
+        return Ok(p);
+    }
+    match &cal {
+        Cal::Days => p.by_day = true,
+        Cal::Sessions | Cal::SessionsOf(_) => {
+            let root = match &cal {
+                Cal::SessionsOf(r) => Some(r.clone()),
+                _ => None,
+            };
+            let days: BTreeSet<i64> = bound
+                .scan(client, "session", None)?
+                .iter()
+                .filter(|r| root.as_ref().is_none_or(|root| r.sym.is_some_and(|s| bound.symbols.name(s) == root)))
+                .map(|r| time::day_key(r.t) * time::DAY)
+                .collect();
+            p.by_day = true;
+            p.days = Some(days.into_iter().collect());
+        }
+        other => {
+            p.note = Some(format!(
+                "report calendar `{}` is not the decision calendar, `days` or a sessions calendar; the periods are the decision bars",
+                prog.cal_name(other)
+            ))
+        }
+    }
+    Ok(p)
 }
 
 /// A run's identity (Definition A-4.1, A-6): H(P), β, the run mode, and the
@@ -3377,6 +3433,7 @@ pub fn replay_observed<'p>(
     // The preconditions, before the first barrier (K-3.2).
     let mut contract = crate::contract::contract(prog);
     let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, &bound, client, &cfg)?;
+    let periods = report_periods(prog, &bound, client)?;
     // A truncated stream resolves ticker literals where it ends.
     let probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
     let identity = Identity {
@@ -3493,6 +3550,7 @@ pub fn replay_observed<'p>(
             let mut partial = fold.result().clone();
             partial.run_id = run.clone();
             partial.binding_id = bound.binding.id.clone().unwrap_or_default();
+            partial.periods = periods;
             let ids = fold.kernel.data_ids.clone();
             let put = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e), written).and_then(|t| outputs::write(client, t));
             if let Err(w) = put {
@@ -3504,6 +3562,7 @@ pub fn replay_observed<'p>(
     let (mut result, mut kernel) = fold.finish()?;
     result.run_id = run.clone();
     result.binding_id = bound.binding.id.clone().unwrap_or_default();
+    result.periods = periods;
     if !opts.write_outputs {
         if !prog.observes.is_empty() {
             result.contract.set(

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub mod data_cli;
+pub mod query_cli;
 
 use abt_data::adapter::{ingest_empty, ingest_keyed, securities_of, terms_of};
 use abt_data::service::{inproc, DataService};
