@@ -910,6 +910,96 @@ batch driver agree on every corpus program. Each bless since:
     is the query layer's. Claims, `test`, `feed` and `activation` steps
     are judged in M-5d.
 
+- **E-60 (Q-4.4, Q-4.6; the time-series tests as built).**
+  - **p-values.** `adf` and `engle_granger` use MacKinnon's 1994
+    asymptotic formulas, for up to six series. His 1996 response surfaces
+    may not be built into a program without his written consent.
+    `engle_granger` with 7 to 12 series gives no p-value; MacKinnon's 2010
+    critical values in its notes judge it.
+  - **The MacKinnon 2010 table** is Schaffer's transcription in Stata's
+    `egranger`. statsmodels' copy differs in four coefficients of the
+    constant case (N = 2 at 1 %: β₂ −22.527 against −33.527; N = 3 and N =
+    5 at 5 %: β₁ in the fifth digit; N = 7 at 10 %: β₂, β₃ −6.922 and
+    67.721 against −5.104 and 27.877); the paper confirms egranger's where
+    checked.
+  - **The T of the critical values** is the regression's observations
+    (n − 1 − p) for `adf`, as in statsmodels, and n − 1 for
+    `engle_granger`, as in `egranger` and `coint`.
+  - **`adf`'s lag** minimises T·ln(RSS/T) + 2k on the sample the largest
+    order leaves. A tie goes to the smaller order, which is then refitted
+    on its full sample. The default maximum is ⌊12 (n/100)^¼⌋, capped near
+    half the sample. The parameters are `lags`, `max_lags`, and `trend`
+    (`c` or `ct`).
+  - **Defaults.**
+    - `kpss` uses the Newey–West lag of Q-4.2; beyond Table 1 its p-value
+      is the table's bound, with a note.
+    - `ljung_box` uses m = min(10, ⌊n/5⌋) with m degrees of freedom.
+    - `arch_lm` uses 12 lags, LM = (n − m)·R² on the squared demeaned
+      series.
+    - `variance_ratio` reads a level (`increments = true` for returns), q =
+      2, z* two-sided.
+    - `half_life` is −ln 2 / ln φ̂ (0 below φ̂ = 0, ∞ at 1 and above), its
+      p-value the one-sided normal one of the Newey–West t of φ − 1,
+      approximate under a unit root.
+    - `johansen` has the unrestricted constant only (Osterwald-Lenum's
+      Table 1), 2 to 11 series, p-values interpolated between its
+      quantiles and bounded at 0.5 and 0.01, the effect the rank its
+      sequential tests estimate.
+  - **Shape.** `engle_granger` and `johansen` take one wide table, a
+    column per series on one time axis; a caller pivots a long panel.
+    `engle_granger`'s dependent series is `y`, and its residual regression
+    has no constant.
+  - **Effects.**
+    - `ljung_box`: ρ̂₁.
+    - `variance_ratio`: VR(q).
+    - `arch_lm`: the sum of the lag coefficients.
+    - `adf`: 1 + γ̂, and for `engle_granger` the same of its residuals.
+    - `half_life`: φ̂.
+    - `johansen`: the rank.
+    - `kpss` has none.
+
+    A text parameter's default is in its `doc`, since `Param::Text` is
+    not a constant.
+  - **Software references.** Lo and MacKinlay's CRSP example, Engle's UK
+    inflation example, a published Q for Series A and Nelson and Plosser's
+    Table 5 are not reachable. Each is replaced by another program's
+    output, which the test's comment names.
+
+- **E-61 (Q-4.2, Q-4.4, Q-4.6; the panel, activation and cost tests as
+  built).**
+  - **The Newey–West standard error of a mean** is √(LRV/(n − 1)), and
+    its t is read against Student's t(n − 1). Zero lags give Fama and
+    MacBeth's s/√T and the textbook paired t; L lags give Stata's `xtfmb`.
+  - **`ic`.** The statistic is the Newey–West t and the effect the mean
+    IC, every bar weighing the same. Missing values are dropped per
+    entity. A bar with fewer than `min_entities` (3) entities or a
+    constant column is left out. `horizon` raises the default lags to at
+    least horizon − 1.
+  - **`fama_macbeth`.** The statistic is the t of the premium `factor`
+    (the only regressor by default). The intercept is `const`. A bar with
+    no more rows than coefficients, or a singular design, leaves the
+    series.
+  - **`coactivation`.**
+    - Phi is both the statistic and the effect; information is in bits.
+    - A missing value is an instance not attempted by both rules.
+    - The p-value doubles the smaller tail of n₁₁ under permutation
+      within bars, each tail (1 + k)/(1 + reps), with reps 2,000.
+    - The interval is a stationary bootstrap over bars, given from ten
+      bars on.
+  - **`effective_rules`** is (Σλ)²/Σλ² of the activation correlations.
+    Constant rules are left out with a note.
+  - **`cost_realism`** tests realised − modelled slippage (positive: the
+    model understates costs). Fills are taken in (time, entity) order. A
+    nonzero constant difference is a precondition failure.
+  - **Q-4.6's permutation invariance for iid tests**: none of the five is
+    iid, so each is tested for the order invariance that applies to it.
+    `Table::bars` refuses an entity twice in one bar.
+  - **Accuracy.** `linalg::least_squares` refines its solution through
+    the augmented system (Björck 1967), with residuals in twice the
+    working precision. Pontius and Wampler5 met their NIST class only
+    with it. Filip is bound at about 7.2 digits by the rounding of its
+    own data, within its class.
+
 
 ## Layout
 
