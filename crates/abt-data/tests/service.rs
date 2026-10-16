@@ -179,6 +179,7 @@ fn script(c: &Client) -> Vec<String> {
         prefer: None,
         budget: None,
         dynamic: None,
+        point: None,
     };
     let Message::ResolveResponse(r) = c
         .request(Message::ResolveRequest(Box::new(ResolveRequest {
@@ -317,6 +318,8 @@ fn script(c: &Client) -> Vec<String> {
                 relation: "kernel.r1.book".into(),
                 schema: Box::new(schema),
                 attributes: None,
+                cache_key: None,
+                replace: false,
             })),
             &rows.schema(),
             &[rows],

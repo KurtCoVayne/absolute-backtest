@@ -87,6 +87,39 @@ fn a_kernel_service_runs_and_answers_over_a_data_service() {
     // Its outputs are in the store.
     let o = abt(&["data", "query", "--store", &store, &format!("kernel.{}.report", run)]);
     assert!(text(&o).0.contains("\"completed\""), "{:?}", text(&o));
+    // Checkpoints through the data layer, each named by its key; a run from
+    // one of them is the same run, and ends as it did (K-4.7).
+    let o = with(&["run", "--strategy", "sma_crossover", "--checkpoint-every", "month", FILES[0], FILES[1], FILES[2]]);
+    let (again, err) = text(&o);
+    assert!(o.status.success(), "{}\n{}", again, err);
+    let keys: Vec<&str> = err.lines().filter_map(|l| l.strip_prefix("checkpoint ")?.split_whitespace().next()).collect();
+    assert!(keys.len() >= 3 && keys.iter().all(|k| k.len() == 64), "{}", err);
+    let o = with(&["run", "--strategy", "sma_crossover", "--resume", keys[keys.len() / 2], FILES[0], FILES[1], FILES[2]]);
+    let (resumed, err) = text(&o);
+    assert!(o.status.success(), "{}\n{}", resumed, err);
+    assert!(resumed.starts_with(&format!("run {}", run)), "{}", resumed);
+    assert!(resumed.contains(&format!("\"decisions\":{}", decisions)), "{}", resumed);
+    // `abt run` over the data service: checkpoints as cache objects, each
+    // printed with its key; a run resumed from one, taking the same
+    // checkpoints again, ends where the unbroken run ends.
+    let run_over = |extra: &[&str]| {
+        let mut a = vec!["run", "--strategy", "sma_crossover", "--data", d.as_str(), "--quiet"];
+        a.extend(extra);
+        a.extend(FILES);
+        abt(&a)
+    };
+    let full = run_over(&["--checkpoint-every", "month"]);
+    let (out, err) = text(&full);
+    assert!(full.status.success(), "{}\n{}", out, err);
+    let keys: Vec<&str> = err.lines().filter_map(|l| l.strip_prefix("checkpoint ")?.split_whitespace().next()).collect();
+    assert!(keys.len() >= 3 && keys.iter().all(|k| k.len() == 64), "{}", err);
+    let again = run_over(&["--checkpoint-every", "month", "--resume", keys[1]]);
+    let (rout, rerr) = text(&again);
+    assert!(again.status.success(), "{}\n{}", rout, rerr);
+    assert!(rerr.contains(&format!("resuming from {}", keys[1])), "{}", rerr);
+    let final_line = |s: &str| s.lines().find(|l| l.starts_with("final cash")).unwrap_or_default().to_string();
+    assert!(!final_line(&out).is_empty(), "{}", out);
+    assert_eq!(final_line(&out), final_line(&rout));
 
     let _ = kernel_service.kill();
     let _ = data_service.kill();

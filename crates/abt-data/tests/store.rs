@@ -241,6 +241,12 @@ fn a_put_of_a_new_shape_starts_the_relation_over() {
     let (v1, _) = s.put(&wide, &[close_rows(&[(1, t, t, 1.0)])], "kernel").unwrap();
     let (v2, _) = s.put(&wide, &[close_rows(&[(2, t, t, 2.0)])], "kernel").unwrap();
     assert_eq!(rows_of(&s.read(&v2, &RowFilter::default()).unwrap()).len(), 2, "the same shape adds to the relation");
+    // A put that replaces starts the relation over from its rows (E-56).
+    let (vr, _) = s.replace(&wide, &[close_rows(&[(2, t, t, 5.0)])], "kernel").unwrap();
+    assert_eq!(rows_of(&s.read(&vr, &RowFilter::default()).unwrap()).len(), 1, "a replacing put holds its own rows only");
+    assert_eq!(rows_of(&s.read(&v2, &RowFilter::default()).unwrap()).len(), 2, "the version it replaced still reads");
+    let (v2, _) = s.put(&wide, &[close_rows(&[(1, t, t, 1.0)])], "kernel").unwrap();
+    assert_eq!(rows_of(&s.read(&v2, &RowFilter::default()).unwrap()).len(), 2);
     let narrow = schema(vec![
         col("A", ColumnType::Entity, Role::Entity),
         col("T", ColumnType::Time, Role::EventTime),

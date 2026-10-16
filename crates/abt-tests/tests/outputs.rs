@@ -2,11 +2,12 @@
 //! `kernel.<run>.*` reads back through the data layer as the run holds it;
 //! a halted run writes what it has, with `status = halted(reason)`; an
 //! observed relation's ledger is its extension at every bar of the run, its
-//! stuck instances flagged rather than halting the run.
+//! stuck instances flagged rather than halting the run; a run that takes
+//! checkpoints writes its outputs incrementally at each.
 
 #![allow(clippy::result_large_err)]
 
-use abt_kernel::kernel::{outputs, DataClient, EventKind, ExecConfig, Replay, RunError, RunResult};
+use abt_kernel::kernel::{on_kernel_thread, outputs, replay, CheckpointEvery, DataClient, EventKind, ExecConfig, Replay, RunError, RunResult, SimExecutor};
 use abt_tests as common;
 use abt_tests::{golden_inputs, StrategyParts};
 use abt_wire::generated::abt::wire::{QueryForm, Scan, View};
@@ -91,7 +92,7 @@ fn every_relation_reads_back_as_the_run_holds_it() {
         let client = common::client(&prog, &ds);
         let r = run_writing(&prog, &client, ExecConfig::from_program(&prog)).unwrap();
         let run = r.run_id.clone();
-        assert_eq!(run.len(), 16, "{}: the run id", name);
+        assert_eq!(run.len(), 64, "{}: the run id", name);
         let rel = |n: &str| scan(&client, &format!("kernel.{}.{}", run, n));
         // The event log, every event in the order of the log.
         let ev = by_seq(&rel("events"));
@@ -320,5 +321,80 @@ fn the_books_write_their_ledgers() {
             "{}",
             book
         );
+    }
+}
+
+/// A relation's rows with its labels as text: two stores intern labels in
+/// the order they meet them.
+fn plain(b: &RecordBatch) -> Vec<Vec<String>> {
+    use arrow::datatypes::DataType;
+    let cols: Vec<_> = b
+        .columns()
+        .iter()
+        .map(|c| {
+            // A time as its nanoseconds: the cast to text needs a time zone database.
+            let c = if matches!(c.data_type(), DataType::Timestamp(..)) {
+                arrow::compute::cast(c, &DataType::Int64).unwrap()
+            } else {
+                c.clone()
+            };
+            arrow::compute::cast(&c, &DataType::Utf8).unwrap()
+        })
+        .collect();
+    (0..b.num_rows())
+        .map(|i| {
+            cols.iter()
+                .map(|c| {
+                    let s = c.as_string::<i32>();
+                    if s.is_null(i) {
+                        "null".to_string()
+                    } else {
+                        s.value(i).to_string()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// K-7.1: a run that takes checkpoints writes its outputs at each, before
+/// the checkpoint (the rows the run gained since the last write), and ends
+/// with the outputs of the run that takes none.
+#[test]
+fn a_run_writes_its_outputs_at_every_checkpoint() {
+    let (prog, ds) = golden_inputs(&common::corpus_dir().join("strategies").join("dividend_capture.dsl")).unwrap();
+    let cfg = ExecConfig::from_program(&prog);
+    let client = common::client(&prog, &ds);
+    let opts = Replay {
+        write_outputs: true,
+        checkpoint_every: Some(CheckpointEvery::Month),
+        ..Default::default()
+    };
+    let mut seen: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let r = on_kernel_thread(|| {
+        let mut exec = SimExecutor::new(cfg.clone());
+        let (r, k) = replay(&prog, None, &client, cfg.clone(), &mut exec, &opts, &mut |cp| {
+            let run = &cp.identity.run_id;
+            let events = scan(&client, &format!("kernel.{}.events", run));
+            let book = scan(&client, &format!("kernel.{}.book", run));
+            seen.push((cp.result.events.len(), events.num_rows(), cp.result.exposure.len(), book.num_rows()));
+        })?;
+        std::mem::forget(k);
+        Ok(r)
+    })
+    .unwrap();
+    assert!(seen.len() >= 3, "{} checkpoints", seen.len());
+    for (held, stored, bars, rows) in &seen {
+        assert_eq!(held, stored, "the event log as the checkpoint holds it");
+        assert_eq!(bars, rows, "the book as the checkpoint holds it");
+    }
+    assert!(seen.windows(2).all(|w| w[0].1 <= w[1].1));
+    // The same rows as the run that takes no checkpoint.
+    let other = common::client(&prog, &ds);
+    let plain_run = run_writing(&prog, &other, cfg).unwrap();
+    assert_eq!(plain_run.run_id, r.run_id);
+    for rel in outputs::RELATIONS {
+        let name = format!("kernel.{}.{}", r.run_id, rel);
+        assert_eq!(plain(&scan(&client, &name)), plain(&scan(&other, &name)), "{}", rel);
     }
 }

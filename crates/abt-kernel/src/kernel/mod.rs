@@ -15,6 +15,7 @@ use hash::{FxHashMap, FxHashSet};
 use crate::check::Program;
 use crate::ir::*;
 pub mod bind;
+pub mod checkpoints;
 pub mod events;
 pub mod executor;
 pub mod fold;
@@ -25,7 +26,7 @@ pub mod service;
 pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
 pub use events::{Book, EventKind, OrderId, RunEvent};
 pub use executor::{Executor, SimExecutor};
-pub use fold::{fingerprint, Checkpoint, CheckpointEvery, Event, Fold};
+pub use fold::{Checkpoint, CheckpointEvery, Event, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 
 pub type Tuple = Vec<Value>;
@@ -665,7 +666,9 @@ pub struct ExecConfig {
     /// 2 is Reg T's 50% initial margin, see `ExecConfig::reg_t`); what the
     /// `on_leverage` policy judges. At every bar's mark, positive equity
     /// below `maintenance_margin` times gross is a margin call, judged by
-    /// `on_margin_call`.
+    /// `on_margin_call`. Infinity under `leverage unconstrained` (stored as
+    /// null).
+    #[serde(with = "infinite_as_null")]
     pub max_gross: f64,
     pub maintenance_margin: f64,
     pub on_margin_call: OnMarginCall,
@@ -1289,6 +1292,21 @@ pub struct RunResult {
     pub binding_id: String,
 }
 
+/// A run's identity (Definition A-4.1, A-6): H(P), β, the run mode, and the
+/// run id over them and the plan step.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Identity {
+    pub program_hash: String,
+    pub binding_id: String,
+    pub mode: String,
+    pub run_id: String,
+    /// The effective configuration's hash: what a checkpoint is verified
+    /// against besides (H(P), β, mode), for a configuration the program's
+    /// blocks do not state (a test's override).
+    #[serde(default)]
+    pub config: String,
+}
+
 /// A tuple that arrived after its bucket's barrier (K-4.4): its place in
 /// the stream, its relation, instrument, time and receipt.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1522,6 +1540,9 @@ pub struct Kernel<'p> {
     /// The instruments' ids in the data layer, set when the kernel is
     /// bound (what the outputs name an instrument by, K-7.1).
     pub(crate) data_ids: outputs::Ids,
+    /// The run's identity (Definition A-4.1), set when it is bound: what a
+    /// checkpoint is verified against (K-4.7).
+    pub(crate) identity: Identity,
     pub(crate) skip_rule: Vec<bool>,
     pub(crate) shared_windows: FxHashMap<(usize, usize), usize>,
     pub(crate) plan_label: String,
@@ -2297,6 +2318,7 @@ impl<'p> Kernel<'p> {
             plan_order: vec![None; prog.rules.len()],
             written_order: false,
             data_ids: Default::default(),
+            identity: Default::default(),
             skip_rule: vec![false; prog.rules.len()],
             shared_windows: Default::default(),
             plan_label: "written".into(),
@@ -3298,8 +3320,9 @@ pub struct Replay {
     /// Evict the memo at every bar however small (tests that prove eviction
     /// changes nothing).
     pub force_memo_eviction: bool,
-    /// Write the run's outputs through the data layer when it ends or
-    /// halts (K-7.1).
+    /// Write the run's outputs through the data layer at every checkpoint
+    /// (the rows the run gained since the last) and when it ends or halts
+    /// (K-7.1).
     pub write_outputs: bool,
 }
 
@@ -3316,7 +3339,7 @@ pub fn replay<'p>(
     opts: &Replay,
     on_checkpoint: &mut dyn FnMut(Checkpoint),
 ) -> Result<(RunResult, Kernel<'p>), RunError> {
-    replay_observed(prog, lowered, client, cfg, exec, opts, on_checkpoint, &mut |_, _, _| Ok(()))
+    replay_observed(prog, lowered, client, cfg, exec, opts, on_checkpoint, &mut |_, _, _| Ok(Next::Continue))
 }
 
 /// What a run reports as it goes (the kernel service's progress frames and
@@ -3326,6 +3349,14 @@ pub fn replay<'p>(
 pub enum Progress {
     Started { run_id: String },
     Barrier { t: i64 },
+}
+
+/// What the run does after a progress report: go on, or take a checkpoint
+/// at the end of the current decision bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    Continue,
+    Checkpoint,
 }
 
 /// `replay`, handing `on_progress` the kernel and the run so far when the
@@ -3340,15 +3371,30 @@ pub fn replay_observed<'p>(
     exec: &mut dyn Executor,
     opts: &Replay,
     on_checkpoint: &mut dyn FnMut(Checkpoint),
-    on_progress: &mut dyn FnMut(Progress, &mut Kernel<'p>, &RunResult) -> Result<(), RunError>,
+    on_progress: &mut dyn FnMut(Progress, &mut Kernel<'p>, &RunResult) -> Result<Next, RunError>,
 ) -> Result<(RunResult, Kernel<'p>), RunError> {
-    let bound = bind::bind(prog, client)?;
+    let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides))?;
     // The preconditions, before the first barrier (K-3.2).
     let mut contract = crate::contract::contract(prog);
     let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, &bound, client, &cfg)?;
     // A truncated stream resolves ticker literals where it ends.
     let probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
-    let run = bind::run_id(prog, &cfg, &bound.binding);
+    let identity = Identity {
+        program_hash: crate::compiler::normalise(prog).hash,
+        binding_id: bound.binding.id.clone().unwrap_or_default(),
+        mode: "replay-sim".into(),
+        run_id: String::new(),
+        // Through a JSON value: a field that is infinite (no leverage
+        // limit) is null there, and canonical JSON has no infinity.
+        config: abt_wire::Hash::of(
+            abt_wire::to_canonical_json(&serde_json::to_value(&cfg).map_err(|e| RunError::Internal(e.to_string()))?)
+                .map_err(|e| RunError::Internal(e.to_string()))?
+                .as_bytes(),
+        )
+        .hex(),
+    };
+    let run = bind::run_id(&identity.program_hash, &identity.binding_id, &bind::run_step(&cfg, opts.to_seq, opts.horizon), &identity.mode);
+    let identity = Identity { run_id: run.clone(), ..identity };
     let (spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
     let mut to_seq = opts.to_seq;
     let mut end_label: Option<i64> = None;
@@ -3370,6 +3416,7 @@ pub fn replay_observed<'p>(
         None => Kernel::bound(prog, &bound, cfg.clone())?,
     };
     kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
+    kernel.identity = identity;
     // A literal the data layer does not answer is evaluated here: the run
     // says so (E-47).
     for message in bind::push_down(&mut kernel, &bound, client, &spec)? {
@@ -3393,6 +3440,9 @@ pub fn replay_observed<'p>(
     }
     let from = opts.from.as_ref().map(|c| c.cursor).unwrap_or(1);
     let mut halt: Option<RunError> = None;
+    // How far the outputs are written: a resumed run writes its whole
+    // history at its first write (rows already there are the same rows).
+    let mut written = outputs::Written::default();
     {
         let (k, r) = fold.parts();
         on_progress(Progress::Started { run_id: run.clone() }, k, r)?;
@@ -3407,13 +3457,30 @@ pub fn replay_observed<'p>(
                     break 'stream;
                 }
                 if let Some(cp) = fold.take_checkpoint() {
+                    // The outputs incrementally at every checkpoint (K-7.1),
+                    // before the checkpoint: a run resumed from it finds them.
+                    if opts.write_outputs {
+                        let rows = outputs::growing(&run, prog, &fold.kernel.data_ids, &cp.result, written)
+                            .and_then(|(t, upto)| outputs::write(client, t.into_iter().filter(|(_, b)| b.num_rows() > 0).collect()).map(|_| upto));
+                        match rows {
+                            Ok(upto) => written = upto,
+                            Err(e) => {
+                                halt = Some(e);
+                                break 'stream;
+                            }
+                        }
+                    }
                     on_checkpoint(cp);
                 }
                 if let Some(t) = fold.last_bar().filter(|t| before != Some(*t)) {
                     let (k, r) = fold.parts();
-                    if let Err(e) = on_progress(Progress::Barrier { t }, k, r) {
-                        halt = Some(e);
-                        break 'stream;
+                    match on_progress(Progress::Barrier { t }, k, r) {
+                        Ok(Next::Continue) => {}
+                        Ok(Next::Checkpoint) => fold.request_checkpoint(),
+                        Err(e) => {
+                            halt = Some(e);
+                            break 'stream;
+                        }
                     }
                 }
             }
@@ -3427,8 +3494,8 @@ pub fn replay_observed<'p>(
             partial.run_id = run.clone();
             partial.binding_id = bound.binding.id.clone().unwrap_or_default();
             let ids = fold.kernel.data_ids.clone();
-            let written = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e)).and_then(|t| outputs::write(client, t));
-            if let Err(w) = written {
+            let put = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e), written).and_then(|t| outputs::write(client, t));
+            if let Err(w) = put {
                 return Err(RunError::Internal(format!("{} (and the halted run's outputs could not be written: {})", e, w)));
             }
         }
@@ -3454,7 +3521,7 @@ pub fn replay_observed<'p>(
     if !prog.observes.is_empty() {
         result.contract.set("post.ledgers", crate::contract::Status::Checked { times: ledgers.len() as u64 });
     }
-    let mut tables = outputs::tables(&run, prog, &bound, &ids, &kernel.cfg, &result, "completed")?;
+    let mut tables = outputs::tables(&run, prog, &bound, &ids, &kernel.cfg, &result, "completed", written)?;
     tables.extend(ledgers);
     outputs::write(client, tables)?;
     Ok((result, kernel))
@@ -3469,7 +3536,8 @@ pub fn load<'p>(prog: &'p Program, lowered: Option<&'p crate::lower::Lowered>, c
         None => Kernel::bound(prog, &bound, cfg.clone())?,
     };
     kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
-    let run = bind::run_id(prog, &cfg, &bound.binding);
+    let program_hash = crate::compiler::normalise(prog).hash;
+    let run = bind::run_id(&program_hash, bound.binding.id.as_deref().unwrap_or(""), &serde_json::Value::Null, "replay-sim");
     let (spec, cal_of) = bind::stream_spec(&kernel, &bound, client, &run)?;
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
     let mut sub = client.subscribe(spec, 1, None)?;

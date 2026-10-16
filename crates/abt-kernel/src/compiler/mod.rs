@@ -6,7 +6,6 @@
 
 pub mod normalise;
 pub mod print;
-pub mod sha256;
 
 pub use normalise::{normalise, Nir};
 pub use print::Stage;

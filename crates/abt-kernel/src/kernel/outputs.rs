@@ -25,6 +25,10 @@ use crate::ir::Ty;
 /// `calendar_label` (E-32).
 pub const RELATIONS: [&str; 11] = ["events", "book", "holdings", "decisions", "fills", "coverage", "contract", "binding", "plans", "late", "report"];
 
+/// The relations that grow with the run, written incrementally at every
+/// checkpoint (K-7.1); the others are written when the run ends or halts.
+pub const GROWING: [&str; 6] = ["events", "book", "holdings", "decisions", "fills", "late"];
+
 /// The kernel's instruments by their ids in the data layer.
 pub type Ids = HashMap<Sym, u64>;
 
@@ -125,15 +129,37 @@ impl Table {
     }
 }
 
-/// Every output relation of a run but the ledgers, built (P-4).
-pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecConfig, result: &RunResult, status: &str) -> Result<Tables, RunError> {
-    let end = result.bars.last().copied().unwrap_or(0);
+/// How far a run's writes have put the relations that grow with it: the
+/// rows of its event log, book, holdings and late tuples (K-7.1, written
+/// incrementally at every checkpoint).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Written {
+    events: usize,
+    book: usize,
+    holdings: usize,
+    late: usize,
+}
+
+/// Every output relation of a run but the ledgers, built (P-4): the rows
+/// the growing relations hold past `from` (what the run's checkpoints have
+/// not written), and the relations that describe the run as a whole.
+#[allow(clippy::too_many_arguments)]
+pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecConfig, result: &RunResult, status: &str, from: Written) -> Result<Tables, RunError> {
+    let (mut out, _) = growing(run, prog, ids, result, from)?;
+    out.extend(summaries(run, prog, bound, cfg, result, status)?);
+    Ok(out)
+}
+
+/// The rows past `from` of the relations that grow with the run: the event
+/// log, the book, the holdings, the decisions and fills, the late tuples;
+/// and how far they go.
+pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: Written) -> Result<(Tables, Written), RunError> {
     let id_of = |s: Sym| ids.get(&s).copied();
     let rule = |r: Option<usize>| r.map(|r| if r == usize::MAX { "silence".to_string() } else { prog.rule_label(r) });
+    let ev = result.events.get(from.events..).unwrap_or_default();
     let mut out = Vec::new();
     // The event log (K-5.2).
     {
-        let ev = &result.events;
         let n = ev.len();
         let mut decision = vec![None; n];
         let mut quantity = vec![None; n];
@@ -235,7 +261,7 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
     }
     // The book at every decision barrier (K-5.1): the book's rows, and its
     // holdings' (E-52).
-    let x = &result.exposure;
+    let x = result.exposure.get(from.book..).unwrap_or_default();
     out.push(
         Table::new(run, "book")
             .col("t", Role::EventTime, Col::Time(x.iter().map(|r| Some(r.t)).collect()))
@@ -256,7 +282,7 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
     );
     // A holding is of an instrument the data layer has (it was filled at
     // its price).
-    let h: Vec<&super::HoldingRecord> = result.holdings.iter().filter(|r| id_of(r.instrument).is_some()).collect();
+    let h: Vec<&super::HoldingRecord> = result.holdings.get(from.holdings..).unwrap_or_default().iter().filter(|r| id_of(r.instrument).is_some()).collect();
     out.push(
         Table::new(run, "holdings")
             .col("instrument", Role::Entity, Col::Entity(h.iter().map(|r| id_of(r.instrument)).collect()))
@@ -269,8 +295,7 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
     );
     // The decisions and fills: projections of the log, keyed by the
     // event's place in it (E-52).
-    let d: Vec<(&super::RunEvent, &super::Decision)> = result
-        .events
+    let d: Vec<(&super::RunEvent, &super::Decision)> = ev
         .iter()
         .filter_map(|e| match &e.kind {
             EventKind::Decision { decision } => Some((e, decision)),
@@ -289,8 +314,7 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
             .col("late", Role::Value, Col::Bool(d.iter().map(|_| Some(false)).collect()))
             .finish()?,
     );
-    let fills: Vec<(u64, &super::FillRecord, Option<u64>)> = result
-        .events
+    let fills: Vec<(u64, &super::FillRecord, Option<u64>)> = ev
         .iter()
         .filter_map(|e| match &e.kind {
             EventKind::Fill { fill, .. } => Some((e.seq, fill, e.order_id)),
@@ -315,6 +339,32 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
             .col("source", Role::Value, Col::Label(fills.iter().map(|_| Some("sim".to_string())).collect()))
             .finish()?,
     );
+    // The late tuples.
+    let l = result.late.get(from.late..).unwrap_or_default();
+    out.push(
+        Table::new(run, "late")
+            .col("seq", Role::Entity, Col::Entity(l.iter().map(|r| Some(r.seq)).collect()))
+            .col("t", Role::EventTime, Col::Time(l.iter().map(|r| Some(r.t)).collect()))
+            .col("relation", Role::Value, Col::Label(l.iter().map(|r| Some(r.relation.clone())).collect()))
+            .col("entity", Role::Value, Col::Entity(l.iter().map(|r| r.entity.and_then(id_of)).collect()))
+            .col("r", Role::Value, Col::Time(l.iter().map(|r| Some(r.r)).collect()))
+            .col("changed_decision", Role::Value, Col::Bool(l.iter().map(|_| Some(false)).collect()))
+            .finish()?,
+    );
+    let upto = Written {
+        events: result.events.len(),
+        book: result.exposure.len(),
+        holdings: result.holdings.len(),
+        late: result.late.len(),
+    };
+    Ok((out, upto))
+}
+
+/// The relations that describe the run as a whole, at its last decision
+/// bar: the coverage, the contract, the binding, the plans and the report.
+fn summaries(run: &str, prog: &Program, bound: &Bound, cfg: &ExecConfig, result: &RunResult, status: &str) -> Result<Tables, RunError> {
+    let end = result.bars.last().copied().unwrap_or(0);
+    let mut out = Vec::new();
     // The coverage (C summarised per relation).
     let c = &result.coverage;
     out.push(
@@ -473,18 +523,6 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
                 .finish()?,
         );
     }
-    // The late tuples.
-    let l = &result.late;
-    out.push(
-        Table::new(run, "late")
-            .col("seq", Role::Entity, Col::Entity(l.iter().map(|r| Some(r.seq)).collect()))
-            .col("t", Role::EventTime, Col::Time(l.iter().map(|r| Some(r.t)).collect()))
-            .col("relation", Role::Value, Col::Label(l.iter().map(|r| Some(r.relation.clone())).collect()))
-            .col("entity", Role::Value, Col::Entity(l.iter().map(|r| r.entity.and_then(id_of)).collect()))
-            .col("r", Role::Value, Col::Time(l.iter().map(|r| Some(r.r)).collect()))
-            .col("changed_decision", Role::Value, Col::Bool(l.iter().map(|_| Some(false)).collect()))
-            .finish()?,
-    );
     // The report: the status, the warnings with their biases, the counters.
     {
         let mut rows: Vec<(String, String, Option<String>)> = vec![
@@ -639,12 +677,17 @@ fn ledger(
 }
 
 /// Writes the run's outputs through the data layer: the versions put, by
-/// relation.
+/// relation. The rows of a relation that grows with the run are added to
+/// what the run's earlier writes put (a row already there must be the same
+/// row: a resumed run is the run); every other relation describes the
+/// execution that wrote it whole and replaces the last (E-56).
 pub fn write(client: &DataClient, tables: Tables) -> Result<Vec<(String, String)>, RunError> {
     let mut out = Vec::new();
     for (schema, batch) in tables {
         let name = schema.name.clone();
-        let version = client.put(schema, &[batch])?;
+        // `kernel.<run>.<relation>`: a ledger's is `ledger.<R>`.
+        let grows = name.splitn(3, '.').nth(2).is_some_and(|r| GROWING.contains(&r));
+        let version = if grows { client.put(schema, &[batch])? } else { client.replace(schema, &[batch])? };
         out.push((name, version));
     }
     Ok(out)

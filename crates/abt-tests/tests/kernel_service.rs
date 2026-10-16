@@ -2,7 +2,8 @@
 //! `contract` and `show` from sources; a `run` that streams its progress and
 //! ends as the run in process does (G3); queries of the run it holds,
 //! between barriers while it runs (K-7.3) and over its final state after;
-//! `status` and `control`.
+//! `status` and `control`; checkpoints through the data layer, and a run
+//! resumed from one by its key (K-4.7).
 
 #![allow(clippy::result_large_err)]
 
@@ -55,6 +56,8 @@ fn request(op: KernelOp) -> KernelRequest {
         memory_budget: None,
         pushdown: true,
         progress_every: None,
+        checkpoint_every: None,
+        from_checkpoint: None,
     }
 }
 
@@ -206,4 +209,77 @@ fn a_live_run_answers_between_barriers_and_halts_on_request() {
     r.run_id = Some(run_id);
     let (m, _) = ask(&c, r).unwrap();
     assert!(m.status.is_some_and(|s| s.starts_with("halted(")));
+}
+
+/// The checkpoint keys among a run's frames.
+fn checkpoint_keys(frames: &[KernelResponse]) -> Vec<String> {
+    frames.iter().filter_map(|f| f.text.as_deref()?.strip_prefix("checkpoint ").map(str::to_string)).collect()
+}
+
+/// K-4.7 over the service: a run asked for monthly checkpoints sends each
+/// one's key as the data layer holds it; a run from one of them is the same
+/// run, and ends as the unbroken run did.
+#[test]
+fn a_run_checkpoints_through_the_data_layer_and_resumes_from_a_key() {
+    let (prog, ds) = common::golden_inputs(&common::corpus_dir().join("strategies/sma_crossover.dsl")).unwrap();
+    let c = services(&prog, &ds);
+    let mut r = of("sma_crossover", KernelOp::Run);
+    r.checkpoint_every = Some("month".into());
+    let frames = run(&c, r);
+    let keys = checkpoint_keys(&frames);
+    assert!(keys.len() >= 3, "{} checkpoints", keys.len());
+    let full = frames.last().unwrap();
+    assert_eq!(full.status.as_deref(), Some("completed"));
+    let full_report: serde_json::Value = serde_json::from_str(full.report.as_deref().unwrap()).unwrap();
+    for key in [&keys[0], &keys[keys.len() / 2], keys.last().unwrap()] {
+        let mut r = of("sma_crossover", KernelOp::Run);
+        r.from_checkpoint = Some(key.clone());
+        let resumed = run(&c, r);
+        assert_eq!(resumed[0].run_id, frames[0].run_id, "the same run");
+        let last = resumed.last().unwrap();
+        assert_eq!(last.status.as_deref(), Some("completed"), "{:?}", last.report);
+        let report: serde_json::Value = serde_json::from_str(last.report.as_deref().unwrap()).unwrap();
+        assert_eq!(report, full_report, "resumed from {}", key);
+    }
+    // Another window is another run: its checkpoint is refused, naming why.
+    let mut r = of("sma_crossover", KernelOp::Run);
+    r.from_checkpoint = Some(keys[0].clone());
+    r.start = Some(common::run(&prog, &ds, ExecConfig::from_program(&prog)).unwrap().bars[40]);
+    assert!(ask(&c, r).is_err_and(|e| e.contains("window")));
+    let mut r = of("sma_crossover", KernelOp::Run);
+    r.from_checkpoint = Some("0".repeat(64));
+    assert!(ask(&c, r).is_err_and(|e| e.contains("no checkpoint")));
+    let mut r = of("sma_crossover", KernelOp::Run);
+    r.checkpoint_every = Some("fortnight".into());
+    assert!(ask(&c, r).is_err_and(|e| e.contains("checkpoint_every")));
+}
+
+/// `control checkpoint` takes a checkpoint at the end of the running run's
+/// next decision bar and answers its key; the run sends the same key.
+#[test]
+fn control_checkpoint_answers_the_key_of_a_live_run() {
+    let (prog, _) = common::golden_inputs(&common::corpus_dir().join("strategies/sma_crossover.dsl")).unwrap();
+    let ds = abt_kernel::data::synthetic_for_program(&prog, &["AAA", "XYZ", "BBB", "SPY", "DDD"], (2000, 1, 3), 4000, 11);
+    let c = services(&prog, &ds);
+    let mut r = of("sma_crossover", KernelOp::Run);
+    r.progress_every = Some(1);
+    let (first, mut reply) = ask(&c, r).unwrap();
+    let run_id = first.run_id.clone().unwrap();
+    let mut r = request(KernelOp::Control);
+    r.run_id = Some(run_id.clone());
+    r.what = Some("checkpoint".into());
+    let (m, _) = ask(&c, r).unwrap();
+    assert_eq!(m.status.as_deref(), Some("checkpointed"));
+    let key = m.text.unwrap();
+    assert_eq!(key.len(), 64);
+    let mut r = request(KernelOp::Control);
+    r.run_id = Some(run_id.clone());
+    r.what = Some("halt".into());
+    ask(&c, r).unwrap();
+    let mut frames = vec![first];
+    while frames.last().unwrap().status.as_deref() == Some("running") {
+        frames.push(next(&mut reply).unwrap());
+    }
+    assert!(checkpoint_keys(&frames).contains(&key), "the run sent the key");
+    assert!(frames.last().unwrap().status.as_deref().is_some_and(|s| s.starts_with("halted(")));
 }

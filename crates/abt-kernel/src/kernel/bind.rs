@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use abt_wire::generated::abt::wire::{
-    AggregateCall, AggregateRequest, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, PlanStep, Preference,
+    AggregateCall, AggregateRequest, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, ParamValue, PlanStep, Preference,
     PreferenceKind, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
 };
 use abt_wire::rpc::{Client, Reply, WireError};
@@ -138,8 +138,39 @@ impl DataClient {
         })))
     }
 
-    /// Writes rows under the kernel's namespace (D-3.6); returns the version.
+    /// Stores rows as a cache object under `key` (D-3.5); returns the version.
+    pub fn put_cache(&self, key: &str, schema: RelationSchema, rows: &[RecordBatch]) -> Result<String, RunError> {
+        self.put_as(schema, rows, Some(key.to_string()), false)
+    }
+
+    /// A cache object's rows, by its key (none when the data layer has no
+    /// object under it, or evicted it).
+    pub fn get_cache(&self, key: &str) -> Result<Option<Vec<RecordBatch>>, RunError> {
+        let m = Message::GetRequest(Box::new(abt_wire::generated::abt::wire::GetRequest {
+            cache_key: Some(key.to_string()),
+            version: None,
+            relation: None,
+        }));
+        match self.client.request_table(m) {
+            Ok((_, b)) => Ok(Some(b)),
+            Err(WireError::Remote(e)) if e.code == abt_wire::ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(wire(e)),
+        }
+    }
+
+    /// Writes rows under the kernel's namespace (D-3.6), added to the
+    /// relation's; returns the version.
     pub fn put(&self, schema: RelationSchema, rows: &[RecordBatch]) -> Result<String, RunError> {
+        self.put_as(schema, rows, None, false)
+    }
+
+    /// Writes rows under the kernel's namespace as the relation's next
+    /// version whole (E-56); returns the version.
+    pub fn replace(&self, schema: RelationSchema, rows: &[RecordBatch]) -> Result<String, RunError> {
+        self.put_as(schema, rows, None, true)
+    }
+
+    fn put_as(&self, schema: RelationSchema, rows: &[RecordBatch], cache_key: Option<String>, replace: bool) -> Result<String, RunError> {
         let arrow_schema = rows.first().map(|b| b.schema()).ok_or_else(|| RunError::Internal("a put of no batch".into()))?;
         let relation = schema.name.clone();
         let mut reply = self
@@ -149,6 +180,8 @@ impl DataClient {
                     relation,
                     schema: Box::new(schema),
                     attributes: None,
+                    cache_key,
+                    replace,
                 })),
                 &arrow_schema,
                 rows,
@@ -378,6 +411,28 @@ fn col<'b>(b: &'b RecordBatch, name: &str) -> Result<&'b ArrayRef, RunError> {
 /// The Bind stage: the binding of the program's demand and what the kernel
 /// reads before the stream.
 pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
+    bind_at(prog, client, &point_of(prog, &[]))
+}
+
+/// The parameter point of a run (D-7.5): every parameter of the program at
+/// its value, the run's override or the declared default, as its literal's
+/// text, by name (`unit::name` for a library's), in name order.
+pub fn point_of(prog: &Program, overrides: &[(String, crate::Lit)]) -> Vec<ParamValue> {
+    let mut out = Vec::new();
+    for (unit, ps) in &prog.params {
+        for (name, p) in ps {
+            let key = if *unit == prog.strategy { name.clone() } else { format!("{}::{}", unit, name) };
+            let value = overrides.iter().rev().find(|(n, _)| *n == key).map(|(_, l)| l).unwrap_or(&p.value);
+            out.push(ParamValue { name: key, value: value.to_string() });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// `bind` at a parameter point: the binding carries it (D-7.5), so two
+/// points are two bindings.
+pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Result<Bound, RunError> {
     let all = client.schemas(None)?;
     let by_name: BTreeMap<String, RelationSchema> = all.iter().map(|s| (s.name.clone(), s.clone())).collect();
     // The store's name of a relation: the program's class's, else the one
@@ -394,7 +449,9 @@ pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
         first.filter(|_| others.next().is_none())
     };
     let primitives: Vec<&str> = prog.relations.iter().filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. })).map(|(n, _)| n.as_str()).collect();
-    let (binding, steps) = client.resolve(demand_of(prog, &stored_name))?;
+    let mut demand = demand_of(prog, &stored_name);
+    demand.point = Some(point.to_vec());
+    let (binding, steps) = client.resolve(demand)?;
     let warnings = binding_warnings(prog, &steps);
     let view = View {
         versions: None,
@@ -924,6 +981,7 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
             seconds: d.budget.as_ref().and_then(|b| b.seconds),
         })),
         dynamic: (!dynamic.is_empty()).then_some(dynamic),
+        point: None,
     }
 }
 
@@ -1228,10 +1286,33 @@ impl Decoder {
     }
 }
 
-/// The run's id: of the program, its configuration and the binding (K-7.1).
-pub fn run_id(prog: &Program, cfg: &super::ExecConfig, binding: &Binding) -> String {
-    let fp = super::fold::fingerprint(prog, cfg);
-    abt_wire::Hash::of_parts([fp.to_le_bytes().as_slice(), binding.id.as_deref().unwrap_or("").as_bytes()]).hex()[..16].to_string()
+/// The run's id (Definition A-4.1, A-6): BLAKE3 over the canonical form of
+/// (H(P), β, π, mode), 64 hex digits. π is the plan step that asked for the
+/// run; a run outside a plan has none, and its window, truncation and
+/// bundle date stand in its place (ERRATA E-56).
+pub fn run_id(program_hash: &str, binding_id: &str, step: &serde_json::Value, mode: &str) -> String {
+    let v = serde_json::json!({"program": program_hash, "binding": binding_id, "step": step, "mode": mode});
+    abt_wire::Hash::of(abt_wire::to_canonical_json(&v).expect("an identity is JSON").as_bytes()).hex()
+}
+
+/// π of a run outside a plan: what of its request, beyond the program and
+/// the binding, changes what it decides; none for a run over the whole
+/// stream.
+pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>) -> serde_json::Value {
+    let fields = [
+        ("start", cfg.start.map(|t| serde_json::json!(t))),
+        ("end", cfg.end.map(|t| serde_json::json!(t))),
+        ("as_of", cfg.as_of.map(|t| serde_json::json!(t))),
+        ("to_seq", to_seq.map(|s| serde_json::json!(s))),
+        ("horizon", horizon.map(|t| serde_json::json!(t))),
+        ("fault", cfg.inject.as_ref().map(|(c, t)| serde_json::json!([c, t]))),
+    ];
+    let set: serde_json::Map<String, serde_json::Value> = fields.into_iter().filter_map(|(k, v)| v.map(|v| (k.to_string(), v))).collect();
+    if set.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(set)
+    }
 }
 
 /// A dataset in memory as an adapter's keyed tables (E-34): its security

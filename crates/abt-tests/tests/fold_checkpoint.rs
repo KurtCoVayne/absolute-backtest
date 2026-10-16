@@ -126,13 +126,14 @@ fn a_checkpoint_of_another_program_or_configuration_is_refused() {
     let other_cfg = ExecConfig { initial_cash: 5.0, ..cfg.clone() };
     let err = replayed(&p, &client, &other_cfg, &from(&cp)).err().unwrap();
     assert!(matches!(err, RunError::Config(_)), "{}", err);
-    assert!(err.to_string().contains("checkpoint"), "{}", err);
+    assert!(err.to_string().contains("another configuration"), "{}", err);
     // Another binding (more symbols).
     let ds2 = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY", "ZZZ"], (2022, 1, 3), 120, 7);
     let client2 = common::client(&p, &ds2);
     let err = replayed(&p, &client2, &cfg, &from(&cp)).err().unwrap();
-    assert!(err.to_string().contains("symbols"), "{}", err);
+    assert!(err.to_string().contains("another binding"), "{}", err);
     // Another program.
     let sma = common::corpus_program("sma_crossover");
-    assert!(replayed(&sma, &client, &cfg, &from(&cp)).is_err());
+    let err = replayed(&sma, &client, &cfg, &from(&cp)).err().unwrap();
+    assert!(err.to_string().contains("another program"), "{}", err);
 }

@@ -279,6 +279,8 @@ table Demand {
   prefer: [Preference];
   budget: Budget;
   dynamic: [DynamicNeed];
+  // The parameter point the run is at (D-7.5): the binding carries it.
+  point: [ParamValue];
 }
 
 // A parameter of the point a binding was resolved for, as its literal text.
@@ -364,7 +366,10 @@ table StreamIndexRequest { spec: StreamSpec (required); }
 table AckMessage { seq: ulong; }
 
 // The rows follow as Arrow frames in the request's correlation.
-table PutRequest { relation: string (required); schema: RelationSchema (required); attributes: [Attribute]; }
+// With `cache_key`, the rows are a cache object (D-3.5) under that key.
+// With `replace`, they are the relation's next version whole: the relation
+// starts over from them, its earlier versions readable by id (E-56).
+table PutRequest { relation: string (required); schema: RelationSchema (required); attributes: [Attribute]; cache_key: string; replace: bool; }
 table PutResponse { version: string (required); seq_from: ulong; seq_to: ulong; }
 table GetRequest { cache_key: string; version: string; relation: string; }
 table PinRequest { version: string; binding: string; pin: bool; }
@@ -402,6 +407,10 @@ table KernelRequest {
   pushdown: bool = true;
   // `run`: a progress frame every this many decision barriers.
   progress_every: ulong = null;
+  // `run`: a checkpoint every `month` or every N decision barriers, written
+  // through the data layer (K-4.7); `from_checkpoint` resumes from one.
+  checkpoint_every: string;
+  from_checkpoint: string;
 }
 
 // An answer, or one of a run's progress frames (`status` running).

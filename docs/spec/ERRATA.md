@@ -303,7 +303,7 @@ batch driver agree on every corpus program. Each bless since:
   (the report's `status` is then `halted(reason)`, and the violated
   invariant is `violated` in its contract). The run id is the one the
   stream's calendars are put under (`kernel.<run>.calendar_label`, E-32):
-  16 hex digits of the hash of the program's fingerprint and the binding.
+  BLAKE3 over H(P), β, π and the mode (E-56).
   `abt run --data SOCKET` writes them and prints the id. A run whose data
   service holds a dataset in this process (`--synthetic`, `--bundle`, a
   Parquet directory) writes none, since its store is temporary.
@@ -355,8 +355,7 @@ batch driver agree on every corpus program. Each bless since:
     relation that takes inputs cannot be enumerated: its ledger is empty,
     with a warning. `post.ledgers` is `checked` with the number of
     ledgers written, or `not_applicable` for a run that writes no outputs.
-  - "Incrementally at every checkpoint" comes with the checkpoints
-    through the data layer (M-4e).
+  - "Incrementally at every checkpoint" is E-56.
   - The parity scripts read the run from the store (K-9.1), through
     `scripts/parity/abt_store.py`:
     - `r8l_compare.py STORE RUN LEG_FLAGS` reads the decisions, the fills
@@ -421,9 +420,8 @@ batch driver agree on every corpus program. Each bless since:
   seven requests of P-3.4 are one message pair: `KernelRequest`, whose
   `op` says which request it is, and `KernelResponse`. A field a request
   does not take is left out.
-  - `check` answers with the diagnostics, H(P) with the normal form (the
-    normaliser's hash; BLAKE3 over the normal form comes with M-4e), and
-    the degrees of freedom.
+  - `check` answers with the diagnostics, H(P) with the normal form
+    (E-56), and the degrees of freedom.
     `contract` answers with the contract's table. `show` reads the
     request's sources, or the run `run_id` names.
   - `run` sends its id first, then a progress frame (`barrier`,
@@ -434,8 +432,8 @@ batch driver agree on every corpus program. Each bless since:
       names and literals. `mode` is replay-sim until M-6, and
       `deployment?` waits for M-10.
     - `embargo_mask` and `plan_step` wait for the query layer's plans
-      (M-5). `from_checkpoint` and `checkpoint_every` wait for the
-      checkpoints through the data layer (M-4e).
+      (M-5). `checkpoint_every` (`month` or a number of decision
+      barriers) and `from_checkpoint` (a checkpoint's key) are E-56's.
   - Each run is held by a thread that owns its program and kernel.
     Between barriers it answers the queries asked meanwhile, over the
     state the barrier closed (K-7.3), so a query waits for the next
@@ -453,12 +451,77 @@ batch driver agree on every corpus program. Each bless since:
   - A query's table follows its response in the same correlation
     (`has_table`).
   - `control halt` stops a running run at its next barrier, as a halted
-    run, which writes what it has. `checkpoint` is refused until M-4e, and
-    `flatten` until a live broker's book exists (M-10).
+    run, which writes what it has. `checkpoint` takes one at the end of
+    the run's next decision bar and answers its key (E-56). `flatten` is
+    refused until a live broker's book exists (M-10).
   - `status` gives a run's state, its last barrier and its decisions, or
     every held run's.
   - `abt kernel serve --data SOCKET` serves the kernel, and `abt kernel
     check|contract|show|run|query|status|control` are its client commands.
+
+- **E-56 (A-4.1, A-6, K-4.7, K-7.1, D-3.5, P-3.1, P-3.4; the identity of a
+  run, its checkpoints, and its outputs written as it goes).**
+  - H(P) is BLAKE3 over the RFC 8785 form of the normal form's hash view,
+    64 hex digits. The hash view is V-8.4 form 3: the program's structure
+    with the strategy's own name as `self`, without spans, written names
+    or the `report` block. It replaces the first formulation's SHA-256.
+    - That RFC 8785 text is the rendering P-2 hashes, and `abt hash --show`
+      prints exactly those bytes. The normal form as source (`abt hash
+      --json`, `binding.normal_form`) is for reading. It carries the
+      strategy's own name and its `report` block, which H(P) leaves out,
+      so a renamed copy of a program is the same program.
+    - `tests/golden/program_hashes.tsv` pins the hash of every corpus
+      program and both books. A study lineage recorded under the old hash
+      starts a new lineage (the study moves to the query layer at M-5).
+  - β carries the parameter point (A-6). The demand sends every parameter
+    of the program at its value (`Demand.point`): the strategy's by name, a
+    library's as `unit::name`, so a default written as an override is the
+    same point. The resolver puts the point, sorted, into the binding
+    whose id it hashes. Two points are two bindings.
+  - The run id is BLAKE3 over the RFC 8785 form of `{program: H(P),
+    binding: β, step: π, mode}`, 64 hex digits. Outside a plan, π is null
+    for a run over the whole stream. Otherwise it holds what of the
+    request changes what the run decides, which Definition A-4.1 leaves to
+    the plan step: the window (`start`, `end`), the bundle date (`as_of`),
+    the truncation (`to_seq`, `horizon`) and an injected fault. The query
+    layer's plans give π its step (M-5).
+  - A checkpoint (K-4.7) is a cache object (D-3.5) keyed by BLAKE3 over
+    `{checkpoint: run id, seq}`. It is its JSON in parts of at most a MiB,
+    as a table (`part`, `t` = the checkpoint's last bar, `data`). A cache
+    object written again under its key replaces the one there.
+    - `abt run --data SOCKET --checkpoint-every month|N` prints each key,
+      and `--resume KEY` reads one back. In process, checkpoints are still
+      files (`--checkpoint-dir`) until M-9 retires the in-process stores.
+    - `abt kernel run` takes `--checkpoint-every` and `--resume KEY`
+      (`checkpoint_every`, `from_checkpoint`). It sends a frame
+      `checkpoint KEY` as each one is written. `control checkpoint` takes
+      one at the end of the running run's next decision bar and answers
+      its key.
+  - Resume compares the checkpoint's H(P), β, mode, run id and
+    configuration hash with the run's, and refuses on the first that
+    differs, naming it: another program; another binding (other data
+    versions or another parameter point); another mode; another run of
+    the program and binding (its window, truncation or bundle date);
+    another configuration. The kernel service refuses a run that ends
+    before it is bound (its binding, its checkpoint or a precondition
+    refused) rather than reporting it as halted.
+  - The outputs, "incrementally at every checkpoint" (K-7.1, E-52):
+    - Before a checkpoint is handed out, the relations that grow with the
+      run (`events`, `book`, `holdings`, `decisions`, `fills`, `late`) are
+      written with the rows the run gained since its last write. The
+      relations that describe the run as a whole (`coverage`, `contract`,
+      `binding`, `plans`, `report`, the ledgers) are written when the run
+      ends or halts.
+    - `put` gains `replace`: the rows are the relation's next version
+      whole, as a put of a new shape is (E-55). The growing relations are
+      added to what is there, and a row already there must be the same
+      row: a resumed run is the run, and the store refuses one that is
+      not. The other relations replace the last execution's.
+    - A resumed run carries its coverage and per-literal counters from
+      the checkpoint, but its memo starts empty. Its coverage counts, its
+      plans' observed counts and its kernel statistics therefore count the
+      derived results it derives again. They describe the execution, not
+      the run, and the last execution's are the run's.
 
 ## Data layer and protocol
 

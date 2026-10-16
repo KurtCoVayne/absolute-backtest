@@ -99,6 +99,8 @@ fn exercise(client: &Client) -> Vec<String> {
         relation: "kernel.run.fills".into(),
         schema: Default::default(),
         attributes: None,
+        cache_key: None,
+        replace: false,
     }));
     log.push(format!("{:?}", client.call_with_table(put, &table_schema(), &[rows(0, 7), rows(7, 5)]).unwrap().message().unwrap()));
     // A stream: read three batches, cancel, read to its end.

@@ -179,7 +179,14 @@ impl Service for DataService {
                 let mut schema = *r.schema;
                 schema.name = r.relation.clone();
                 let mut st = self.store_mut();
-                let (version, (from, to)) = st.put(&schema, &batches, "put").map_err(data)?;
+                // A cache object (D-3.5): kept under its key, evictable by gc.
+                if let Some(k) = &r.cache_key {
+                    let key = abt_wire::Hash::from_hex(k).map_err(|e| error(ErrorCode::Malformed, e.0))?;
+                    let version = st.cache_put(&key, &schema, &batches).map_err(data)?;
+                    drop(st);
+                    return out.respond(Message::PutResponse(Box::new(PutResponse { version, seq_from: 0, seq_to: 0 }))).map_err(wire);
+                }
+                let (version, (from, to)) = if r.replace { st.replace(&schema, &batches, "put") } else { st.put(&schema, &batches, "put") }.map_err(data)?;
                 drop(st);
                 out.respond(Message::PutResponse(Box::new(PutResponse { version, seq_from: from, seq_to: to }))).map_err(wire)
             }

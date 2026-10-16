@@ -188,9 +188,13 @@ pub fn resolve(store: &Store, demand: &Demand) -> Result<(Binding, ResolvePlan),
             pairs.insert(rel.to_string(), v.to_string());
         }
     }
+    // The binding carries the point the demand is at (D-7.5): its id covers
+    // it, so two points are two bindings.
+    let mut point = demand.point.clone().unwrap_or_default();
+    point.sort_by(|a, b| a.name.cmp(&b.name));
     let binding = Binding {
         pairs: Some(pairs.into_iter().map(|(relation, version)| VersionRef { relation, version }).collect()),
-        point: None,
+        point: (!point.is_empty()).then_some(point),
         dynamic: None,
         id: None,
     };

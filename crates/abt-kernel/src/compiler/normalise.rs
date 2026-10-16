@@ -20,7 +20,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 
 use super::print::{render_lit, render_literal, render_param, render_rule, render_signature, Stage};
-use super::sha256::sha256_hex;
 use crate::check::Program;
 use crate::ir::*;
 use crate::syntax::print::{render_strategy, Options, RuleStyle};
@@ -1475,9 +1474,17 @@ pub fn hash_view(nir: &Nir) -> serde_json::Value {
     })
 }
 
-/// The program hash (2.9): SHA-256 of the hash view's JSON.
+/// The text H(P) is over (P-2, what `abt hash --show` prints): the
+/// canonical form (RFC 8785) of the hash view.
+pub fn hashed_text(nir: &Nir) -> String {
+    abt_wire::to_canonical_json(&hash_view(nir)).expect("the hash view is JSON")
+}
+
+/// The program hash H(P) (2.9; A-6): BLAKE3 over the canonical form (RFC
+/// 8785) of the hash view, the normal form without the `report` block and
+/// the comments, 64 hex digits.
 pub fn program_hash(nir: &Nir) -> String {
-    sha256_hex(hash_view(nir).to_string().as_bytes())
+    abt_wire::Hash::of(hashed_text(nir).as_bytes()).hex()
 }
 
 impl Nir {

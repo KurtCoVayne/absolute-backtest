@@ -47,7 +47,7 @@ silently misaligns every bucket.
 | `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
 | `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
 | `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
-| `crates/abt-kernel/src/compiler/` | Normalise (the normal form, canonical order and names, the SHA-256 program hash) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
+| `crates/abt-kernel/src/compiler/` | Normalise (the normal form, canonical order and names, the program hash H(P): BLAKE3 over the RFC 8785 form of the normal form without its `report` block, what `abt hash` prints and `abt hash --show` prints the bytes of) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
 | `crates/abt-kernel/src/analysis/` | Analyse: strata, the open-loop partition, keyedness labels, demand, window lengths, and the abstract interpretation with its warnings. |
 | `crates/abt-kernel/src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
 | `crates/abt-kernel/src/plan/`, `crates/abt-kernel/src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt plan`). |
@@ -305,9 +305,16 @@ strategy's decisions and the executor's take. Because every temporal
 builtin looks back only, a time domain that grows as buckets open is
 observationally the up-front one. The fold's state is serialisable
 (`kernel::Checkpoint`, with the stream's seq as its cursor):
-`--checkpoint-every month|N --checkpoint-dir DIR` writes one at the end of
-every calendar month (or every N bars) as `DIR/<bar>.json`, and `--resume
-FILE` continues from it over the same data and configuration. The executor
+`--checkpoint-every month|N` takes one at the end of every calendar month
+(or every N bars). Over `--data SOCKET` it is a cache object of the data
+layer, keyed by the run's id and the seq and printed (`checkpoint KEY of
+DATE`), and the run writes its outputs so far before it; in process it is
+`DIR/<bar>.json` under `--checkpoint-dir DIR`. `--resume KEY|FILE`
+continues from one. The checkpoint's program hash, binding, mode, run id
+and configuration must be the run's, and a resume that differs is refused
+naming which (ERRATA E-56). A run is identified by BLAKE3 over its program
+hash, its binding (the data versions and the parameter point), its window
+and the mode, 64 hex digits. The executor
 is a trait (`kernel::Executor`), so a live run attaches another executor to
 the same fold.
 
@@ -492,8 +499,12 @@ The kernel is also a service (`docs/spec/04-protocol.md`, P-3.4):
 outputs to the data service's store and prints a progress line every
 `--progress N` barriers. `abt kernel query --run RUN --text QUERY` asks the
 run a query: between barriers while it runs, over its final state after.
+`--checkpoint-every month|N` writes checkpoints through the data layer and
+prints each key, `--resume KEY` runs from one, and `abt kernel control
+--run RUN checkpoint` takes one while the run runs and prints its key.
 `abt kernel status`, `control RUN halt`, `check`, `contract` and `show`
-complete the commands (`--kernel SOCKET` names the service; ERRATA E-54).
+complete the commands (`--kernel SOCKET` names the service; ERRATA E-54,
+E-56).
 
 ## The command line
 
@@ -502,7 +513,8 @@ abt check <files...>
 abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
         [--verify-causality] [--no-pushdown] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>
-abt run ... [--checkpoint-every month|N --checkpoint-dir DIR] [--resume FILE]
+abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
+abt hash --strategy NAME [--json | --show] <files...>
 abt show --strategy NAME <files...>
 abt graph --strategy NAME <files...>
 abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
@@ -512,8 +524,8 @@ abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--j
 abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>
 abt kernel serve [--socket PATH] --data SOCKET
-abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] <files...>
-abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt]
+abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
+abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
 abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>
@@ -662,8 +674,8 @@ abt study dispute --study DIR --strategy sma_crossover --reason "a different ide
 A strategy belongs to a *lineage*: its own when nothing like it exists, or
 the nearest one when its normalised rules are within Jaccard 0.8 of a
 member's (attached with a warning; a dispute is logged and changes
-nothing). The program hash (`abt study declare` prints it; `abt ir --stage
-normalised` carries it) is over the normal form of the checked program,
+nothing). The program hash (`abt hash` and `abt study declare` print it;
+`abt ir --stage normalised` carries it) is over the normal form of the checked program,
 with its variable names canonicalised, its literals in canonical order and
 the `report` block removed, so renaming a variable or reordering a body
 resets nothing. `declare` fixes the study's inputs (hold-out policy,

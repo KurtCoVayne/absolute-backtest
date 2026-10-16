@@ -198,3 +198,19 @@ fn the_surface_rendering_of_derived_forms_re_parses() {
     assert!(diags.iter().all(|d| d.severity != Severity::Error), "{}\n{}", common::text(&diags), text);
     assert_eq!(normalise(&p2.unwrap()).hash, nir.hash);
 }
+
+/// H(P) is BLAKE3 over the text `abt hash --show` prints (P-2): the RFC 8785
+/// form of the hash view, without the `report` block and with the
+/// strategy's own name as `self`, so a renamed copy is the same program.
+#[test]
+fn the_program_hash_is_over_the_text_shown() {
+    let prog = common::program(BASE, "canon");
+    let nir = abt_kernel::compiler::normalise(&prog);
+    let text = abt_kernel::compiler::normalise::hashed_text(&nir);
+    assert_eq!(abt_wire::Hash::of(text.as_bytes()).hex(), nir.hash);
+    assert!(text.contains("\"self\"") && !text.contains("\"canon\""), "{}", text);
+    let renamed = common::program(&BASE.replace("strategy canon", "strategy other"), "other");
+    assert_eq!(abt_kernel::compiler::normalise(&renamed).hash, nir.hash, "a renamed copy is the same program");
+    let reported = common::program(&BASE.replace("periods 252 per year", "periods 12 per year"), "canon");
+    assert_eq!(abt_kernel::compiler::normalise(&reported).hash, nir.hash, "the report block is not hashed");
+}

@@ -5,7 +5,7 @@
 //! abt kernel check    [--kernel SOCKET] --strategy NAME <files...>
 //! abt kernel contract [--kernel SOCKET] --strategy NAME <files...>
 //! abt kernel show     [--kernel SOCKET] (--run RUN | --strategy NAME <files...>) [--what program|plan R|schedule|calendars|contract]
-//! abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] <files...>
+//! abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 //! abt kernel query    [--kernel SOCKET] --run RUN --text QUERY [--json]
 //! abt kernel status   [--kernel SOCKET] [--run RUN]
 //! abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten
@@ -41,7 +41,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt kernel serve    [--socket PATH] --data SOCKET\n  abt kernel check    [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel contract [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel show     [--kernel SOCKET] (--run RUN | --strategy NAME <files...>) [--what program|plan R|schedule|calendars|contract]\n  abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] <files...>\n  abt kernel query    [--kernel SOCKET] --run RUN --text QUERY [--json]\n  abt kernel status   [--kernel SOCKET] [--run RUN]\n  abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten"
+        "usage:\n  abt kernel serve    [--socket PATH] --data SOCKET\n  abt kernel check    [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel contract [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel show     [--kernel SOCKET] (--run RUN | --strategy NAME <files...>) [--what program|plan R|schedule|calendars|contract]\n  abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>\n  abt kernel query    [--kernel SOCKET] --run RUN --text QUERY [--json]\n  abt kernel status   [--kernel SOCKET] [--run RUN]\n  abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten"
     );
     exit(2)
 }
@@ -117,6 +117,8 @@ fn request(op: KernelOp) -> KernelRequest {
         memory_budget: None,
         pushdown: true,
         progress_every: None,
+        checkpoint_every: None,
+        from_checkpoint: None,
     }
 }
 
@@ -221,10 +223,16 @@ pub fn main(args: &[String]) {
             r.start = a.opts.get("start").map(|s| time(s));
             r.end = a.opts.get("end").map(|s| time(s));
             r.progress_every = a.opts.get("progress").map(|n| n.parse().unwrap_or_else(|_| fail("--progress takes a number of barriers")));
+            r.checkpoint_every = a.opts.get("checkpoint-every").cloned();
+            r.from_checkpoint = a.opts.get("resume").cloned();
             let c = client(&a);
             let (mut m, mut reply) = answer(&c, r);
             loop {
                 match (m.status.as_deref(), &m.barrier) {
+                    // A checkpoint, written through the data layer: its key.
+                    (Some("running"), Some(t)) if m.text.as_deref().is_some_and(|x| x.starts_with("checkpoint ")) => {
+                        eprintln!("{} of {}", m.text.as_deref().unwrap_or_default(), crate::kernel::time::format_timestamp(*t))
+                    }
                     (Some("running"), Some(t)) => eprintln!("barrier {} decisions {}", crate::kernel::time::format_timestamp(*t), m.decisions.unwrap_or(0)),
                     (Some("running"), None) => println!("run {}", m.run_id.clone().unwrap_or_default()),
                     (status, _) => {
@@ -274,7 +282,11 @@ pub fn main(args: &[String]) {
             r.run_id = Some(a.opts.get("run").cloned().unwrap_or_else(|| fail("--run RUN names the run")));
             r.what = Some(a.positional.first().cloned().unwrap_or_else(|| usage()));
             let (m, _) = answer(&client(&a), r);
-            println!("{}: {}", m.run_id.unwrap_or_default(), m.status.unwrap_or_default());
+            // `checkpoint` answers with the checkpoint's key.
+            match m.text {
+                Some(key) => println!("{}: {} {}", m.run_id.unwrap_or_default(), m.status.unwrap_or_default(), key),
+                None => println!("{}: {}", m.run_id.unwrap_or_default(), m.status.unwrap_or_default()),
+            }
         }
         _ => usage(),
     }

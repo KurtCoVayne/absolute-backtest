@@ -156,19 +156,29 @@ impl Store {
     /// becomes current (D-2.6, D-3.3). Returns the version.
     pub fn ingest(&mut self, relation: &str, input: &[RecordBatch], source: &str, attributes: BTreeMap<String, String>) -> Result<String, DataError> {
         let schema = self.schema(relation)?;
-        let (version, _) = self.write(&schema, input, source, attributes)?;
+        let (version, _) = self.write(&schema, input, source, attributes, false)?;
         Ok(version)
     }
 
     /// Another layer's rows under its namespace (D-3.6): the schema is the
     /// writer's and is registered; returns the version and the rows'
-    /// sequence numbers.
+    /// sequence numbers. The rows are added to the relation's current
+    /// version (a row already there must be the same row).
     pub fn put(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str) -> Result<(String, (u64, u64)), DataError> {
         self.registry.register_schema(schema)?;
-        self.write(schema, input, source, BTreeMap::new())
+        self.write(schema, input, source, BTreeMap::new(), false)
     }
 
-    fn write(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str, mut attributes: BTreeMap<String, String>) -> Result<(String, (u64, u64)), DataError> {
+    /// A `put` whose rows are the relation's next version whole: the
+    /// relation starts over from them, as when a writer's rows change shape
+    /// (a writer's summary written again, a cache object written again
+    /// under its key); its earlier versions stay readable by id (E-56).
+    pub fn replace(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str) -> Result<(String, (u64, u64)), DataError> {
+        self.registry.register_schema(schema)?;
+        self.write(schema, input, source, BTreeMap::new(), true)
+    }
+
+    fn write(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str, mut attributes: BTreeMap<String, String>, fresh: bool) -> Result<(String, (u64, u64)), DataError> {
         let relation = schema.name.clone();
         let key = (relation.clone(), source.to_string());
         let first_seq = match self.next_seq.get(&key) {
@@ -188,12 +198,12 @@ impl Store {
         let last_seq = seq.saturating_sub(1);
         // The next version, computed and validated before anything is written.
         let previous = self.registry.current(&relation, Some(source)).map(|v| v.to_string());
-        // A writer whose rows changed shape starts the relation over: the
-        // new version holds this write's rows only (its earlier versions
-        // stay readable by id).
+        // A writer whose rows changed shape, or that replaces them, starts
+        // the relation over: the new version holds this write's rows only
+        // (its earlier versions stay readable by id).
         let prev_manifest = match &previous {
-            Some(v) => Some(self.manifest(v)?).filter(|m| m.schema.columns == schema.columns),
-            None => None,
+            Some(v) if !fresh => Some(self.manifest(v)?).filter(|m| m.schema.columns == schema.columns),
+            _ => None,
         };
         let lay = layout(schema);
         let mut by_bucket: BTreeMap<String, Vec<u32>> = BTreeMap::new();
@@ -469,7 +479,7 @@ impl Store {
         let mut schema = schema.clone();
         schema.name = format!("cache.{}", &key.hex()[..16]);
         schema.class = "cache".to_string();
-        let (version, _) = self.put(&schema, rows, "cache")?;
+        let (version, _) = self.replace(&schema, rows, "cache")?;
         self.registry.cache_record(&key.hex(), &schema.name, &version);
         self.registry.save()?;
         Ok(version)

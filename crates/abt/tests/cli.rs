@@ -501,3 +501,22 @@ fn checkpoints_are_written_and_a_resumed_run_matches() {
     assert!(text(&gone).1.contains("the batch kernel is gone"), "{}", text(&gone).1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `abt hash` prints H(P), and `--show` the bytes it is BLAKE3 over (P-2).
+#[test]
+fn hash_prints_the_program_hash_and_shows_what_it_hashed() {
+    let files = strategy_files("sma_crossover");
+    let mut args = vec!["hash", "--strategy", "sma_crossover"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let o = abt(&args);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o).1);
+    let out = text(&o).0;
+    let (hash, name) = out.trim_end().split_once("  ").unwrap_or_else(|| panic!("{}", out));
+    assert_eq!((hash.len(), name), (64, "sma_crossover"));
+    let mut args = vec!["hash", "--strategy", "sma_crossover", "--show"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let shown = abt(&args);
+    assert_eq!(shown.status.code(), Some(0), "{}", text(&shown).1);
+    let bytes = text(&shown).0;
+    assert_eq!(abt_wire::Hash::of(bytes.trim_end_matches('\n').as_bytes()).hex(), hash);
+}

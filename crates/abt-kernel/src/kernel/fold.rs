@@ -20,8 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::eval::{WindowKey, WindowRows};
 use super::executor::Executor;
 use super::time;
-use super::{ExecConfig, Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
-use crate::check::Program;
+use super::{Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
 use crate::ir::Cal;
 
 /// When the fold takes a checkpoint (data-bundle doc, section 2): at the end
@@ -39,9 +38,9 @@ pub enum CheckpointEvery {
 /// demand.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
-    /// Of the program, its parameters and the configuration; a restore into
-    /// another is refused.
-    pub fingerprint: u64,
+    /// The run it was taken of (Definition A-4.1): a restore into another
+    /// program, binding, mode or run window is refused (K-4.7).
+    pub identity: super::Identity,
     pub cursor: u64,
     pub last_bar: i64,
     pub symbols: Vec<String>,
@@ -51,20 +50,15 @@ pub struct Checkpoint {
     pub last_price: Vec<(Sym, f64)>,
     pub windows: Vec<(WindowKey, Vec<(i64, WindowRows)>)>,
     pub stats: KernelStats,
+    /// The coverage and per-literal counters so far, which a resumed run
+    /// continues.
+    #[serde(default)]
+    pub coverage: Vec<(usize, usize, usize)>,
+    #[serde(default)]
+    pub literal_counts: Vec<Vec<(u64, u64, u64)>>,
     pub decided_once: bool,
     pub result: RunResult,
     pub executor: serde_json::Value,
-}
-
-/// FNV-1a of the program's rules and parameters and the configuration.
-pub fn fingerprint(prog: &Program, cfg: &ExecConfig) -> u64 {
-    let text = format!("{:?}|{:?}|{:?}|{:?}", prog.strategy, prog.rules, prog.params, cfg);
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in text.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
 }
 
 /// One event of the stream, as the fold takes it (D-5.1).
@@ -97,6 +91,9 @@ pub struct Fold<'p, 'e> {
     checkpoint_every: Option<CheckpointEvery>,
     bars_since_checkpoint: usize,
     pending_checkpoint: Option<Checkpoint>,
+    /// A checkpoint asked for (the kernel service's `control checkpoint`),
+    /// taken at the end of the current decision bar.
+    checkpoint_requested: bool,
     /// Whether the current event's barriers ran a decision bar.
     ran_decision: bool,
     /// The last decision bars, the memo kept for (see `evict_memo`).
@@ -128,6 +125,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             checkpoint_every: None,
             bars_since_checkpoint: 0,
             pending_checkpoint: None,
+            checkpoint_requested: false,
             ran_decision: false,
             recent: Default::default(),
             invariants,
@@ -159,6 +157,12 @@ impl<'p, 'e> Fold<'p, 'e> {
         &self.result
     }
 
+    /// Takes a checkpoint at the end of the current decision bar, as a
+    /// periodic one is taken (K-4.7).
+    pub fn request_checkpoint(&mut self) {
+        self.checkpoint_requested = true;
+    }
+
     /// The last decision barrier the fold closed.
     pub fn last_bar(&self) -> Option<i64> {
         self.last_bar
@@ -179,7 +183,7 @@ impl<'p, 'e> Fold<'p, 'e> {
     pub fn checkpoint(&self, cursor: u64) -> Result<Checkpoint, RunError> {
         let k = &self.kernel;
         Ok(Checkpoint {
-            fingerprint: fingerprint(k.prog, &k.cfg),
+            identity: k.identity.clone(),
             cursor,
             last_bar: self.last_bar.unwrap_or(i64::MIN),
             symbols: k.symbols.names().to_vec(),
@@ -197,19 +201,41 @@ impl<'p, 'e> Fold<'p, 'e> {
             },
             windows: k.windows.iter().map(|(key, cache)| (key.clone(), cache.iter().map(|(t, rows)| (*t, rows.clone())).collect())).collect(),
             stats: k.stats(),
+            coverage: k.coverage.clone(),
+            literal_counts: k.literal_counts.clone(),
             decided_once: self.decided_once,
             result: self.result.clone(),
             executor: self.exec.checkpoint().map_err(RunError::Internal)?,
         })
     }
 
-    /// A fold continuing from `cp`: `kernel` is a bound kernel over the same
-    /// program, binding and configuration (checked by fingerprint and
-    /// symbols), `exec` the same kind of executor. The stream resumes at the
-    /// seq `cp.cursor`.
+    /// A fold continuing from `cp`: `kernel` is a bound kernel of the same
+    /// run (checked by the run's identity and the symbols), `exec` the same
+    /// kind of executor. The stream resumes at the seq `cp.cursor`.
     pub fn restore(mut kernel: Kernel<'p>, exec: &'e mut dyn Executor, cp: Checkpoint) -> Result<Fold<'p, 'e>, RunError> {
-        if cp.fingerprint != fingerprint(kernel.prog, &kernel.cfg) {
-            return Err(RunError::Config("the checkpoint was taken by another program, parameters or configuration".into()));
+        let (here, there) = (&kernel.identity, &cp.identity);
+        if there.program_hash != here.program_hash {
+            return Err(RunError::Config(format!(
+                "the checkpoint was taken of another program (H(P) {}, and this one is {})",
+                there.program_hash, here.program_hash
+            )));
+        }
+        if there.binding_id != here.binding_id {
+            return Err(RunError::Config(format!(
+                "the checkpoint was taken over another binding (β {}, and this run's is {}): other data versions or another parameter point",
+                there.binding_id, here.binding_id
+            )));
+        }
+        if there.mode != here.mode {
+            return Err(RunError::Config(format!("the checkpoint was taken in mode {}, and this run is {}", there.mode, here.mode)));
+        }
+        if there.run_id != here.run_id {
+            return Err(RunError::Config(
+                "the checkpoint was taken of another run of this program and binding: its window, truncation or bundle date differ".into(),
+            ));
+        }
+        if there.config != here.config {
+            return Err(RunError::Config("the checkpoint was taken under another configuration".into()));
         }
         if cp.symbols != kernel.symbols.names() || cp.labels != kernel.labels.names() {
             return Err(RunError::Config("the checkpoint was taken over another dataset (its symbols differ)".into()));
@@ -226,6 +252,12 @@ impl<'p, 'e> Fold<'p, 'e> {
         kernel.last_price = cp.last_price.into_iter().collect();
         kernel.windows = cp.windows.into_iter().map(|(key, rows)| (key, rows.into_iter().collect())).collect();
         kernel.stats = cp.stats;
+        if cp.coverage.len() == kernel.coverage.len() {
+            kernel.coverage = cp.coverage;
+        }
+        if cp.literal_counts.len() == kernel.literal_counts.len() {
+            kernel.literal_counts = cp.literal_counts;
+        }
         kernel.memo.clear();
         kernel.asof_memo.clear();
         kernel.memo_errors.clear();
@@ -243,6 +275,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             checkpoint_every: None,
             bars_since_checkpoint: 0,
             pending_checkpoint: None,
+            checkpoint_requested: false,
             ran_decision: false,
             recent: Default::default(),
         })
@@ -273,9 +306,10 @@ impl<'p, 'e> Fold<'p, 'e> {
                         (Some(CheckpointEvery::Bars(n)), _) => self.bars_since_checkpoint >= n,
                         _ => false,
                     };
-                    if due {
+                    if due || self.checkpoint_requested {
                         self.pending_checkpoint = Some(self.checkpoint(seq)?);
                         self.bars_since_checkpoint = 0;
+                        self.checkpoint_requested = false;
                     }
                 }
                 self.ran_decision = false;

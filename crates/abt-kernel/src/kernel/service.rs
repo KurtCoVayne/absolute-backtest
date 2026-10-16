@@ -17,7 +17,7 @@ use abt_wire::transport::{bind, channel_pair, Connection};
 use abt_wire::{ErrorCode, ErrorMessage, Layer};
 use arrow::record_batch::RecordBatch;
 
-use super::{DataClient, ExecConfig, Progress, Replay, RunError, RunResult, SimExecutor};
+use super::{Checkpoint, CheckpointEvery, DataClient, ExecConfig, Next, Progress, Replay, RunError, RunResult, SimExecutor};
 use crate::check::{check_program, Program, Workspace};
 use crate::query::{self, Answer, Query};
 
@@ -46,6 +46,8 @@ struct RunState {
 /// What a run's thread is asked between barriers and once it ended.
 enum Ask {
     Query(String, mpsc::Sender<Result<Answer, RunError>>),
+    /// A checkpoint at the end of the current decision bar; its key.
+    Checkpoint(mpsc::Sender<Result<String, RunError>>),
     Halt,
 }
 
@@ -53,7 +55,15 @@ enum Ask {
 enum Frame {
     Started(String),
     Barrier { t: i64, decisions: u64 },
+    Checkpoint { key: String, t: i64 },
     Done { run_id: String, status: String, report: String },
+}
+
+/// How a run checkpoints (K-4.7): every month or every N decision
+/// barriers, and the checkpoint it resumes from.
+struct Checkpoints {
+    every: Option<CheckpointEvery>,
+    from: Option<Checkpoint>,
 }
 
 fn refused(m: impl Into<String>) -> ErrorMessage {
@@ -132,6 +142,19 @@ impl KernelService {
         let every = r.progress_every.unwrap_or(0);
         let to_seq = r.to_seq;
         let client = (self.connect)().map_err(run_error)?;
+        let checkpoints = Checkpoints {
+            every: match r.checkpoint_every.as_deref() {
+                None => None,
+                Some("month") => Some(CheckpointEvery::Month),
+                Some(n) => Some(CheckpointEvery::Bars(
+                    n.parse().map_err(|_| refused(format!("checkpoint_every is `month` or a number of barriers, not `{}`", n)))?,
+                )),
+            },
+            from: match &r.from_checkpoint {
+                Some(k) => Some(super::checkpoints::read(&client, k).map_err(run_error)?),
+                None => None,
+            },
+        };
         let (tx, rx) = mpsc::channel::<Ask>();
         let (ptx, prx) = mpsc::channel::<Frame>();
         let state = Arc::new(Mutex::new(RunState {
@@ -142,11 +165,13 @@ impl KernelService {
         let connect = self.connect.clone();
         std::thread::Builder::new()
             .stack_size(512 << 20)
-            .spawn(move || hold(ws, prog, cfg, to_seq, client, connect, rx, ptx, st, every))
+            .spawn(move || hold(ws, prog, cfg, to_seq, checkpoints, client, connect, rx, ptx, st, every))
             .map_err(|e| error(ErrorCode::Internal, format!("cannot spawn a run: {}", e)))?;
+        let mut started = false;
         for frame in prx {
             match frame {
                 Frame::Started(run_id) => {
+                    started = true;
                     let mut runs = self.runs.lock().expect("the runs");
                     if runs.get(&run_id).is_some_and(|e| e.state.lock().expect("a run's state").status == "running") {
                         let _ = tx.send(Ask::Halt);
@@ -166,6 +191,19 @@ impl KernelService {
                     m.decisions = Some(decisions);
                     m.lag = Some(0);
                     out.respond(Message::KernelResponse(Box::new(m))).map_err(|e| error(ErrorCode::Internal, e.to_string()))?;
+                }
+                Frame::Checkpoint { key, t } => {
+                    let mut m = response(KernelOp::Run);
+                    m.status = Some("running".into());
+                    m.barrier = Some(t);
+                    m.text = Some(format!("checkpoint {}", key));
+                    out.respond(Message::KernelResponse(Box::new(m))).map_err(|e| error(ErrorCode::Internal, e.to_string()))?;
+                }
+                // A run that ended before it was bound (its binding, its
+                // checkpoint or a precondition refused) is refused.
+                Frame::Done { status, .. } if !started => {
+                    let why = status.strip_prefix("halted(").and_then(|s| s.strip_suffix(')')).unwrap_or(&status);
+                    return Err(refused(why.to_string()));
                 }
                 Frame::Done { run_id, status, report } => {
                     let mut m = response(KernelOp::Run);
@@ -299,7 +337,19 @@ impl Service for KernelService {
                         m.status = Some("halting".into());
                         respond(m)
                     }
-                    Some("checkpoint") => Err(refused("a checkpoint on request comes with the checkpoints through the data layer (M-4e)")),
+                    Some("checkpoint") => {
+                        if state.lock().expect("a run's state").status != "running" {
+                            return Err(refused("the run is not running"));
+                        }
+                        let (ctx, crx) = mpsc::channel();
+                        tx.send(Ask::Checkpoint(ctx)).map_err(|_| error(ErrorCode::NotFound, "the run is no longer held"))?;
+                        let key = crx.recv().map_err(|_| error(ErrorCode::Internal, "the run ended before its checkpoint"))?.map_err(run_error)?;
+                        let mut m = response(KernelOp::Control);
+                        m.run_id = r.run_id.clone();
+                        m.status = Some("checkpointed".into());
+                        m.text = Some(key);
+                        respond(m)
+                    }
                     Some("flatten") => Err(refused("flatten acts on a live broker's book (M-10); a simulated run has none")),
                     other => Err(refused(format!("control takes halt, checkpoint or flatten, not {:?}", other))),
                 }
@@ -364,6 +414,7 @@ fn hold(
     prog: Program,
     cfg: ExecConfig,
     to_seq: Option<u64>,
+    checkpoints: Checkpoints,
     client: DataClient,
     connect: Arc<Connect>,
     rx: mpsc::Receiver<Ask>,
@@ -376,10 +427,25 @@ fn hold(
     let opts = Replay {
         write_outputs: true,
         to_seq,
+        checkpoint_every: checkpoints.every,
+        from: checkpoints.from,
         ..Default::default()
     };
     let mut barriers = 0u64;
-    let outcome = super::replay_observed(&prog, Some(&compiled.lowered), &client, cfg.clone(), &mut exec, &opts, &mut |_| {}, &mut |p, k, result| {
+    // A checkpoint is written through the data layer as it is taken; the
+    // control requests waiting for one get its key.
+    let waiting: std::cell::RefCell<Vec<mpsc::Sender<Result<String, RunError>>>> = Default::default();
+    let mut on_checkpoint = |cp: Checkpoint| {
+        let key = super::checkpoints::write(&client, &cp);
+        if let Ok(k) = &key {
+            let _ = ptx.send(Frame::Checkpoint { key: k.clone(), t: cp.last_bar });
+        }
+        for w in waiting.borrow_mut().drain(..) {
+            let _ = w.send(key.clone());
+        }
+    };
+    let outcome = super::replay_observed(&prog, Some(&compiled.lowered), &client, cfg.clone(), &mut exec, &opts, &mut on_checkpoint, &mut |p, k, result| {
+        let mut next = Next::Continue;
         match p {
             Progress::Started { run_id } => {
                 let _ = ptx.send(Frame::Started(run_id));
@@ -402,13 +468,20 @@ fn hold(
                         Ask::Query(text, reply) => {
                             let _ = reply.send(answer_live(k, &prog, result, &compiled.plan, &text));
                         }
+                        Ask::Checkpoint(reply) => {
+                            waiting.borrow_mut().push(reply);
+                            next = Next::Checkpoint;
+                        }
                         Ask::Halt => return Err(RunError::Request("a control request halted the run".into())),
                     }
                 }
             }
         }
-        Ok(())
+        Ok(next)
     });
+    for w in waiting.borrow_mut().drain(..) {
+        let _ = w.send(Err(RunError::Request("the run ended before its next decision bar closed".into())));
+    }
     match outcome {
         Ok((result, mut kernel)) => {
             state.lock().expect("a run's state").status = "completed".into();
@@ -419,8 +492,14 @@ fn hold(
             });
             drop(ptx);
             for ask in rx {
-                if let Ask::Query(text, reply) = ask {
-                    let _ = reply.send(answer_held(&mut kernel, &ws, &prog, &result, &compiled.plan, &client, &connect, &cfg, &text));
+                match ask {
+                    Ask::Query(text, reply) => {
+                        let _ = reply.send(answer_held(&mut kernel, &ws, &prog, &result, &compiled.plan, &client, &connect, &cfg, &text));
+                    }
+                    Ask::Checkpoint(reply) => {
+                        let _ = reply.send(Err(RunError::Request("the run ended".into())));
+                    }
+                    Ask::Halt => {}
                 }
             }
         }
@@ -434,8 +513,14 @@ fn hold(
             });
             drop(ptx);
             for ask in rx {
-                if let Ask::Query(_, reply) = ask {
-                    let _ = reply.send(Err(RunError::Request(format!("the run {}", status))));
+                match ask {
+                    Ask::Query(_, reply) => {
+                        let _ = reply.send(Err(RunError::Request(format!("the run {}", status))));
+                    }
+                    Ask::Checkpoint(reply) => {
+                        let _ = reply.send(Err(RunError::Request(format!("the run {}", status))));
+                    }
+                    Ask::Halt => {}
                 }
             }
         }

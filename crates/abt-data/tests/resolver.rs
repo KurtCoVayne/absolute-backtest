@@ -71,6 +71,7 @@ fn demand(needs: Vec<Need>, require_reviewed: bool, prefer: Option<Preference>) 
         prefer: prefer.map(|p| vec![p]),
         budget: None,
         dynamic: None,
+        point: None,
     }
 }
 

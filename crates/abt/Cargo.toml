@@ -24,4 +24,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 abt-tests.workspace = true
+abt-wire.workspace = true
 serde_json.workspace = true
