@@ -7,4 +7,5 @@ pub mod cli;
 pub mod data;
 pub mod metrics;
 pub mod run;
+pub mod tests;
 pub mod time;
