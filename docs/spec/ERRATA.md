@@ -1000,6 +1000,55 @@ batch driver agree on every corpus program. Each bless since:
     with it. Filip is bound at about 7.2 digits by the rounding of its
     own data, within its class.
 
+- **E-62 (Q-4.2, Q-4.4, Q-4.6; the distribution and resampling tests as
+  built).**
+  - **The bootstrap tests impose their null.** `jarque_bera` re-centres
+    the moments (each resample's statistic on S* − S and K* − K).
+    `ks_normal` re-centres the empirical process (Babu and Rao 2004).
+    - Their block, and `bootstrap_sharpe`'s, is the larger of the
+      Politis–White blocks of the series and of its squared deviations.
+    - A p-value is (1 + #{T* ≥ T})/(1 + R), from eight observations on.
+    - On short series they are somewhat liberal: `jarque_bera` rejects 7
+      % of normal series of 250 at 5 %, `ks_normal` 12 % of 200 at 10 %.
+      Under dependence they are far nearer their size than the iid tests.
+      The suite asserts that comparison, not the nominal size.
+  - **`ks_normal`** uses the n − 1 standard deviation. Its known answer is
+    Dallal and Wilkinson's corrected table, since Lilliefors' 1967 table is
+    off in the third decimal. The table's 0.001 column, which a 10⁶-sample
+    simulation puts up to 0.002 off, is left out.
+  - **`hill_tail`.**
+    - The tail is the losses by default (`upper` and `absolute` on
+      request), and α₀ is 4.
+    - k is Hall's bootstrap as R's `tea::hall` does it: ε 0.955, a pilot
+      ⌊2√n⌋, 1,000 replications, the scaling (n/n₁)^(2/3).
+    - p = P(Gamma(k, 1) ≥ α₀kH), with the exact interval given k.
+    - It needs fifty tail values unless k is given.
+  - **`psr`, `dsr`, `min_trl`.**
+    - `benchmark` and `var_trials` are per period, and the p-value is
+      1 − PSR (1 − DSR).
+    - The effects are SR − benchmark, SR − SR₀ and n − MinTRL.
+    - `min_trl` refuses a Sharpe ratio not above the benchmark.
+  - **`pbo`** reports no p-value; a claim reads its statistic (`expect
+    statistic < 0.5`). Its input is a column per trial in time order. Its
+    partitions are 16, falling back to 8, even and at most 20, and its
+    effect is the mean logit.
+  - **Simple tests.**
+    - `bootstrap_sharpe`: a percentile interval at 0.95 with 252 periods
+      a year, p = (1 + #{SR* ≤ 0})/(1 + R).
+    - `nw_mean`: a two-sided normal p-value, the lag rule capped at
+      n − 1.
+  - **`wfe`.**
+    - Its input is a table of `in_sample` and `out_of_sample` annualised
+      returns per fold, and WFE is mean over mean, the old study's.
+    - Its p-value is Fisher's sign-flip test on out − e₀·in (e₀ 0.5):
+      exact to twenty folds, drawn beyond.
+  - **A constant series** has central moments of exactly zero.
+  - **Sources.** NIST's univariate files are Apache Commons Math's
+    copies. The Bailey–López de Prado and textbook figures, whose papers
+    and book were not reachable, come from independent reproductions that
+    agree, and are checked to one unit of their last printed digit (half
+    a unit for the textbook).
+
 
 ## Layout
 

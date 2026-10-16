@@ -44,9 +44,43 @@ impl Test for MeanAboveZero {
     }
 }
 
+/// Every row of Q-4.4's table (`psr`, `dsr` and `min_trl` share one).
+const STARTING_SET: [&str; 24] = [
+    "adf",
+    "arch_lm",
+    "bootstrap_sharpe",
+    "coactivation",
+    "cost_realism",
+    "dsr",
+    "effective_rules",
+    "engle_granger",
+    "fama_macbeth",
+    "half_life",
+    "hill_tail",
+    "ic",
+    "jarque_bera",
+    "johansen",
+    "kpss",
+    "ks_normal",
+    "ljung_box",
+    "min_trl",
+    "nw_mean",
+    "pbo",
+    "psr",
+    "regression",
+    "variance_ratio",
+    "wfe",
+];
+
 #[test]
 fn the_registry_holds_the_starting_set_and_takes_a_new_test_once() {
-    assert!(names().contains(&"regression".to_string()));
+    let registered = names();
+    for t in STARTING_SET {
+        assert!(registered.contains(&t.to_string()), "{} is not registered ({:?})", t, registered);
+        let test = get(t).unwrap();
+        assert_eq!(test.name(), t);
+        assert!(!test.version().is_empty() && !test.null().is_empty(), "{} states its version and its null", t);
+    }
     assert!(get("nowhere").is_none());
     register(Arc::new(MeanAboveZero)).unwrap();
     assert_eq!(get("mean_above_zero").map(|t| t.version().to_string()), Some("1".into()));
