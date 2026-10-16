@@ -417,6 +417,49 @@ batch driver agree on every corpus program. Each bless since:
   - Fixed on the way: an observation is a demand (Definition V-8.3), so
     the analysis no longer flags an observed relation as elided.
 
+- **E-54 (P-3.4, K-7.2, K-7.3; the kernel service as it is served).** The
+  seven requests of P-3.4 are one message pair: `KernelRequest`, whose
+  `op` says which request it is, and `KernelResponse`. A field a request
+  does not take is left out.
+  - `check` answers with the diagnostics, H(P) with the normal form (the
+    normaliser's hash; BLAKE3 over the normal form comes with M-4e), and
+    the degrees of freedom.
+    `contract` answers with the contract's table. `show` reads the
+    request's sources, or the run `run_id` names.
+  - `run` sends its id first, then a progress frame (`barrier`,
+    `decisions`, `lag` 0 in replay) every `progress_every` decision
+    barriers, then a last frame with `completed` or `halted(reason)` and
+    the report as JSON. The run writes its outputs (K-7.1, E-52).
+    - `window?` is `start` and `end`. `point` is a parameter list of
+      names and literals. `mode` is replay-sim until M-6, and
+      `deployment?` waits for M-10.
+    - `embargo_mask` and `plan_step` wait for the query layer's plans
+      (M-5). `from_checkpoint` and `checkpoint_every` wait for the
+      checkpoints through the data layer (M-4e).
+  - Each run is held by a thread that owns its program and kernel.
+    Between barriers it answers the queries asked meanwhile, over the
+    state the barrier closed (K-7.3), so a query waits for the next
+    barrier and never blocks the stream. Once the stream ends, it answers
+    over the final state until the service ends.
+  - Live, these forms are answered: every form but a `?` over more than
+    one atom (a rule the run must hold from its start, E-53) and `ledger
+    ... into` (written once the run ends). A one-atom `?` is answered from
+    the kernel's own extension of the relation, filtered by its constants
+    and its `for` binding.
+  - Of a run that ended, a `?` over more than one atom is answered by a
+    run of the program holding the query as a rule (E-53). That run is
+    refused when the data service would now bind the program otherwise
+    than the run's binding.
+  - A query's table follows its response in the same correlation
+    (`has_table`).
+  - `control halt` stops a running run at its next barrier, as a halted
+    run, which writes what it has. `checkpoint` is refused until M-4e, and
+    `flatten` until a live broker's book exists (M-10).
+  - `status` gives a run's state, its last barrier and its decisions, or
+    every held run's.
+  - `abt kernel serve --data SOCKET` serves the kernel, and `abt kernel
+    check|contract|show|run|query|status|control` are its client commands.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the
@@ -623,6 +666,15 @@ batch driver agree on every corpus program. Each bless since:
   that decides either (a configuration error naming the rule) until the
   options model executes them (M-7); the denial constraint's counting of
   a combo's legs is the executor's, with them.
+
+- **E-55 (D-3.6; a writer's relation that changes shape).** A `put` adds
+  its rows to the relation's current version from that source, as an
+  ingest does. A run written again under its id (Definition A-4.1) writes
+  the same rows, and duplicates are dropped. A `put` whose columns differ
+  from the current version's starts the relation over: the new version
+  holds that write's rows only, and the earlier versions stay readable by
+  their ids. This is how a writer's outputs change shape between versions
+  of the writer.
 
 ## Aggregates
 

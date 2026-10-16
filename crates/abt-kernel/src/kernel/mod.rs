@@ -21,6 +21,7 @@ pub mod fold;
 pub mod hash;
 pub mod outputs;
 pub mod pushdown;
+pub mod service;
 pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
 pub use events::{Book, EventKind, OrderId, RunEvent};
 pub use executor::{Executor, SimExecutor};
@@ -1283,6 +1284,9 @@ pub struct RunResult {
     /// (`kernel.<run id>.*`, K-7.1).
     #[serde(default)]
     pub run_id: String,
+    /// The binding the run read (β, D-7.5).
+    #[serde(default)]
+    pub binding_id: String,
 }
 
 /// A tuple that arrived after its bucket's barrier (K-4.4): its place in
@@ -3307,10 +3311,36 @@ pub fn replay<'p>(
     prog: &'p Program,
     lowered: Option<&'p crate::lower::Lowered>,
     client: &DataClient,
+    cfg: ExecConfig,
+    exec: &mut dyn Executor,
+    opts: &Replay,
+    on_checkpoint: &mut dyn FnMut(Checkpoint),
+) -> Result<(RunResult, Kernel<'p>), RunError> {
+    replay_observed(prog, lowered, client, cfg, exec, opts, on_checkpoint, &mut |_, _, _| Ok(()))
+}
+
+/// What a run reports as it goes (the kernel service's progress frames and
+/// its queries between barriers, K-7.3): its identity once it is bound,
+/// then every decision barrier it closes.
+#[derive(Clone, Debug)]
+pub enum Progress {
+    Started { run_id: String },
+    Barrier { t: i64 },
+}
+
+/// `replay`, handing `on_progress` the kernel and the run so far when the
+/// run is bound and after every decision barrier; an error it returns halts
+/// the run there.
+#[allow(clippy::too_many_arguments)]
+pub fn replay_observed<'p>(
+    prog: &'p Program,
+    lowered: Option<&'p crate::lower::Lowered>,
+    client: &DataClient,
     mut cfg: ExecConfig,
     exec: &mut dyn Executor,
     opts: &Replay,
     on_checkpoint: &mut dyn FnMut(Checkpoint),
+    on_progress: &mut dyn FnMut(Progress, &mut Kernel<'p>, &RunResult) -> Result<(), RunError>,
 ) -> Result<(RunResult, Kernel<'p>), RunError> {
     let bound = bind::bind(prog, client)?;
     // The preconditions, before the first barrier (K-3.2).
@@ -3363,16 +3393,28 @@ pub fn replay<'p>(
     }
     let from = opts.from.as_ref().map(|c| c.cursor).unwrap_or(1);
     let mut halt: Option<RunError> = None;
+    {
+        let (k, r) = fold.parts();
+        on_progress(Progress::Started { run_id: run.clone() }, k, r)?;
+    }
     if to_seq.is_none_or(|t| t >= from) {
         let mut sub = client.subscribe(spec, from, to_seq)?;
         'stream: while let Some(b) = sub.next_batch()? {
             for ev in decoder.events(&mut fold.kernel, &bound, &b)? {
+                let before = fold.last_bar();
                 if let Err(e) = fold.step(ev.into()) {
                     halt = Some(e);
                     break 'stream;
                 }
                 if let Some(cp) = fold.take_checkpoint() {
                     on_checkpoint(cp);
+                }
+                if let Some(t) = fold.last_bar().filter(|t| before != Some(*t)) {
+                    let (k, r) = fold.parts();
+                    if let Err(e) = on_progress(Progress::Barrier { t }, k, r) {
+                        halt = Some(e);
+                        break 'stream;
+                    }
                 }
             }
         }
@@ -3383,6 +3425,7 @@ pub fn replay<'p>(
         if opts.write_outputs {
             let mut partial = fold.result().clone();
             partial.run_id = run.clone();
+            partial.binding_id = bound.binding.id.clone().unwrap_or_default();
             let ids = fold.kernel.data_ids.clone();
             let written = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e)).and_then(|t| outputs::write(client, t));
             if let Err(w) = written {
@@ -3393,6 +3436,7 @@ pub fn replay<'p>(
     }
     let (mut result, mut kernel) = fold.finish()?;
     result.run_id = run.clone();
+    result.binding_id = bound.binding.id.clone().unwrap_or_default();
     if !opts.write_outputs {
         if !prog.observes.is_empty() {
             result.contract.set(

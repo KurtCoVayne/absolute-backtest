@@ -18,6 +18,7 @@ pub mod dump;
 pub mod ingest;
 pub mod ir;
 pub mod kernel;
+pub mod kernel_cli;
 pub mod lower;
 pub mod observe;
 pub mod plan;

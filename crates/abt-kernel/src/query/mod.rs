@@ -9,5 +9,5 @@
 mod answer;
 mod parse;
 
-pub use answer::{answer, prepare, Answer, Context, Prepared, PREFIX};
+pub use answer::{answer, prepare, schedule, Answer, Context, Prepared, PREFIX};
 pub use parse::{parse, Ask, Query, Show};

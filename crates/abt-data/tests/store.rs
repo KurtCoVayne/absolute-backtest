@@ -210,6 +210,62 @@ fn pinned_versions_survive_gc_and_the_cache_returns_what_was_put() {
     assert_eq!(s.cache_get(&Hash::of(b"other")), None);
 }
 
+/// A writer's relation (D-3.6): a `put` of its schema again adds to it; a
+/// `put` whose columns changed starts it over with that write's rows, and
+/// the earlier version still reads by its id.
+#[test]
+fn a_put_of_a_new_shape_starts_the_relation_over() {
+    let mut s = Store::temporary("reshape").unwrap();
+    let t = 19_000 * DAY;
+    let col = |name: &str, ty: ColumnType, role: Role| ColumnSpec {
+        name: name.into(),
+        ty,
+        role,
+        dimension: None,
+    };
+    let schema = |cols: Vec<ColumnSpec>| RelationSchema {
+        name: "kernel.r1.close".into(),
+        class: "kernel".into(),
+        columns: cols,
+        calendar: None,
+        constraints: None,
+        attributes: None,
+        schema_version: Some("1.0".into()),
+    };
+    let wide = schema(vec![
+        col("A", ColumnType::Entity, Role::Entity),
+        col("T", ColumnType::Time, Role::EventTime),
+        col("P", ColumnType::Num, Role::Value),
+        col("r", ColumnType::Time, Role::ReceiptTime),
+    ]);
+    let (v1, _) = s.put(&wide, &[close_rows(&[(1, t, t, 1.0)])], "kernel").unwrap();
+    let (v2, _) = s.put(&wide, &[close_rows(&[(2, t, t, 2.0)])], "kernel").unwrap();
+    assert_eq!(rows_of(&s.read(&v2, &RowFilter::default()).unwrap()).len(), 2, "the same shape adds to the relation");
+    let narrow = schema(vec![
+        col("A", ColumnType::Entity, Role::Entity),
+        col("T", ColumnType::Time, Role::EventTime),
+        col("r", ColumnType::Time, Role::ReceiptTime),
+    ]);
+    let rows = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("A", DataType::UInt64, false),
+            Field::new("T", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+            Field::new("r", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+        ])),
+        vec![
+            Arc::new(UInt64Array::from(vec![3u64])),
+            Arc::new(TimestampNanosecondArray::from(vec![t])),
+            Arc::new(TimestampNanosecondArray::from(vec![t])),
+        ],
+    )
+    .unwrap();
+    let (v3, _) = s.put(&narrow, &[rows], "kernel").unwrap();
+    let got = s.read(&v3, &RowFilter::default()).unwrap();
+    assert_eq!(got.iter().map(|b| b.num_rows()).sum::<usize>(), 1, "a new shape holds its own rows only");
+    assert_eq!(s.manifest(&v3).unwrap().schema.columns.len(), 3);
+    assert_eq!(rows_of(&s.read(&v1, &RowFilter::default()).unwrap()).len(), 1, "the earlier version still reads");
+}
+
 #[test]
 fn labels_are_interned_once_with_stable_codes() {
     let mut s = Store::temporary("labels").unwrap();

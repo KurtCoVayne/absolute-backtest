@@ -52,6 +52,64 @@ pub struct Prepared {
     /// each argument (what its rows are the relation's tuples of, with the
     /// rule that derived each).
     pub atoms: Vec<Option<(String, Vec<Option<String>>)>>,
+    /// A one-atom query answered from the kernel's own extension of the
+    /// relation, without a rule of its own (`Prepared::direct`).
+    pub direct: Vec<Option<ast::Atom>>,
+}
+
+impl Prepared {
+    /// The queries answered over a kernel whose program does not hold them
+    /// as rules (a run already running or ended): a `?` must be one atom
+    /// of a relation of the program, which is answered from the relation's
+    /// extension, its constants and its `for` binding applied.
+    pub fn direct(prog: &Program, queries: &[Query]) -> Result<Prepared, String> {
+        let mut out = Prepared {
+            program: prog.clone(),
+            rules: vec![None; queries.len()],
+            vars: vec![Vec::new(); queries.len()],
+            atoms: vec![None; queries.len()],
+            direct: vec![None; queries.len()],
+        };
+        for (i, q) in queries.iter().enumerate() {
+            let Query::Ask(a) = q else { continue };
+            let body = crate::syntax::parse_body(&a.body).map_err(|e| format!("`? {}`: {}", a.body, e.message))?;
+            let [ast::Literal::Atom(atom)] = body.as_slice() else {
+                return Err(format!("`? {}` is more than one atom: the run must hold it as a rule (Definition V-8.1)", a.body));
+            };
+            let Some(sig) = prog.relations.get(&atom.name).filter(|_| atom.brackets.is_empty() && atom.cal.is_none()) else {
+                return Err(format!("`{}` is not a relation of {}", atom.name, prog.strategy));
+            };
+            if atom.terms.len() != sig.args.len() {
+                return Err(format!("`{}` takes {} arguments, {} given", atom.name, sig.args.len(), atom.terms.len()));
+            }
+            out.vars[i] = body_vars(&body);
+            out.atoms[i] = Some((
+                atom.name.clone(),
+                atom.terms
+                    .iter()
+                    .map(|t| match t {
+                        Term::Var(v, _) if v != "_" => Some(v.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ));
+            out.direct[i] = Some(atom.clone());
+        }
+        Ok(out)
+    }
+}
+
+/// `show schedule`: the program graph's partition into the open loop,
+/// evaluated ahead of the executor, and the closed loop, bar by bar after
+/// the previous bar's fills (F-11.5).
+pub fn schedule(prog: &Program) -> String {
+    let g = crate::observe::program_graph(prog);
+    let (closed, open): (Vec<_>, Vec<_>) = g.nodes.iter().filter(|n| n.kind == "derived").partition(|n| n.closed_loop);
+    format!(
+        "open loop (evaluated ahead of the executor, per entity): {}\nclosed loop (bar by bar, after the previous bar's fills): {}\n",
+        open.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", "),
+        closed.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")
+    )
 }
 
 fn term_vars(t: &Term, out: &mut Vec<String>) {
@@ -62,17 +120,19 @@ fn term_vars(t: &Term, out: &mut Vec<String>) {
     }
 }
 
-/// The variables of a body in the order they first appear in its atoms.
+/// The variables of a body in the order they first appear in its atoms,
+/// its temporal builtins and its assignments.
 fn body_vars(body: &[ast::Literal]) -> Vec<String> {
     let mut out = Vec::new();
     for l in body {
-        if let ast::Literal::Atom(a) | ast::Literal::Neg(a) = l {
-            a.terms.iter().for_each(|t| term_vars(t, &mut out));
-        }
-        if let ast::Literal::Assign { var, .. } = l {
-            if !out.contains(var) {
-                out.push(var.clone());
-            }
+        match l {
+            ast::Literal::Atom(a) | ast::Literal::Neg(a) => a.terms.iter().for_each(|t| term_vars(t, &mut out)),
+            ast::Literal::Prev { t, t1, .. } | ast::Literal::Lag { t, t1, .. } => [t, t1].into_iter().for_each(|x| term_vars(x, &mut out)),
+            ast::Literal::SessionOf { a, t, s, .. } => [a, t, s].into_iter().for_each(|x| term_vars(x, &mut out)),
+            ast::Literal::MonthStart { t, .. } | ast::Literal::DayStart { t, .. } => term_vars(t, &mut out),
+            ast::Literal::Window { var, .. } => term_vars(var, &mut out),
+            ast::Literal::Assign { var, .. } if !out.contains(var) => out.push(var.clone()),
+            _ => {}
         }
     }
     out
@@ -120,6 +180,7 @@ pub fn prepare(ws: &Workspace, strategy: &str, base: &Program, queries: &[Query]
             rules: vec![None; queries.len()],
             vars,
             atoms,
+            direct: vec![None; queries.len()],
         });
     }
     let mut src = String::from("strategy __queries {\n  rules {\n");
@@ -177,7 +238,8 @@ pub fn prepare(ws: &Workspace, strategy: &str, base: &Program, queries: &[Query]
         return Err(format!("the query does not check as a rule of `{}`:\n{}", strategy, errors.join("\n")));
     };
     let rules = (0..queries.len()).map(|i| program.rules.iter().position(|r| r.head.name == format!("{}{}", PREFIX, i))).collect();
-    Ok(Prepared { program, rules, vars, atoms })
+    let direct = vec![None; queries.len()];
+    Ok(Prepared { program, rules, vars, atoms, direct })
 }
 
 /// The type of a column from its values (text when they disagree).
@@ -199,6 +261,102 @@ fn column_type(values: &[Option<&Value>]) -> ColType {
     ty.unwrap_or(ColType::Str)
 }
 
+/// The bars a `?` asks at, of a calendar's domain within the run.
+fn bars_of(k: &mut Kernel, cal: &Cal, a: &Ask, first: i64, last: i64) -> Result<Vec<i64>, RunError> {
+    let domain = k.bars_at(cal);
+    Ok(match (a.at, a.over, a.every_bar) {
+        (Some(t), _, _) => {
+            k.check_bar(cal, t)?;
+            vec![t]
+        }
+        (None, Some((t0, t1)), _) => domain.into_iter().filter(|&b| b >= t0 && b <= t1 && b >= first && b <= last).collect(),
+        (None, None, true) => domain.into_iter().filter(|&b| b >= first && b <= last).collect(),
+        (None, None, false) => domain.into_iter().rfind(|&b| b <= last).into_iter().collect(),
+    })
+}
+
+/// A one-atom `?` over the kernel's extension of its relation: its
+/// constants and its `for` binding narrow the call, a variable twice in it
+/// must agree, and a derived relation's rows name their rule.
+fn ask_direct(k: &mut Kernel, cx: &Context, i: usize, a: &Ask, atom: &ast::Atom) -> Result<Answer, RunError> {
+    let prog = cx.prog;
+    let (Some(&first), Some(&last)) = (cx.result.bars.first(), cx.result.bars.last()) else {
+        return Err(RunError::NoBars);
+    };
+    let rel = k.relation_id(&atom.name).ok_or_else(|| RunError::Request(format!("`{}` is not a relation the run holds", atom.name)))?;
+    let sig = &prog.relations[&atom.name];
+    let key = k.rels[rel].key_pos;
+    let bars = bars_of(k, &sig.cal, a, first, last)?;
+    let bound = match &a.bind {
+        Some((v, key)) => Some((v.clone(), k.parse_binding(key).map_err(|m| RunError::Request(format!("for {} = {}: {}", v, key, m)))?)),
+        None => None,
+    };
+    let mut pattern: Vec<Option<Value>> = vec![None; sig.args.len()];
+    for (j, t) in atom.terms.iter().enumerate() {
+        match t {
+            Term::Lit(l, _) => pattern[j] = Some(crate::kernel::lit_value(l, &mut k.symbols, &mut k.labels, &k.literal_equities)),
+            Term::Var(v, _) => {
+                if let Some((bv, x)) = &bound {
+                    if bv == v {
+                        pattern[j] = Some(x.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if bound.as_ref().is_some_and(|(v, _)| !atom.terms.iter().any(|t| matches!(t, Term::Var(x, _) if x == v))) {
+        return Err(RunError::Request(format!(
+            "`for {} = ...`: `{}` is not a variable of the query",
+            bound.as_ref().map(|b| b.0.as_str()).unwrap_or(""),
+            bound.as_ref().map(|b| b.0.as_str()).unwrap_or("")
+        )));
+    }
+    let vars = &cx.prepared.vars[i];
+    let derived = !prog.rules_for(&atom.name).is_empty();
+    let mut rows: Vec<(Vec<Option<Value>>, Option<String>)> = Vec::new();
+    for t in bars {
+        pattern[key] = Some(Value::Time(t));
+        let found = if k.rels[rel].inputs.is_empty() { k.call(rel, &pattern)?.as_ref().clone() } else { Vec::new() };
+        let mut at: Vec<(Vec<Option<Value>>, Option<String>)> = Vec::new();
+        'tuple: for (tu, ri) in found {
+            let mut row: Vec<Option<Value>> = vec![None; vars.len()];
+            for (j, term) in atom.terms.iter().enumerate() {
+                if let Term::Var(v, _) = term {
+                    if let Some(c) = vars.iter().position(|n| n == v) {
+                        match &row[c] {
+                            Some(x) if *x != tu[j] => continue 'tuple,
+                            _ => row[c] = Some(tu[j].clone()),
+                        }
+                    }
+                }
+            }
+            at.push((row, derived.then(|| prog.rule_label(ri))));
+        }
+        at.sort_by(|x, y| x.0.cmp(&y.0));
+        at.dedup_by(|x, y| x.0 == y.0);
+        rows.extend(at);
+    }
+    let types: Vec<ColType> = (0..vars.len()).map(|j| column_type(&rows.iter().map(|r| r.0[j].as_ref()).collect::<Vec<_>>())).collect();
+    let mut cols: Vec<(&str, ColType)> = vars.iter().map(|v| v.as_str()).zip(types.iter().copied()).collect();
+    if derived {
+        cols.push(("rule", ColType::Str));
+    }
+    let mut table = Table::new("?", &cols);
+    for (r, rule) in &rows {
+        let mut cells: Vec<Cell> = r
+            .iter()
+            .zip(&types)
+            .map(|(v, ty)| v.as_ref().map(|v| crate::state::tables::cell_of(k, v, *ty)).unwrap_or(Cell::Null))
+            .collect();
+        if derived {
+            cells.push(rule.clone().map(Cell::Str).unwrap_or(Cell::Null));
+        }
+        table.push(cells);
+    }
+    Ok(Answer::table(table))
+}
+
 /// Answers query `i` of the prepared run, over the kernel at the end of it.
 pub fn answer(k: &mut Kernel, cx: &Context, i: usize, q: &Query) -> Result<Answer, RunError> {
     let (prog, result, prepared) = (cx.prog, cx.result, cx.prepared);
@@ -207,6 +365,9 @@ pub fn answer(k: &mut Kernel, cx: &Context, i: usize, q: &Query) -> Result<Answe
     };
     match q {
         Query::Ask(a) => {
+            if let Some(atom) = &prepared.direct[i] {
+                return ask_direct(k, cx, i, a, atom);
+            }
             let ri = prepared.rules[i].ok_or_else(|| RunError::Internal("an unprepared query".into()))?;
             let cal = prog.infos[ri].cal.clone();
             let domain = k.bars_at(&cal);
@@ -431,15 +592,7 @@ pub fn answer(k: &mut Kernel, cx: &Context, i: usize, q: &Query) -> Result<Answe
                     None => plan.text(),
                 })
             }
-            Show::Schedule => {
-                let g = crate::observe::program_graph(prog);
-                let (closed, open): (Vec<_>, Vec<_>) = g.nodes.iter().filter(|n| n.kind == "derived").partition(|n| n.closed_loop);
-                Answer::text(format!(
-                    "open loop (evaluated ahead of the executor, per entity): {}\nclosed loop (bar by bar, after the previous bar's fills): {}\n",
-                    open.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", "),
-                    closed.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")
-                ))
-            }
+            Show::Schedule => Answer::text(schedule(prog)),
             Show::Calendars => {
                 let mut t = Table::new("calendars", &[("calendar", ColType::Str), ("bars", ColType::Int), ("first", ColType::Time), ("last", ColType::Time)]);
                 for cal in k.calendars() {

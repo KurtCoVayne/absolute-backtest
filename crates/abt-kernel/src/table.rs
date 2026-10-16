@@ -223,6 +223,12 @@ impl Col {
     }
 }
 
+/// Named columns of equal length as one Arrow batch (empty when they are).
+pub fn batch(cols: Vec<(&str, Col)>) -> Result<RecordBatch, String> {
+    let (schema, b) = batch_of(Path::new(""), cols)?;
+    Ok(b.unwrap_or_else(|| RecordBatch::new_empty(schema)))
+}
+
 /// Named columns of equal length as one Arrow schema and batch.
 fn batch_of(path: &Path, cols: Vec<(&str, Col)>) -> Result<(Arc<Schema>, Option<RecordBatch>), String> {
     let n = cols.first().map(|(_, c)| c.len()).unwrap_or(0);

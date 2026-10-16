@@ -322,3 +322,17 @@ fn a_ledger_is_written_into_the_data_layer() {
     let n: usize = client.query(&view, form).unwrap().iter().map(|b| b.num_rows()).sum();
     assert_eq!(n, want);
 }
+
+/// A variable a temporal builtin binds is a column of the answer.
+#[test]
+fn a_variable_prev_binds_is_a_column() {
+    let (ws, prog, ds) = corpus("sma_crossover");
+    let base = common::run(&prog, &ds, ExecConfig::from_program(&prog)).unwrap();
+    let (t, t0) = (base.bars[60], base.bars[59]);
+    let day = abt_kernel::kernel::time::format_timestamp(t);
+    let (_, answers, _) = ask(&ws, &prog, &ds, &[&format!("? close(A, T, P), prev(T, T0) at T = {}", day)], |_, _| ());
+    let a = answers[0].as_ref().unwrap();
+    let table = a.table.as_ref().unwrap();
+    assert_eq!(table.columns.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["A", "T", "P", "T0"]);
+    assert!(table.rows.iter().all(|r| r[3] == Cell::Time(t0)), "{}", a.text);
+}

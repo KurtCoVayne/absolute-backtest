@@ -375,6 +375,55 @@ table TableFollows { rows: ulong = null; }
 
 table Done {}
 
+// ---------------------------------------------------------------- kernel service
+
+// P-3.4: the kernel's requests, one table for the seven (`op` says which);
+// a field a request does not take is left out (ERRATA E-54).
+enum KernelOp : ubyte { Check = 0, Contract = 1, Show = 2, Run = 3, Query = 4, Control = 5, Status = 6 }
+
+// A source file of the workspace a request checks.
+table SourceFile { path: string; text: string (required); }
+
+table KernelRequest {
+  op: KernelOp;
+  sources: [SourceFile];
+  strategy: string;
+  point: [ParamValue];
+  // `show`: program | plan [R] | schedule | calendars | contract;
+  // `control`: halt | checkpoint | flatten.
+  what: string;
+  run_id: string;
+  // `query`: the query's text (V-8).
+  text: string;
+  to_seq: ulong = null;
+  start: long = null;
+  end: long = null;
+  memory_budget: ulong = null;
+  pushdown: bool = true;
+  // `run`: a progress frame every this many decision barriers.
+  progress_every: ulong = null;
+}
+
+// An answer, or one of a run's progress frames (`status` running).
+table KernelResponse {
+  op: KernelOp;
+  diagnostics: [string];
+  program_hash: string;
+  normal_form: string;
+  degrees_of_freedom: string;
+  run_id: string;
+  // running | completed | halted(reason)
+  status: string;
+  text: string;
+  // The run's report rows as JSON.
+  report: string;
+  barrier: long = null;
+  decisions: ulong = null;
+  lag: long = null;
+  // A query's table follows in this correlation.
+  has_table: bool;
+}
+
 // Every control message; a frame's kind says which half (request, response)
 // the receiver expects, the correlation id pairs them (P-2.3).
 union Message {
@@ -400,7 +449,9 @@ union Message {
   PinRequest,
   StatsRequest,
   TableFollows,
-  Done
+  Done,
+  KernelRequest,
+  KernelResponse
 }
 
 table Envelope {

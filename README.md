@@ -486,6 +486,15 @@ of one run):
 
 A bar must be one of the queried relation's calendar.
 
+The kernel is also a service (`docs/spec/04-protocol.md`, P-3.4):
+`abt kernel serve --data SOCKET` reaches a data service.
+`abt kernel run --strategy NAME <files...>` starts a run, which writes its
+outputs to the data service's store and prints a progress line every
+`--progress N` barriers. `abt kernel query --run RUN --text QUERY` asks the
+run a query: between barriers while it runs, over its final state after.
+`abt kernel status`, `control RUN halt`, `check`, `contract` and `show`
+complete the commands (`--kernel SOCKET` names the service; ERRATA E-54).
+
 ## The command line
 
 ```
@@ -502,6 +511,9 @@ abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--da
 abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>
+abt kernel serve [--socket PATH] --data SOCKET
+abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] <files...>
+abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt]
 abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>

@@ -159,6 +159,17 @@ impl<'p, 'e> Fold<'p, 'e> {
         &self.result
     }
 
+    /// The last decision barrier the fold closed.
+    pub fn last_bar(&self) -> Option<i64> {
+        self.last_bar
+    }
+
+    /// The kernel and the run so far, together (what a query between
+    /// barriers reads, K-7.3).
+    pub fn parts(&mut self) -> (&mut Kernel<'p>, &RunResult) {
+        (&mut self.kernel, &self.result)
+    }
+
     /// The checkpoint the last `step` produced, if any.
     pub fn take_checkpoint(&mut self) -> Option<Checkpoint> {
         self.pending_checkpoint.take()

@@ -188,8 +188,11 @@ impl Store {
         let last_seq = seq.saturating_sub(1);
         // The next version, computed and validated before anything is written.
         let previous = self.registry.current(&relation, Some(source)).map(|v| v.to_string());
+        // A writer whose rows changed shape starts the relation over: the
+        // new version holds this write's rows only (its earlier versions
+        // stay readable by id).
         let prev_manifest = match &previous {
-            Some(v) => Some(self.manifest(v)?),
+            Some(v) => Some(self.manifest(v)?).filter(|m| m.schema.columns == schema.columns),
             None => None,
         };
         let lay = layout(schema);
