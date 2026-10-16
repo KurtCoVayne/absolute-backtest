@@ -113,7 +113,12 @@ signed delta; each with an optional trailing order (`market`, `moo`, `moc`,
 omitted. `silence hold` keeps an instrument with no decision; `silence flat`
 closes it. A sale of a held quantity is a negative delta bound in the body:
 `decide(T, trade(A, Q)) :- held(A, T, Q0), ..., Q = -Q0.` A decision term's
-arguments are variables, parameters or literals.
+arguments are variables, parameters or literals. Two more forms
+(docs/spec/02-kernel.md, 2.3): `combo([leg(A1, Q1), ..., leg(An, Qn)])`, an
+all-or-none multi-leg delta of at least two legs on distinct instruments,
+whose optional order's limit is the net price; and `exercise(A, Q)`, Q long
+contracts of an option exercised, admitted only in the option class. Both
+check; the kernel runs them when the options model lands (M-7).
 
 **Kernel relations**, at the decision calendar: `position(A, @T, Q)`,
 `cash(@T, C)`, `nav(@T, N)`, `capital(@T, C)` (the base the execution block's

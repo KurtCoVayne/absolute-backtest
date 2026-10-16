@@ -204,8 +204,10 @@ library stat {
   (`0 USD/share`, `0 shares`).
 - **`decisions`**: one algebra, no mode. `hold(A, W)` with W a Scalar is a
   target weight of the capital the execution block names; `hold(A, Q)`
-  with Q a quantity is a target quantity; `trade(A, Q)` is a signed delta.
-  Each takes an optional trailing order (`market`, `moo`, `moc`,
+  with Q a quantity is a target quantity; `trade(A, Q)` is a signed delta;
+  `combo([leg(A1, Q1), leg(A2, Q2), ...])` is an all-or-none multi-leg
+  delta and `exercise(A, Q)` an option exercised (both checked; executed
+  from the options model on). Each takes an optional trailing order (`market`, `moo`, `moc`,
   `moo_moc`, `limit(P[, TIF])`, `stop(P[, TIF])`), the block's `orders`
   when omitted. `silence hold` keeps an instrument with no decision;
   `silence flat` closes it. A sale of a held quantity is a negative delta

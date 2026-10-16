@@ -71,7 +71,7 @@ pub fn render_term(t: &Term, names: NameMap) -> String {
         Term::Wild(_) => "_".into(),
         Term::Param(p, _) => p.clone(),
         Term::Lit(l, _) => render_lit(l),
-        Term::Ctor(c, args, _) => format!("{}({})", c, args.iter().map(|a| render_term(a, names)).collect::<Vec<_>>().join(", ")),
+        Term::Ctor(c, args, _) => crate::ir::ctor_text(c, &args.iter().map(|a| render_term(a, names)).collect::<Vec<_>>()),
     }
 }
 

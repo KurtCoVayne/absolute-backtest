@@ -801,7 +801,7 @@ pub fn render_core(l: &NirLit, names: &mut dyn FnMut(&str) -> String) -> String 
             NirTerm::Wild => "_".into(),
             NirTerm::Param(p) => format!("param {}", p),
             NirTerm::Lit(l) => l.clone(),
-            NirTerm::Ctor(c, subs) => format!("{}({})", c, subs.iter().map(|s| t(s, names)).collect::<Vec<_>>().join(", ")),
+            NirTerm::Ctor(c, subs) => crate::ir::ctor_text(c, &subs.iter().map(|s| t(s, names)).collect::<Vec<_>>()),
         }
     }
     fn e(x: &NirExpr, names: &mut dyn FnMut(&str) -> String) -> String {
@@ -1588,7 +1588,7 @@ pub fn render_nir_term(t: &NirTerm) -> String {
         NirTerm::Wild => "_".into(),
         NirTerm::Param(p) => p.clone(),
         NirTerm::Lit(l) => l.clone(),
-        NirTerm::Ctor(c, subs) => format!("{}({})", c, subs.iter().map(render_nir_term).collect::<Vec<_>>().join(", ")),
+        NirTerm::Ctor(c, subs) => crate::ir::ctor_text(c, &subs.iter().map(render_nir_term).collect::<Vec<_>>()),
     }
 }
 

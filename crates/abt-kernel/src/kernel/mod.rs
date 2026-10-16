@@ -1555,6 +1555,19 @@ impl<'p> Kernel<'p> {
     }
 
     fn build(prog: &'p Program, dataset: &bind::Bound, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
+        // Combos and exercise are checked (K-2.3); the executor that fills
+        // them all or none and exercises options is the options model's.
+        for r in &prog.rules {
+            if let (true, Some(Term::Ctor(c, _, _))) = (r.head.name == "decide", r.head.terms.get(1)) {
+                if c == "combo" || c == "exercise" {
+                    return Err(RunError::Config(format!(
+                        "rule {} decides `{}`, which this kernel does not execute yet: combos (all or none) and exercise arrive with the options model (docs/spec/05-migration.md, M-7)",
+                        prog.rule_label(prog.rules.iter().position(|x| std::ptr::eq(x, r)).unwrap_or(0)),
+                        c
+                    )));
+                }
+            }
+        }
         // Resolve string overrides by their parameter's type, as the checker
         // did for the program's own literals.
         let mut cfg = cfg;

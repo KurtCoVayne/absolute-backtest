@@ -1375,16 +1375,21 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             self.err(Code::T, head.span, "decide's second argument is a decision, `hold(A, W)` or `trade(A, Q)`");
             return;
         };
-        if c != "hold" && c != "trade" {
-            self.err(
-                Code::T,
-                *sp,
-                format!(
-                    "`{}` is not a decision constructor: write `hold(A, W)` (a target weight), `hold(A, Q)` (a target quantity) or `trade(A, Q)` (a signed delta)",
-                    c
-                ),
-            );
-            return;
+        match c.as_str() {
+            "combo" => return self.combo_head(subs, *sp),
+            "exercise" => return self.exercise_head(subs, *sp),
+            "hold" | "trade" => {}
+            _ => {
+                self.err(
+                    Code::T,
+                    *sp,
+                    format!(
+                        "`{}` is not a decision constructor: write `hold(A, W)` (a target weight), `hold(A, Q)` (a target quantity), `trade(A, Q)` (a signed delta), `combo([leg(A1, Q1), leg(A2, Q2), ...])` (an all-or-none multi-leg delta) or `exercise(A, Q)` (an option exercised)",
+                        c
+                    ),
+                );
+                return;
+            }
         }
         if subs.len() < 2 {
             self.err(Code::T, *sp, format!("`{}` takes an instrument and an amount", c));
@@ -1441,6 +1446,99 @@ impl<'c, 'a> Analyzer<'c, 'a> {
             self.err(Code::T, *sp, format!("`{}` takes an instrument, an amount and an optional order", c));
         }
         self.head_ctor = Some(resolved.to_string());
+    }
+
+    /// The amount of a delta: a quantity in the class's unit.
+    fn delta_amount(&mut self, ctor: &str, amount: &Term) {
+        let ty: Option<Ty> = match amount {
+            Term::Var(v, vsp) => match self.vars.get(v).cloned() {
+                Some(st) => st.ty,
+                None => {
+                    self.err(Code::B, *vsp, format!("variable `{}` is unbound in `{}(...)`", v, ctor));
+                    return;
+                }
+            },
+            Term::Param(p, psp) => self.param_ty(p, *psp),
+            Term::Lit(l, _) => Some(l.ty()),
+            other => {
+                self.err(Code::T, other.span(), format!("the amount of `{}` must be a variable, a parameter or a literal", ctor));
+                return;
+            }
+        };
+        if let Some(ty) = ty {
+            if !compat(&Ty::Quantity(Dim::shares()), &ty) {
+                let hint = self.typed_hint(&Ty::Quantity(Dim::shares()), &Lit::Int(100));
+                self.err(
+                    Code::T,
+                    amount.span(),
+                    format!("the delta of `{}` is a quantity in the class's unit, and `{}` is {}{}", ctor, amount, ty, hint),
+                );
+            }
+        }
+    }
+
+    /// `combo([leg(A1, Q1), ..., leg(An, Qn)][, ORDER])` (K-2.3): at least two
+    /// legs on distinct instruments, each a signed delta; the order's limit
+    /// is the combo's net price.
+    fn combo_head(&mut self, subs: &[Term], sp: Span) {
+        let shape = "a combo is `combo([leg(A1, Q1), leg(A2, Q2), ...])` with an optional order";
+        let legs = match subs.first() {
+            Some(Term::Ctor(l, legs, _)) if l == crate::ir::LIST => legs.clone(),
+            _ => {
+                self.err(Code::T, sp, shape);
+                return;
+            }
+        };
+        if legs.len() < 2 {
+            self.err(Code::T, sp, format!("a combo has at least two legs ({})", shape));
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for leg in &legs {
+            match leg {
+                Term::Ctor(l, args, lsp) if l == "leg" && args.len() == 2 => {
+                    self.entity_term(&args[0], "the instrument of a leg");
+                    let key = args[0].to_string();
+                    if seen.contains(&key) {
+                        self.err(
+                            Code::T,
+                            *lsp,
+                            format!("two legs of a combo trade `{}`: the legs are distinct instruments (one decision per instrument per bar, F-5)", key),
+                        );
+                    }
+                    seen.push(key);
+                    self.delta_amount("leg", &args[1]);
+                }
+                other => self.err(Code::T, other.span(), format!("`{}` is not a leg: {}", other, shape)),
+            }
+        }
+        if let Some(order) = subs.get(1) {
+            self.order_term("combo", order);
+        }
+        if subs.len() > 2 {
+            self.err(Code::T, sp, format!("{}: the legs and an optional order", shape));
+        }
+        self.head_ctor = Some("combo".to_string());
+    }
+
+    /// `exercise(A, Q)` (K-2.3, K-5.5.4): Q long contracts of an option
+    /// exercised now; admitted only in the option class (T).
+    fn exercise_head(&mut self, subs: &[Term], sp: Span) {
+        let class = self.cx.class_name.clone();
+        if class != "option" {
+            self.err(
+                Code::T,
+                sp,
+                format!("`exercise` takes an option, and this program's class is `{}`: an exercise is admitted only in the option class", class),
+            );
+            return;
+        }
+        if subs.len() != 2 {
+            self.err(Code::T, sp, "`exercise` takes an option and a number of contracts, `exercise(A, Q)`");
+            return;
+        }
+        self.entity_term(&subs[0], "the option of `exercise`");
+        self.delta_amount("exercise", &subs[1]);
+        self.head_ctor = Some("exercise".to_string());
     }
 
     fn order_term(&mut self, ctor: &str, term: &Term) {

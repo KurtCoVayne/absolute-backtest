@@ -1070,6 +1070,19 @@ impl Parser {
                 self.bump();
                 Ok(Term::Wild(span))
             }
+            // `[t, ...]`: the legs of a combo (K-2.3).
+            Tok::LBracket => {
+                self.bump();
+                let mut items = Vec::new();
+                while !self.at(&Tok::RBracket) {
+                    items.push(self.term()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBracket)?;
+                Ok(Term::Ctor(crate::ir::LIST.to_string(), items, span))
+            }
             Tok::Ident(name) => {
                 self.bump();
                 if self.at(&Tok::LParen) {

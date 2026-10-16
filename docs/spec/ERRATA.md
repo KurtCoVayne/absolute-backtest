@@ -279,6 +279,16 @@ and the batch driver agree on every corpus program.
   says they are updated in M-4. They change at M-4, with the outputs they
   read.
 
+- **E-45 (K-2.3; the list and the order of a combo).** A bracketed list of
+  terms is a term (`[t, ...]`, the constructor `[]`); a combo's first
+  argument is the list of its legs, `leg(A, Q)` each, and its optional
+  second the order. The checker requires two legs or more, on distinct
+  instrument terms, each a signed delta in the class's unit (T); `exercise`
+  in a class other than `option` is T. The kernel refuses to run a program
+  that decides either (a configuration error naming the rule) until the
+  options model executes them (M-7); the denial constraint's counting of
+  a combo's legs is the executor's, with them.
+
 ## Aggregates
 
 - **E-27 (P-1.2, Proposition 1.1; the running sums' rebuild points).** "The

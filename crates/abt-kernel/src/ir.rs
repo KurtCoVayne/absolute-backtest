@@ -579,6 +579,20 @@ pub enum Term {
     Ctor(String, Vec<Term>, Span),
 }
 
+/// The constructor name a bracketed list of terms parses to (`combo([leg(A,
+/// Q), leg(B, R)])`, K-2.3).
+pub const LIST: &str = "[]";
+
+/// A constructor application as the program writes it: `name(a, b)`, or
+/// `[a, b]` for a list.
+pub fn ctor_text(name: &str, args: &[String]) -> String {
+    if name == LIST {
+        format!("[{}]", args.join(", "))
+    } else {
+        format!("{}({})", name, args.join(", "))
+    }
+}
+
 impl Term {
     pub fn span(&self) -> Span {
         match self {
@@ -595,14 +609,8 @@ impl fmt::Display for Term {
             Term::Param(p, _) => write!(f, "{}", p),
             Term::Lit(l, _) => write!(f, "{}", l),
             Term::Ctor(c, args, _) => {
-                write!(f, "{}(", c)?;
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", a)?;
-                }
-                write!(f, ")")
+                let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                f.write_str(&ctor_text(c, &args))
             }
         }
     }
