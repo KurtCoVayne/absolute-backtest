@@ -117,43 +117,8 @@ pub fn day_key(t: i64) -> i64 {
 }
 
 /// Parse `YYYY-MM-DD`, optionally followed by ` HH:MM[:SS[.fffffffff]]` or
-/// `THH:MM[:SS[.fffffffff]]`.
-pub fn parse_timestamp(s: &str) -> Option<i64> {
-    let s = s.trim();
-    let (date, time) = if s.len() > 10 { (&s[..10], Some(s[11..].trim())) } else { (s, None) };
-    let mut it = date.split('-');
-    let y: i64 = it.next()?.parse().ok()?;
-    let m: u32 = it.next()?.parse().ok()?;
-    let d: u32 = it.next()?.parse().ok()?;
-    if it.next().is_some() || !(1..=12).contains(&m) || d == 0 || d > days_in_month(y, m) {
-        return None;
-    }
-    let mut t = days_from_civil(y, m, d) * DAY;
-    if let Some(time) = time {
-        let time = time.trim_end_matches('Z');
-        let mut parts = time.split(':');
-        let h: i64 = parts.next()?.parse().ok()?;
-        let mi: i64 = parts.next()?.parse().ok()?;
-        let (sec, frac) = match parts.next() {
-            Some(x) => match x.split_once('.') {
-                Some((s, f)) => (s.parse::<i64>().ok()?, Some(f)),
-                None => (x.parse::<i64>().ok()?, None),
-            },
-            None => (0, None),
-        };
-        if h > 23 || mi > 59 || sec > 59 {
-            return None;
-        }
-        t += h * HOUR + mi * MIN + sec * SEC;
-        if let Some(f) = frac {
-            if f.is_empty() || f.len() > 9 || !f.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            t += f.parse::<i64>().ok()? * 10i64.pow(9 - f.len() as u32);
-        }
-    }
-    Some(t)
-}
+/// `THH:MM[:SS[.fffffffff]]` (the data layer's and the query layer's too).
+pub use abt_wire::scalar::parse_timestamp;
 
 pub fn format_timestamp(t: i64) -> String {
     let days = floor_div(t, DAY);

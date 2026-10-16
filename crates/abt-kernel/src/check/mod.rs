@@ -462,6 +462,32 @@ pub struct Program {
 }
 
 impl Program {
+    /// Observe `rel` beyond the program's own observations (a plan's `run
+    /// ... observe R`, Q-2.2), as the checker reads `observe R`: a relation
+    /// declared on several calendars on each of its instances (E-57).
+    /// Observation is no part of H(P), and changes no decision.
+    pub fn observe_more(&mut self, rel: &str) -> Result<(), String> {
+        let instances: Vec<String> = if self.relations.contains_key(rel) {
+            vec![rel.to_string()]
+        } else {
+            self.relations.keys().filter(|k| k.split_once('@').is_some_and(|(r, _)| r == rel)).cloned().collect()
+        };
+        if instances.is_empty() {
+            return Err(format!("`observe {}` names no relation of {}", rel, self.strategy));
+        }
+        for r in instances {
+            if !self.observes.iter().any(|o| o.rel == r && o.wheres.is_empty()) {
+                self.observes.push(Observe {
+                    rel: r,
+                    wheres: vec![],
+                    trace_instances: false,
+                    span: Span::default(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn rules_for(&self, rel: &str) -> Vec<usize> {
         self.rules.iter().enumerate().filter(|(_, r)| r.head.name == rel).map(|(i, _)| i).collect()
     }

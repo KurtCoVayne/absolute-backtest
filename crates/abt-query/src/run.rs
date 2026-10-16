@@ -246,3 +246,13 @@ impl Run {
         out
     }
 }
+
+/// The binding a run was bound to and its program's hash (`kernel.<run>.binding`,
+/// K-7.1).
+pub fn binding_of(data: &Data, run: &str) -> Result<(String, String), Error> {
+    let rel = format!("kernel.{}.binding", run);
+    let b = crate::relation::read(data, &rel)?.ok_or_else(|| Error::Missing(format!("the store holds no binding of run {}", run)))?;
+    let binding = crate::relation::texts(&b, "binding_id")?.into_iter().flatten().next().unwrap_or_default();
+    let program = crate::relation::texts(&b, "program_hash")?.into_iter().flatten().next().unwrap_or_default();
+    Ok((binding, program))
+}

@@ -819,6 +819,59 @@ pub fn convention_metrics_on(r: &Run, periods_per_year: f64, by_day: bool, calen
     m
 }
 
+// ---- metrics by name ----
+
+/// The metrics a plan may optimise or a report show by name (Q-2.1's
+/// `objective`).
+pub const METRIC_NAMES: [&str; 13] = [
+    "sharpe",
+    "sharpe_lo",
+    "cagr",
+    "total_return",
+    "sortino",
+    "calmar",
+    "volatility",
+    "max_drawdown",
+    "max_drawdown_duration",
+    "cvar_5",
+    "worst_month",
+    "turnover",
+    "max_leverage",
+];
+
+/// A named metric's value for a run; Calmar is the CAGR over the maximum
+/// drawdown (Q-3.1), undefined without a drawdown.
+pub fn objective_value(name: &str, m: &ReturnMetrics, t: &TradingMetrics) -> Option<f64> {
+    Some(match name {
+        "sharpe" => m.sharpe,
+        "sharpe_lo" => m.sharpe_lo,
+        "cagr" => m.cagr,
+        "total_return" => m.total_return,
+        "sortino" => m.sortino,
+        "calmar" => {
+            if m.max_drawdown > 0.0 {
+                m.cagr / m.max_drawdown
+            } else {
+                f64::NAN
+            }
+        }
+        "volatility" => m.volatility,
+        "max_drawdown" => m.max_drawdown,
+        "max_drawdown_duration" => m.max_drawdown_duration as f64,
+        "cvar_5" => m.cvar_5,
+        "worst_month" => m.worst_month,
+        "turnover" => t.turnover,
+        "max_leverage" => t.max_leverage,
+        _ => return None,
+    })
+}
+
+/// Whether a higher value of the metric is better (drawdowns, volatility,
+/// CVaR, turnover and leverage are costs).
+pub fn higher_is_better(name: &str) -> bool {
+    !matches!(name, "volatility" | "max_drawdown" | "max_drawdown_duration" | "cvar_5" | "turnover" | "max_leverage")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

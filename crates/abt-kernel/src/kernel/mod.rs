@@ -762,6 +762,11 @@ pub struct ExecConfig {
     /// a decision bar is closed; `silence hold` keeps it.
     #[serde(default)]
     pub silence_flat: bool,
+    /// A block hold-out's mask (Q-2.3): `[from, to)` spans whose bars the
+    /// run's ledgers leave out. Part of the run's id through π, not of the
+    /// configuration's (the run crosses the blocks the same way).
+    #[serde(skip)]
+    pub embargo_mask: Vec<(i64, i64)>,
 }
 
 impl Default for ExecConfig {
@@ -830,6 +835,7 @@ impl Default for ExecConfig {
             start: None,
             end: None,
             silence_flat: false,
+            embargo_mask: Vec::new(),
         }
     }
 }
@@ -3380,6 +3386,8 @@ pub struct Replay {
     /// (the rows the run gained since the last) and when it ends or halts
     /// (K-7.1).
     pub write_outputs: bool,
+    /// π, the plan step that asked for the run (Q-2.5): part of its id.
+    pub plan_step: Option<serde_json::Value>,
 }
 
 /// The fold over a data service (K-4.1, K-4.2): Bind, the calendars put
@@ -3413,6 +3421,33 @@ pub enum Progress {
 pub enum Next {
     Continue,
     Checkpoint,
+}
+
+/// What a run of the program would read now, without a run (P-3.4's `show
+/// binding`, E-59): the binding, its relations' versions, and the decision
+/// calendar's bars, the sample a plan places its hold-out and its
+/// walk-forward folds in (Q-2.3).
+pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig) -> Result<serde_json::Value, RunError> {
+    let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides))?;
+    let probe = Kernel::build(prog, &bound, cfg.clone())?;
+    let labels: Vec<i64> = bind::calendars(&probe).pop().map(|(_, l)| l).unwrap_or_default();
+    let relations: Vec<serde_json::Value> = bound
+        .binding
+        .pairs
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| serde_json::json!({"relation": p.relation, "version": p.version}))
+        .collect();
+    Ok(serde_json::json!({
+        "program_hash": crate::compiler::normalise(prog).hash,
+        "binding": bound.binding.id,
+        "relations": relations,
+        "calendar": prog.cal_name(&prog.decision_cal),
+        "bars": labels.len(),
+        "first": labels.first(),
+        "last": labels.last(),
+    }))
 }
 
 /// `replay`, handing `on_progress` the kernel and the run so far when the
@@ -3450,7 +3485,12 @@ pub fn replay_observed<'p>(
         )
         .hex(),
     };
-    let run = bind::run_id(&identity.program_hash, &identity.binding_id, &bind::run_step(&cfg, opts.to_seq, opts.horizon), &identity.mode);
+    let run = bind::run_id(
+        &identity.program_hash,
+        &identity.binding_id,
+        &bind::plan_step(opts.plan_step.as_ref(), &cfg, opts.to_seq, opts.horizon),
+        &identity.mode,
+    );
     let identity = Identity { run_id: run.clone(), ..identity };
     let (spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
     let mut to_seq = opts.to_seq;

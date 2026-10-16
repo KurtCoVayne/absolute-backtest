@@ -5,7 +5,10 @@
 
 pub mod cli;
 pub mod data;
+pub mod kernel;
 pub mod metrics;
+pub mod plan;
+pub mod relation;
 pub mod run;
 pub mod tests;
 pub mod time;

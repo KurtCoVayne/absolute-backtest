@@ -145,13 +145,13 @@ feature the evaluator would have skipped at some bars (because an earlier
 literal excluded the instance) is computed for the ledger, so the ledger is
 the relation's extension, whatever the run's plan.
 
-## The compiler's view: `abt graph`, `abt ir`, `abt plan`, `abt verify`
+## The compiler's view: `abt graph`, `abt ir`, `abt show plan`, `abt verify`
 
 ```
 abt graph --strategy NAME <files...>
 abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
 abt rewrite-log --strategy NAME [--json] <files...>
-abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 ```
 
@@ -282,6 +282,6 @@ compiler design says; the note says which case it is.
    (absence-driven) or a comparison decided.
 7. `abt explain --derivation ID` on a tuple you did not expect: the tree
    of tuples that produced it.
-8. `abt graph`, `abt plan` and `abt verify` before trusting a program: the
+8. `abt graph`, `abt show plan` and `abt verify` before trusting a program: the
    keyedness labels, the dead literals the analysis found, the plan the
    run uses, and the verification report.

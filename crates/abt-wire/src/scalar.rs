@@ -30,6 +30,7 @@ pub struct Seq(pub u64);
 pub struct Time(pub i64);
 
 pub const NANOS_PER_SECOND: i64 = 1_000_000_000;
+pub const NANOS_PER_MINUTE: i64 = 60 * NANOS_PER_SECOND;
 pub const NANOS_PER_HOUR: i64 = 3_600 * NANOS_PER_SECOND;
 pub const NANOS_PER_DAY: i64 = 86_400 * NANOS_PER_SECOND;
 
@@ -145,6 +146,46 @@ pub fn add_months(t: i64, months: i64) -> i64 {
     let ny = total.div_euclid(12);
     let nm = (total - ny * 12) as u32 + 1;
     days_from_civil(ny, nm, d.min(days_in_month(ny, nm))) * NANOS_PER_DAY + clock
+}
+
+/// `YYYY-MM-DD`, optionally followed by ` HH:MM[:SS[.fffffffff]]` or
+/// `THH:MM[:SS[.fffffffff]]`, as nanoseconds since the epoch; what every
+/// layer reads a written time with (A-D2).
+pub fn parse_timestamp(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (date, time) = if s.len() > 10 { (s.get(..10)?, Some(s.get(11..)?.trim())) } else { (s, None) };
+    let mut it = date.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: u32 = it.next()?.parse().ok()?;
+    let d: u32 = it.next()?.parse().ok()?;
+    if it.next().is_some() || !(1..=12).contains(&m) || d == 0 || d > days_in_month(y, m) {
+        return None;
+    }
+    let mut t = days_from_civil(y, m, d) * NANOS_PER_DAY;
+    if let Some(time) = time {
+        let time = time.trim_end_matches('Z');
+        let mut parts = time.split(':');
+        let h: i64 = parts.next()?.parse().ok()?;
+        let mi: i64 = parts.next()?.parse().ok()?;
+        let (sec, frac) = match parts.next() {
+            Some(x) => match x.split_once('.') {
+                Some((s, f)) => (s.parse::<i64>().ok()?, Some(f)),
+                None => (x.parse::<i64>().ok()?, None),
+            },
+            None => (0, None),
+        };
+        if h > 23 || mi > 59 || sec > 59 {
+            return None;
+        }
+        t += h * NANOS_PER_HOUR + mi * NANOS_PER_MINUTE + sec * NANOS_PER_SECOND;
+        if let Some(f) = frac {
+            if f.is_empty() || f.len() > 9 || !f.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            t += f.parse::<i64>().ok()? * 10i64.pow(9 - f.len() as u32);
+        }
+    }
+    Some(t)
 }
 
 /// `t − δ` for a calendar duration of `months`, `days` and `nanos`: months

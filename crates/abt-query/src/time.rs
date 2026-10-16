@@ -2,7 +2,7 @@
 //! calendar abt-wire shares (A-D2), so that a day or a month of a run is
 //! the same day or month in both layers.
 
-pub use abt_wire::scalar::civil_from_days;
+pub use abt_wire::scalar::{civil_from_days, parse_timestamp};
 use abt_wire::scalar::{NANOS_PER_DAY, NANOS_PER_HOUR, NANOS_PER_SECOND};
 
 /// A day, in the nanoseconds times are counted in (A-D7).

@@ -2,7 +2,7 @@
 //! store through the data service like every other client, and never
 //! stores a byte itself.
 
-use abt_wire::generated::abt::wire::{Message, QueryForm, QueryRequest, RelationSchema, Scan, SchemaRequest, View};
+use abt_wire::generated::abt::wire::{Message, PinRequest, PutRequest, QueryForm, QueryRequest, RelationSchema, Scan, SchemaRequest, View};
 use abt_wire::rpc::{Client, WireError};
 use abt_wire::transport::Connection;
 use abt_wire::Layer;
@@ -85,6 +85,50 @@ impl Data {
         Ok(out)
     }
 
+    /// Rows put under the query layer's namespace (D-3.6): added to the
+    /// relation's current version, or, with `replace`, its next version
+    /// whole (E-56). The version written.
+    pub fn put(&self, schema: RelationSchema, batch: &RecordBatch, replace: bool) -> Result<String, Error> {
+        let relation = schema.name.clone();
+        let mut reply = self
+            .client
+            .call_with_table(
+                Message::PutRequest(Box::new(PutRequest {
+                    relation,
+                    schema: Box::new(schema),
+                    attributes: None,
+                    cache_key: None,
+                    replace,
+                })),
+                &batch.schema(),
+                std::slice::from_ref(batch),
+            )
+            .map_err(wire)?;
+        match reply.message().map_err(wire)? {
+            Message::PutResponse(p) => Ok(p.version),
+            _ => Err(Error::Wire("a put answered with another message".into())),
+        }
+    }
+
+    /// Pins (or unpins) the versions of a binding (Q-2.6).
+    pub fn pin(&self, binding: &str, pin: bool) -> Result<(), Error> {
+        let mut reply = self
+            .client
+            .call(Message::PinRequest(Box::new(PinRequest {
+                version: None,
+                binding: Some(binding.to_string()),
+                pin,
+            })))
+            .map_err(wire)?;
+        reply.message().map(|_| ()).map_err(wire)
+    }
+
+    /// The names of the relations whose name starts with `prefix` and ends
+    /// with `suffix`, with their current versions.
+    pub fn relations(&self, prefix: &str, suffix: &str) -> Result<Vec<(String, String)>, Error> {
+        Ok(self.versions(prefix)?.into_iter().filter(|(r, _)| r.ends_with(suffix)).collect())
+    }
+
     /// Every row of a relation's current version, in the store's order (t,
     /// then identity); none when it has no row.
     pub fn scan(&self, relation: &str) -> Result<Vec<RecordBatch>, Error> {
@@ -110,7 +154,7 @@ impl Data {
             })))
             .map(|(_, b)| b)
             .map_err(|e| match e {
-                WireError::Remote(r) if r.code == abt_wire::ErrorCode::NotFound => Error::Missing(format!("the store has no relation {}", relation)),
+                WireError::Remote(r) if matches!(r.code, abt_wire::ErrorCode::NotFound | abt_wire::ErrorCode::UnknownRelation) => Error::Missing(format!("the store has no relation {}", relation)),
                 e => wire(e),
             })
     }

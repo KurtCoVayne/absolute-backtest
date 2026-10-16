@@ -829,6 +829,87 @@ batch driver agree on every corpus program. Each bless since:
   them with the version of every table of the run they read. The front
   serves a store directory to the query layer in its own process. The
   surface's grid axes are the literal texts of the plan's values.
+- **E-59 (Q-2.1 to Q-2.6, Q-3.1, A-4.1, P-3.4, P-3.5, P-4; plans as the
+  query layer runs them).**
+  - **Grammar.** A block's entries are separated by `;`, `,` or new lines
+    outside brackets, a grid axis's values by commas, and `#` starts a
+    comment. A template's parameter is replaced as a whole word, so
+    `trailing:Y` with `Y = 2y`, not `trailing:Yy`. `program PATH` is
+    relative to the plan file (a path contains `/` or ends in `.dsl`; any
+    other word names a strategy among the sources). A window's ends are
+    written back as the kernel prints a time.
+  - **Defaults.** The objective is `sharpe` and the hold-out `none`. A
+    block hold-out's seed is 1, the old study's. A claim is at 0.05,
+    `after` and `warn`. The default steps are the grid (or one run) named
+    `main`, the walk-forward `folds` when a scheme is declared, and the
+    report `report`.
+  - **What a step reads** must be a step of the right kind. `best(G)`
+    names a grid. A step that takes one run (`run ... at`, `reveal`,
+    `compare`, `ledger`, `activation`) reads a grid by its best point
+    only. A `walk_forward` step needs a scheme and a `reveal` a hold-out.
+    A cycle is refused.
+  - **The normal form** is `study { program H(P) ... steps { ... } }`.
+    Steps are named `s0, s1, ...` in topological order, ties broken by
+    the step's kind in the order of Q-2.2's table, then its inputs'
+    positions, then its text. Claims are named `c0, c1, ...` in the order
+    of their text. The program is named by its hash, parameters are sorted
+    by name, grid axes and values are kept as written, and the study's
+    name, the report block and the report steps are left out. A plan
+    renamed is the same plan.
+  - **π** is `{plan: H(Π), step: the canonical name, point: {name: text},
+    fold: {k, phase} | null}`. The run id is over (H(P), β, π with the
+    request's truncation fields, mode) (E-56). The point is also in β, so
+    every point has a binding of its own, over the same versions.
+  - **The kernel's run request** (P-3.4) gains `horizon`, the truncation
+    by time. The kernel turns it into the barrier's seq through the
+    stream's index, since the query layer does not know the kernel's
+    stream and so cannot name a `to_seq`. It also gains `plan_step`,
+    `embargo_mask` (spans `[from, to)`; the kernel writes no ledger row at
+    a bar inside one) and `observe`, relations observed beyond the
+    program's own, outside H(P). `show binding` answers the binding a run
+    would get now and its decision calendar's span, which is what a plan
+    places its hold-out and folds in, without a run. `control release`
+    stops holding a completed run. A request's `start` and `end` replace
+    the report block's window only when given.
+  - **The hold-out.** The sample is the decision calendar's bars at the
+    plan's base point (the old study took every fact's time). A trailing
+    hold-out truncates every run at its first bar less one. A block
+    hold-out is a mask: on the kernel's ledgers, and on every metric the
+    query layer computes.
+  - **Reveals.** `abt plan run` runs every step but the reveals. `abt
+    plan reveal PLAN STEP` runs one reveal from the committed point the
+    plan's latest execution recorded in its outcomes, with no truncation
+    and no mask, its metrics over the embargoed bars only.
+  - **Relations.** `<plan>` in `query.<plan>.*` is H(Π) in hex.
+    - `query.trials` has P-4's columns and `sharpe` (per period, for the
+      DSR's variance), `fold`, `phase` and `status`. A run's trial id is
+      its run id.
+    - `query.<plan>.outcomes` is written whole at every execution (a
+      reveal adds its row). It holds the step, run, kind, status, point,
+      fold, phase, `best`, window, objective, and every metric of Q-3.1's
+      return and trading groups.
+    - `query.<plan>.executions` has a row per execution.
+    - `query.plans` is written whole, one row per plan, with P-4's
+      columns and the program hash and lineage. Its bindings are every
+      run's, each pinned through the data layer by binding. `abt plan
+      drop` unpins those no other plan holds; the plan's trials stay.
+  - **Lineages** are rows of `query.lineages`: program hash, lineage
+    (its root's H(P)), strategy, attachment `root` or `similar` with the
+    member it resembles and the similarity, and the rules. The rules are
+    the strategy's as the kernel's normal form renders them, compared by
+    Jaccard at 0.8. The language has no `revises` header, so similarity
+    alone attaches a revision. Disputes are rows of `query.disputes` and
+    change no count.
+  - **The count** (Proposition Q-2.2) is the distinct run ids among the
+    `kernel.*.binding` of the lineage's members, plus the tests and
+    claims judged. A run the same as an earlier one (same point, same
+    binding, same step) is the same run, not another trial. The old
+    `trials.jsonl` counted every invocation.
+  - **Calmar** is the CAGR over the maximum drawdown, a metric by name.
+  - **Commands.** The compiler's `abt plan` is `abt show plan`; `abt plan`
+    is the query layer's. Claims, `test`, `feed` and `activation` steps
+    are judged in M-5d.
+
 
 ## Layout
 

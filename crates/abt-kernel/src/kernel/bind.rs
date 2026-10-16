@@ -1306,12 +1306,30 @@ pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i6
         ("to_seq", to_seq.map(|s| serde_json::json!(s))),
         ("horizon", horizon.map(|t| serde_json::json!(t))),
         ("fault", cfg.inject.as_ref().map(|(c, t)| serde_json::json!([c, t]))),
+        ("mask", (!cfg.embargo_mask.is_empty()).then(|| serde_json::json!(cfg.embargo_mask))),
     ];
     let set: serde_json::Map<String, serde_json::Value> = fields.into_iter().filter_map(|(k, v)| v.map(|v| (k.to_string(), v))).collect();
     if set.is_empty() {
         serde_json::Value::Null
     } else {
         serde_json::Value::Object(set)
+    }
+}
+
+/// π of a run (Q-2.5): the plan step that asked for it, with what of the
+/// request beyond the step changes what it decides; a run outside a plan
+/// has `run_step`'s alone.
+pub fn plan_step(step: Option<&serde_json::Value>, cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>) -> serde_json::Value {
+    let own = run_step(cfg, to_seq, horizon);
+    match (step, own) {
+        (None, own) => own,
+        (Some(pi), serde_json::Value::Object(extra)) => {
+            let mut v = serde_json::Map::new();
+            v.insert("plan_step".into(), pi.clone());
+            v.extend(extra);
+            serde_json::Value::Object(v)
+        }
+        (Some(pi), _) => serde_json::json!({ "plan_step": pi }),
     }
 }
 

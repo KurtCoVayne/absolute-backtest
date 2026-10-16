@@ -43,14 +43,14 @@ silently misaligns every bucket.
 | `docs/compiler-design.md` | The compiler design: the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers and the observability tables; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
 | `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D34, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached). The implementation lands step by step on this branch; `docs/spec/ERRATA.md` records where it settles what the documents leave open. |
 | `docs/llm-observability.md`, `docs/llm-usability.md` | The two studies of models writing programs with the toolchain, both on the first formulation; their material is under `experiments/`. |
-| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer: so far the metrics, computed from a run's tables in the store, `abt metrics`), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
+| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer: the metrics, computed from a run's tables in the store, `abt metrics`; the test framework; plans, `abt plan`, `abt lineage`, `abt dispute`), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
 | `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
 | `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
 | `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
 | `crates/abt-kernel/src/compiler/` | Normalise (the normal form, canonical order and names, the program hash H(P): BLAKE3 over the RFC 8785 form of the normal form without its `report` block, what `abt hash` prints and `abt hash --show` prints the bytes of) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
 | `crates/abt-kernel/src/analysis/` | Analyse: strata, the open-loop partition, keyedness labels, demand, window lengths, and the abstract interpretation with its warnings. |
 | `crates/abt-kernel/src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
-| `crates/abt-kernel/src/plan/`, `crates/abt-kernel/src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt plan`). |
+| `crates/abt-kernel/src/plan/`, `crates/abt-kernel/src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt show plan`). |
 | `crates/abt-kernel/src/verify/` | The verification tiers: exact linear feasibility, the SMT-LIB2 driver with replay files, constrained Horn clauses, translation validation, the runtime checks (`abt verify`). |
 | `crates/abt-kernel/src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, and the query language's `why` and `why not`). |
 | `crates/abt-kernel/src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
@@ -513,6 +513,21 @@ curve, its trading metrics, its capacity, the metrics per period of its
 report block, and the Sharpe ratio of each calendar year, each printed
 with the versions of the tables it read (ERRATA E-58).
 
+Plans are studies written in the language's block syntax
+(`docs/spec/03-query.md`, section 2): a program, a parameter grid, a
+hold-out, a walk-forward scheme, an objective and the steps. `abt plan
+check PLAN` prints the plan's normal form, its hash H(Π), its steps in order
+and the trials it will count. `abt plan run` asks the kernels for every run
+with its step's identity π, spreads a grid over them, truncates every run
+before a trailing hold-out and masks a block hold-out out of the metrics and
+the ledgers. It writes every run as a trial row of `query.trials`, the
+plan's outcomes under `query.<hash>.outcomes` and the plan, which pins its
+bindings, in `query.plans`. `abt plan reveal PLAN STEP` runs one committed
+point over the whole sample and reports the embargoed bars; `abt plan
+report` reads the outcomes back, and `abt plan drop` unpins. `abt lineage`
+counts a lineage's trials, every run ever made of its members, and `abt
+dispute` records a dispute of an attachment (ERRATA E-59).
+
 ## The command line
 
 ```
@@ -526,11 +541,15 @@ abt show --strategy NAME <files...>
 abt graph --strategy NAME <files...>
 abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
 abt rewrite-log --strategy NAME [--json] <files...>
-abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>
 abt metrics --run RUN (--data SOCKET | --store DIR) [--json]
+abt plan check|run|report|drop PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt lineage PROGRAM [SOURCES...] [--json] (--data SOCKET | --store DIR)
+abt dispute PROGRAM --reason TEXT [SOURCES...] (--data SOCKET | --store DIR)
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
@@ -579,7 +598,7 @@ stderr line with the load, build and run times, the bar and tuple counts
 and the kernel's statistics, among them `pushed_answers`, the windows the
 data layer's aggregate pass answered. An aggregate over one stored relation
 in one of the pass's window forms is pushed down to the data layer, which
-computes it over the whole run in one request; `abt plan` prints, under
+computes it over the whole run in one request; `abt show plan` prints, under
 each aggregate, `pushdown: ...` or `local:` and the condition that keeps it
 in the kernel (`docs/spec/ERRATA.md`, E-47). `--no-pushdown` evaluates every
 aggregate in the kernel, a test switch: both give the same bits.

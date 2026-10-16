@@ -634,7 +634,13 @@ fn ledger(
             pattern[i] = Some(super::lit_value(lit, &mut k.symbols, &mut k.labels, &k.literal_equities));
         }
     }
-    let bars: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
+    // A block hold-out's bars are left out (Q-2.3).
+    let mask = k.cfg.embargo_mask.clone();
+    let bars: Vec<i64> = k
+        .bars_at(&sig.cal)
+        .into_iter()
+        .filter(|&b| b >= first && b <= last && !mask.iter().any(|&(a, z)| a <= b && b < z))
+        .collect();
     for t in bars {
         pattern[info.key_pos] = Some(Value::Time(t));
         let (mut live, mut stuck) = k.observe_at(rel, &pattern)?;

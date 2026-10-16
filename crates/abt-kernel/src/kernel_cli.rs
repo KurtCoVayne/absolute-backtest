@@ -119,6 +119,10 @@ fn request(op: KernelOp) -> KernelRequest {
         progress_every: None,
         checkpoint_every: None,
         from_checkpoint: None,
+        horizon: None,
+        plan_step: None,
+        embargo_mask: None,
+        observe: None,
     }
 }
 

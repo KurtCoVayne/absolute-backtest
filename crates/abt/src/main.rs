@@ -13,8 +13,18 @@ fn main() {
     if args.first().map(String::as_str) == Some("kernel") {
         return abt_kernel::kernel_cli::main(&args[1..]);
     }
-    if args.first().map(String::as_str) == Some("metrics") {
-        std::process::exit(abt::query_cli::metrics(&args[1..]));
+    match args.first().map(String::as_str) {
+        Some("metrics") => std::process::exit(abt::query_cli::metrics(&args[1..])),
+        Some("plan") => std::process::exit(abt::query_cli::plan(&args[1..])),
+        Some(cmd @ ("lineage" | "dispute")) => std::process::exit(abt::query_cli::lineage(cmd, &args[1..])),
+        // The compiler's plan of a program (`show plan`; the query layer's
+        // plans are `abt plan`).
+        Some("show") if args.get(1).map(String::as_str) == Some("plan") => {
+            let mut rest = vec!["plan".to_string()];
+            rest.extend(args[2..].iter().cloned());
+            return abt_kernel::cli::main_with(rest);
+        }
+        _ => {}
     }
     abt_kernel::cli::main()
 }

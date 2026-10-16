@@ -411,7 +411,22 @@ table KernelRequest {
   // through the data layer (K-4.7); `from_checkpoint` resumes from one.
   checkpoint_every: string;
   from_checkpoint: string;
+  // `run`: stop after the decision at this bar, the stream truncated at that
+  // barrier's seq (a trailing hold-out, a walk-forward window; Q-2.3).
+  horizon: long = null;
+  // `run`: π, the plan step that asks for the run (Q-2.5), as canonical
+  // JSON; part of the run's id (A-4.1).
+  plan_step: string;
+  // `run`: a block hold-out's mask (Q-2.3): no ledger row at a bar inside a
+  // span.
+  embargo_mask: [Span];
+  // `run`: relations observed beyond the program's own (`run ... observe`,
+  // Q-2.2).
+  observe: [string];
 }
+
+// A span of times, `[from, to)`.
+table Span { from: long; to: long; }
 
 // An answer, or one of a run's progress frames (`status` running).
 table KernelResponse {

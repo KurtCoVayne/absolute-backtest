@@ -59,13 +59,6 @@ enum Frame {
     Done { run_id: String, status: String, report: String },
 }
 
-/// How a run checkpoints (K-4.7): every month or every N decision
-/// barriers, and the checkpoint it resumes from.
-struct Checkpoints {
-    every: Option<CheckpointEvery>,
-    from: Option<Checkpoint>,
-}
-
 fn refused(m: impl Into<String>) -> ErrorMessage {
     error(ErrorCode::Refused, m)
 }
@@ -127,8 +120,13 @@ impl KernelService {
         let mut cfg = ExecConfig::from_program(prog);
         cfg.pushdown = r.pushdown;
         cfg.memory_budget = r.memory_budget;
-        cfg.start = r.start;
-        cfg.end = r.end;
+        // The request's window, when it has one, over the report block's.
+        if r.start.is_some() {
+            cfg.start = r.start;
+        }
+        if r.end.is_some() {
+            cfg.end = r.end;
+        }
         for p in r.point.iter().flatten() {
             let lit = crate::syntax::parse_lit(&p.value).map_err(|e| refused(format!("parameter {}: `{}` is not a literal: {}", p.name, p.value, e.message)))?;
             cfg.param_overrides.push((p.name.clone(), lit));
@@ -137,13 +135,23 @@ impl KernelService {
     }
 
     fn run(&self, r: &KernelRequest, out: &Responder) -> Result<(), ErrorMessage> {
-        let (ws, prog, _) = self.program(r)?;
-        let cfg = Self::config(&prog, r)?;
+        let (ws, mut prog, _) = self.program(r)?;
+        for name in r.observe.iter().flatten() {
+            prog.observe_more(name).map_err(refused)?;
+        }
+        let mut cfg = Self::config(&prog, r)?;
+        cfg.embargo_mask = r.embargo_mask.iter().flatten().map(|s| (s.from, s.to)).collect();
         let every = r.progress_every.unwrap_or(0);
-        let to_seq = r.to_seq;
         let client = (self.connect)().map_err(run_error)?;
-        let checkpoints = Checkpoints {
-            every: match r.checkpoint_every.as_deref() {
+        let opts = Replay {
+            write_outputs: true,
+            to_seq: r.to_seq,
+            horizon: r.horizon,
+            plan_step: match &r.plan_step {
+                Some(t) => Some(serde_json::from_str(t).map_err(|e| refused(format!("plan_step is not JSON: {}", e)))?),
+                None => None,
+            },
+            checkpoint_every: match r.checkpoint_every.as_deref() {
                 None => None,
                 Some("month") => Some(CheckpointEvery::Month),
                 Some(n) => Some(CheckpointEvery::Bars(
@@ -154,6 +162,7 @@ impl KernelService {
                 Some(k) => Some(super::checkpoints::read(&client, k).map_err(run_error)?),
                 None => None,
             },
+            ..Default::default()
         };
         let (tx, rx) = mpsc::channel::<Ask>();
         let (ptx, prx) = mpsc::channel::<Frame>();
@@ -165,7 +174,7 @@ impl KernelService {
         let connect = self.connect.clone();
         std::thread::Builder::new()
             .stack_size(512 << 20)
-            .spawn(move || hold(ws, prog, cfg, to_seq, checkpoints, client, connect, rx, ptx, st, every))
+            .spawn(move || hold(ws, prog, cfg, opts, client, connect, rx, ptx, st, every))
             .map_err(|e| error(ErrorCode::Internal, format!("cannot spawn a run: {}", e)))?;
         let mut started = false;
         for frame in prx {
@@ -297,6 +306,13 @@ impl Service for KernelService {
                     return respond(m);
                 }
                 let (_, prog, _) = self.program(&r)?;
+                if what == "binding" {
+                    let cfg = Self::config(&prog, &r)?;
+                    let client = (self.connect)().map_err(run_error)?;
+                    let mut m = response(KernelOp::Show);
+                    m.text = Some(super::sample(&prog, &client, &cfg).map_err(run_error)?.to_string());
+                    return respond(m);
+                }
                 let text = match crate::query::parse(&format!("show {}", what)).map_err(refused)? {
                     Query::Show(crate::query::Show::Program) => crate::observe::show_program(&prog),
                     Query::Show(crate::query::Show::Plan(rel)) => {
@@ -324,6 +340,24 @@ impl Service for KernelService {
             }
             KernelOp::Run => self.run(&r, out),
             KernelOp::Query => self.query(&r, out),
+            KernelOp::Control if r.what.as_deref() == Some("release") => {
+                // The run is no longer held: its outputs stay in the data
+                // layer, its queries end with it.
+                let id = r.run_id.clone().ok_or_else(|| refused("the request names no run"))?;
+                let mut runs = self.runs.lock().expect("the runs");
+                match runs.get(&id) {
+                    None => return Err(error(ErrorCode::NotFound, format!("no run {} here", id))),
+                    Some(e) if e.state.lock().expect("a run's state").status == "running" => return Err(refused("the run is running; halt it first")),
+                    Some(_) => {
+                        runs.remove(&id);
+                    }
+                }
+                drop(runs);
+                let mut m = response(KernelOp::Control);
+                m.run_id = Some(id);
+                m.status = Some("released".into());
+                respond(m)
+            }
             KernelOp::Control => {
                 let (tx, state) = self.entry(&r)?;
                 match r.what.as_deref() {
@@ -351,7 +385,7 @@ impl Service for KernelService {
                         respond(m)
                     }
                     Some("flatten") => Err(refused("flatten acts on a live broker's book (M-10); a simulated run has none")),
-                    other => Err(refused(format!("control takes halt, checkpoint or flatten, not {:?}", other))),
+                    other => Err(refused(format!("control takes halt, checkpoint, flatten or release, not {:?}", other))),
                 }
             }
             KernelOp::Status => {
@@ -413,8 +447,7 @@ fn hold(
     ws: Workspace,
     prog: Program,
     cfg: ExecConfig,
-    to_seq: Option<u64>,
-    checkpoints: Checkpoints,
+    opts: Replay,
     client: DataClient,
     connect: Arc<Connect>,
     rx: mpsc::Receiver<Ask>,
@@ -424,13 +457,6 @@ fn hold(
 ) {
     let compiled = crate::compiler::compile(&prog, &crate::compiler::CompileOptions::default());
     let mut exec = SimExecutor::new(cfg.clone());
-    let opts = Replay {
-        write_outputs: true,
-        to_seq,
-        checkpoint_every: checkpoints.every,
-        from: checkpoints.from,
-        ..Default::default()
-    };
     let mut barriers = 0u64;
     // A checkpoint is written through the data layer as it is taken; the
     // control requests waiting for one get its key.
