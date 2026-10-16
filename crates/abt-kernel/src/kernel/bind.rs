@@ -15,11 +15,12 @@
 //! (ERRATA E-36).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use abt_wire::generated::abt::wire::{
-    Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, PlanStep, Preference, PreferenceKind, PutRequest, QueryForm,
-    QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
+    AggregateCall, AggregateRequest, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, PlanStep, Preference,
+    PreferenceKind, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
 };
 use abt_wire::rpc::{Client, Reply, WireError};
 use abt_wire::transport::Connection;
@@ -104,6 +105,27 @@ impl DataClient {
             }
             _ => Err(RunError::Config("the data service answered a resolve with another message".into())),
         }
+    }
+
+    /// An aggregate the data layer's pass computes (D-6) over a view: the
+    /// cache key and the answer's rows.
+    pub fn aggregate(&self, view: &View, request: AggregateRequest) -> Result<(String, Vec<RecordBatch>), RunError> {
+        let mut reply = self
+            .client
+            .call(Message::AggregateCall(Box::new(AggregateCall {
+                view: Some(Box::new(view.clone())),
+                request: Box::new(request),
+            })))
+            .map_err(wire)?;
+        let key = match reply.message().map_err(wire)? {
+            Message::AggregateResponse(r) => r.cache_key,
+            _ => return Err(RunError::Config("the data service answered an aggregate with another message".into())),
+        };
+        let Message::TableFollows(_) = reply.message().map_err(wire)? else {
+            return Err(RunError::Config("the data service sent an aggregate's key without its answer".into()));
+        };
+        let (_, batches) = reply.table().map_err(wire)?;
+        Ok((key, batches))
     }
 
     pub fn query(&self, view: &View, form: QueryForm) -> Result<Vec<RecordBatch>, RunError> {
@@ -543,6 +565,152 @@ pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
         prints,
         warnings,
     })
+}
+
+/// Pushes a kernel's eligible aggregate literals down to the data layer
+/// (K-4.5): one request each over the binding and the kernel's calendars,
+/// walking the labels of the window variable's calendar with the program's
+/// numerics; its answer is held by (instrument, label) for the evaluator. A
+/// literal the layer cannot answer is evaluated here; the result says which
+/// and why.
+pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &StreamSpec) -> Result<Vec<String>, RunError> {
+    let mut notes = Vec::new();
+    if !k.cfg.pushdown {
+        return Ok(notes);
+    }
+    let Some(clock) = spec.relations.iter().flatten().find(|v| v.relation.ends_with(".calendar_label")).cloned() else {
+        return Ok(notes);
+    };
+    let view = View {
+        versions: Some(vec![clock]),
+        binding: bound.binding.id.clone(),
+        as_of_seq: None,
+    };
+    // The kernel's symbols, in its own order (as the stream's decoder maps them).
+    let by_id: HashMap<u64, Sym> = bound.ids.iter().enumerate().map(|(s, &id)| (id, k.remap_syms[s])).collect();
+    let numerics = if k.cfg.running_sums {
+        abt_wire::generated::abt::wire::Numerics::Running
+    } else {
+        abt_wire::generated::abt::wire::Numerics::TwoPass
+    };
+    for ((ri, li), e) in super::pushdown::eligibilities(k.prog) {
+        let Ok(shape) = e else { continue };
+        let label = k.prog.rule_label(ri);
+        let Some((stored_rel, schema)) = bound.stored.get(&shape.relation) else { continue };
+        let values: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role != Role::ReceiptTime).collect();
+        let cols: Vec<String> = shape.columns.iter().filter_map(|&p| values.get(p).map(|c| c.name.clone())).collect();
+        if cols.len() != shape.columns.len() {
+            continue;
+        }
+        let cr = k.compiled[ri].clone();
+        let (Some(&entity_slot), Some(&base_slot)) = (cr.slots.get(&shape.entity_var), cr.slots.get(&shape.base_var)) else {
+            continue;
+        };
+        // A length or minimum that does not evaluate leaves the window here,
+        // to fail as the rule does.
+        let (Ok(dur), Ok(min)) = (k.static_value(ri, &shape.dur), k.static_value(ri, &shape.min)) else {
+            continue;
+        };
+        let min = min.as_f64().map(|m| m.max(0.0) as u64);
+        let wcal = k.prog.var_cals[ri].get(&shape.window_var).cloned().unwrap_or(Cal::Base);
+        use abt_wire::generated::abt::wire::WindowKind as W;
+        let as_count = |v: &Value| v.as_f64().map(|x| x.max(0.0) as u64).unwrap_or(0);
+        let as_span = |v: &Value| match v {
+            Value::Dur(d) => Some(Box::new(abt_wire::generated::abt::wire::Duration {
+                months: d.months,
+                days: d.days,
+                nanos: d.nanos,
+            })),
+            _ => None,
+        };
+        let (window, n, span, bucket) = match &shape.window {
+            crate::ir::WindowKind::Rows => (W::Rows, as_count(&dur), None, None),
+            crate::ir::WindowKind::PriorRows => (W::PriorRows, as_count(&dur), None, None),
+            crate::ir::WindowKind::Window => (W::Span, 0, as_span(&dur), None),
+            crate::ir::WindowKind::Prior => (W::PriorSpan, 0, as_span(&dur), None),
+            crate::ir::WindowKind::Bucket(c) => (W::Bucket, 0, None, Some(c.to_string())),
+            crate::ir::WindowKind::Session => continue,
+        };
+        if matches!(window, W::Span | W::PriorSpan) && span.is_none() {
+            continue;
+        }
+        let request = AggregateRequest {
+            relation: stored_rel.clone(),
+            column: cols[0].clone(),
+            second_column: cols.get(1).cloned(),
+            function: shape.function.clone(),
+            level: shape.level,
+            window,
+            n,
+            min,
+            span,
+            bucket,
+            group: abt_wire::generated::abt::wire::Grouping::PerEntity,
+            group_column: None,
+            receipt_filter: None,
+            numerics,
+            calendar: Some(wcal.to_string()),
+            t0: None,
+            t1: None,
+            output: None,
+        };
+        let batches = match client.aggregate(&view, request) {
+            Ok((_, b)) => b,
+            Err(e) => {
+                notes.push(format!("rule {}: the aggregate is evaluated here: {}", label, e));
+                continue;
+            }
+        };
+        let mut by_time: super::hash::FxHashMap<i64, Vec<(Sym, super::pushdown::Answer)>> = super::hash::FxHashMap::default();
+        let mut unmapped = false;
+        for b in &batches {
+            let ids = col(b, "entity")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+            let ts = times(
+                b.column_by_name("t")
+                    .or_else(|| b.column_by_name("label"))
+                    .ok_or_else(|| RunError::Internal("an aggregate answer without its time".into()))?,
+            );
+            let rs = times(col(b, "r")?);
+            let value = col(b, "value")?.as_primitive::<arrow::datatypes::Float64Type>().clone();
+            let count = col(b, "count")?.as_primitive::<arrow::datatypes::Int64Type>().clone();
+            let error = col(b, "error")?.clone();
+            for i in 0..b.num_rows() {
+                let (Some(t), Some(r)) = (ts[i], rs[i]) else { continue };
+                let Some(&sym) = by_id.get(&ids.value(i)) else {
+                    unmapped = true;
+                    continue;
+                };
+                by_time.entry(t).or_default().push((
+                    sym,
+                    super::pushdown::Answer {
+                        value: (!value.is_null(i)).then(|| value.value(i)),
+                        count: count.value(i),
+                        error: !error.is_null(i),
+                        r,
+                    },
+                ));
+            }
+        }
+        // An instrument of the answer the binding does not name would be
+        // missing from a section: the window is evaluated here.
+        if unmapped {
+            notes.push(format!("rule {}: the aggregate is evaluated here: its answer names an instrument the binding does not", label));
+            continue;
+        }
+        for section in by_time.values_mut() {
+            section.sort_by_key(|(s, _)| *s);
+        }
+        k.pushed.insert(
+            (ri, li),
+            Rc::new(super::pushdown::Pushed {
+                shape,
+                entity_slot,
+                base_slot,
+                by_time,
+            }),
+        );
+    }
+    Ok(notes)
 }
 
 /// The relations of a class each need of a data block admits (Definition

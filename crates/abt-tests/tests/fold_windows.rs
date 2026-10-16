@@ -1,7 +1,9 @@
 //! Incremental windows (data-bundle doc, section 2 "State"): a windowed
 //! aggregation keeps, per group, the rows of every bar it has solved, so a
 //! rolling feature solves each bar once and only evicts; the result is the
-//! uncached evaluation to the bit, on both drivers.
+//! uncached evaluation to the bit, on both drivers. The window state is the
+//! kernel's, so these runs evaluate every aggregate here, without pushdown
+//! (K-4.5, which `tests/pushdown.rs` compares to this evaluation).
 
 use abt_tests as common;
 
@@ -73,6 +75,7 @@ fn cache_is_exact(sub_daily: bool, only_evicts: bool) {
         // move a bit.
         let cached = ExecConfig {
             running_sums: false,
+            pushdown: false,
             ..ExecConfig::from_program(&p)
         };
         let uncached = ExecConfig {
@@ -140,7 +143,10 @@ fn a_rolling_feature_solves_each_bar_once() {
     .render();
     let p = common::program(&src, "rolling");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 320, 3);
-    let cfg = ExecConfig::from_program(&p);
+    let cfg = ExecConfig {
+        pushdown: false,
+        ..ExecConfig::from_program(&p)
+    };
     let cached = run(&p, &ds, cfg.clone()).unwrap();
     let uncached = run(&p, &ds, ExecConfig { window_cache: false, ..cfg }).unwrap();
     assert_eq!(digest(&cached), digest(&uncached));
@@ -180,7 +186,10 @@ fn a_group_is_keyed_by_the_outer_bindings_the_conjunction_reads() {
     .render();
     let p = common::program(&src, "two_lengths");
     let ds = synthetic_daily(&SYMS, (2022, 1, 3), 200, 9);
-    let cfg = ExecConfig::from_program(&p);
+    let cfg = ExecConfig {
+        pushdown: false,
+        ..ExecConfig::from_program(&p)
+    };
     let cached = run(&p, &ds, cfg.clone()).unwrap();
     let uncached = run(&p, &ds, ExecConfig { window_cache: false, ..cfg }).unwrap();
     assert_eq!(digest(&cached), digest(&uncached));

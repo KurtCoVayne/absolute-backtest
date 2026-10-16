@@ -115,6 +115,7 @@ fn usage_documents_every_option() {
         "--param",
         "--plan",
         "--verify-causality",
+        "--no-pushdown",
         "--all",
         "--fills",
         "--nav",
@@ -259,6 +260,7 @@ fn timing_prints_one_stderr_line_with_every_field() {
         "window_groups",
         "window_rows_cached",
         "late_tuples",
+        "pushed_answers",
     ] {
         assert!(names.contains(&want), "timing lacks {}: {}", want, lines[0]);
     }

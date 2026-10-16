@@ -253,6 +253,9 @@ impl<'p, 'e> Fold<'p, 'e> {
                 Ok(())
             }
             Event::Barrier { cal, label, .. } => {
+                // Every tuple received by the barrier's instant precedes it
+                // (D-5.3): the kernel holds what was received by `now`.
+                self.kernel.now = super::bind::barrier_at(self.kernel.prog, label);
                 self.kernel.open_bucket(&cal, label);
                 self.barrier(&cal, label)
             }

@@ -18,6 +18,7 @@ pub mod bind;
 pub mod executor;
 pub mod fold;
 pub mod hash;
+pub mod pushdown;
 pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
 pub use executor::{Executor, SimExecutor};
 pub use fold::{fingerprint, Checkpoint, CheckpointEvery, Event, Fold};
@@ -512,6 +513,9 @@ pub struct KernelStats {
     /// run), each served from a buffer rebuilt by walking back from its bar.
     #[serde(default)]
     pub window_backward: usize,
+    /// Aggregate literals answered by the data layer's pass (K-4.5).
+    #[serde(default)]
+    pub pushed_answers: usize,
 }
 
 /// What the evaluator derived for one relation over a run: how many times
@@ -567,6 +571,10 @@ pub struct ExposureRecord {
     pub equity: f64,
     /// gross / equity (0 when equity is not positive).
     pub leverage: f64,
+}
+
+fn pushdown_on() -> bool {
+    true
 }
 
 /// Executor configuration: part of the kernel, not of the program (section 6).
@@ -644,6 +652,11 @@ pub struct ExecConfig {
     /// so that a rolling feature solves each bar once (data-bundle doc,
     /// section 2, "State"); off only to prove the cache exact.
     pub window_cache: bool,
+    /// Push eligible aggregate literals down to the data layer's pass (K-4.5);
+    /// off only to compare the two (`--no-pushdown`, G3). Not part of the
+    /// configuration's identity: both give the same bits (D-6.1).
+    #[serde(skip, default = "pushdown_on")]
+    pub pushdown: bool,
     /// Rolling `mean`, `sum`, `std`, `cov`, `corr` and `ols_slope` over a rows
     /// window from sliding sums (compensated, shifted, rebuilt exactly every
     /// N rows): O(1) a bar instead of O(N), equal to the exact two-pass
@@ -751,6 +764,7 @@ impl Default for ExecConfig {
             price_relation: None,
             as_of: None,
             window_cache: true,
+            pushdown: true,
             running_sums: true,
             delisting_haircuts: vec![("bankruptcy".into(), 1.0), ("regulatory".into(), 1.0), ("acquisition".into(), 0.0), ("voluntary".into(), 0.0)],
             delisting_haircut_default: 1.0,
@@ -1411,6 +1425,14 @@ pub struct Kernel<'p> {
     /// The `clock(A, @T)` relation of a session-offset clock.
     pub(crate) clock_rel: Option<usize>,
     pub(crate) cfg: ExecConfig,
+    /// The pushed-down aggregate literals' answers, by (rule, literal).
+    pub(crate) pushed: FxHashMap<(usize, usize), Rc<pushdown::Pushed>>,
+    /// The instant of the last barrier the fold passed: every tuple received
+    /// by it is held, so a pushed answer that waits on no later receipt is
+    /// what the kernel computes (ERRATA E-47). Before the first barrier (a
+    /// kernel just built or restored) it is no instant, and no pushed answer
+    /// is read; after the fold it stays the last barrier's.
+    pub(crate) now: i64,
     pub(crate) price_rel: Option<usize>,
     pub(crate) price_col: usize,
     pub(crate) volume_rel: Option<usize>,
@@ -1549,6 +1571,13 @@ impl<'p> Kernel<'p> {
     }
     pub fn summary_rows(&self) -> &[SummaryRow] {
         &self.summary_rows
+    }
+    /// The aggregate literals the data layer's pass answers (K-4.5), by
+    /// (rule, literal): they hold no window state here.
+    pub fn pushed_literals(&self) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = self.pushed.keys().copied().collect();
+        out.sort_unstable();
+        out
     }
     pub fn plan_label(&self) -> &str {
         &self.plan_label
@@ -2139,6 +2168,8 @@ impl<'p> Kernel<'p> {
             session_domains: sessions.iter().map(|(s, v)| (*s, v.iter().map(|(_, l)| *l).collect())).collect(),
             sessions,
             cfg,
+            pushed: Default::default(),
+            now: i64::MIN,
             price_rel,
             price_col,
             volume_rel,
@@ -3106,10 +3137,15 @@ pub fn replay<'p>(
     if let Some(end) = end_label.or(opts.horizon) {
         cfg.as_of = Some(cfg.as_of.or(bound.bundle_date()).map_or(end, |a| a.min(end)));
     }
-    let kernel = match lowered {
+    let mut kernel = match lowered {
         Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
         None => Kernel::bound(prog, &bound, cfg.clone())?,
     };
+    // A literal the data layer does not answer is evaluated here: the run
+    // says so (E-47).
+    for message in bind::push_down(&mut kernel, &bound, client, &spec)? {
+        kernel.run_warnings.push(RunWarning { bias: "pushdown".into(), message });
+    }
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
     let mut fold = match &opts.from {
         Some(cp) => Fold::restore(kernel, exec, cp.clone())?,

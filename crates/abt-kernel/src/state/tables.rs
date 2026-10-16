@@ -538,6 +538,13 @@ pub fn summary(k: &Kernel, prog: &Program) -> Table {
         t.notes
             .push("no summary recorded: the run was not recording (`Kernel::record_summaries`), or no windowed aggregation ran through a cache".into());
     }
+    for (rule, lit) in k.pushed_literals() {
+        t.notes.push(format!(
+            "{} literal {}: answered by the data layer's aggregate pass (pushdown, K-4.5), which holds its window state",
+            prog.rule_label(rule),
+            lit
+        ));
+    }
     t
 }
 

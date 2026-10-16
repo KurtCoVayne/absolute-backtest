@@ -43,6 +43,10 @@ struct Out {
     value: Option<f64>,
     count: i64,
     error: Option<String>,
+    /// The latest receipt of the group's rows at or before `t`: from that
+    /// instant on, the answer is what a reader of the received rows computes
+    /// (ERRATA E-47).
+    r: i64,
 }
 
 /// The labels of a calendar in the view: its `calendar_label` rows.
@@ -111,6 +115,7 @@ pub fn answer_schema(request: &AggregateRequest) -> RelationSchema {
     columns.push(col("value", ColumnType::Num, Role::Value));
     columns.push(col("count", ColumnType::Count, Role::Value));
     columns.push(col("error", ColumnType::Label, Role::Value));
+    columns.push(col("r", ColumnType::Time, Role::ReceiptTime));
     RelationSchema {
         name: request.output.clone().unwrap_or_else(|| "aggregate".to_string()),
         class: "cache".to_string(),
@@ -160,6 +165,7 @@ fn to_batch(schema: &RelationSchema, rows: &[Out], names: &BTreeMap<u64, String>
             "entity" => Arc::new(UInt64Array::from(rows.iter().map(|r| r.group).collect::<Vec<_>>())),
             "group" => Arc::new(StringArray::from(rows.iter().map(|r| names.get(&r.group).cloned().unwrap_or_default()).collect::<Vec<_>>())),
             "t" | "label" => Arc::new(TimestampNanosecondArray::from(rows.iter().map(|r| r.t).collect::<Vec<_>>())),
+            "r" => Arc::new(TimestampNanosecondArray::from(rows.iter().map(|r| r.r).collect::<Vec<_>>())),
             "value" => Arc::new(Float64Array::from(rows.iter().map(|r| r.value).collect::<Vec<_>>())),
             "count" => Arc::new(Int64Array::from(rows.iter().map(|r| r.count).collect::<Vec<_>>())),
             _ => Arc::new(StringArray::from(rows.iter().map(|r| r.error.clone()).collect::<Vec<_>>())),
@@ -169,8 +175,26 @@ fn to_batch(schema: &RelationSchema, rows: &[Out], names: &BTreeMap<u64, String>
     Ok(RecordBatch::try_new(Arc::new(arrow::datatypes::Schema::new(fields)), cols)?)
 }
 
-/// The input's rows of one group: (t, values) in time order.
-type Series = Vec<(i64, [f64; 2])>;
+/// The input's rows of one group in time order: (t, values) of the rows
+/// with values, and (t, r) of every row, the receipts an answer waits on.
+#[derive(Default)]
+struct Series {
+    rows: Vec<(i64, [f64; 2])>,
+    recv: Vec<(i64, i64)>,
+}
+
+impl Series {
+    /// The latest receipt at or before each row, in `recv` order.
+    fn prefix_receipts(&self) -> Vec<i64> {
+        self.recv
+            .iter()
+            .scan(i64::MIN, |m, &(_, r)| {
+                *m = (*m).max(r);
+                Some(*m)
+            })
+            .collect()
+    }
+}
 
 /// The pass: the request's rows, in (t, group) order, and the texts of the
 /// labels that key a per-label grouping.
@@ -237,18 +261,22 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     let mut times: Vec<i64> = Vec::new();
     for b in &batches {
         let ts = rows::times(b, lay.t);
+        let rs = lay.r.map(|r| rows::times(b, r));
         for i in 0..b.num_rows() {
-            if b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i)) {
-                continue;
-            }
             let g = match gc {
                 Some(c) if s.columns[c].ty == ColumnType::Entity => b.column(c).as_primitive::<arrow::datatypes::UInt64Type>().value(i),
                 Some(c) => b.column(c).as_primitive::<arrow::datatypes::UInt32Type>().value(i) as u64,
                 None => 0,
             };
+            let t = ts.value(i);
+            let series = groups.entry(g).or_default();
+            series.recv.push((t, rs.map_or(t, |r| r.value(i))));
+            if b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i)) {
+                continue;
+            }
             let x = [value(b, vc, i), wc.map(|w| value(b, w, i)).unwrap_or(0.0)];
-            groups.entry(g).or_default().push((ts.value(i), x));
-            times.push(ts.value(i));
+            series.rows.push((t, x));
+            times.push(t);
         }
     }
     let names: BTreeMap<u64, String> = if request.group == Grouping::PerLabel {
@@ -328,10 +356,13 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    fn emit(&self, out: &mut Vec<Out>, t: i64, group: GroupKey, count: usize, v: Result<Option<f64>, AggError>) {
+    #[allow(clippy::too_many_arguments)]
+    fn emit(&self, out: &mut Vec<Out>, series: &Series, received: &[i64], t: i64, group: GroupKey, count: usize, v: Result<Option<f64>, AggError>) {
         if t < self.t0 || t > self.t1 {
             return;
         }
+        let upto = series.recv.partition_point(|x| x.0 <= t);
+        let r = if upto == 0 { i64::MIN } else { received[upto - 1] };
         match v {
             Ok(Some(x)) => out.push(Out {
                 t,
@@ -339,6 +370,7 @@ impl Ctx<'_> {
                 value: Some(x),
                 count: count as i64,
                 error: None,
+                r,
             }),
             Ok(None) => {}
             Err(e) => out.push(Out {
@@ -347,14 +379,17 @@ impl Ctx<'_> {
                 value: None,
                 count: count as i64,
                 error: Some(e.to_string()),
+                r,
             }),
         }
     }
 
     /// One group's answer rows, in time order.
-    fn group(&self, g: GroupKey, series: &Series) -> Vec<Out> {
+    fn group(&self, g: GroupKey, all: &Series) -> Vec<Out> {
         let r = self.request;
         let mut out = Vec::new();
+        let received = all.prefix_receipts();
+        let series = &all.rows;
         // A group's rows at the labels only, one per label for rows windows.
         let at_label = |t: i64| self.labels.binary_search(&t).is_ok();
         match r.window {
@@ -379,13 +414,13 @@ impl Ctx<'_> {
                     if prior && row.is_some() {
                         let count = w.count();
                         let v = w.value(min);
-                        self.emit(&mut out, t, g, count, v);
+                        self.emit(&mut out, all, &received, t, g, count, v);
                     }
                     w.step(index as u64, t, row.is_some(), row.as_ref().map(|x| x.as_slice()));
                     if !prior && row.is_some() {
                         let count = w.count();
                         let v = w.value(min);
-                        self.emit(&mut out, t, g, count, v);
+                        self.emit(&mut out, all, &received, t, g, count, v);
                     }
                 }
             }
@@ -407,14 +442,14 @@ impl Ctx<'_> {
                         w.evict(abt_wire::scalar::sub_duration(t, d.months, d.days, d.nanos));
                         if prior {
                             let v = w.value(min);
-                            self.emit(&mut out, t, g, w.len(), v);
+                            self.emit(&mut out, all, &received, t, g, w.len(), v);
                         }
                         for row in &series[i..j] {
                             w.push(t, &row.1);
                         }
                         if !prior {
                             let v = w.value(min);
-                            self.emit(&mut out, t, g, w.len(), v);
+                            self.emit(&mut out, all, &received, t, g, w.len(), v);
                         }
                     }
                     i = j;
@@ -433,7 +468,7 @@ impl Ctx<'_> {
                     }
                     if !w.is_empty() {
                         let v = w.value(min);
-                        self.emit(&mut out, l, g, w.len(), v);
+                        self.emit(&mut out, all, &received, l, g, w.len(), v);
                     }
                     w = WindowState::new(self.f, Mode::TwoPass);
                 }

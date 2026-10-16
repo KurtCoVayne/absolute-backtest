@@ -101,6 +101,55 @@ batch driver agree on every corpus program. Each bless since:
   `close_before` of R8L are session-relative), while X-3.3 counts them as
   pushdowns. Until a session window form is added, those features are
   evaluated in the kernel.
+- **E-47 (K-4.5, K-3.3, C-5, D-6.1; pushdown).** The conditions as the
+  kernel reads them (`kernel::pushdown::eligibility`):
+  - (a) the window's conjunction is the window and one atom of a stored
+    relation, keyed by the group's instrument and the window's time. The
+    instrument is the group: it is named by `within`, or shared with the
+    rest of the rule. If it is not, the window reads every instrument's
+    rows and gives one value.
+  - (a) The atom's other arguments are distinct variables that only the
+    aggregate reads. One read outside would group or filter the window's
+    rows, which the pass does not do.
+  - (a) `count` is evaluated here: it counts the window's rows, and the
+    pass counts the rows with a value.
+  - (a) A `rows[N]` window carries the checker's `universe(A, T1)` anchor
+    and counts the instrument's universe bars, which are not D-6.1's
+    `rows(N)` of a relation, so it stays here.
+  - (a) A window over a bar view stays here. The bar view's own literal is
+    pushed, and composing the two aggregates is not done.
+  - (b) D-6.1's forms only, with a length and a minimum that parameters
+    and literals make, and no lower bound. Session windows are E-12.
+  - (c) The conjunction does not read the base time.
+  - (d) The relation is held at the base calendar, the finest.
+
+  The request of a pushed literal is sent once per run, after the stream's
+  calendars are put. It walks the labels of the window variable's calendar
+  with the program's numerics, and has no receipt filter. Each answer row
+  carries `r`, the latest receipt among the instrument's rows at or before
+  its label. At barrier T the evaluator reads an answer only when
+  `r ≤ at(T)`. Then every row the pass read was received by T, so the
+  answer is the one a request filtered at `r ≤ at(T)` gives. Otherwise the
+  window is evaluated here, from Σ_t, which holds exactly the rows received
+  by T. K-3.3's invariant that the receipt filter of every pushdown
+  aggregate equals the barrier's instant is that check. One request per
+  barrier and literal would be one round trip per bar.
+
+  Where the aggregation binds the instrument (a bar view's head), the
+  section at the label is read, every instrument's answer, if all of them
+  are usable. A request the data layer refuses, or an answer naming an
+  instrument the binding does not, leaves the literal here, with a note.
+
+  The planner pushes every eligible literal. C-5 lets it choose by the
+  `explain` cost; that choice waits for M-8's evaluator, whose local cost it
+  would be weighed against.
+
+  `abt plan` prints each aggregate's pushdown, or the condition that keeps
+  it here. `abt run --no-pushdown` is the test switch and is outside the
+  configuration's identity. `--timing` counts `pushed_answers`.
+  `tests/pushdown.rs` runs every corpus program and both books with and
+  without pushdown and compares them to the bit (G3); ten of them push
+  something.
 
 ## Data layer and protocol
 

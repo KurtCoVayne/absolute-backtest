@@ -80,6 +80,9 @@ impl Plan {
                     a.implementation,
                     a.shares_state_of.map(|p| format!("; shares the window state of literal {}", p + 1)).unwrap_or_default()
                 ));
+                if !a.pushdown.is_empty() {
+                    out.push_str(&format!("      {}\n", a.pushdown));
+                }
             }
         }
         out.push_str("\nrelations:\n");

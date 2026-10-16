@@ -35,12 +35,16 @@ fn ts(s: &str) -> i64 {
 
 /// A run under the compiled plan, the kernel kept at the end of the stream.
 fn with_run<T: Send>(p: &Program, ds: &Dataset, summaries: bool, f: impl for<'k> FnOnce(&mut Kernel<'k>, &abt_kernel::kernel::RunResult) -> T + Send) -> T {
+    with_run_cfg(p, ds, summaries, ExecConfig::default(), f)
+}
+
+fn with_run_cfg<T: Send>(p: &Program, ds: &Dataset, summaries: bool, cfg: ExecConfig, f: impl for<'k> FnOnce(&mut Kernel<'k>, &abt_kernel::kernel::RunResult) -> T + Send) -> T {
     let compiled = compile(p, &CompileOptions::default());
     let opts = abt_kernel::kernel::Replay {
         record_summaries: summaries,
         ..Default::default()
     };
-    common::run_keeping(p, Some(&compiled.lowered), ds, ExecConfig::default(), &opts, |r, k| Ok(f(k, r))).unwrap().1
+    common::run_keeping(p, Some(&compiled.lowered), ds, cfg, &opts, |r, k| Ok(f(k, r))).unwrap().1
 }
 
 /// The corpus's z-score mean reversion with one relation of its own that
@@ -137,12 +141,22 @@ fn extension_carried_and_summary_of_a_run() {
 
 /// A calendar window's groups are recorded with their rows per bar: the
 /// z-score's mean and standard deviation are two library instances, each
-/// with its own rule.
+/// with its own rule. (The kernel's window state: evaluated here, without
+/// pushdown, which leaves an eligible window's state to the data layer and
+/// says so in the table's notes.)
 #[test]
 fn the_summary_table_records_calendar_windows() {
     let p = common::corpus_program("mean_reversion_zscore");
     let ds = dataset();
     with_run(&p, &ds, true, |k, _| {
+        let sum = tables::summary(k, &p);
+        assert!(sum.notes.iter().any(|n| n.contains("answered by the data layer's aggregate pass")), "{:?}", sum.notes);
+    });
+    let local = ExecConfig {
+        pushdown: false,
+        ..ExecConfig::default()
+    };
+    with_run_cfg(&p, &ds, true, local, |k, _| {
         let sum = tables::summary(k, &p);
         assert!(!sum.is_empty(), "{}", sum.text());
         let labels: std::collections::BTreeSet<String> = sum.rows.iter().filter_map(|row| if let Cell::Str(s) = &row[0] { Some(s.clone()) } else { None }).collect();

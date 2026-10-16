@@ -441,7 +441,7 @@ A = E1, F = 43.49, S = 43.95, T = 2022-04-07`).
 abt check <files...>
 abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
-        [--verify-causality] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>
+        [--verify-causality] [--no-pushdown] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N --checkpoint-dir DIR] [--resume FILE]
 abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
@@ -497,7 +497,13 @@ gross, net, leverage`), `--returns FILE` the returns per reporting period
 tuples at every bar, `--tables DIR` every state table as Arrow IPC, and
 `--dump DIR` what the reference engine replays. `--timing` prints one
 stderr line with the load, build and run times, the bar and tuple counts
-and the kernel's statistics.
+and the kernel's statistics, among them `pushed_answers`, the windows the
+data layer's aggregate pass answered. An aggregate over one stored relation
+in one of the pass's window forms is pushed down to the data layer, which
+computes it over the whole run in one request; `abt plan` prints, under
+each aggregate, `pushdown: ...` or `local:` and the condition that keeps it
+in the kernel (`docs/spec/ERRATA.md`, E-47). `--no-pushdown` evaluates every
+aggregate in the kernel, a test switch: both give the same bits.
 
 Every option value is validated: `--days abc`, `--symbols ""` or `--at
 yesterday` are errors naming the option, never a silent default, and an

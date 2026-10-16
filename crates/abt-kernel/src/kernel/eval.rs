@@ -1202,6 +1202,9 @@ impl<'p> Kernel<'p> {
                 }
             }
             Literal::Agg { var, agg, args, conj, within, .. } => {
+                if self.pushed_answers(cr, lit, var, env, out) {
+                    return Ok(());
+                }
                 let mut min_count: i64 = 0;
                 for l in conj {
                     if let Literal::Window { min, .. } = l {
@@ -1447,6 +1450,57 @@ impl<'p> Kernel<'p> {
             }
         }
         Ok(())
+    }
+
+    /// The pushed answers of an aggregate literal at this binding (K-4.5):
+    /// the data layer's value for the bound instrument at the bound base
+    /// time or, when the aggregation binds the instrument, every
+    /// instrument's at that time, in the instrument order the local grouping
+    /// gives; only when every row they read was received by the barrier
+    /// being evaluated (ERRATA E-47). False when the window is evaluated here.
+    fn pushed_answers(&mut self, cr: &CompiledRule, lit: &Literal, var: &str, env: &Env, out: &mut Vec<Env>) -> bool {
+        if self.pushed.is_empty() {
+            return false;
+        }
+        let Some(pos) = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)) else {
+            return false;
+        };
+        let Some(p) = self.pushed.get(&(cr.idx, pos)).cloned() else { return false };
+        let Some(Some(Value::Time(t))) = env.get(p.base_slot) else { return false };
+        let Some(section) = p.by_time.get(t) else { return false };
+        let vslot = cr.slots[var];
+        match env.get(p.entity_slot) {
+            Some(Some(Value::Equity(a))) => {
+                let Ok(i) = section.binary_search_by_key(a, |(s, _)| *s) else { return false };
+                let ans = &section[i].1;
+                let (Some(x), false, true) = (ans.value, ans.error, ans.r <= self.now) else { return false };
+                let mut e = env.clone();
+                e[vslot] = Some(Value::Num(x));
+                out.push(e);
+            }
+            Some(None) => {
+                if section.iter().any(|(_, a)| a.value.is_none() || a.error || a.r > self.now) {
+                    return false;
+                }
+                for (s, a) in section {
+                    let mut e = env.clone();
+                    e[p.entity_slot] = Some(Value::Equity(*s));
+                    e[vslot] = a.value.map(Value::Num);
+                    out.push(e);
+                }
+            }
+            _ => return false,
+        }
+        self.stats.pushed_answers += 1;
+        true
+    }
+
+    /// A window's length or minimum, which only parameters and literals
+    /// make (K-4.5 (b)).
+    pub(crate) fn static_value(&mut self, rule: usize, e: &Expr) -> Result<Value, RunError> {
+        let cr = self.compiled[rule].clone();
+        let env: Env = vec![None; cr.nslots];
+        self.eval_expr(&cr, e, &env)
     }
 
     /// The aggregate's arguments on one row of its group, as numbers.

@@ -229,6 +229,7 @@ pub fn plan_program(prog: &Program, inputs: &PlanInputs, stats: &Statistics, num
                     implementation: implementation(agg, window.clone(), numerics == Numerics::Running),
                     numerics,
                     shares_state_of: shared.get(&(ri, li)).copied(),
+                    pushdown: crate::kernel::pushdown::describe(&crate::kernel::pushdown::eligibility(prog, ri, li)),
                 });
             }
         }

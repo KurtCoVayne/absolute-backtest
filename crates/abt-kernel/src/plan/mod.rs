@@ -85,6 +85,9 @@ pub struct AggPlan {
     pub numerics: Numerics,
     /// The literal (of the same rule) whose window state this one reads (R3).
     pub shares_state_of: Option<usize>,
+    /// Whether the data layer's pass answers it (K-4.5), and why not.
+    #[serde(default)]
+    pub pushdown: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

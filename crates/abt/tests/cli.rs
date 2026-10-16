@@ -258,6 +258,33 @@ fn run_prints_every_decision_and_the_fills_on_request() {
     assert!(stdout.lines().any(|l| l.trim_start().starts_with("fill ") && l.contains(" @ ")), "stdout: {}", stdout);
 }
 
+/// K-4.5: `--no-pushdown` evaluates every aggregate in the kernel; the run is
+/// the same, decision for decision and fill for fill, and only the count of
+/// the data layer's answers differs.
+#[test]
+fn no_pushdown_is_the_same_run() {
+    let files = strategy_files("sma_crossover");
+    let run = |extra: &[&str]| {
+        let mut args = vec!["run", "--strategy", "sma_crossover", "--synthetic", "--seed", "1", "--days", "300", "--all", "--fills", "--timing"];
+        args.extend(extra);
+        args.extend(files.iter().map(|s| s.as_str()));
+        let out = abt(&args);
+        let (stdout, stderr) = text(&out);
+        assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+        let pushed: usize = stderr
+            .split_whitespace()
+            .find_map(|kv| kv.strip_prefix("pushed_answers="))
+            .unwrap_or_else(|| panic!("{}", stderr))
+            .parse()
+            .unwrap();
+        (stdout, pushed)
+    };
+    let (pushed_run, pushed) = run(&[]);
+    let (local_run, local) = run(&["--no-pushdown"]);
+    assert_eq!(pushed_run, local_run);
+    assert!(pushed > 0 && local == 0, "pushed {} / {}", pushed, local);
+}
+
 /// trend-09: `--param name=value` (repeatable) overrides a parameter on
 /// `abt run` and `abt explain`; a value outside the declared range or of the
 /// wrong type, or an unknown name, is refused. (`fast=30d`: the strategy's
