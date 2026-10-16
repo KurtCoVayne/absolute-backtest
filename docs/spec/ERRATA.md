@@ -523,6 +523,15 @@ batch driver agree on every corpus program. Each bless since:
       derived results it derives again. They describe the execution, not
       the run, and the last execution's are the run's.
 
+- **E-57 (V-8.3, V-3; observing a relation declared on several
+  calendars).** A signature that lists calendars (`@X: base | session`)
+  is instantiated on each calendar the program reads it at, as
+  `R@calendar`. `observe R` therefore observes every instance. Each
+  instance is its own observation, with the `where` and `trace` written,
+  and has its own ledger, `kernel.<run>.ledger.R@calendar`. Before this,
+  the checker refused `observe R` for such a relation, as naming no
+  relation.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

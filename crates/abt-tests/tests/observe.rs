@@ -1,6 +1,8 @@
 //! The observability prototype (`docs/language-v2.md`, section 8): the
 //! program graph, the coverage report with its never-fired root causes, the
-//! bindings an explanation reports, and the ledger query.
+//! bindings an explanation reports, and the ledger query; observation
+//! changes no decision (Proposition V-8.4) on every corpus program and both
+//! books.
 
 use abt_tests as common;
 
@@ -161,4 +163,79 @@ fn query_every_bar_is_the_ledger() {
     let saturday = common::day("2022-01-08");
     let err = k.check_bar(&prog.decision_cal, saturday).unwrap_err().to_string();
     assert!(err.contains("2022-01-08 is not a bar of calendar base"), "{}", err);
+}
+
+/// A program's text with an `observe` of every relation its rules block
+/// declares (a template, `rel R[...]`, is observed at its uses only), and
+/// the number of its observations.
+fn observing_everything(src: &str) -> (String, usize) {
+    let lines: Vec<&str> = src.lines().collect();
+    let start = lines.iter().position(|l| l.trim_end() == "  rules {").expect("a rules block");
+    let end = start + lines[start..].iter().position(|l| l.trim_end() == "  }").expect("the rules block closes");
+    let block = &lines[start..end];
+    let observed: std::collections::BTreeSet<&str> = block.iter().filter_map(|l| l.trim().strip_prefix("observe ")?.split_whitespace().next()).collect();
+    let added: Vec<&str> = block
+        .iter()
+        .filter_map(|l| l.trim().strip_prefix("rel ")?.split('(').next())
+        .map(str::trim)
+        .filter(|n| !n.contains('['))
+        .filter(|n| !observed.contains(n))
+        .collect();
+    let mut out: Vec<String> = lines[..end].iter().map(|l| l.to_string()).collect();
+    out.extend(added.iter().map(|n| format!("    observe {}", n)));
+    out.extend(lines[end..].iter().map(|l| l.to_string()));
+    (out.join("\n"), observed.len() + added.len())
+}
+
+/// What a run decided and did, to the bit, with each decision's rule by its
+/// label.
+fn decided(p: &abt_kernel::check::Program, r: &abt_kernel::kernel::RunResult) -> Vec<String> {
+    let mut out = vec![format!("bars {}", r.bars.len())];
+    for d in &r.decisions {
+        out.push(format!("decision {} {} {}", d.t, r.describe_decision(&d.decision), p.rule_label(d.rule)));
+    }
+    for f in &r.fills {
+        out.push(format!("fill {} {} {:x} {:x}", f.t, f.equity, f.quantity.to_bits(), f.price.to_bits()));
+    }
+    for (t, e) in &r.equity_curve {
+        out.push(format!("equity {} {:x}", t, e.to_bits()));
+    }
+    out.push(format!("final_cash {:x}", r.final_cash.to_bits()));
+    out
+}
+
+/// Proposition V-8.4 on every corpus program and both books: the program
+/// observing every relation it declares decides as the program does, to
+/// the bit, and writes a ledger per observation (Definition V-8.3).
+#[test]
+fn observing_every_relation_changes_no_decision() {
+    for path in common::golden_programs() {
+        let src = std::fs::read_to_string(&path).unwrap();
+        let (p, ds) = common::golden_inputs(&path).unwrap();
+        let base = common::run(&p, &ds, ExecConfig::from_program(&p)).unwrap();
+        let (text, written) = observing_everything(&src);
+        let (q, _) = common::golden_inputs_of(&text, &path.display().to_string()).unwrap();
+        // An observation per line, or per calendar instance of a relation
+        // declared on several calendars (R8L's `open0`).
+        assert!(q.observes.len() >= written, "{}", p.strategy);
+        if p.strategy == "r8l" {
+            let open0: Vec<&str> = q.observes.iter().map(|o| o.rel.as_str()).filter(|r| r.starts_with("open0@")).collect();
+            assert_eq!(open0.len(), 2, "`open0` is observed on each of its calendars: {:?}", open0);
+        }
+        let n = q.observes.len();
+        let client = common::client(&q, &ds);
+        let opts = abt_kernel::kernel::Replay {
+            write_outputs: true,
+            ..Default::default()
+        };
+        let r = abt_kernel::kernel::run_on(&q, None, &client, ExecConfig::from_program(&q), &opts).unwrap_or_else(|e| panic!("{}: {}", p.strategy, e));
+        assert_eq!(decided(&q, &r), decided(&p, &base), "{}: observing changed what it decided", p.strategy);
+        let ledgers = r.contract.get("post.ledgers").map(|c| c.status.clone());
+        assert!(
+            matches!(ledgers, Some(abt_kernel::contract::Status::Checked { times }) if times == n as u64),
+            "{}: {:?}",
+            p.strategy,
+            ledgers
+        );
+    }
 }

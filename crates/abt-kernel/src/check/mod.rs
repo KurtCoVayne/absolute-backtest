@@ -1788,10 +1788,17 @@ impl<'a> Checker<'a> {
             let sp = self.root.decisions.as_ref().map(|d| d.span).unwrap_or(self.root.span);
             self.unit_diag(Code::Z, sp, "the decisions block has no decide rule; at least one is required");
         }
-        // O: observations name relations of the program.
+        // O: observations name relations of the program. A relation declared
+        // on several calendars is instantiated on each (section 3), and
+        // observing it observes every instance.
         let observes: Vec<ast::Observe> = self.root.rules.as_ref().map(|r| r.observes.clone()).unwrap_or_default();
         for o in &observes {
-            let Some(sig) = self.relations.get(&o.rel).cloned() else {
+            let instances: Vec<String> = if self.relations.contains_key(&o.rel) {
+                vec![o.rel.clone()]
+            } else {
+                self.relations.keys().filter(|k| k.split_once('@').is_some_and(|(r, _)| r == o.rel)).cloned().collect()
+            };
+            let Some(sig) = instances.first().and_then(|r| self.relations.get(r)).cloned() else {
                 self.unit_diag(Code::O, o.span, format!("`observe {}` names no relation of the program", o.rel));
                 continue;
             };
@@ -1829,12 +1836,14 @@ impl<'a> Checker<'a> {
                 }
             }
             if !bad {
-                self.observes.push(Observe {
-                    rel: o.rel.clone(),
-                    wheres,
-                    trace_instances: o.trace.as_deref() == Some("instances"),
-                    span: o.span,
-                });
+                for rel in instances {
+                    self.observes.push(Observe {
+                        rel,
+                        wheres: wheres.clone(),
+                        trace_instances: o.trace.as_deref() == Some("instances"),
+                        span: o.span,
+                    });
+                }
             }
         }
         // Dependency graph.

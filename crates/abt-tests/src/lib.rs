@@ -83,12 +83,17 @@ pub fn corpus_program(name: &str) -> Program {
 /// with the checker's diagnostics.
 pub fn golden_inputs(file: &Path) -> Result<(Program, Dataset), String> {
     let src = fs::read_to_string(file).map_err(|e| format!("{}: {}", file.display(), e))?;
+    golden_inputs_of(&src, &file.display().to_string())
+}
+
+/// `golden_inputs` of a program's text (`origin` names it in a failure).
+pub fn golden_inputs_of(src: &str, origin: &str) -> Result<(Program, Dataset), String> {
     let name = src
         .lines()
         .find_map(|l| l.trim().strip_prefix("strategy ").map(|r| r.split_whitespace().next().unwrap_or("").trim_end_matches('{').to_string()))
-        .ok_or_else(|| format!("{}: no strategy", file.display()))?;
+        .ok_or_else(|| format!("{}: no strategy", origin))?;
     let mut ws = base_workspace();
-    ws.add_source(&src).map_err(|e| format!("{}: {}", file.display(), e))?;
+    ws.add_source(src).map_err(|e| format!("{}: {}", origin, e))?;
     let (prog, diags) = check_program(&ws, &name);
     let mut prog = prog.ok_or_else(|| format!("{}: does not check:\n{}", name, text(&diags)))?;
     let syms: Vec<&str> = if prog.class == "future" {

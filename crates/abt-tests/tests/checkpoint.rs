@@ -1,14 +1,17 @@
 //! Checkpoints through the data layer (K-4.7, G5) and the identity of a run
 //! (Definition A-4.1, A-6): every monthly checkpoint, written as a cache
 //! object keyed by (run id, seq) and read back by its key, resumes to the
-//! unbroken run to the bit, on corpus programs and both books; the run id is
-//! BLAKE3 over (H(P), β, π, mode), and a parameter point is part of β; H(P)
-//! is stable (a golden file, blessed with ABT_BLESS=1 in a commit naming the
-//! change).
+//! unbroken run to the bit, on every corpus program and both books; the run
+//! id is BLAKE3 over (H(P), β, π, mode), and a parameter point is part of β;
+//! H(P) is stable (a golden file, blessed with ABT_BLESS=1 in a commit
+//! naming the change).
 
 #![allow(clippy::result_large_err)]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use abt_kernel::kernel::{checkpoints, on_kernel_thread, replay, CheckpointEvery, DataClient, ExecConfig, Replay, RunError, RunResult, SimExecutor};
 use abt_tests as common;
@@ -25,7 +28,20 @@ fn digest(r: &RunResult) -> Vec<String> {
     for (t, e) in &r.equity_curve {
         out.push(format!("equity {} {:x}", t, e.to_bits()));
     }
-    out.push(format!("events {}", r.events.len()));
+    for x in &r.exposure {
+        out.push(format!("book {} {:x} {:x} {:x}", x.t, x.cash.to_bits(), x.equity.to_bits(), x.receivables.to_bits()));
+    }
+    for e in &r.events {
+        out.push(format!(
+            "event {} {} {} {:?} {:?} {:?}",
+            e.seq,
+            e.t,
+            e.kind.name(),
+            e.instrument,
+            e.order_id,
+            e.cash_flow.map(f64::to_bits)
+        ));
+    }
     out.push(format!("final_cash {:x}", r.final_cash.to_bits()));
     out
 }
@@ -46,35 +62,73 @@ fn replayed(p: &abt_kernel::check::Program, client: &DataClient, cfg: &ExecConfi
     })
 }
 
-/// G5: every monthly checkpoint of corpus programs and both books, through
-/// the data layer, resumes to the unbroken run.
-#[test]
-fn every_monthly_checkpoint_resumes_to_the_unbroken_run() {
-    let root = common::corpus_dir();
-    for path in [
-        root.join("strategies/sma_crossover.dsl"),
-        root.join("strategies/dividend_capture.dsl"),
-        root.join("company/mw14.dsl"),
-        root.join("company/r8l.dsl"),
-    ] {
-        let (p, ds) = golden_inputs(&path).unwrap();
-        let cfg = ExecConfig::from_program(&p);
-        let client = common::client(&p, &ds);
-        let monthly = Replay {
-            checkpoint_every: Some(CheckpointEvery::Month),
-            ..Replay::default()
-        };
-        let (full, keys) = replayed(&p, &client, &cfg, &monthly).unwrap();
-        assert!(!keys.is_empty(), "{}: no checkpoint", p.strategy);
-        assert_eq!(keys.iter().collect::<std::collections::BTreeSet<_>>().len(), keys.len(), "a key per checkpoint");
-        for key in &keys {
-            let cp = checkpoints::read(&client, key).unwrap();
-            assert_eq!(cp.identity.run_id, full.run_id);
-            assert_eq!(*key, checkpoints::key(&full.run_id, cp.cursor), "keyed by (run id, seq)");
-            let (resumed, _) = replayed(&p, &client, &cfg, &Replay { from: Some(cp), ..Replay::default() }).unwrap();
-            assert_eq!(digest(&resumed), digest(&full), "{}: resumed from {}", p.strategy, key);
+/// Every monthly checkpoint of one program, written through the data layer
+/// and read back by its key, resumes to the unbroken run; the number of
+/// checkpoints.
+fn every_checkpoint_resumes(path: &Path) -> Result<usize, String> {
+    let (p, ds) = golden_inputs(path)?;
+    let name = p.strategy.clone();
+    let cfg = ExecConfig::from_program(&p);
+    let client = common::client(&p, &ds);
+    let monthly = Replay {
+        checkpoint_every: Some(CheckpointEvery::Month),
+        ..Replay::default()
+    };
+    let (full, keys) = replayed(&p, &client, &cfg, &monthly).map_err(|e| format!("{}: {}", name, e))?;
+    if keys.is_empty() {
+        return Err(format!("{}: no checkpoint", name));
+    }
+    if keys.iter().collect::<BTreeSet<_>>().len() != keys.len() {
+        return Err(format!("{}: two checkpoints under one key", name));
+    }
+    let want = digest(&full);
+    for key in &keys {
+        let cp = checkpoints::read(&client, key).map_err(|e| format!("{}: {}", name, e))?;
+        if cp.identity.run_id != full.run_id || *key != checkpoints::key(&full.run_id, cp.cursor) {
+            return Err(format!("{}: the checkpoint {} is not keyed by its run and seq", name, key));
+        }
+        let bar = cp.last_bar;
+        let (resumed, _) = replayed(&p, &client, &cfg, &Replay { from: Some(cp), ..Replay::default() }).map_err(|e| format!("{}: {}", name, e))?;
+        let got = digest(&resumed);
+        if got != want {
+            let at = got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(got.len().min(want.len()));
+            return Err(format!(
+                "{}: resumed from the checkpoint of {} differs at line {}: {:?} against {:?}",
+                name,
+                bar,
+                at,
+                got.get(at),
+                want.get(at)
+            ));
         }
     }
+    Ok(keys.len())
+}
+
+/// G5: every monthly checkpoint of every corpus program and both books
+/// resumes to the unbroken run.
+#[test]
+fn every_monthly_checkpoint_resumes_to_the_unbroken_run() {
+    let programs = common::golden_programs();
+    let next = AtomicUsize::new(0);
+    let outcomes = Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                while let Some(path) = programs.get(next.fetch_add(1, Ordering::SeqCst)) {
+                    let r = every_checkpoint_resumes(path);
+                    outcomes.lock().unwrap().push((path.clone(), r));
+                }
+            });
+        }
+    });
+    let outcomes = outcomes.into_inner().unwrap();
+    assert_eq!(outcomes.len(), programs.len());
+    let failed: Vec<String> = outcomes.iter().filter_map(|(_, r)| r.as_ref().err().cloned()).collect();
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+    // The books are among them, and a daily program checkpoints monthly.
+    assert!(outcomes.iter().any(|(p, r)| p.ends_with("company/mw14.dsl") && r.is_ok()));
+    assert!(outcomes.iter().any(|(p, r)| p.ends_with("strategies/sma_crossover.dsl") && r.as_ref().is_ok_and(|n| *n >= 12)));
 }
 
 #[test]
