@@ -521,84 +521,121 @@ pub fn tables(run: &str, prog: &Program, bound: &Bound, ids: &Ids, cfg: &ExecCon
 /// been. A bar's rows are keyed by their place among them (E-52); R's
 /// arguments are values. With the notes of what cannot be observed.
 pub fn ledgers(run: &str, prog: &Program, k: &mut Kernel, ids: &Ids, result: &RunResult) -> Result<(Tables, Vec<String>), RunError> {
-    let (Some(&first), Some(&last)) = (result.bars.first(), result.bars.last()) else {
-        return Ok((Vec::new(), Vec::new()));
-    };
     let mut out = Vec::new();
     let mut notes = Vec::new();
     for o in &prog.observes {
-        let Some(sig) = prog.relations.get(&o.rel) else { continue };
-        let Some(rel) = k.relation_id(&o.rel) else { continue };
-        let info = k.rels[rel].clone();
-        let width = sig.args.len();
-        let mut rows: Vec<(i64, Vec<Option<Value>>, Option<String>)> = Vec::new();
-        if !info.inputs.is_empty() {
-            notes.push(format!("`observe {}`: the relation takes inputs; its extension is not enumerable and its ledger is empty", o.rel));
-        } else {
-            let mut pattern: Vec<Option<Value>> = vec![None; width];
-            for (v, lit) in &o.wheres {
-                if let Some(i) = sig.args.iter().position(|a| a.name == *v) {
-                    pattern[i] = Some(super::lit_value(lit, &mut k.symbols, &mut k.labels, &k.literal_equities));
-                }
-            }
-            let bars: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
-            for t in bars {
-                pattern[info.key_pos] = Some(Value::Time(t));
-                let (mut live, mut stuck) = k.observe_at(rel, &pattern)?;
-                live.sort();
-                stuck.sort_by(|a, b| a.0.cmp(&b.0));
-                rows.extend(live.into_iter().map(|tu| (t, tu.into_iter().map(Some).collect(), None)));
-                rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e.to_string()))));
-            }
+        match ledger(run, &format!("ledger.{}", o.rel), prog, k, ids, result, &o.rel, &o.wheres)? {
+            Ok(t) => out.push(t),
+            Err(note) => notes.push(format!("`observe {}`: {}", o.rel, note)),
         }
-        // The row's place among its bar's rows.
-        let mut place: Vec<Option<u64>> = Vec::with_capacity(rows.len());
-        for (i, r) in rows.iter().enumerate() {
-            place.push(Some(if i > 0 && rows[i - 1].0 == r.0 { place[i - 1].unwrap_or(0) + 1 } else { 0 }));
-        }
-        let mut table = Table::new(run, &format!("ledger.{}", o.rel))
-            .col("bar", Role::EventTime, Col::Time(rows.iter().map(|r| Some(r.0)).collect()))
-            .col("row", Role::Entity, Col::Entity(place));
-        let reserved = ["bar", "row", "stuck", "stuck_literal"];
-        for (j, a) in sig.args.iter().enumerate() {
-            let values = rows.iter().map(|r| r.1[j].as_ref());
-            let col = match &a.ty {
-                Ty::Entity => Col::Entity(values.map(|v| v.and_then(|v| v.as_equity()).and_then(|s| ids.get(&s).copied())).collect()),
-                Ty::Timestamp => Col::Time(values.map(|v| v.and_then(|v| v.as_time())).collect()),
-                Ty::Count => Col::Count(
-                    values
-                        .map(|v| match v {
-                            Some(Value::Count(c)) => Some(*c),
-                            _ => None,
-                        })
-                        .collect(),
-                ),
-                Ty::Quantity(_) => Col::Num(
-                    values
-                        .map(|v| match v {
-                            Some(Value::Num(x)) => Some(*x),
-                            Some(Value::Count(c)) => Some(*c as f64),
-                            _ => None,
-                        })
-                        .collect(),
-                ),
-                Ty::Label => Col::Label(values.map(|v| v.map(|v| k.show(v))).collect()),
-                _ => Col::Bytes(values.map(|v| v.map(|v| k.show(v))).collect()),
-            };
-            let mut name = a.name.clone();
-            while reserved.contains(&name.as_str()) || sig.args.iter().enumerate().any(|(i, b)| i != j && b.name == name) {
-                name.push('_');
-            }
-            table = table.col_named(name, Role::Value, col);
-        }
-        out.push(
-            table
-                .col("stuck", Role::Value, Col::Bool(rows.iter().map(|r| Some(r.2.is_some())).collect()))
-                .col("stuck_literal", Role::Value, Col::Bytes(rows.iter().map(|r| r.2.clone()).collect()))
-                .finish()?,
-        );
     }
     Ok((out, notes))
+}
+
+/// `ledger R into NAME` (V-8.3): R's ledger written as `kernel.<run>.NAME`;
+/// the rows written.
+pub fn ledger_into(run: &str, prog: &Program, k: &mut Kernel, client: &DataClient, result: &RunResult, rel: &str, into: &str) -> Result<usize, RunError> {
+    if !prog.relations.contains_key(rel) {
+        return Err(RunError::Request(format!("`{}` is not a relation of {}", rel, prog.strategy)));
+    }
+    let ids = k.data_ids.clone();
+    match ledger(run, into, prog, k, &ids, result, rel, &[])? {
+        Ok((schema, batch)) => {
+            let n = batch.num_rows();
+            write(client, vec![(schema, batch)])?;
+            Ok(n)
+        }
+        Err(note) => Err(RunError::Request(format!("`ledger {}`: {}", rel, note))),
+    }
+}
+
+/// One relation's ledger as the relation `kernel.<run>.<name>`, or why it
+/// has none.
+#[allow(clippy::too_many_arguments)]
+fn ledger(
+    run: &str,
+    name: &str,
+    prog: &Program,
+    k: &mut Kernel,
+    ids: &Ids,
+    result: &RunResult,
+    rel_name: &str,
+    wheres: &[(String, crate::Lit)],
+) -> Result<Result<(RelationSchema, RecordBatch), String>, RunError> {
+    let (Some(&first), Some(&last)) = (result.bars.first(), result.bars.last()) else {
+        return Ok(Err("the run has no bar".into()));
+    };
+    let Some(sig) = prog.relations.get(rel_name) else {
+        return Ok(Err("not a relation of the program".into()));
+    };
+    let Some(rel) = k.relation_id(rel_name) else {
+        return Ok(Err("not a relation the kernel holds".into()));
+    };
+    let info = k.rels[rel].clone();
+    let width = sig.args.len();
+    let mut rows: Vec<(i64, Vec<Option<Value>>, Option<String>)> = Vec::new();
+    if !info.inputs.is_empty() {
+        return Ok(Err("the relation takes inputs; its extension is not enumerable".into()));
+    }
+    let mut pattern: Vec<Option<Value>> = vec![None; width];
+    for (v, lit) in wheres {
+        if let Some(i) = sig.args.iter().position(|a| a.name == *v) {
+            pattern[i] = Some(super::lit_value(lit, &mut k.symbols, &mut k.labels, &k.literal_equities));
+        }
+    }
+    let bars: Vec<i64> = k.bars_at(&sig.cal).into_iter().filter(|&b| b >= first && b <= last).collect();
+    for t in bars {
+        pattern[info.key_pos] = Some(Value::Time(t));
+        let (mut live, mut stuck) = k.observe_at(rel, &pattern)?;
+        live.sort();
+        stuck.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.extend(live.into_iter().map(|tu| (t, tu.into_iter().map(Some).collect(), None)));
+        rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e.to_string()))));
+    }
+    // The row's place among its bar's rows.
+    let mut place: Vec<Option<u64>> = Vec::with_capacity(rows.len());
+    for (i, r) in rows.iter().enumerate() {
+        place.push(Some(if i > 0 && rows[i - 1].0 == r.0 { place[i - 1].unwrap_or(0) + 1 } else { 0 }));
+    }
+    let mut table = Table::new(run, name)
+        .col("bar", Role::EventTime, Col::Time(rows.iter().map(|r| Some(r.0)).collect()))
+        .col("row", Role::Entity, Col::Entity(place));
+    let reserved = ["bar", "row", "stuck", "stuck_literal"];
+    for (j, a) in sig.args.iter().enumerate() {
+        let values = rows.iter().map(|r| r.1[j].as_ref());
+        let col = match &a.ty {
+            Ty::Entity => Col::Entity(values.map(|v| v.and_then(|v| v.as_equity()).and_then(|s| ids.get(&s).copied())).collect()),
+            Ty::Timestamp => Col::Time(values.map(|v| v.and_then(|v| v.as_time())).collect()),
+            Ty::Count => Col::Count(
+                values
+                    .map(|v| match v {
+                        Some(Value::Count(c)) => Some(*c),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            Ty::Quantity(_) => Col::Num(
+                values
+                    .map(|v| match v {
+                        Some(Value::Num(x)) => Some(*x),
+                        Some(Value::Count(c)) => Some(*c as f64),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            Ty::Label => Col::Label(values.map(|v| v.map(|v| k.show(v))).collect()),
+            _ => Col::Bytes(values.map(|v| v.map(|v| k.show(v))).collect()),
+        };
+        let mut name = a.name.clone();
+        while reserved.contains(&name.as_str()) || sig.args.iter().enumerate().any(|(i, b)| i != j && b.name == name) {
+            name.push('_');
+        }
+        table = table.col_named(name, Role::Value, col);
+    }
+    Ok(Ok(table
+        .col("stuck", Role::Value, Col::Bool(rows.iter().map(|r| Some(r.2.is_some())).collect()))
+        .col("stuck_literal", Role::Value, Col::Bytes(rows.iter().map(|r| r.2.clone()).collect()))
+        .finish()?))
 }
 
 /// Writes the run's outputs through the data layer: the versions put, by

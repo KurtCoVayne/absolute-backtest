@@ -222,9 +222,11 @@ fn call_sites<'a>(body: &'a [Literal], out: &mut Vec<&'a Atom>) {
 /// Demand (3.4): the relations reachable from `decide`, and for every
 /// parametric relation the parameter tuples it is called at.
 pub fn demand(prog: &Program) -> (BTreeMap<String, DemandSet>, BTreeSet<String>) {
-    // Reachability from decide.
+    // Reachability from decide and from every observation (Definition
+    // V-8.3: an observation is a demand).
     let mut demanded: BTreeSet<String> = BTreeSet::new();
     let mut stack = vec!["decide".to_string()];
+    stack.extend(prog.observes.iter().map(|o| o.rel.clone()));
     while let Some(x) = stack.pop() {
         if !demanded.insert(x.clone()) {
             continue;

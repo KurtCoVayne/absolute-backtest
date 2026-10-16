@@ -143,6 +143,18 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The plan of one relation's rules (`show plan R`, V-8.4).
+    pub fn only(&self, prog: &crate::check::Program, rel: &str) -> Plan {
+        let mine = |r: usize| prog.rules.get(r).is_some_and(|x| x.head.name == rel);
+        Plan {
+            rules: self.rules.iter().filter(|r| mine(r.rule)).cloned().collect(),
+            aggregates: self.aggregates.iter().filter(|a| mine(a.rule)).cloned().collect(),
+            relations: self.relations.iter().filter(|r| r.name == rel).cloned().collect(),
+            strata: self.strata.iter().filter(|s| s.relations.iter().any(|r| r == rel)).cloned().collect(),
+            ..self.clone()
+        }
+    }
+
     /// Attach a run's observed counts to the literals.
     pub fn with_observed(mut self, counts: &[Vec<(u64, u64, u64)>]) -> Plan {
         for rp in &mut self.rules {

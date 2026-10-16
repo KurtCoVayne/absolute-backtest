@@ -377,6 +377,46 @@ batch driver agree on every corpus program. Each bless since:
       charged a commission per contract or on notional. The CLI used to
       hide it only when printing.
 
+- **E-53 (K-7.2, V-8, V-8.3, Definition V-8.1; the query language as
+  the kernel answers it).** `abt query --strategy NAME --text QUERY ...`
+  runs the program over its data and answers each query over the kernel at
+  the end of the run. The forms:
+  - `? BODY at T = DATE`, `at DATE`, `at T` (every bar of the run), or
+    `over D1 .. D2` (a month `YYYY-MM` stands for its days); `for VAR = KEY`
+    binds a variable to an instrument by its key. With no clause, the
+    query is asked at the run's last bar.
+  - `why R(...)`, `why not R(A, T) [in written order]`, `trace R at DATE`
+    (V-8's `trace decide at T`, for any relation), `coverage [over D1 ..
+    D2]`, `show program|plan [R]|schedule|calendars|contract`, and `ledger
+    R into NAME`, which writes `kernel.<run>.NAME` through the data service
+    (E-52's ledger shape), so it needs `--data SOCKET`.
+  - A `?` query is compiled into the program, as Definition V-8.1 has it.
+    Each query adds a relation `__query_<i>(@T[: CAL])` and the rule
+    `__query_<i>(T) :- BODY.`, and an `observe` of it.
+    - T is the variable `at` names, else the key of the body's first atom
+      of a relation of the program. CAL is that atom's calendar.
+    - The program with its queries is checked whole. A query that does not
+      check is refused with the checker's diagnostics, before anything runs.
+    - The run is of that program. By Proposition V-8.4 it decides as the
+      program does; `tests/queries.rs` compares them to the bit.
+  - The answer is the body's solutions at each bar, one column per variable
+    in the order of first appearance. A one-atom query of a derived
+    relation adds `rule`, the rule that derived each row: V-8's "a table
+    with the rule of each", for `decide` and any derived relation.
+  - Instances of a `?` body left stuck on a partial operation are counted
+    in a note of the answer, with the first halt.
+  - `why not` and `trace` report in the plan's order (`show plan`'s).
+    `in written order` evaluates every rule in its written order.
+  - `show schedule` is the program graph's partition into the open loop
+    and the closed loop (F-11.5).
+  - The query language replaces `abt explain` (the `trace` and `why`
+    forms), `abt why-not`, `abt materialise` and `abt query --rel` (the `?`
+    form). Each retired command now exits 2 and names its replacement.
+  - The kernel service (P-3.4), which answers the same forms of a run it
+    holds and between barriers while the run is live (K-7.3), lands next.
+  - Fixed on the way: an observation is a demand (Definition V-8.3), so
+    the analysis no longer flags an observed relation as elided.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

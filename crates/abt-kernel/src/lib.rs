@@ -21,6 +21,7 @@ pub mod kernel;
 pub mod lower;
 pub mod observe;
 pub mod plan;
+pub mod query;
 pub mod rewrite;
 pub mod state;
 pub mod study;

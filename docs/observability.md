@@ -8,6 +8,22 @@ kernel therefore answers, for every relation of a program, what it held at
 any bar and why, and every run reports what every relation derived. These are
 the commands; `docs/language-v2.md` section 8 is the design they prototype.
 
+> **Status (Oct 16, 2026, migration step M-4d).** The query commands below
+> are retired into the query language of section 8, asked with
+> `abt query --strategy NAME --text QUERY ...` (`docs/spec/02-kernel.md`,
+> K-7.2; `docs/spec/ERRATA.md`, E-53):
+>
+> | Was | Is |
+> | --- | --- |
+> | `abt query --rel R --at T [--symbol S]` | `--text '? R(A, T, ...) at T = DATE [for A = S]'` |
+> | `abt query ... --explain`, `abt explain --rule L --at T` | `--text 'trace R at DATE'` |
+> | `abt explain --derivation 'R(...)@BAR'` | `--text 'why R(...)'` |
+> | `abt why-not --rel R --symbol S --at T` | `--text 'why not R(S, DATE)'` |
+> | `abt materialise --rel R --at T` | `--text '? R(...) at T = DATE'` |
+>
+> `abt show`, `abt graph`, `abt table` and the coverage report are as
+> below; this document is folded into K-7 at M-9.
+
 ## The program before a run: `abt show`
 
 ```

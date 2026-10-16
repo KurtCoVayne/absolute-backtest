@@ -1512,6 +1512,12 @@ pub struct Kernel<'p> {
     /// its body, the rules that contribute no work, the aggregation literals
     /// sharing one window state, and the plan's name.
     pub(crate) plan_order: Vec<Option<Rc<Vec<usize>>>>,
+    /// Evaluate every rule in its written order rather than the plan's
+    /// (`why not ... in written order`, V-8.3).
+    pub(crate) written_order: bool,
+    /// The instruments' ids in the data layer, set when the kernel is
+    /// bound (what the outputs name an instrument by, K-7.1).
+    pub(crate) data_ids: outputs::Ids,
     pub(crate) skip_rule: Vec<bool>,
     pub(crate) shared_windows: FxHashMap<(usize, usize), usize>,
     pub(crate) plan_label: String,
@@ -2285,6 +2291,8 @@ impl<'p> Kernel<'p> {
             prog,
             source: prog,
             plan_order: vec![None; prog.rules.len()],
+            written_order: false,
+            data_ids: Default::default(),
             skip_rule: vec![false; prog.rules.len()],
             shared_windows: Default::default(),
             plan_label: "written".into(),
@@ -2895,7 +2903,11 @@ impl<'p> Kernel<'p> {
     /// `explain` with body variables pre-bound: the explanation is then about
     /// the bindings that agree with them (one instrument, say) rather than
     /// about the union of every binding.
-    pub fn explain_with(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<Explanation, RunError> {
+    /// A rule's instance at a bar as evaluation enters its body: the head's
+    /// key and inputs bound, and the variables pre-bound (with their shown
+    /// values). Only bars of the rule's time domain are evaluated.
+    #[allow(clippy::type_complexity)]
+    fn entry(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<(Rc<CompiledRule>, Env, Vec<(String, String)>), RunError> {
         let rule = &self.prog.rules[rule_idx];
         let cr = self.compiled[rule_idx].clone();
         let rel = self.rel(&rule.head.name)?;
@@ -2950,6 +2962,40 @@ impl<'p> Kernel<'p> {
             env[slot] = Some(val.clone());
             shown.push((var.clone(), self.show(val)));
         }
+        Ok((cr, env, shown))
+    }
+
+    /// Every solution of a rule's body at a bar, its variables by name, with
+    /// the instances left stuck on a partial operation (a query's rows,
+    /// V-8.3).
+    #[allow(clippy::type_complexity)]
+    pub fn solutions(&mut self, rule_idx: usize, t: i64, bindings: &[(String, Value)]) -> Result<(Vec<Vec<(String, Value)>>, Vec<RunError>), RunError> {
+        let (cr, env, _) = self.entry(rule_idx, t, &[], bindings)?;
+        let order = self.plan_order(rule_idx);
+        let body = &self.prog.rules[rule_idx].body;
+        let (sols, stuck) = self.solve_kleene(&cr, body, &order, vec![env], Some(rule_idx))?;
+        let mut names: Vec<(&String, usize)> = cr.slots.iter().map(|(n, &s)| (n, s)).collect();
+        names.sort();
+        let rows = sols
+            .iter()
+            .map(|e| names.iter().filter_map(|(n, s)| e[*s].as_ref().map(|v| ((*n).clone(), v.clone()))).collect())
+            .collect();
+        Ok((rows, stuck.into_iter().map(|s| s.error).collect()))
+    }
+
+    /// Evaluate in every rule's written order rather than the plan's.
+    pub fn set_written_order(&mut self, on: bool) {
+        self.written_order = on;
+    }
+
+    /// The kernel's calendars, finer first and the decision calendar last.
+    pub fn calendars(&self) -> Vec<Cal> {
+        bind::calendars(self).into_iter().map(|(c, _)| c).collect()
+    }
+
+    pub fn explain_with(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<Explanation, RunError> {
+        let (cr, env, shown) = self.entry(rule_idx, t, inputs, bindings)?;
+        let rule = &self.prog.rules[rule_idx];
         // Literal by literal in the written order, under Kleene conjunction
         // (`solve_kleene`): the literal reported is the one at which the last
         // instance was excluded, stuck instances included; an instance stuck
@@ -3293,6 +3339,7 @@ pub fn replay<'p>(
         Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
         None => Kernel::bound(prog, &bound, cfg.clone())?,
     };
+    kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
     // A literal the data layer does not answer is evaluated here: the run
     // says so (E-47).
     for message in bind::push_down(&mut kernel, &bound, client, &spec)? {
@@ -3336,7 +3383,7 @@ pub fn replay<'p>(
         if opts.write_outputs {
             let mut partial = fold.result().clone();
             partial.run_id = run.clone();
-            let ids = outputs::instrument_ids(&fold.kernel, &bound);
+            let ids = fold.kernel.data_ids.clone();
             let written = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e)).and_then(|t| outputs::write(client, t));
             if let Err(w) = written {
                 return Err(RunError::Internal(format!("{} (and the halted run's outputs could not be written: {})", e, w)));
@@ -3357,7 +3404,7 @@ pub fn replay<'p>(
         }
         return Ok((result, kernel));
     }
-    let ids = outputs::instrument_ids(&kernel, &bound);
+    let ids = kernel.data_ids.clone();
     let (ledgers, notes) = outputs::ledgers(&run, prog, &mut kernel, &ids, &result)?;
     result.warnings.extend(notes.into_iter().map(|message| RunWarning { bias: "observation".into(), message }));
     if !prog.observes.is_empty() {
@@ -3377,6 +3424,7 @@ pub fn load<'p>(prog: &'p Program, lowered: Option<&'p crate::lower::Lowered>, c
         Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
         None => Kernel::bound(prog, &bound, cfg.clone())?,
     };
+    kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
     let run = bind::run_id(prog, &cfg, &bound.binding);
     let (spec, cal_of) = bind::stream_spec(&kernel, &bound, client, &run)?;
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);

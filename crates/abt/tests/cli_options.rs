@@ -39,8 +39,8 @@ fn malformed_option_values_are_errors_naming_the_option() {
         ),
         (&["run", "--strategy", "sma_crossover", "--synthetic", "--end", "never", "--quiet", CATALOG, LIB, SMA], "--end", "never"),
         (
-            &["explain", "--strategy", "sma_crossover", "--rule", "decide#1", "--at", "yesterday", "--synthetic", CATALOG, LIB, SMA],
-            "--at",
+            &["query", "--strategy", "sma_crossover", "--text", "trace decide at yesterday", "--synthetic", CATALOG, LIB, SMA],
+            "time",
             "yesterday",
         ),
     ];
@@ -128,9 +128,8 @@ fn usage_documents_every_option() {
         "--study",
         "--quiet",
         "--timing",
-        "--rule",
+        "--text",
         "--at",
-        "--bind",
         "--bundle",
         "--checkpoint-every",
         "--checkpoint-dir",
@@ -146,6 +145,10 @@ fn usage_documents_every_option() {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }
     for gone in [
+        "--rule",
+        "--bind",
+        "--derivation",
+        "--depth",
         "--untested",
         "--cash",
         "--capital",
@@ -191,15 +194,13 @@ fn an_execution_price_without_a_price_value_is_rejected() {
 }
 
 #[test]
-fn explain_outside_the_time_domain_says_so() {
+fn a_query_outside_the_time_domain_says_so() {
     let (code, stdout, stderr) = abt(&[
-        "explain",
+        "query",
         "--strategy",
         "sma_crossover",
-        "--rule",
-        "decide#1",
-        "--at",
-        "2030-01-01",
+        "--text",
+        "trace decide at 2030-01-01",
         "--synthetic",
         "--days",
         "300",
@@ -216,15 +217,13 @@ fn explain_outside_the_time_domain_says_so() {
         stderr
     );
     // The synthetic market's last bar (300 weekdays from 2022-01-03) is in
-    // the domain and still explains.
+    // the domain and still traces.
     let (code, stdout, _) = abt(&[
-        "explain",
+        "query",
         "--strategy",
         "sma_crossover",
-        "--rule",
-        "decide#1",
-        "--at",
-        "2023-02-24",
+        "--text",
+        "trace decide at 2023-02-24",
         "--synthetic",
         "--days",
         "300",

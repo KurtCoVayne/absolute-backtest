@@ -513,6 +513,9 @@ impl<'p> Kernel<'p> {
     /// The order the plan evaluates a rule's body in (the written order
     /// without one).
     pub(crate) fn plan_order(&self, ri: usize) -> Rc<Vec<usize>> {
+        if self.written_order {
+            return Rc::new((0..self.prog.rules[ri].body.len()).collect());
+        }
         match self.plan_order.get(ri).and_then(|o| o.clone()) {
             Some(o) => o,
             None => Rc::new((0..self.prog.rules[ri].body.len()).collect()),

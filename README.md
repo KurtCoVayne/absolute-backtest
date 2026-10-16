@@ -17,8 +17,8 @@ abt run --strategy sma_crossover --synthetic --days 200 corpus-v2/catalog corpus
 abt run --strategy sma_crossover --data ./market --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt run --strategy sma_crossover --synthetic --all --fills corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt run --strategy sma_crossover --synthetic --param fast=30d --start 2022-06-01 --end 2022-09-30 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
-abt explain --strategy sma_crossover --rule 'decide#1' --at 2022-04-07 --bind A=E3 --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
-abt query --strategy sma_crossover --rel above --at 2022-04-07 --explain --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt query --strategy sma_crossover --text 'trace decide at 2022-04-07' --text 'why not above(E3, 2022-04-07)' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt query --strategy sma_crossover --text '? above(A, T), close(A, T, P), P > 50 USD/share at T = 2022-04-07' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt synth --class equity --out ./market corpus-v2/catalog corpus-v2/lib   # write a synthetic market as Parquet
 ```
 
@@ -39,7 +39,7 @@ silently misaligns every bucket.
 | `docs/semantic-model.md` | The first formulation's model. What `docs/language-v2.md` section 10 retains unchanged (WF-3 types, WF-5 closedness, WF-6 causality, WF-7 total orders, WF-8 stratification, W5 and W6, the kernel's semantics of its section 7) is specified there; its syntax, environments and corpus are gone. |
 | `docs/formal-foundations.md` | The formal foundations: the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results. |
 | `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API. |
-| `docs/observability.md` | The observability commands: `abt show` and `abt graph` (the program graph, with the compiler's facts), the coverage report every run prints, `abt query --explain` (any relation at any bar, and why each rule did or did not fire), `--ledger`, the state tables (`abt table`, `--tables DIR`), `abt explain --derivation` (a tuple's derivation tree), `abt why-not`, `abt materialise`, and the compiler's `ir`, `rewrite-log`, `plan` and `verify`. |
+| `docs/observability.md` | The observability commands: `abt show` and `abt graph` (the program graph, with the compiler's facts), the coverage report every run prints, `abt query` (the query language: `?`, `why`, `why not`, `trace`, `coverage`, `show`, `ledger ... into`), `--ledger`, the state tables (`abt table`, `--tables DIR`), and the compiler's `ir`, `rewrite-log`, `plan` and `verify`. |
 | `docs/compiler-design.md` | The compiler design: the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers and the observability tables; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
 | `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D34, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached). The implementation lands step by step on this branch; `docs/spec/ERRATA.md` records where it settles what the documents leave open. |
 | `docs/llm-observability.md`, `docs/llm-usability.md` | The two studies of models writing programs with the toolchain, both on the first formulation; their material is under `experiments/`. |
@@ -52,7 +52,7 @@ silently misaligns every bucket.
 | `crates/abt-kernel/src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
 | `crates/abt-kernel/src/plan/`, `crates/abt-kernel/src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt plan`). |
 | `crates/abt-kernel/src/verify/` | The verification tiers: exact linear feasibility, the SMT-LIB2 driver with replay files, constrained Horn clauses, translation validation, the runtime checks (`abt verify`). |
-| `crates/abt-kernel/src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, `abt explain --derivation`, `abt why-not`, `abt materialise`). |
+| `crates/abt-kernel/src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, and the query language's `why` and `why not`). |
 | `crates/abt-kernel/src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
 | `crates/abt-kernel/src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation under the three-valued reading of section 5; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver, `ExecConfig::from_program` (the configuration the `execution`, `decisions` and `report` blocks fix), `explain` and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers, and its checkpoints; `time.rs` is calendar arithmetic and buckets; `value.rs` the runtime values. |
 | `crates/abt-kernel/src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
@@ -461,16 +461,30 @@ decide(T, trade(A, Q)) :- held(A, T, Q0), not bought_within[hold](A, T), Q = -Q0
 This sells at the first bar strictly later than `hold` after the entry,
 closes every entry, and fires again if a fill was dropped.
 
-`abt explain --rule LABEL --at T` reports whether the rule fired at `t`
-and the first solution's bindings, or the first body literal with no
-solution; `--bind A=E3` (repeatable) pre-binds a body variable so the
-explanation is about that instrument. `t` must be a bar of the rule's
-calendar. `abt query --rel R --at T [--symbol SYM] [--explain]` prints a
-relation's tuples at a bar after the run, any relation, primitive or
-derived, and with `--explain` the same per-rule account; `abt why-not`
-names the literal that excluded an instrument at a bar with the bindings
-at that point (`sma_crossover::above#1 excluded at literal 3 `F > S` with
-A = E1, F = 43.49, S = 43.95, T = 2022-04-07`).
+`abt query --text QUERY` runs the program and asks the query language of
+`docs/language-v2.md`, section 8, over it (repeat `--text` to ask several
+of one run):
+
+- `? BODY at T = DATE` is a rule body, checked with the program as any rule
+  is (a stratum above it, so it changes no decision), and answered with its
+  solutions at the bar. `at T` asks at every bar of the run, `over D1 ..
+  D2` over a window, and `for A = KEY` binds a variable to one instrument.
+  A one-atom query of a derived relation names the rule of each row.
+- `why R(...)` is a tuple's derivation down to the supplied tuples.
+- `why not R(A, T)` names, for each rule, the literal that excluded the
+  instance, with the bindings at that point, in the plan's order or `in
+  written order` (`sma_crossover::above#1 excluded at literal 3 `F > S` with
+  A = E1, F = 43.49, S = 43.95, T = 2022-04-07`).
+- `trace decide at DATE` lists every instance attempted at the bar: fired,
+  or the literal that excluded it.
+- `coverage over D1 .. D2` names the first empty relation of every path to
+  `decide`, with its `why not`.
+- `show program|plan R|schedule|calendars|contract` prints the program's
+  forms.
+- `ledger R into NAME` writes R's extension over the run through the data
+  service as `kernel.<run>.NAME`.
+
+A bar must be one of the queried relation's calendar.
 
 ## The command line
 
@@ -480,8 +494,6 @@ abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days 
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
         [--verify-causality] [--no-pushdown] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N --checkpoint-dir DIR] [--resume FILE]
-abt explain --strategy NAME --rule LABEL --at TIMESTAMP [--bind VAR=VALUE]... [--param NAME=VALUE]... (--data DIR | --bundle DIR | --synthetic ...) <files...>
-abt explain --strategy NAME --derivation 'R(v1, ..., vn)@BAR' [--depth N] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
 abt show --strategy NAME <files...>
 abt graph --strategy NAME <files...>
 abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
@@ -489,9 +501,7 @@ abt rewrite-log --strategy NAME [--json] <files...>
 abt plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
 abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
-abt why-not --strategy NAME --rel R --symbol SYM [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
-abt materialise --strategy NAME --rel R [--at T] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
-abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--symbol SYM] [--explain] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>
 abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>

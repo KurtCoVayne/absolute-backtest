@@ -61,19 +61,17 @@ fn up_down_strategy(dir: &std::path::Path, name: &str, up_body: &str, execution:
     path.to_string_lossy().into_owned()
 }
 
-/// trend-10: `--at` on a Saturday is refused, naming the nearest bars, with a
-/// non-zero exit.
+/// trend-10: a query at a Saturday is refused, naming the nearest bars, with
+/// a non-zero exit.
 #[test]
-fn explain_at_a_non_bar_fails_naming_the_nearest_bars() {
+fn a_query_at_a_non_bar_fails_naming_the_nearest_bars() {
     let files = strategy_files("breakout_52w");
     let mut args = vec![
-        "explain",
+        "query",
         "--strategy",
         "breakout_52w",
-        "--rule",
-        "decide#1",
-        "--at",
-        "2022-04-16",
+        "--text",
+        "trace decide at 2022-04-16",
         "--synthetic",
         "--days",
         "120",
@@ -86,63 +84,57 @@ fn explain_at_a_non_bar_fails_naming_the_nearest_bars() {
     assert!(!out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
     assert!(stderr.contains("2022-04-16 is not a bar"), "stderr: {}", stderr);
     assert!(stderr.contains("2022-04-15") && stderr.contains("2022-04-18"), "stderr: {}", stderr);
-    assert!(!stdout.contains("did not fire"), "stdout: {}", stdout);
+    assert!(!stdout.contains("trace("), "stdout: {}", stdout);
 }
 
-/// `abt explain` on trailing_stop over a small synthetic market, with extra
+/// `abt query` on trailing_stop over a small synthetic market, with extra
 /// options placed before the files.
-fn explain_trailing_stop(rule: &str, extra: &[&str]) -> Output {
+fn query_trailing_stop(query: &str, extra: &[&str]) -> Output {
     let files = strategy_files("trailing_stop");
-    let mut args = vec![
-        "explain",
-        "--strategy",
-        "trailing_stop",
-        "--rule",
-        rule,
-        "--at",
-        "2022-04-14",
-        "--synthetic",
-        "--days",
-        "120",
-        "--symbols",
-        "AAA,BBB",
-    ];
+    let mut args = vec!["query", "--strategy", "trailing_stop", "--text", query, "--synthetic", "--days", "120", "--symbols", "AAA,BBB"];
     args.extend(extra);
     args.extend(files.iter().map(|s| s.as_str()));
     abt(&args)
 }
 
-/// trend-05: a library rule is explained by its `unit::head#n` label (the
-/// strategy's own may drop the unit). A v2 rule takes its inputs in brackets
-/// at link time, so there is no `--inputs` option; an unknown label is
-/// refused naming the label form.
+/// trend-05: `trace` of a library relation lists its rules by their
+/// `unit::head#n` labels; a relation the program does not have is refused
+/// naming it; the retired `explain` says what replaced it.
 #[test]
-fn explain_takes_a_library_rule_by_its_qualified_label() {
-    let out = explain_trailing_stop("state::high_since_entry#1", &[]);
+fn a_trace_names_a_library_relations_rules_by_their_labels() {
+    let out = query_trailing_stop("trace high_since_entry at 2022-04-14", &[]);
     let (stdout, stderr) = text(&out);
     assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
-    assert!(stdout.contains("rule state::high_since_entry#1") && stdout.contains("2022-04-14"), "stdout: {}", stdout);
+    assert!(stdout.contains("state::high_since_entry#1") && stdout.contains("2022-04-14"), "stdout: {}", stdout);
 
-    let out = explain_trailing_stop("decide#1", &["--inputs", "AAA,20d"]);
+    let out = query_trailing_stop("trace decide at 2022-04-14", &["--inputs", "AAA,20d"]);
     let (_, stderr) = text(&out);
     assert!(!out.status.success() && stderr.contains("unknown option") && stderr.contains("--inputs"), "stderr: {}", stderr);
 
-    let out = explain_trailing_stop("nope#1", &[]);
+    let out = query_trailing_stop("trace nope at 2022-04-14", &[]);
     let (_, stderr) = text(&out);
-    assert!(!out.status.success() && stderr.contains("`nope#1`") && stderr.contains("unit::head#n"), "stderr: {}", stderr);
+    assert!(!out.status.success() && stderr.contains("`nope`"), "stderr: {}", stderr);
+
+    let out = abt(&["explain", "--strategy", "trailing_stop"]);
+    let (_, stderr) = text(&out);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr.contains("abt query") && stderr.contains("why not"), "stderr: {}", stderr);
 }
 
-/// trend-04: `--bind VAR=value` narrows a decide rule to one instrument; the
-/// synthetic market's securities are `E1..` carrying the tickers, and the
-/// kernel shows a security by its identifier.
+/// trend-04: `for A = KEY` binds a variable of the query to one instrument;
+/// the synthetic market's securities are `E1..` carrying the tickers, and
+/// the kernel shows a security by its identifier. An unknown key is
+/// refused naming it.
 #[test]
-fn explain_binds_a_body_variable() {
-    let out = explain_trailing_stop("decide#1", &["--bind", "A=AAA"]);
+fn a_query_binds_a_variable() {
+    let out = query_trailing_stop("? momentum(A, T, M) for A = AAA over 2022-04-11 .. 2022-04-14", &[]);
     let (stdout, stderr) = text(&out);
     assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
-    assert!(stdout.contains("rule trailing_stop::decide#1") && stdout.contains("A = E1"), "stdout: {}", stdout);
+    assert!(stdout.contains("4 row(s)") && stdout.contains("trailing_stop::momentum#1"), "stdout: {}", stdout);
+    let rows: Vec<&str> = stdout.lines().filter(|l| l.contains("2022-04-1")).collect();
+    assert!(rows.len() == 4 && rows.iter().all(|l| l.trim_start().starts_with("E1 ")), "stdout: {}", stdout);
 
-    let out = explain_trailing_stop("decide#1", &["--bind", "A=ZZZ"]);
+    let out = query_trailing_stop("? momentum(A, T, M) for A = ZZZ over 2022-04-11 .. 2022-04-14", &[]);
     let (_, stderr) = text(&out);
     assert!(!out.status.success() && stderr.contains("ZZZ"), "stderr: {}", stderr);
 }
@@ -347,13 +339,11 @@ fn run_takes_parameter_overrides() {
     assert!(!out.status.success() && stderr.contains("`nope`"), "stderr: {}", stderr);
 
     let mut args = vec![
-        "explain",
+        "query",
         "--strategy",
         "sma_crossover",
-        "--rule",
-        "decide#1",
-        "--at",
-        "2022-04-14",
+        "--text",
+        "trace decide at 2022-04-14",
         "--param",
         "fast=30d",
         "--synthetic",
@@ -365,7 +355,7 @@ fn run_takes_parameter_overrides() {
     args.extend(files.iter().map(|s| s.as_str()));
     let out = abt(&args);
     let (stdout, stderr) = text(&out);
-    assert!(out.status.success() && stdout.contains("rule sma_crossover::decide#1"), "stdout: {}\nstderr: {}", stdout, stderr);
+    assert!(out.status.success() && stdout.contains("sma_crossover::decide#1"), "stdout: {}\nstderr: {}", stdout, stderr);
 }
 
 /// Data-bundle doc, section 6: `abt check` prints each strategy's degrees of
