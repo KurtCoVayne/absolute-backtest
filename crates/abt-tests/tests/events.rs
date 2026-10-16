@@ -39,7 +39,7 @@ fn outcomes(r: &RunResult) -> BTreeMap<OrderId, Outcome> {
                 remainder: Some((_, Fate::Expired)), ..
             } => Outcome::Open,
             EventKind::Fill { .. } => Outcome::Filled,
-            EventKind::Dropped { .. } => Outcome::Dropped,
+            EventKind::Dropped { .. } | EventKind::Rejected { .. } => Outcome::Dropped,
             EventKind::Satisfied { .. } => Outcome::Met,
             EventKind::Replaced { .. } => Outcome::Replaced,
             EventKind::ExpiredOrder { .. } => Outcome::Expired,
@@ -74,7 +74,12 @@ fn the_log_folds_to_the_book_and_every_order_ends_once() {
         let count = |f: &dyn Fn(&EventKind) -> bool| r.events.iter().filter(|e| f(&e.kind)).count();
         assert_eq!(count(&|k| matches!(k, EventKind::Decision { .. })), r.decisions.len(), "{}", name);
         assert_eq!(count(&|k| matches!(k, EventKind::Fill { .. })), r.fills.len(), "{}", name);
-        assert_eq!(count(&|k| matches!(k, EventKind::Dropped { .. } | EventKind::ExpiredOrder { .. })), r.dropped.len(), "{}", name);
+        assert_eq!(
+            count(&|k| matches!(k, EventKind::Dropped { .. } | EventKind::ExpiredOrder { .. } | EventKind::Rejected { .. })),
+            r.dropped.len(),
+            "{}",
+            name
+        );
         assert_eq!(count(&|k| matches!(k, EventKind::Action { .. })), r.actions.len(), "{}", name);
         // Every decision is one order; every order ends once, or is open
         // at the end (a target re-issuing, an order working).
@@ -89,7 +94,7 @@ fn the_log_folds_to_the_book_and_every_order_ends_once() {
         for e in &r.events {
             match &e.kind {
                 EventKind::Fill { fill, .. } => assert_eq!(e.order_id.is_none(), fill.forced, "{}: {:?}", name, e),
-                EventKind::Dropped { .. } | EventKind::ExpiredOrder { .. } | EventKind::Satisfied { .. } | EventKind::Replaced { .. } => {
+                EventKind::Dropped { .. } | EventKind::ExpiredOrder { .. } | EventKind::Satisfied { .. } | EventKind::Replaced { .. } | EventKind::Rejected { .. } => {
                     assert!(e.order_id.is_some(), "{}: {:?}", name, e)
                 }
                 _ => {}

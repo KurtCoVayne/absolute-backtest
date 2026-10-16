@@ -101,6 +101,8 @@ pub struct Fold<'p, 'e> {
     ran_decision: bool,
     /// The last decision bars, the memo kept for (see `evict_memo`).
     recent: std::collections::VecDeque<i64>,
+    /// What the invariants keep between barriers (K-3.3).
+    invariants: crate::contract::check::Invariants,
 }
 
 impl<'p, 'e> Fold<'p, 'e> {
@@ -112,8 +114,10 @@ impl<'p, 'e> Fold<'p, 'e> {
             volume_relation: kernel.volume_rel.map(|id| kernel.rels[id].name.clone()),
             base_capital: (!kernel.cfg.compounding).then_some(kernel.cfg.initial_cash),
             multipliers: kernel.contracts.iter().map(|(s, c)| (*s, c.multiplier)).collect(),
+            contract: crate::contract::contract(kernel.prog),
             ..Default::default()
         };
+        let invariants = crate::contract::check::Invariants::new(kernel.cfg.initial_cash, &result);
         Fold {
             kernel,
             exec,
@@ -126,7 +130,22 @@ impl<'p, 'e> Fold<'p, 'e> {
             pending_checkpoint: None,
             ran_decision: false,
             recent: Default::default(),
+            invariants,
         }
+    }
+
+    /// The contract its preconditions were checked against at bind (K-3.2);
+    /// a resumed run keeps the statuses its checkpoint carries and takes the
+    /// bind's.
+    pub fn with_contract(mut self, c: crate::contract::Contract) -> Self {
+        if self.result.events.is_empty() {
+            self.result.contract = c;
+        } else {
+            for clause in c.clauses.into_iter().filter(|x| x.kind == crate::contract::Kind::Pre) {
+                self.result.contract.set(&clause.id, clause.status);
+            }
+        }
+        self
     }
 
     /// Take checkpoints on this schedule; `take_checkpoint` hands them out.
@@ -196,9 +215,11 @@ impl<'p, 'e> Fold<'p, 'e> {
         kernel.memo_errors.clear();
         kernel.domain_vecs.clear();
         exec.restore(cp.executor).map_err(RunError::Config)?;
+        let invariants = crate::contract::check::Invariants::new(kernel.cfg.initial_cash, &cp.result);
         Ok(Fold {
             kernel,
             exec,
+            invariants,
             result: cp.result,
             decided_once: cp.decided_once,
             halted: false,
@@ -226,7 +247,8 @@ impl<'p, 'e> Fold<'p, 'e> {
 
     fn step_inner(&mut self, ev: Event) -> Result<(), RunError> {
         match ev {
-            Event::Tuple { seq, rel, key, tuple, .. } => {
+            Event::Tuple { seq, rel, key, r, tuple } => {
+                self.kernel.received_r = self.kernel.received_r.max(r);
                 // A checkpoint at the end of a decision bar, before the next
                 // tuple is stored: the replay resumes at this tuple.
                 if self.ran_decision {
@@ -276,6 +298,10 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
         let by_equity = self.kernel.decide_at(label, &mut self.result)?;
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
+        // The invariants after the executor's take (K-3.3, K-4.2).
+        let working = self.exec.working();
+        let at = self.kernel.now;
+        self.invariants.check(&mut self.kernel, self.exec.book(), &working, self.exec.expected(), &mut self.result, label, at)?;
         // Bucketed by time, eviction costs only what it drops: every bar,
         // keeping the last few decision bars' entries.
         self.recent.push_back(label);
@@ -304,6 +330,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.result.coverage = self.kernel.coverage();
         self.result.literal_counts = self.kernel.literal_counts().to_vec();
         self.result.plan = self.kernel.plan_label().to_string();
+        crate::contract::check::postconditions(&mut self.result, self.kernel.prog, self.kernel.cfg.initial_cash, false);
         Ok((self.result, self.kernel))
     }
 }

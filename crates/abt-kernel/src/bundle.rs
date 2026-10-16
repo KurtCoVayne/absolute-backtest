@@ -506,46 +506,10 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
                 *dividends.entry((tu[0].clone(), ex)).or_insert(0.0) += amount;
             }
         }
-        for (sym, s) in &series {
-            let name = sym_name(sym);
-            let mut prev: Option<f64> = None;
-            for (&t, &p) in s {
-                if let Some(p0) = prev {
-                    let div = dividends.get(&(sym.clone(), t)).copied().unwrap_or(0.0);
-                    let split = splits.get(&(sym.clone(), t)).copied();
-                    let ratio = (p + div) * split.unwrap_or(1.0) / p0;
-                    let problem = match split {
-                        Some(f) if (ratio - 1.0).abs() > 0.25 => Some(format!("{} at {}: a {}:1 split but the close moved from {} to {}", name, format_timestamp(t), f, p0, p)),
-                        None if !(0.6..=1.67).contains(&ratio) => Some(if div > 0.0 {
-                            format!(
-                                "{} at {}: the close moved from {} to {} and a dividend of {} does not explain it",
-                                name,
-                                format_timestamp(t),
-                                p0,
-                                p,
-                                div
-                            )
-                        } else {
-                            format!("{} at {}: the close moved from {} to {} with no action to explain it", name, format_timestamp(t), p0, p)
-                        }),
-                        _ => None,
-                    };
-                    if let Some(problem) = problem {
-                        if excused.contains(&(name.as_str(), t)) {
-                            accepted += 1;
-                        } else {
-                            problems.push(problem);
-                        }
-                    }
-                }
-                prev = Some(p);
-            }
-        }
-        for ((sym, t), f) in &splits {
-            if !series.get(sym).map(|s| s.contains_key(t)).unwrap_or(false) {
-                problems.push(format!("{} at {}: a {}:1 split on a bar with no close", sym_name(sym), format_timestamp(*t), f));
-            }
-        }
+        let excused_at = |sym: &Value, t: i64| excused.contains(&(sym_name(sym).as_str(), t));
+        let (found, ok) = crate::contract::check::action_problems(&series, &splits, &dividends, &excused_at, &|v| sym_name(v));
+        problems = found;
+        accepted = ok;
     }
     accepted_here.set(accepted);
     push("action reconciliation", problems);
@@ -553,35 +517,17 @@ pub fn run_tests_with(prog: &Program, ds: &Dataset, exceptions: &[Exception]) ->
     // last bar has a delisted tuple.
     let mut problems = Vec::new();
     if let Some(listing) = ds.facts.get("listed") {
-        let last_bar = listing.iter().filter_map(|tu| tu[1].as_time()).max();
-        let mut last_seen: BTreeMap<Value, i64> = BTreeMap::new();
-        for tu in listing {
-            if let Some(t) = tu[1].as_time() {
-                let e = last_seen.entry(tu[0].clone()).or_insert(t);
-                *e = (*e).max(t);
-            }
-        }
+        let listed: Vec<(Value, i64)> = listing.iter().filter_map(|tu| Some((tu[0].clone(), tu[1].as_time()?))).collect();
         let delisted: std::collections::BTreeSet<Value> = ds.facts.get("delisted").map(|tus| tus.iter().map(|tu| tu[0].clone()).collect()).unwrap_or_default();
-        if let Some(last_bar) = last_bar {
-            for (sym, t) in &last_seen {
-                if *t < last_bar && !delisted.contains(sym) {
-                    problems.push(format!("{} leaves the listing at {} with no delisted record", sym_name(sym), format_timestamp(*t)));
-                }
-            }
-        }
+        problems = crate::contract::check::delisting_problems(&listed, &delisted, &|v| sym_name(v));
     }
     push("delisting coverage", problems);
     // Membership: a member tuple is for a name listed that bar.
     let mut problems = Vec::new();
     if let (Some(members), Some(listing)) = (ds.facts.get("member"), ds.facts.get("listed")) {
         let listed: std::collections::BTreeSet<(Value, i64)> = listing.iter().filter_map(|tu| Some((tu[0].clone(), tu[1].as_time()?))).collect();
-        for tu in members {
-            if let Some(t) = tu[1].as_time() {
-                if !listed.contains(&(tu[0].clone(), t)) {
-                    problems.push(format!("{} is a member at {} but not listed", sym_name(&tu[0]), format_timestamp(t)));
-                }
-            }
-        }
+        let members: Vec<(Value, i64)> = members.iter().filter_map(|tu| Some((tu[0].clone(), tu[1].as_time()?))).collect();
+        problems = crate::contract::check::membership_problems(&members, &listed, &|v| sym_name(v));
     }
     push("membership", problems);
     out

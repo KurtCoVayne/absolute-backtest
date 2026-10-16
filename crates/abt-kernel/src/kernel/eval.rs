@@ -1474,6 +1474,7 @@ impl<'p> Kernel<'p> {
                 let Ok(i) = section.binary_search_by_key(a, |(s, _)| *s) else { return false };
                 let ans = &section[i].1;
                 let (Some(x), false, true) = (ans.value, ans.error, ans.r <= self.now) else { return false };
+                self.pushed_read_r = self.pushed_read_r.max(ans.r);
                 let mut e = env.clone();
                 e[vslot] = Some(Value::Num(x));
                 out.push(e);
@@ -1483,6 +1484,7 @@ impl<'p> Kernel<'p> {
                     return false;
                 }
                 for (s, a) in section {
+                    self.pushed_read_r = self.pushed_read_r.max(a.r);
                     let mut e = env.clone();
                     e[p.entity_slot] = Some(Value::Equity(*s));
                     e[vslot] = a.value.map(Value::Num);

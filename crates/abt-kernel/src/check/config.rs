@@ -1,13 +1,209 @@
 //! The closed configuration of a program (language-v2, 4.3 and 4.5): the
 //! execution block with its fifteen fields, expanded from a preset and its
-//! overrides, and the report block. Every field that changes the model is
-//! required (WF-14, code P); the kernel's `ExecConfig` is built from the
-//! block and nothing else.
+//! overrides, its optional pre-trade limits (K-3.5), and the report block.
+//! Every field that changes the model is required (WF-14, code P); the
+//! kernel's `ExecConfig` is built from the block and nothing else.
 
 use std::fmt;
 
 use crate::ir::{Duration, Span};
 use crate::syntax::ast::{ExecField, ExecValue, ExecutionBlock, ReportBlock};
+
+/// What a pre-trade limit bounds (K-3.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    Gross,
+    Net,
+    Weight,
+    Loss,
+    Drawdown,
+    Turnover,
+    Participation,
+    Names,
+}
+
+/// What happens to the bar's orders when a limit would be passed: the run
+/// halts, the increasing orders are dropped, they are scaled to the limit,
+/// or the run warns and goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitPolicy {
+    Halt,
+    Reject,
+    Clamp,
+    Warn,
+}
+
+impl LimitPolicy {
+    pub fn name(self) -> &'static str {
+        match self {
+            LimitPolicy::Halt => "halt",
+            LimitPolicy::Reject => "reject",
+            LimitPolicy::Clamp => "clamp",
+            LimitPolicy::Warn => "warn",
+        }
+    }
+    fn parse(s: &str) -> Option<LimitPolicy> {
+        Some(match s {
+            "halt" => LimitPolicy::Halt,
+            "reject" => LimitPolicy::Reject,
+            "clamp" => LimitPolicy::Clamp,
+            "warn" => LimitPolicy::Warn,
+            _ => return None,
+        })
+    }
+}
+
+impl LimitKind {
+    pub const ALL: [LimitKind; 8] = [
+        LimitKind::Gross,
+        LimitKind::Net,
+        LimitKind::Weight,
+        LimitKind::Loss,
+        LimitKind::Drawdown,
+        LimitKind::Turnover,
+        LimitKind::Participation,
+        LimitKind::Names,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            LimitKind::Gross => "gross",
+            LimitKind::Net => "net",
+            LimitKind::Weight => "weight",
+            LimitKind::Loss => "loss",
+            LimitKind::Drawdown => "drawdown",
+            LimitKind::Turnover => "turnover",
+            LimitKind::Participation => "participation",
+            LimitKind::Names => "names",
+        }
+    }
+    fn parse(s: &str) -> Option<LimitKind> {
+        LimitKind::ALL.into_iter().find(|k| k.name() == s)
+    }
+    /// The policies K-3.5 admits for the kind: a count, a loss and a
+    /// drawdown cannot be scaled; a turnover and a participation never halt.
+    pub fn policies(self) -> &'static [LimitPolicy] {
+        use LimitPolicy::*;
+        match self {
+            LimitKind::Gross | LimitKind::Net | LimitKind::Weight => &[Halt, Reject, Clamp, Warn],
+            LimitKind::Names | LimitKind::Loss | LimitKind::Drawdown => &[Halt, Reject, Warn],
+            LimitKind::Turnover | LimitKind::Participation => &[Reject, Clamp, Warn],
+        }
+    }
+    /// The `per` the kind is written with: `weight <= X per name`, `loss <=
+    /// X per day`, `turnover <= X per PERIOD`.
+    fn per(self) -> Option<&'static [&'static str]> {
+        match self {
+            LimitKind::Weight => Some(&["name"]),
+            LimitKind::Loss => Some(&["day"]),
+            LimitKind::Turnover => Some(&["day", "week", "month", "quarter", "year"]),
+            _ => None,
+        }
+    }
+}
+
+/// A pre-trade limit of `execution.limits` (K-3.5): `gross`, `net`,
+/// `weight` and `turnover` bounds are fractions of the capital, `loss` of
+/// the capital lost in a day, `drawdown` of the peak NAV, `participation`
+/// of the bar's volume, `names` a count.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Limit {
+    pub kind: LimitKind,
+    pub bound: f64,
+    /// The trailing period of a turnover limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+    pub policy: LimitPolicy,
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} <= {}", self.kind.name(), self.bound)?;
+        match (self.kind, &self.period) {
+            (LimitKind::Weight, _) => write!(f, " per name")?,
+            (LimitKind::Loss, _) => write!(f, " per day")?,
+            (_, Some(p)) => write!(f, " per {}", p)?,
+            _ => {}
+        }
+        write!(f, " {}", self.policy.name())
+    }
+}
+
+/// The limits as written, checked: a known kind once, a positive bound (a
+/// whole one for `names`), the `per` the kind takes, a policy it admits
+/// (`reject` when none is written).
+fn expand_limits(items: &[crate::syntax::ast::LimitItem]) -> Result<Vec<Limit>, Vec<(Span, String)>> {
+    let mut out: Vec<Limit> = Vec::new();
+    let mut errors = Vec::new();
+    for it in items {
+        let Some(kind) = LimitKind::parse(&it.kind) else {
+            let known: Vec<&str> = LimitKind::ALL.iter().map(|k| k.name()).collect();
+            errors.push((it.span, format!("`{}` is not a limit ({})", it.kind, known.join(", "))));
+            continue;
+        };
+        if out.iter().any(|l| l.kind == kind) {
+            errors.push((it.span, format!("the `{}` limit is set twice", kind.name())));
+            continue;
+        }
+        if !(it.bound > 0.0 && it.bound.is_finite()) || (kind == LimitKind::Names && it.bound.fract() != 0.0) {
+            errors.push((
+                it.span,
+                format!(
+                    "the `{}` limit's bound {} is not a positive {}",
+                    kind.name(),
+                    it.bound,
+                    if kind == LimitKind::Names { "whole number" } else { "number" }
+                ),
+            ));
+            continue;
+        }
+        let period = match (kind.per(), &it.per) {
+            (None, None) => None,
+            (None, Some(p)) => {
+                errors.push((it.span, format!("the `{}` limit takes no `per` (found `per {}`)", kind.name(), p)));
+                continue;
+            }
+            (Some(admitted), Some(p)) if admitted.contains(&p.as_str()) => (kind == LimitKind::Turnover).then(|| p.clone()),
+            (Some(admitted), written) => {
+                errors.push((
+                    it.span,
+                    format!(
+                        "the `{}` limit is written `{} <= X per {}`{}",
+                        kind.name(),
+                        kind.name(),
+                        admitted.join("|"),
+                        written.as_ref().map(|p| format!(", not `per {}`", p)).unwrap_or_default()
+                    ),
+                ));
+                continue;
+            }
+        };
+        let policy = match it.policy.as_deref().map(LimitPolicy::parse) {
+            None => LimitPolicy::Reject,
+            Some(Some(p)) if kind.policies().contains(&p) => p,
+            Some(_) => {
+                let admitted: Vec<&str> = kind.policies().iter().map(|p| p.name()).collect();
+                errors.push((
+                    it.span,
+                    format!("the `{}` limit admits {}, not `{}`", kind.name(), admitted.join(", "), it.policy.as_deref().unwrap_or_default()),
+                ));
+                continue;
+            }
+        };
+        out.push(Limit {
+            kind,
+            bound: it.bound,
+            period,
+            policy,
+        });
+    }
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(errors)
+    }
+}
 
 /// The commission schedule.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +272,9 @@ pub struct ExecBlock {
     pub oversize: String,
     pub ruin: String,
     pub numerics: String,
+    /// The pre-trade limits (K-3.5), optional.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<Limit>,
 }
 
 impl ExecBlock {
@@ -164,6 +363,10 @@ impl fmt::Display for ExecBlock {
         writeln!(f, "  oversize      {}", self.oversize)?;
         writeln!(f, "  ruin          {}", self.ruin)?;
         writeln!(f, "  numerics      {}", self.numerics)?;
+        if !self.limits.is_empty() {
+            let parts: Vec<String> = self.limits.iter().map(|l| l.to_string()).collect();
+            writeln!(f, "  limits        {{ {} }}", parts.join("; "))?;
+        }
         write!(f, "}}")
     }
 }
@@ -238,6 +441,13 @@ pub fn expand_execution(block: &ExecutionBlock, presets: &[(String, Vec<ExecFiel
             ),
         ));
     }
+    let limits = match fields.iter().find(|f| f.name == "limits").map(|f| &f.value) {
+        Some(ExecValue::Limits(items)) => expand_limits(items).unwrap_or_else(|e| {
+            errors.extend(e);
+            Vec::new()
+        }),
+        _ => Vec::new(),
+    };
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -308,6 +518,7 @@ pub fn expand_execution(block: &ExecutionBlock, presets: &[(String, Vec<ExecFiel
         oversize: word("oversize"),
         ruin: word("ruin"),
         numerics: word("numerics"),
+        limits,
     })
 }
 

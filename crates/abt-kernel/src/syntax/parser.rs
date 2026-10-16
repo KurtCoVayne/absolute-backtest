@@ -44,6 +44,7 @@ const EXEC_FIELDS: &[&str] = &[
     "oversize",
     "ruin",
     "numerics",
+    "limits",
 ];
 
 pub fn parse_units(src: &str) -> PResult<Vec<Unit>> {
@@ -1684,6 +1685,29 @@ impl Parser {
                 } else {
                     return self.err("expected `gross <= X halt|reject`, `reg_t` or `unconstrained` after `leverage`");
                 }
+            }
+            "limits" => {
+                // `{ KIND <= BOUND [per WORD] [POLICY]; ... }` (K-3.5): what
+                // each kind admits is the checker's (`check::config`).
+                self.expect(Tok::LBrace)?;
+                let mut items = Vec::new();
+                while !self.at(&Tok::RBrace) {
+                    let (kind, span) = self.ident()?;
+                    self.expect(Tok::Le)?;
+                    let (bound, _) = self.number()?;
+                    let per = if self.eat_kw("per") { Some(self.ident()?.0) } else { None };
+                    let policy = if matches!(self.peek(), Tok::Ident(w) if ["halt", "reject", "clamp", "warn"].contains(&w.as_str())) {
+                        Some(self.ident()?.0)
+                    } else {
+                        None
+                    };
+                    items.push(LimitItem { kind, bound, per, policy, span });
+                    if !self.eat(&Tok::Semi) && !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                ExecValue::Limits(items)
             }
             "delisting" => {
                 if self.eat_kw("last_price") {

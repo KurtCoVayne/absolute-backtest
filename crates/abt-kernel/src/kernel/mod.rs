@@ -689,6 +689,17 @@ pub struct ExecConfig {
     /// configuration's identity: both give the same bits (D-6.1).
     #[serde(skip, default = "pushdown_on")]
     pub pushdown: bool,
+    /// The pre-trade limits of the execution block (K-3.5).
+    #[serde(default)]
+    pub limits: Vec<crate::check::Limit>,
+    /// The memory the derived state may take (K-4.6, `--memory-budget`);
+    /// half the machine's memory when unset. Not part of the identity.
+    #[serde(skip)]
+    pub memory_budget: Option<u64>,
+    /// A fault made deliberately at a bar, for the acceptance tests of the
+    /// invariants (G7): the clause whose check it trips, and the bar.
+    #[serde(skip)]
+    pub inject: Option<(String, i64)>,
     /// Rolling `mean`, `sum`, `std`, `cov`, `corr` and `ols_slope` over a rows
     /// window from sliding sums (compensated, shifted, rebuilt exactly every
     /// N rows): O(1) a bar instead of O(N), equal to the exact two-pass
@@ -797,6 +808,9 @@ impl Default for ExecConfig {
             as_of: None,
             window_cache: true,
             pushdown: true,
+            limits: Vec::new(),
+            memory_budget: None,
+            inject: None,
             running_sums: true,
             delisting_haircuts: vec![("bankruptcy".into(), 1.0), ("regulatory".into(), 1.0), ("acquisition".into(), 0.0), ("voluntary".into(), 0.0)],
             delisting_haircut_default: 1.0,
@@ -925,6 +939,7 @@ impl ExecConfig {
             _ => OnOversize::Halt,
         };
         cfg.on_ruin = if x.ruin == "continue" { OnRuin::Continue } else { OnRuin::Halt };
+        cfg.limits = x.limits.clone();
         cfg
     }
 
@@ -1114,6 +1129,17 @@ pub enum RunError {
     /// The demand has no binding (K-3.2): the data layer's refusal, naming
     /// the need no version satisfies and what each held version lacks.
     Unbound(String),
+    /// A precondition refused the run before its first barrier (K-3.2).
+    Precondition {
+        clause: String,
+        message: String,
+    },
+    /// An invariant failed at a decision barrier (K-3.3): the run halts.
+    Invariant {
+        clause: String,
+        t: i64,
+        message: String,
+    },
     /// A degenerate book state that the configured policy halts on
     /// (section 6, executor policy): ruin, leverage, or an oversize order.
     Risk {
@@ -1151,6 +1177,8 @@ impl std::fmt::Display for RunError {
             }
             RunError::Request(m) => write!(f, "{}", m),
             RunError::Unbound(m) => write!(f, "the demand has no binding: {}", m),
+            RunError::Precondition { clause, message } => write!(f, "precondition `{}` refused the run: {}", clause, message),
+            RunError::Invariant { clause, t, message } => write!(f, "invariant `{}` failed at {}: {}", clause, time::format_timestamp(*t), message),
             RunError::Config(m) => write!(f, "configuration error: {}", m),
             RunError::Risk { t, rule, decision, message } => write!(f, "risk policy halted the run at {}: {} (rule {}): {}", time::format_timestamp(*t), decision, rule, message),
             RunError::Internal(m) => write!(f, "internal kernel error: {}", m),
@@ -1244,6 +1272,9 @@ pub struct RunResult {
     /// The plan the run evaluated under (`written` or `optimised`).
     #[serde(default)]
     pub plan: String,
+    /// The program's contract with the run's statuses (K-3).
+    #[serde(default)]
+    pub contract: crate::contract::Contract,
 }
 
 impl RunResult {
@@ -1259,7 +1290,9 @@ impl RunResult {
                 rule: e.rule.unwrap_or(usize::MAX),
             }),
             EventKind::Fill { fill, .. } => self.fills.push(fill.clone()),
-            EventKind::Dropped { decided, decision, reason } | EventKind::ExpiredOrder { decided, decision, reason } => self.dropped.push((*decided, decision.clone(), reason.clone())),
+            EventKind::Dropped { decided, decision, reason } | EventKind::ExpiredOrder { decided, decision, reason } | EventKind::Rejected { decided, decision, reason } => {
+                self.dropped.push((*decided, decision.clone(), reason.clone()))
+            }
             EventKind::Action { action, .. } => {
                 if let Some(sym) = e.instrument {
                     self.actions.push(ActionRecord {
@@ -1385,6 +1418,10 @@ pub(crate) struct RelInfo {
     pub cal: Cal,
     pub rules: Vec<usize>,
     pub entity_positions: Vec<usize>,
+    /// A fact's key besides its time (ERRATA E-35): the entity arguments,
+    /// then the labels. A stored relation holds one tuple per identity at
+    /// a time (K-3.3); a later one is a revision and replaces it (K-4.2).
+    pub identity: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -1501,6 +1538,11 @@ pub struct Kernel<'p> {
     /// kernel just built or restored) it is no instant, and no pushed answer
     /// is read; after the fold it stays the last barrier's.
     pub(crate) now: i64,
+    /// The latest receipt among the tuples received and among the pushed
+    /// answers read since the last decision barrier's checks (what
+    /// `inv.no_read_past` and `inv.pushdown_receipt` compare with at(T)).
+    pub(crate) received_r: i64,
+    pub(crate) pushed_read_r: i64,
     pub(crate) price_rel: Option<usize>,
     pub(crate) price_col: usize,
     pub(crate) volume_rel: Option<usize>,
@@ -1807,6 +1849,14 @@ impl<'p> Kernel<'p> {
                 cal: sig.cal.clone(),
                 rules: prog.rules_for(name),
                 entity_positions: sig.args.iter().enumerate().filter(|(_, a)| a.ty.is_entity()).map(|(i, _)| i).collect(),
+                identity: sig
+                    .args
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| *i != key_pos && a.ty.is_entity())
+                    .chain(sig.args.iter().enumerate().filter(|(i, a)| *i != key_pos && a.ty == Ty::Label))
+                    .map(|(i, _)| i)
+                    .collect(),
             }));
         }
         // Stores and time domains.
@@ -2238,6 +2288,8 @@ impl<'p> Kernel<'p> {
             cfg,
             pushed: Default::default(),
             now: i64::MIN,
+            received_r: i64::MIN,
+            pushed_read_r: i64::MIN,
             price_rel,
             price_col,
             volume_rel,
@@ -2313,6 +2365,13 @@ impl<'p> Kernel<'p> {
     pub fn insert_fact(&mut self, rel: usize, tuple: Tuple) -> Result<i64, RunError> {
         let info = &self.rels[rel];
         let key = tuple[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", info.name)))?;
+        // A revision (a later receipt of the same fact) replaces the row it
+        // revises (K-4.2).
+        let same = |t: &Tuple| info.identity.iter().all(|&i| t[i] == tuple[i]);
+        if let Some(old) = self.stores[rel].by_time.get_mut(&key).and_then(|block| block.iter_mut().find(|t| same(t))) {
+            *old = tuple;
+            return Ok(key);
+        }
         self.stores[rel].insert(key, tuple);
         Ok(key)
     }
@@ -3186,6 +3245,9 @@ pub fn replay<'p>(
     on_checkpoint: &mut dyn FnMut(Checkpoint),
 ) -> Result<(RunResult, Kernel<'p>), RunError> {
     let bound = bind::bind(prog, client)?;
+    // The preconditions, before the first barrier (K-3.2).
+    let mut contract = crate::contract::contract(prog);
+    let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, &bound, client, &cfg)?;
     // A truncated stream resolves ticker literals where it ends.
     let probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
     let run = bind::run_id(prog, &cfg, &bound.binding);
@@ -3214,11 +3276,13 @@ pub fn replay<'p>(
     for message in bind::push_down(&mut kernel, &bound, client, &spec)? {
         kernel.run_warnings.push(RunWarning { bias: "pushdown".into(), message });
     }
+    kernel.run_warnings.extend(pre_warnings);
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
     let mut fold = match &opts.from {
         Some(cp) => Fold::restore(kernel, exec, cp.clone())?,
         None => Fold::new(kernel, exec),
-    };
+    }
+    .with_contract(contract);
     if let Some(e) = opts.checkpoint_every {
         fold = fold.with_checkpoints(e);
     }

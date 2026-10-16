@@ -285,6 +285,80 @@ impl Bound {
     }
 }
 
+/// One row of a bound stored relation read back through the data layer:
+/// its instrument, its time, and its value columns after the time in the
+/// schema's order, the numeric ones (a count as a number), the times and
+/// the labels.
+#[derive(Clone, Debug)]
+pub struct ScanRow {
+    pub sym: Option<Sym>,
+    pub t: i64,
+    pub nums: Vec<Option<f64>>,
+    pub times: Vec<Option<i64>>,
+    pub labels: Vec<Option<String>>,
+}
+
+impl Bound {
+    /// The rows of a program relation as the binding holds it (a `scan`,
+    /// filtered by `predicate` when one is given); none when the relation
+    /// is not bound.
+    pub fn scan(&self, client: &DataClient, relation: &str, predicate: Option<abt_wire::generated::abt::wire::Predicate>) -> Result<Vec<ScanRow>, RunError> {
+        let Some((stored_rel, schema)) = self.stored.get(relation) else { return Ok(Vec::new()) };
+        let by_id: HashMap<u64, Sym> = self.ids.iter().enumerate().map(|(s, &id)| (id, s as Sym)).collect();
+        let entity = column_of(schema, Role::Entity).map(|c| c.name.clone());
+        let time = column_of(schema, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
+        let values: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role == Role::Value).collect();
+        let batches = client.query(
+            &self.view,
+            QueryForm::Scan(Box::new(Scan {
+                relation: stored_rel.clone(),
+                t0: i64::MIN,
+                t1: i64::MAX,
+                predicate: predicate.map(Box::new),
+                columns: None,
+            })),
+        )?;
+        let mut out = Vec::new();
+        for b in batches {
+            let ts = times(col(&b, &time)?);
+            let ids = entity
+                .as_ref()
+                .and_then(|e| b.column_by_name(e))
+                .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>().cloned());
+            let mut nums: Vec<Vec<Option<f64>>> = Vec::new();
+            let mut tcols: Vec<Vec<Option<i64>>> = Vec::new();
+            let mut lcols: Vec<Vec<Option<String>>> = Vec::new();
+            for c in &values {
+                let a = col(&b, &c.name)?;
+                match c.ty {
+                    ColumnType::Num => {
+                        let x = a.as_primitive::<arrow::datatypes::Float64Type>();
+                        nums.push((0..x.len()).map(|i| (!x.is_null(i)).then(|| x.value(i))).collect());
+                    }
+                    ColumnType::Count => {
+                        let x = a.as_primitive::<arrow::datatypes::Int64Type>();
+                        nums.push((0..x.len()).map(|i| (!x.is_null(i)).then(|| x.value(i) as f64)).collect());
+                    }
+                    ColumnType::Time => tcols.push(times(a)),
+                    ColumnType::Label => lcols.push(strings(a)?),
+                    _ => {}
+                }
+            }
+            for (i, t) in ts.into_iter().enumerate() {
+                let Some(t) = t else { continue };
+                out.push(ScanRow {
+                    sym: ids.as_ref().and_then(|c| by_id.get(&c.value(i)).copied()),
+                    t,
+                    nums: nums.iter().map(|c| c[i]).collect(),
+                    times: tcols.iter().map(|c| c[i]).collect(),
+                    labels: lcols.iter().map(|c| c[i].clone()).collect(),
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// A column of a batch as the strings it holds (a dictionary decoded).
 fn strings(c: &ArrayRef) -> Result<Vec<Option<String>>, RunError> {
     let s = arrow::compute::cast(c, &DataType::Utf8).map_err(|e| RunError::Internal(e.to_string()))?;

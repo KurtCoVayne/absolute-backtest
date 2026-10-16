@@ -224,7 +224,12 @@ library stat {
   `commission`, `slippage`, `impact`, `participation`, `financing`,
   `leverage`, `actions`, `delisting`, `oversize`, `ruin`, `numerics`. Every
   field is required (P); their values are in `corpus-v2/lib/execution.dsl`
-  and under Reading the kernel. **`report`** names the reporting calendar,
+  and under Reading the kernel. An optional `limits { gross <= 1.5 reject;
+  weight <= 0.1 per name clamp; ... }` field holds the pre-trade limits of
+  K-3.5 (`gross`, `net`, `weight ... per name`, `loss ... per day`,
+  `drawdown`, `turnover ... per day|week|month|quarter|year`,
+  `participation`, `names`, each `halt`, `reject` (the default), `clamp`
+  or `warn` as the kind admits). **`report`** names the reporting calendar,
   `periods N per year`, and optionally `window DATE .. DATE`, the run's
   window; every bar before it is warm-up.
 - A corpus file's headers: `# expect: CODE` on a negative case, `# allow:
@@ -373,6 +378,21 @@ executor cannot apply what it does not load, so a split would move the
 price and not the position, and a delisted name would never be closed.
 The numbers of the semantic model's conservative defaults are the
 `equity_default` preset.
+
+Every program has a contract derived from its structure (K-3): the
+preconditions the binding must meet before the first barrier (a binding,
+positive prices, a derived state within `--memory-budget`, the reconciled
+actions, delistings and memberships the bundle tests used to check), the
+invariants the kernel checks on itself at every decision barrier (the NAV
+identity, one decision per instrument, no read past the barrier, keyed
+stored relations, the leverage field, the limits, the event log folding to
+the book, one working order per instrument), the postconditions computed at
+the end, and the limits of the `limits` field, which act on a bar's orders
+before they are sent. `abt contract --strategy NAME files...` prints it,
+each clause with its source, discharge and policy; with data it runs the
+program and prints each clause's status (`proven`, `checked`, `warned`,
+`not_applicable`); a refused precondition stops the run with exit 2, a
+failed invariant halts it naming the clause, the bar and the values.
 
 The executor fills a bar's decisions at the next bar's close, at the price
 relation adjusted by the cost model, then writes `fill`, `position` and

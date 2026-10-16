@@ -258,6 +258,33 @@ fn run_prints_every_decision_and_the_fills_on_request() {
     assert!(stdout.lines().any(|l| l.trim_start().starts_with("fill ") && l.contains(" @ ")), "stdout: {}", stdout);
 }
 
+/// K-3.7: `abt contract` prints the contract derived from the program, its
+/// static clauses proven and the others open; with data, a run's status of
+/// every clause; `--json` the clauses as records.
+#[test]
+fn contract_prints_the_clauses_and_a_runs_statuses() {
+    let files = strategy_files("sma_crossover");
+    let mut args = vec!["contract", "--strategy", "sma_crossover"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{}{}", stdout, stderr);
+    for want in ["pre.prices", "inv.nav", "post.decisions", "proven(tier 0)", "open"] {
+        assert!(stdout.contains(want), "lacks {}:\n{}", want, stdout);
+    }
+    let mut args = vec!["contract", "--strategy", "sma_crossover", "--synthetic", "--days", "120", "--json"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{}{}", stdout, stderr);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let clauses = v["clauses"].as_array().unwrap();
+    assert_eq!(clauses.len(), 33);
+    let nav = clauses.iter().find(|c| c["id"] == "inv.nav").unwrap();
+    assert_eq!(nav["status"]["status"], "checked", "{}", nav);
+    assert!(clauses.iter().all(|c| c["status"]["status"] != "open" && c["status"]["status"] != "violated"), "{}", stdout);
+}
+
 /// K-4.5: `--no-pushdown` evaluates every aggregate in the kernel; the run is
 /// the same, decision for decision and fill for fill, and only the count of
 /// the data layer's answers differs.

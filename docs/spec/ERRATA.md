@@ -217,6 +217,86 @@ batch driver agree on every corpus program. Each bless since:
   with the `book` library's `exposure(@T, G)` view, so neither it nor
   `margin_req` is added to Σ_t before M-7. Their values are in the book
   rows.
+- **E-50 (K-3.1 to K-3.4, K-4.2, G7; the contract as the kernel derives and
+  checks it).** `contract::contract(P)` gives the 16 preconditions, 10
+  invariants and 7 postconditions of K-3, under stable ids (`pre.prices`,
+  `inv.nav`, `post.final_cash`), plus one clause per declared limit. A run
+  sets each status; `abt contract` prints the table, and `--json` the
+  records. Where the documents leave a choice:
+  - `pre.vocabulary` is checked by WF-15 against the class catalog, which
+    the registry generates. A label no bound row carries stays the run's
+    `vocabulary` warning.
+  - `pre.state_bound` estimates, per derived relation, its instruments to
+    the power of its entity arguments, times its longest window in bars
+    plus the memo's retention, times a row's bytes, plus its window
+    state. The default budget is half the machine's memory; `abt run
+    --memory-budget BYTES` sets it.
+  - `pre.prices` scans every stored price column for values at or below
+    zero. That covers the price relation, or the relations a derived
+    price relation is computed from (MW14 marks at `tr_index`).
+  - `pre.actions`, `pre.delistings` and `pre.membership` are the former
+    bundle tests, read through the data layer's scans. One implementation
+    (`contract::check`) serves `abt bundle test` too. Reviewed exceptions
+    are not yet read from a version's attributes.
+  - `pre.revisions` is not applicable until a source declares
+    `revisions = none` (M-6). `pre.option_inputs` and `pre.margin_rows`
+    are not applicable until M-7. `pre.calendars` holds by construction:
+    the calendar labels the kernel puts are the bound bars'.
+  - `inv.no_read_past`: the latest receipt among the tuples received
+    before a decision barrier is at most at(T). `inv.pushdown_receipt`:
+    the same among the pushed answers read there.
+  - `inv.keyed_store`: a stored relation's identity is its entity
+    arguments, then its labels (E-35). A later tuple of the same fact and
+    time is a revision and replaces the row it revises, as K-4.2 says;
+    the kernel used to keep both.
+  - `inv.gross` is checked after a bar whose fills added exposure, when
+    the leverage field refuses or halts (`allow` lets a fill borrow past
+    the multiple). Gross is then at most the field's multiple of equity,
+    or of the fixed capital, plus the bar's costs (which are never
+    leverage).
+  - `inv.position_limits` reads the book the accepted orders would leave
+    at the decision's marks, since the limits are pre-trade.
+  - `post.decisions` is E-49's identity per order. `post.final_cash` adds
+    the log's flows by category. `post.truncation` is the acceptance
+    suite's (G5).
+  - `ExecConfig.inject` makes a named invariant fail at a bar, for G7's
+    "every injected invariant violation halts" (`tests/contracts.rs`).
+  - A refusal is `RunError::Precondition` (exit 2). A failed invariant is
+    `RunError::Invariant`, naming the clause, the barrier and the values.
+- **E-51 (K-3.5, K-2.2; the limits as the kernel enforces them).** The
+  execution block's optional `limits` field is written
+  `limits { KIND <= X [per WORD] [POLICY]; ... }`.
+  - The checker refuses (P): an unknown kind, a kind set twice, a bound
+    that is not positive (or not whole for `names`), a missing or
+    unexpected `per`, a policy the kind does not admit. `reject` is the
+    default policy.
+  - `per` is `name` for `weight` and `day` for `loss`. For `turnover` it
+    is `day`, `week`, `month`, `quarter` or `year`, the trailing period.
+  - The limits act in `on_decisions`, after every decision is sent as an
+    order (K-4.2), on the book the orders would leave at the bar's marks:
+    the expected fills. A target weight is sized on the capital at that
+    mark.
+  - A breach acts on the bar's increasing orders, those that raise
+    |position|. The exceptions: `names` acts on the orders that open a
+    name, `participation` on each order above the bound, whether it adds
+    or reduces.
+  - `reject` drops the orders it acts on, each as a `rejected` event,
+    which counts as dropped. `clamp` scales their deltas by the largest
+    factor that meets the limit: found by bisection, since gross, |net|
+    and turnover are convex in it. A `weight` clamp caps each target. A
+    kind that cannot be scaled (`names`, `loss`, `drawdown`) rejects.
+    `warn` lets the orders through. `halt` stops the run (`RunError::Risk`,
+    naming the limit).
+  - Each breach is a `limit_triggered` event. The limit's clause reports
+    the bars it fired at.
+  - `loss` reads the NAV the calendar day opened at: the previous day's
+    last decision bar, or the initial capital. `drawdown` reads the peak
+    NAV of the decision bars. `turnover` reads the notional the decisions
+    traded in the trailing period.
+  - A `weight` limit over decisions that are all target weights with
+    constant weights within it is `proven` at tier 1. Its runtime check
+    stays.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

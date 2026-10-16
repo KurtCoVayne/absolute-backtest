@@ -359,6 +359,22 @@ pub fn render_exec_field(f: &ExecField) -> String {
         ExecValue::Financing { cash, debit, short } => format!("cash {} debit {} short {}", amount(*cash), amount(*debit), amount(*short)),
         ExecValue::LeverageGross { max, policy } => format!("gross <= {} {}", amount(*max), policy),
         ExecValue::Haircuts(hs) => format!("haircut {{ {} }}", hs.iter().map(|(r, x)| format!("{} {}", r, amount(*x))).collect::<Vec<_>>().join(", ")),
+        ExecValue::Limits(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .map(|l| {
+                    let mut s = format!("{} <= {}", l.kind, amount(l.bound));
+                    if let Some(p) = &l.per {
+                        s.push_str(&format!(" per {}", p));
+                    }
+                    if let Some(p) = &l.policy {
+                        s.push_str(&format!(" {}", p));
+                    }
+                    s
+                })
+                .collect();
+            format!("{{ {} }}", parts.join("; "))
+        }
         ExecValue::None => "none".into(),
     };
     format!("{} {}", f.name, value)

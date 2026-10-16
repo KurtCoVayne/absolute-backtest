@@ -12,7 +12,7 @@ pub mod link;
 pub mod rule;
 pub mod types;
 
-pub use config::{Clock, Commission, Delisting, ExecBlock, Impact, Leverage, ReportConfig, Slippage};
+pub use config::{Clock, Commission, Delisting, ExecBlock, Impact, Leverage, Limit, LimitKind, LimitPolicy, ReportConfig, Slippage};
 pub use dof::DegreesOfFreedom;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

@@ -29,6 +29,18 @@ pub trait Executor {
     /// and the state back from one.
     fn checkpoint(&self) -> Result<serde_json::Value, String>;
     fn restore(&mut self, state: serde_json::Value) -> Result<(), String>;
+    /// What the invariants read (K-3.3): the book, the instruments with an
+    /// order working (one entry an order), and the book the last bar's
+    /// accepted orders would leave.
+    fn book(&self) -> Option<&Book> {
+        None
+    }
+    fn working(&self) -> Vec<Sym> {
+        Vec::new()
+    }
+    fn expected(&self) -> Option<&Expected> {
+        None
+    }
 }
 
 /// An order that does not execute at the next bar's close (section 6, order
@@ -65,6 +77,90 @@ enum Trigger {
     Expire(String),
 }
 
+/// What the pre-trade limits read (K-5.1 "limits state"): the NAV the day
+/// opened at, the peak NAV, the notional traded by bar for a trailing
+/// turnover.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct LimitState {
+    day: Option<i64>,
+    pub day_open_nav: f64,
+    last_nav: f64,
+    pub peak_nav: f64,
+    traded: std::collections::VecDeque<(i64, f64)>,
+}
+
+impl LimitState {
+    /// The NAV of a decision bar: a new calendar day opens at the last
+    /// bar's NAV (the first at the initial capital).
+    fn observe(&mut self, t: i64, nav: f64, initial: f64) {
+        let day = time::day_key(t);
+        if self.day != Some(day) {
+            self.day_open_nav = if self.day.is_some() { self.last_nav } else { initial };
+            self.day = Some(day);
+        }
+        self.last_nav = nav;
+        self.peak_nav = self.peak_nav.max(nav);
+    }
+
+    /// The notional traded in `(since, t]`, forgetting what is older.
+    fn traded_since(&mut self, since: i64) -> f64 {
+        while self.traded.front().is_some_and(|(at, _)| *at <= since) {
+            self.traded.pop_front();
+        }
+        self.traded.iter().map(|(_, n)| n).sum()
+    }
+}
+
+/// The book a bar's accepted orders would leave at the bar's marks, after
+/// the limits acted (what `inv.position_limits` reads, K-3.3).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Expected {
+    pub t: i64,
+    pub capital: f64,
+    /// Instrument, quantity, the unit's value (price times multiplier).
+    pub positions: Vec<(Sym, f64, f64)>,
+}
+
+/// One order as the limits see it: at the bar's mark times the multiplier
+/// (`pm`), from the position `q0` to `q1`.
+#[derive(Clone, Debug)]
+struct Sized {
+    sym: Sym,
+    index: usize,
+    id: OrderId,
+    rule: usize,
+    q0: f64,
+    q1: f64,
+    pm: f64,
+}
+
+impl Sized {
+    fn increasing(&self) -> bool {
+        self.q1.abs() > self.q0.abs()
+    }
+}
+
+/// The largest scale in [0, 1] of the increasing orders' deltas under which
+/// `f` (convex in the scale) stays at most `bound`.
+fn largest_scale(f: impl Fn(f64) -> f64, bound: f64) -> f64 {
+    if f(1.0) <= bound {
+        return 1.0;
+    }
+    if f(0.0) > bound {
+        return 0.0;
+    }
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if f(mid) <= bound {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// The simulated executor: the book, the open targets, the working orders
 /// and the counters behind the run's summaries.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -88,6 +184,10 @@ pub struct SimExecutor {
     /// The next order's id.
     #[serde(default)]
     next_order: OrderId,
+    #[serde(default)]
+    limit_state: LimitState,
+    #[serde(default)]
+    expected: Expected,
     requested_total: f64,
     filled_total: f64,
     participations: Vec<f64>,
@@ -113,6 +213,8 @@ impl SimExecutor {
             open_targets: BTreeMap::new(),
             working: BTreeMap::new(),
             next_order: 0,
+            limit_state: LimitState::default(),
+            expected: Expected::default(),
             requested_total: 0.0,
             filled_total: 0.0,
             participations: Vec::new(),
@@ -125,9 +227,245 @@ impl SimExecutor {
         }
     }
 
-    /// The book, as the event log folds to it.
-    pub fn book(&self) -> &Book {
-        &self.book
+    /// The pre-trade limits (K-3.5) on the bar's orders, at their expected
+    /// fills (the bar's marks): each limit in the order written; a breach
+    /// halts the run, rejects the increasing orders, scales them to the
+    /// limit, or warns, and is a `limit_triggered` event. A limit never
+    /// stops an order that reduces a position, except a participation
+    /// limit, which is the order's size against the bar's volume.
+    fn apply_limits(&mut self, k: &mut Kernel, t: i64, pending: &mut BTreeMap<Sym, Vec<(Decision, usize, OrderId)>>, result: &mut RunResult) -> Result<(), RunError> {
+        use crate::check::{LimitKind, LimitPolicy};
+        let nav = self.nav(k, t);
+        let capital = if self.cfg.compounding { nav.max(0.0) } else { self.cfg.initial_cash };
+        let mut orders: Vec<Sized> = Vec::new();
+        for (sym, ds) in pending.iter() {
+            for (index, (d, rule, id)) in ds.iter().enumerate() {
+                // An order without a mark cannot be sized before its fill:
+                // the limits leave it to the executor's own checks.
+                let Some(p) = k.price_at(*sym, t) else { continue };
+                let pm = p * k.multiplier(*sym);
+                let q0 = self.book.position(*sym);
+                let q1 = match d.ctor {
+                    Ctor::Trade => q0 + d.amount,
+                    Ctor::HoldQuantity => d.amount,
+                    Ctor::HoldWeight if pm != 0.0 => d.amount * capital / pm,
+                    Ctor::HoldWeight => q0,
+                };
+                orders.push(Sized {
+                    sym: *sym,
+                    index,
+                    id: *id,
+                    rule: *rule,
+                    q0,
+                    q1,
+                    pm,
+                });
+            }
+        }
+        // The held positions the bar does not order, marked.
+        let ordered: HashSet<Sym> = orders.iter().map(|o| o.sym).collect();
+        let mut others: Vec<(f64, f64)> = Vec::new();
+        for (&sym, &q) in &self.book.positions {
+            if !ordered.contains(&sym) {
+                if let Some(p) = k.price_at(sym, t) {
+                    others.push((q, p * k.multiplier(sym)));
+                }
+            }
+        }
+        let tol = 1e-9 * capital.abs().max(1.0);
+        for limit in self.cfg.limits.clone() {
+            let bound = limit.bound * capital;
+            // An increasing order at scale `s` of its delta; any other in full.
+            let at = |o: &Sized, s: f64| if o.increasing() { o.q0 + s * (o.q1 - o.q0) } else { o.q1 };
+            let gross = |os: &[Sized], s: f64| others.iter().map(|(q, pm)| q.abs() * pm).sum::<f64>() + os.iter().map(|o| at(o, s).abs() * o.pm).sum::<f64>();
+            let net = |os: &[Sized], s: f64| others.iter().map(|(q, pm)| q * pm).sum::<f64>() + os.iter().map(|o| at(o, s) * o.pm).sum::<f64>();
+            // The orders a breach acts on, the scale of each that meets the
+            // limit (for `clamp`; none where the limit cannot be scaled to),
+            // and what the run reports.
+            let (affected, scale, detail): (Vec<usize>, Option<Vec<f64>>, String) = match limit.kind {
+                LimitKind::Gross => {
+                    let g = gross(&orders, 1.0);
+                    if g <= bound + tol {
+                        continue;
+                    }
+                    let s = largest_scale(|s| gross(&orders, s), bound);
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].increasing()).collect();
+                    (idx, Some(vec![s; orders.len()]), format!("gross {:.2} after the bar's orders against {:.2}", g, bound))
+                }
+                LimitKind::Net => {
+                    let n = net(&orders, 1.0);
+                    if n.abs() <= bound + tol {
+                        continue;
+                    }
+                    let s = largest_scale(|s| net(&orders, s).abs(), bound);
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].increasing() && (orders[i].q1 - orders[i].q0) * n > 0.0).collect();
+                    (idx, Some(vec![s; orders.len()]), format!("net {:.2} after the bar's orders against {:.2}", n, bound))
+                }
+                LimitKind::Weight => {
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].increasing() && (orders[i].q1 * orders[i].pm).abs() > bound + tol).collect();
+                    if idx.is_empty() {
+                        continue;
+                    }
+                    let scales: Vec<f64> = orders
+                        .iter()
+                        .map(|o| {
+                            let cap = if o.pm != 0.0 { bound / o.pm.abs() } else { o.q1.abs() };
+                            let target = o.q1.signum() * cap.min(o.q1.abs());
+                            if o.q1 != o.q0 {
+                                ((target - o.q0) / (o.q1 - o.q0)).clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            }
+                        })
+                        .collect();
+                    (idx, Some(scales), format!("a position above {:.2} per name", bound))
+                }
+                LimitKind::Names => {
+                    let held = others.iter().filter(|(q, _)| *q != 0.0).count() + orders.iter().filter(|o| o.q1 != 0.0).count();
+                    if held as f64 <= limit.bound {
+                        continue;
+                    }
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].q0 == 0.0 && orders[i].q1 != 0.0).collect();
+                    (idx, None, format!("{} names after the bar's orders against {}", held, limit.bound))
+                }
+                LimitKind::Loss => {
+                    let loss = self.limit_state.day_open_nav - nav;
+                    if loss <= bound + tol {
+                        continue;
+                    }
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].increasing()).collect();
+                    (idx, None, format!("the day's loss {:.2} against {:.2}", loss, bound))
+                }
+                LimitKind::Drawdown => {
+                    let floor = (1.0 - limit.bound) * self.limit_state.peak_nav;
+                    if nav >= floor - tol {
+                        continue;
+                    }
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].increasing()).collect();
+                    (idx, None, format!("NAV {:.2} below {:.2}, {} under the peak {:.2}", nav, floor, limit.bound, self.limit_state.peak_nav))
+                }
+                LimitKind::Turnover => {
+                    let period = match limit.period.as_deref() {
+                        Some("day") => crate::ir::Duration { months: 0, days: 1, nanos: 0 },
+                        Some("week") => crate::ir::Duration { months: 0, days: 7, nanos: 0 },
+                        Some("quarter") => crate::ir::Duration { months: 3, days: 0, nanos: 0 },
+                        Some("year") => crate::ir::Duration { months: 12, days: 0, nanos: 0 },
+                        _ => crate::ir::Duration { months: 1, days: 0, nanos: 0 },
+                    };
+                    let traded = self.limit_state.traded_since(time::sub_duration(t, period));
+                    let turnover = |s: f64| traded + orders.iter().map(|o| (at(o, s) - o.q0).abs() * o.pm.abs()).sum::<f64>();
+                    let total = turnover(1.0);
+                    if total <= bound + tol {
+                        continue;
+                    }
+                    let s = largest_scale(turnover, bound);
+                    let idx: Vec<usize> = (0..orders.len()).filter(|&i| orders[i].increasing()).collect();
+                    (
+                        idx,
+                        Some(vec![s; orders.len()]),
+                        format!("turnover {:.2} over the trailing {} against {:.2}", total, limit.period.as_deref().unwrap_or("month"), bound),
+                    )
+                }
+                LimitKind::Participation => {
+                    let mut idx = Vec::new();
+                    let mut scales = vec![1.0; orders.len()];
+                    for (i, o) in orders.iter().enumerate() {
+                        let Some(v) = k.bar_volume(o.sym, t) else { continue };
+                        let cap = limit.bound * v;
+                        let size = (o.q1 - o.q0).abs();
+                        if size > cap * (1.0 + 1e-12) {
+                            idx.push(i);
+                            scales[i] = if size > 0.0 { cap / size } else { 1.0 };
+                        }
+                    }
+                    if idx.is_empty() {
+                        continue;
+                    }
+                    (idx, Some(scales), format!("an order above {} of its bar's volume", limit.bound))
+                }
+            };
+            let ids: Vec<OrderId> = affected.iter().map(|&i| orders[i].id).collect();
+            // A limit that cannot be scaled to rejects (the checker admits
+            // `clamp` only where it can, K-3.5).
+            let policy = match (limit.policy, &scale) {
+                (LimitPolicy::Clamp, None) => LimitPolicy::Reject,
+                (p, _) => p,
+            };
+            let reason = format!("limit `{}`: {}", limit, detail);
+            match policy {
+                LimitPolicy::Halt => {
+                    let o = affected.first().map(|&i| &orders[i]);
+                    return Err(RunError::Risk {
+                        t,
+                        rule: o.map(|o| k.prog.rule_label(o.rule)).unwrap_or_else(|| "(limits)".into()),
+                        decision: o
+                            .and_then(|o| pending.get(&o.sym).and_then(|ds| ds.get(o.index)))
+                            .map(|(d, ..)| result.describe_decision(d))
+                            .unwrap_or_default(),
+                        message: reason,
+                    });
+                }
+                LimitPolicy::Warn => {}
+                LimitPolicy::Reject => {
+                    for &i in &affected {
+                        let o = &orders[i];
+                        if let Some(ds) = pending.get_mut(&o.sym) {
+                            if let Some(pos) = ds.iter().position(|(_, _, id)| *id == o.id) {
+                                let (d, rule, id) = ds.remove(pos);
+                                let rejected = EventKind::Rejected {
+                                    decided: t,
+                                    decision: d,
+                                    reason: reason.clone(),
+                                };
+                                self.record(result, RunEvent::new(t, Some(o.sym), rejected).rule(rule).order(id));
+                            }
+                        }
+                    }
+                    pending.retain(|_, ds| !ds.is_empty());
+                    let gone: HashSet<OrderId> = ids.iter().copied().collect();
+                    orders.retain(|o| !gone.contains(&o.id));
+                    for o in orders.iter_mut() {
+                        if let Some(i) = pending.get(&o.sym).and_then(|ds| ds.iter().position(|(_, _, id)| *id == o.id)) {
+                            o.index = i;
+                        }
+                    }
+                }
+                LimitPolicy::Clamp => {
+                    let scales = scale.unwrap_or_default();
+                    for &i in &affected {
+                        let s = scales.get(i).copied().unwrap_or(1.0);
+                        let o = &mut orders[i];
+                        let q = o.q0 + s * (o.q1 - o.q0);
+                        o.q1 = q;
+                        if let Some((d, ..)) = pending.get_mut(&o.sym).and_then(|ds| ds.get_mut(o.index)) {
+                            d.amount = match d.ctor {
+                                Ctor::Trade => q - o.q0,
+                                Ctor::HoldQuantity => q,
+                                Ctor::HoldWeight if capital != 0.0 => q * o.pm / capital,
+                                Ctor::HoldWeight => 0.0,
+                            };
+                        }
+                    }
+                }
+            }
+            let fired = EventKind::LimitTriggered {
+                limit: limit.to_string(),
+                policy: policy.name().to_string(),
+                orders: ids,
+                detail,
+            };
+            self.record(result, RunEvent::new(t, None, fired));
+        }
+        let mut positions: Vec<(Sym, f64, f64)> = orders.iter().map(|o| (o.sym, o.q1, o.pm)).collect();
+        for (&sym, &q) in &self.book.positions {
+            if !orders.iter().any(|o| o.sym == sym) {
+                if let Some(p) = k.price_at(sym, t) {
+                    positions.push((sym, q, p * k.multiplier(sym)));
+                }
+            }
+        }
+        self.expected = Expected { t, capital, positions };
+        Ok(())
     }
 
     /// Emits an event and applies it to the book: the one way the book
@@ -616,6 +954,7 @@ impl SimExecutor {
             };
             let remainder = partial.then(|| (requested - qty.abs(), if reissue { Fate::Reissued } else { Fate::Expired }));
             self.record(result, RunEvent::new(at, Some(sym), EventKind::Fill { fill, remainder }).rule(*rule).order(*id).cash(-cost));
+            self.limit_state.traded.push_back((at, qty.abs() * fill_price * m));
             k.last_price.insert(sym, fill_price);
             k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
             bar_costs += commission + fee + slippage + impact;
@@ -673,6 +1012,7 @@ impl SimExecutor {
                             .order(id)
                             .cash(-(qty * p * m + commission)),
                     );
+                    self.limit_state.traded.push_back((tn, qty.abs() * p * m));
                     result.costs.commissions += commission;
                     result.costs.turnover += qty.abs() * p * m;
                     k.last_price.insert(sym, p);
@@ -1084,6 +1424,7 @@ impl Executor for SimExecutor {
             }
         }
         let base = if self.cfg.compounding { equity.max(0.0) } else { self.cfg.initial_cash };
+        self.limit_state.observe(t, equity, self.cfg.initial_cash);
         result.exposure.push(ExposureRecord {
             t,
             cash: self.book.cash,
@@ -1130,8 +1471,9 @@ impl Executor for SimExecutor {
         Ok(())
     }
 
-    fn on_decisions(&mut self, _k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, result: &mut RunResult) -> Result<(), RunError> {
-        // Every decision becomes an order, with its id (K-5.2 `order_sent`).
+    fn on_decisions(&mut self, k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, result: &mut RunResult) -> Result<(), RunError> {
+        // Every decision becomes an order, with its id (K-5.2 `order_sent`),
+        // then the pre-trade limits act on the bar's orders (K-3.5).
         let mut pending: BTreeMap<Sym, Vec<(Decision, usize, OrderId)>> = BTreeMap::new();
         for (sym, ds) in by_equity {
             for (d, rule) in ds {
@@ -1140,6 +1482,9 @@ impl Executor for SimExecutor {
                 self.record(result, RunEvent::new(t, Some(*sym), EventKind::OrderSent { decision: d.clone() }).rule(*rule).order(id));
                 pending.entry(*sym).or_default().push((d.clone(), *rule, id));
             }
+        }
+        if !self.cfg.limits.is_empty() {
+            self.apply_limits(k, t, &mut pending, result)?;
         }
         self.pending = pending;
         self.pending_t = Some(t);
@@ -1170,6 +1515,18 @@ impl Executor for SimExecutor {
     fn restore(&mut self, state: serde_json::Value) -> Result<(), String> {
         *self = serde_json::from_value(state).map_err(|e| format!("executor state: {}", e))?;
         Ok(())
+    }
+
+    fn book(&self) -> Option<&Book> {
+        Some(&self.book)
+    }
+
+    fn working(&self) -> Vec<Sym> {
+        self.working.keys().chain(self.open_targets.keys()).copied().collect()
+    }
+
+    fn expected(&self) -> Option<&Expected> {
+        Some(&self.expected)
     }
 
     fn finish(&mut self, k: &mut Kernel, result: &mut RunResult) {

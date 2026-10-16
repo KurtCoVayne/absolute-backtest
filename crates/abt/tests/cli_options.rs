@@ -116,6 +116,7 @@ fn usage_documents_every_option() {
         "--plan",
         "--verify-causality",
         "--no-pushdown",
+        "--memory-budget",
         "--all",
         "--fills",
         "--nav",

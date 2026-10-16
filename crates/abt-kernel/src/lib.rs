@@ -12,6 +12,7 @@ pub mod bundle;
 pub mod check;
 pub mod cli;
 pub mod compiler;
+pub mod contract;
 pub mod data;
 pub mod dump;
 pub mod ingest;

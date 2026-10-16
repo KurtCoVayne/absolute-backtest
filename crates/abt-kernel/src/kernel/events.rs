@@ -116,6 +116,11 @@ pub enum EventKind {
     Funding { flow: Funding, amount: f64 },
     /// Equity below the maintenance requirement at the bar's mark.
     MarginCall { equity: f64, requirement: f64, policy: String },
+    /// An order a pre-trade limit refused (K-3.5 `reject`): terminal.
+    Rejected { decided: i64, decision: Decision, reason: String },
+    /// A limit the bar's orders would pass, its policy, the orders it
+    /// acted on (rejected, scaled, or let through with a warning).
+    LimitTriggered { limit: String, policy: String, orders: Vec<OrderId>, detail: String },
 }
 
 impl EventKind {
@@ -139,6 +144,8 @@ impl EventKind {
             },
             EventKind::Funding { .. } => "funding",
             EventKind::MarginCall { .. } => "margin_call",
+            EventKind::Rejected { .. } => "rejected",
+            EventKind::LimitTriggered { .. } => "limit_triggered",
         }
     }
 }

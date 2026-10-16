@@ -334,7 +334,24 @@ pub enum ExecValue {
         policy: String,
     },
     Haircuts(Vec<(String, f64)>),
+    /// `limits { gross <= 1.5 reject; weight <= 0.1 per name clamp; ... }`
+    /// (K-3.5).
+    Limits(Vec<LimitItem>),
     None,
+}
+
+/// One pre-trade limit as written: `KIND <= BOUND [per WORD] [POLICY]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitItem {
+    /// `gross`, `net`, `weight`, `loss`, `drawdown`, `turnover`,
+    /// `participation` or `names`.
+    pub kind: String,
+    pub bound: f64,
+    /// `name` (weight), `day` (loss), the period of a turnover.
+    pub per: Option<String>,
+    /// `halt`, `reject`, `clamp` or `warn`; absent, `reject`.
+    pub policy: Option<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
