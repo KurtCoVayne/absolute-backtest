@@ -386,6 +386,44 @@ impl<'p> Kernel<'p> {
         Ok(narrow(&rc))
     }
 
+    /// The tuples of `rel` matching `pattern` and the instances there left
+    /// stuck on a partial operation, as partial tuples with their halts: an
+    /// observed relation's (Definition V-8.3), whose stuck instance no
+    /// decision demanded is a row of the ledger rather than a halt. A call
+    /// that halted as a whole (an error no instance isolates) is one stuck
+    /// row carrying the pattern.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn observe_at(&mut self, rel: usize, pattern: &[Option<Value>]) -> Result<(Vec<Tuple>, Vec<(Vec<Option<Value>>, RunError)>), RunError> {
+        let e = match self.call(rel, pattern) {
+            Ok(found) => return Ok((found.iter().map(|(tu, _)| tu.clone()).collect(), Vec::new())),
+            Err(e) => e,
+        };
+        let info = self.rels[rel].clone();
+        let mut mkey: Vec<Value> = Vec::with_capacity(1 + info.inputs.len());
+        for &i in std::iter::once(&info.key_pos).chain(&info.inputs) {
+            match &pattern[i] {
+                Some(v) => mkey.push(v.clone()),
+                None => return Err(e),
+            }
+        }
+        let memo_key = (rel, mkey);
+        let matches = |tu: &Tuple| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().is_none_or(|p| p == v));
+        let compatible = |partial: &[Option<Value>]| {
+            pattern.iter().zip(partial.iter()).all(|(p, v)| match (p, v) {
+                (Some(p), Some(v)) => p == v,
+                _ => true,
+            })
+        };
+        match (self.memo.get(&memo_key), self.memo_stuck.get(&memo_key)) {
+            (Some(live), Some(stuck)) => Ok((
+                live.iter().filter(|(tu, _)| matches(tu)).map(|(tu, _)| tu.clone()).collect(),
+                stuck.iter().filter(|(p, _)| compatible(p)).cloned().collect(),
+            )),
+            _ if matches!(e, RunError::Arithmetic { .. }) => Ok((Vec::new(), vec![(pattern.to_vec(), e)])),
+            _ => Err(e),
+        }
+    }
+
     /// Every tuple the rules of a derived relation yield for a pattern, with
     /// the rule that derived each (the first, when several do), and the
     /// instances left stuck on a partial operation as partial head tuples

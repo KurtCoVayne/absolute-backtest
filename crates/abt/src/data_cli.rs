@@ -6,7 +6,7 @@
 //! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--attributes K=V,...] <files...>
 //! abt data ingest  [--store DIR] --adapter synthetic --class C [--days N] [--symbols A,B] [--seed N] <files...>
 //! abt data catalog [--store DIR] [--class C]
-//! abt data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--json]
+//! abt data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
 //! abt data stats   [--store DIR] [--relation R]
 //! abt data pin|unpin [--store DIR] VERSION | --binding B
 //! abt data gc      [--store DIR] [--disk-budget BYTES]
@@ -78,7 +78,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
     );
     exit(1)
 }
@@ -256,8 +256,14 @@ pub fn main(args: &[String]) {
                 println!("rows {} bytes {} partitions {} unresolved {}", e.rows, e.bytes, e.partitions, e.unresolved);
                 return;
             }
-            let (_, batches) = execute(&store, &resolved, &form, r_max, false).unwrap_or_else(|e| fail(&e.to_string()));
-            print!("{}", render(&batches));
+            let (schema, batches) = execute(&store, &resolved, &form, r_max, false).unwrap_or_else(|e| fail(&e.to_string()));
+            match a.opts.get("parquet") {
+                Some(path) => {
+                    let rows = write_parquet(Path::new(path), schema, &batches).unwrap_or_else(|e| fail(&format!("--parquet {}: {}", path, e)));
+                    println!("{} rows to {}", rows, path);
+                }
+                None => print!("{}", render(&batches)),
+            }
         }
         "pin" | "unpin" => {
             let mut store = open(&a);
@@ -297,6 +303,50 @@ pub fn main(args: &[String]) {
     }
 }
 
+/// An answer as a Parquet file, for the tools that read one (the parity
+/// scripts, pandas): a label column as its text, a bytes column whose
+/// values are all text as text. Returns the rows written.
+fn write_parquet(path: &Path, schema: arrow::datatypes::SchemaRef, batches: &[RecordBatch]) -> Result<usize, String> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    let is_text = |i: usize| batches.iter().all(|b| b.column(i).as_binary::<i32>().iter().all(|v| v.is_none_or(|v| std::str::from_utf8(v).is_ok())));
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| match f.data_type() {
+            DataType::Dictionary(_, v) if **v == DataType::Utf8 => Field::new(f.name(), DataType::Utf8, true),
+            DataType::Binary if is_text(i) => Field::new(f.name(), DataType::Utf8, true),
+            _ => f.as_ref().clone(),
+        })
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut w = parquet::arrow::ArrowWriter::try_new(file, schema.clone(), None).map_err(|e| e.to_string())?;
+    let mut rows = 0;
+    for b in batches {
+        let cols: Vec<arrow::array::ArrayRef> = b
+            .columns()
+            .iter()
+            .zip(schema.fields())
+            .map(|(c, f)| match (c.data_type(), f.data_type()) {
+                (DataType::Binary, DataType::Utf8) => {
+                    let b = c.as_binary::<i32>();
+                    let s: Vec<Option<&str>> = (0..b.len()).map(|i| (!b.is_null(i)).then(|| std::str::from_utf8(b.value(i)).unwrap_or_default())).collect();
+                    Ok(Arc::new(arrow::array::StringArray::from(s)) as arrow::array::ArrayRef)
+                }
+                (from, to) if from != to => arrow::compute::cast(c, to).map_err(|e| e.to_string()),
+                _ => Ok(c.clone()),
+            })
+            .collect::<Result<_, String>>()?;
+        let b = RecordBatch::try_new(schema.clone(), cols).map_err(|e| e.to_string())?;
+        rows += b.num_rows();
+        w.write(&b).map_err(|e| e.to_string())?;
+    }
+    w.close().map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
 /// A table as text: its columns, then a line per row.
 fn render(batches: &[RecordBatch]) -> String {
     let mut out = String::new();
@@ -313,6 +363,19 @@ fn render(batches: &[RecordBatch]) -> String {
                 arrow::datatypes::DataType::Timestamp(_, _) => {
                     let t = c.as_any().downcast_ref::<arrow::array::TimestampNanosecondArray>();
                     let s: Vec<Option<String>> = (0..c.len()).map(|k| t.filter(|t| !arrow::array::Array::is_null(*t, k)).map(|t| Time(t.value(k)).iso())).collect();
+                    Arc::new(arrow::array::StringArray::from(s)) as arrow::array::ArrayRef
+                }
+                // Bytes that are text (a run's JSON, a decision) print as text.
+                arrow::datatypes::DataType::Binary => {
+                    let b = c.as_any().downcast_ref::<arrow::array::BinaryArray>().expect("a binary column");
+                    let s: Vec<Option<String>> = (0..c.len())
+                        .map(|k| {
+                            (!arrow::array::Array::is_null(b, k)).then(|| match std::str::from_utf8(b.value(k)) {
+                                Ok(text) => text.to_string(),
+                                Err(_) => b.value(k).iter().map(|x| format!("{:02x}", x)).collect(),
+                            })
+                        })
+                        .collect();
                     Arc::new(arrow::array::StringArray::from(s)) as arrow::array::ArrayRef
                 }
                 _ => c.clone(),

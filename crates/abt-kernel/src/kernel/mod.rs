@@ -19,6 +19,7 @@ pub mod events;
 pub mod executor;
 pub mod fold;
 pub mod hash;
+pub mod outputs;
 pub mod pushdown;
 pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
 pub use events::{Book, EventKind, OrderId, RunEvent};
@@ -1275,6 +1276,24 @@ pub struct RunResult {
     /// The program's contract with the run's statuses (K-3).
     #[serde(default)]
     pub contract: crate::contract::Contract,
+    /// The tuples that arrived after their bucket's barrier (K-4.4).
+    #[serde(default)]
+    pub late: Vec<LateRecord>,
+    /// The run's identity, under which its outputs are written
+    /// (`kernel.<run id>.*`, K-7.1).
+    #[serde(default)]
+    pub run_id: String,
+}
+
+/// A tuple that arrived after its bucket's barrier (K-4.4): its place in
+/// the stream, its relation, instrument, time and receipt.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LateRecord {
+    pub seq: u64,
+    pub relation: String,
+    pub entity: Option<Sym>,
+    pub t: i64,
+    pub r: i64,
 }
 
 impl RunResult {
@@ -3229,6 +3248,9 @@ pub struct Replay {
     /// Evict the memo at every bar however small (tests that prove eviction
     /// changes nothing).
     pub force_memo_eviction: bool,
+    /// Write the run's outputs through the data layer when it ends or
+    /// halts (K-7.1).
+    pub write_outputs: bool,
 }
 
 /// The fold over a data service (K-4.1, K-4.2): Bind, the calendars put
@@ -3293,18 +3315,58 @@ pub fn replay<'p>(
         fold.kernel.force_memo_eviction();
     }
     let from = opts.from.as_ref().map(|c| c.cursor).unwrap_or(1);
+    let mut halt: Option<RunError> = None;
     if to_seq.is_none_or(|t| t >= from) {
         let mut sub = client.subscribe(spec, from, to_seq)?;
-        while let Some(b) = sub.next_batch()? {
+        'stream: while let Some(b) = sub.next_batch()? {
             for ev in decoder.events(&mut fold.kernel, &bound, &b)? {
-                fold.step(ev.into())?;
+                if let Err(e) = fold.step(ev.into()) {
+                    halt = Some(e);
+                    break 'stream;
+                }
                 if let Some(cp) = fold.take_checkpoint() {
                     on_checkpoint(cp);
                 }
             }
         }
     }
-    fold.finish()
+    // The run's outputs, under its namespace (K-7.1): a halted run writes
+    // what it has, and its halt is the error whether or not they could be.
+    if let Some(e) = halt {
+        if opts.write_outputs {
+            let mut partial = fold.result().clone();
+            partial.run_id = run.clone();
+            let ids = outputs::instrument_ids(&fold.kernel, &bound);
+            let written = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e)).and_then(|t| outputs::write(client, t));
+            if let Err(w) = written {
+                return Err(RunError::Internal(format!("{} (and the halted run's outputs could not be written: {})", e, w)));
+            }
+        }
+        return Err(e);
+    }
+    let (mut result, mut kernel) = fold.finish()?;
+    result.run_id = run.clone();
+    if !opts.write_outputs {
+        if !prog.observes.is_empty() {
+            result.contract.set(
+                "post.ledgers",
+                crate::contract::Status::NotApplicable {
+                    why: "the run writes no outputs (a run over a data service writes them)".into(),
+                },
+            );
+        }
+        return Ok((result, kernel));
+    }
+    let ids = outputs::instrument_ids(&kernel, &bound);
+    let (ledgers, notes) = outputs::ledgers(&run, prog, &mut kernel, &ids, &result)?;
+    result.warnings.extend(notes.into_iter().map(|message| RunWarning { bias: "observation".into(), message }));
+    if !prog.observes.is_empty() {
+        result.contract.set("post.ledgers", crate::contract::Status::Checked { times: ledgers.len() as u64 });
+    }
+    let mut tables = outputs::tables(&run, prog, &bound, &ids, &kernel.cfg, &result, "completed")?;
+    tables.extend(ledgers);
+    outputs::write(client, tables)?;
+    Ok((result, kernel))
 }
 
 /// A kernel holding every tuple of the stream and every bucket opened, with

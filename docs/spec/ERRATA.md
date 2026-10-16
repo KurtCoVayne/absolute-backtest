@@ -297,6 +297,86 @@ batch driver agree on every corpus program. Each bless since:
     constant weights within it is `proven` at tier 1. Its runtime check
     stays.
 
+- **E-52 (K-7.1, P-4, K-9.1; the run's outputs as the registry stores
+  them).** A run over a data service writes its outputs through `put`
+  under `kernel.<run id>.*` when the stream ends, or when the run halts
+  (the report's `status` is then `halted(reason)`, and the violated
+  invariant is `violated` in its contract). The run id is the one the
+  stream's calendars are put under (`kernel.<run>.calendar_label`, E-32):
+  16 hex digits of the hash of the program's fingerprint and the binding.
+  `abt run --data SOCKET` writes them and prints the id. A run whose data
+  service holds a dataset in this process (`--synthetic`, `--bundle`, a
+  Parquet directory) writes none, since its store is temporary.
+  - The registry admits exactly one event time per relation, refuses a
+    null entity, and keys a fact by its entities, then its labels (E-35).
+    Each relation is given an identity under that rule:
+    - `events` is keyed by `seq`, an entity. `decisions` and `fills` are
+      projections of the log keyed by the event's `seq`, so they join the
+      log on it. Their instrument is a value column.
+    - K-5.1's `book`, with a null instrument for the book's rows, would
+      put two kinds of row in one relation. It is two: `book`, keyed by
+      the barrier's `t` (one row per decision barrier: cash, debit,
+      receivables, NAV, capital, gross, net, leverage, margins, excess
+      liquidity), and `holdings`, keyed by instrument and `t` (position,
+      average cost, mark, mark source). `variation_account` is 0 until
+      the futures model (M-7). The margins are the approximation's
+      (`margin_source = approx`).
+    - The relations without a time of their own (`coverage`, `contract`,
+      `binding`, `plans`, `report`) carry `t` = the run's last decision
+      bar. They are keyed by a label: `relation`, `clause`, `relation`,
+      `rule` with `position` (an entity), and `key`.
+    - `late` is keyed by the tuple's place in the stream (`seq`).
+      `changed_decision` is false until live modes re-decide (M-6).
+    - `ledger.<R>` is keyed by `bar` and `row`, the row's place among the
+      bar's rows. R's arguments are value columns, since a stuck instance
+      may leave an identity argument unbound, and a relation that is not
+      keyed may hold two tuples of one identity at a bar.
+  - The registry's types have no text column besides the interned label,
+    so free text and JSON (`decision`, `order`, `reason`, `detail`,
+    `literal`, `point`, `normal_form`, `configuration`, `value`,
+    `stuck_literal`) are UTF-8 `Bytes`. `abt data query` prints them as
+    text, and `--parquet FILE` writes them, and the labels, as strings.
+    Hashes and versions (`program_hash`, `binding_id`, `version`) are
+    labels, compared with `=`.
+  - `binding` repeats the run's `program_hash`, `binding_id`, `mode`
+    (`replay-sim`), `point` and `normal_form` on every (relation, version)
+    row, and adds the run's `configuration` (the ExecConfig as JSON).
+    `report` holds the status, the bars, the final cash, the base
+    capital, the costs, liquidity, funding and kernel statistics as JSON,
+    the plan's label, and each warning with its bias. Per-phase timings
+    and lag wait for live modes (M-6) and the performance step (M-8),
+    since a timing would make two equal runs' outputs differ.
+  - The ledger of an observed relation (Definition V-8.3) is computed
+    from the kernel at the end of the run, at every bar of R's calendar
+    within the run, with the observation's `where` applied. This is
+    Proposition V-8.4's equality: observation changes nothing decided,
+    and the memo's instances are the run's. A stuck instance is a row
+    with `stuck` and the halt it would have been in `stuck_literal`. A
+    relation that takes inputs cannot be enumerated: its ledger is empty,
+    with a warning. `post.ledgers` is `checked` with the number of
+    ledgers written, or `not_applicable` for a run that writes no outputs.
+  - "Incrementally at every checkpoint" comes with the checkpoints
+    through the data layer (M-4e).
+  - The parity scripts read the run from the store (K-9.1), through
+    `scripts/parity/abt_store.py`:
+    - `r8l_compare.py STORE RUN LEG_FLAGS` reads the decisions, the fills
+      of the event log (a fill's flow is its `cash_flow`), the book, and
+      ES's sessions for the reporting calendar.
+    - `mw14_compare.py STORE RUN CANON` reads the book and the report's
+      base capital.
+    - On a synthetic run of each book, they print what the dump-reading
+      scripts printed, byte for byte.
+    - `reference/diff.py` still replays the dump, because the reference
+      engine reads the data the run was bound to from it. It moves with
+      the dump, which M-9 retires.
+  - Found and fixed on the way:
+    - Over `--data SOCKET`, a reporting calendar of sessions had no days,
+      since this process holds no dataset, and `--returns` was empty. The
+      sessions are now read through the data service.
+    - The "commissions are zero" warning is dropped from a run that
+      charged a commission per contract or on notional. The CLI used to
+      hide it only when printing.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

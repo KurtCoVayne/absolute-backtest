@@ -98,5 +98,31 @@ fn a_run_reads_a_served_store_as_it_reads_the_market_in_process() {
     assert_eq!(in_process.status.code(), Some(0), "{}", text(&in_process).1);
     assert!(!final_line(&in_process).is_empty(), "{}", text(&in_process).0);
     assert_eq!(final_line(&over_socket), final_line(&in_process));
+    // The run over the service wrote its outputs to the store and named
+    // them (K-7.1); a run in process names none.
+    let out = text(&over_socket).0;
+    let line = out.lines().find(|l| l.starts_with("run ")).unwrap_or_else(|| panic!("no run line: {}", out));
+    let run = line.trim_start_matches("run ").split(':').next().unwrap().to_string();
+    assert!(!text(&in_process).0.lines().any(|l| l.starts_with("run ")));
+    let fills: usize = out
+        .lines()
+        .find_map(|l| l.strip_prefix("decisions: "))
+        .and_then(|l| l.split("fills: ").nth(1))
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    let file = dir.join("fills.parquet");
+    let o = abt(&["data", "query", "--store", &store, &format!("kernel.{}.fills", run), "--parquet", &file.to_string_lossy()]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o).1);
+    assert!(text(&o).0.contains(&format!("{} rows to ", fills)), "{}", text(&o).0);
+    // The Parquet file holds them, a label as text.
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&file).unwrap()).unwrap();
+    let schema = reader.schema().clone();
+    let rows: usize = reader.build().unwrap().map(|b| b.unwrap().num_rows()).sum();
+    assert_eq!(rows, fills);
+    assert_eq!(schema.field_with_name("source").unwrap().data_type(), &arrow::datatypes::DataType::Utf8);
+    // The report's status, as text.
+    let o = abt(&["data", "query", "--store", &store, &format!("kernel.{}.report", run)]);
+    assert!(text(&o).0.lines().any(|l| l.starts_with("status | ") && l.contains("\"completed\"")), "{}", text(&o).0);
     let _ = std::fs::remove_dir_all(&dir);
 }

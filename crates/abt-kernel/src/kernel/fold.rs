@@ -154,6 +154,11 @@ impl<'p, 'e> Fold<'p, 'e> {
         self
     }
 
+    /// The run so far (what a halted run writes, K-7.1).
+    pub fn result(&self) -> &RunResult {
+        &self.result
+    }
+
     /// The checkpoint the last `step` produced, if any.
     pub fn take_checkpoint(&mut self) -> Option<Checkpoint> {
         self.pending_checkpoint.take()
@@ -268,9 +273,17 @@ impl<'p, 'e> Fold<'p, 'e> {
                 // meanwhile is recomputed on demand.
                 let dcal = self.kernel.prog.decision_cal.clone();
                 let late = self.last_bar.is_some_and(|last| self.kernel.label_on(&dcal, key).is_some_and(|l| l <= last));
+                let entity = self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity());
                 self.kernel.insert_fact(rel, tuple)?;
                 if late {
                     self.kernel.invalidate_from(key);
+                    self.result.late.push(super::LateRecord {
+                        seq,
+                        relation: self.kernel.rels[rel].name.clone(),
+                        entity,
+                        t: key,
+                        r,
+                    });
                 }
                 Ok(())
             }
@@ -326,6 +339,11 @@ impl<'p, 'e> Fold<'p, 'e> {
             return Err(RunError::NoBars);
         }
         self.exec.finish(&mut self.kernel, &mut self.result);
+        // A commission per contract or on notional was charged: the costs
+        // are not neglected, whatever the per-share fields say.
+        if self.result.costs.commissions > 0.0 {
+            self.result.warnings.retain(|w| w.bias != "transaction-cost neglect");
+        }
         self.result.stats = self.kernel.stats();
         self.result.coverage = self.kernel.coverage();
         self.result.literal_counts = self.kernel.literal_counts().to_vec();

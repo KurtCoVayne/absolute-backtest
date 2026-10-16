@@ -168,6 +168,7 @@ fn run_keeping(
     let client = data_client(prog, dataset)?;
     let opts = crate::kernel::Replay {
         record_summaries: tables.is_some(),
+        write_outputs: DATA_SOCKET.get().is_some(),
         ..Default::default()
     };
     crate::kernel::run_keeping(prog, lowered, &client, cfg, &opts, |result, k| {
@@ -618,6 +619,25 @@ fn report_periods(prog: &crate::check::Program, dataset: &crate::kernel::Dataset
                 Cal::SessionsOf(r) => Some(r.clone()),
                 _ => None,
             };
+            if let Some(path) = DATA_SOCKET.get() {
+                // The sessions are in the data service's store, not in a
+                // dataset this process holds.
+                let days = data_client(prog, dataset)
+                    .and_then(|client| {
+                        let bound = crate::kernel::bind(prog, &client)?;
+                        let rows = bound.scan(&client, "session", None)?;
+                        Ok(rows
+                            .iter()
+                            .filter(|r| root.as_ref().is_none_or(|root| r.sym.is_some_and(|s| bound.symbols.name(s) == root)))
+                            .map(|r| time_day(r.t))
+                            .collect())
+                    })
+                    .unwrap_or_else(|e| {
+                        eprintln!("--data {}: the report calendar's sessions: {}", path.display(), e);
+                        exit(2)
+                    });
+                return (true, Some(days), None);
+            }
             let days: std::collections::BTreeSet<i64> = dataset
                 .facts
                 .get("session")
@@ -664,10 +684,14 @@ fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<
     });
     let checkpoint_dir = args.opts.get("checkpoint-dir").map(PathBuf::from);
     let resume = args.opts.get("resume").map(PathBuf::from);
+    // A run (not a study's trial) over a data service writes its outputs
+    // there (K-7.1).
+    let writes = args.cmd == "run";
     Box::new(move |prog, client, cfg, horizon| {
         let mut opts = crate::kernel::Replay {
             checkpoint_every,
             horizon,
+            write_outputs: writes && DATA_SOCKET.get().is_some(),
             ..Default::default()
         };
         if let Some(path) = &resume {
@@ -1512,6 +1536,17 @@ pub fn main() {
             if let Some(dir) = &ledger_out {
                 println!("ledger written to {}", dir.display());
             }
+            if DATA_SOCKET.get().is_some() {
+                let mut names: Vec<String> = crate::kernel::outputs::RELATIONS.iter().map(|r| r.to_string()).collect();
+                names.extend(prog.observes.iter().map(|o| format!("ledger.{}", o.rel)));
+                println!(
+                    "run {}: the outputs are kernel.{}.{{{}}} in the data service's store (abt data query 'kernel.{}.book')",
+                    result.run_id,
+                    result.run_id,
+                    names.join(", "),
+                    result.run_id
+                );
+            }
             if let Some(path) = args.opts.get("nav") {
                 crate::dump::write_nav(&result, Path::new(path)).unwrap_or_else(|e| {
                     eprintln!("error: --nav: {}", e);
@@ -1519,11 +1554,6 @@ pub fn main() {
                 });
             }
             for w in &result.warnings {
-                // The configuration's "commissions are zero" is false when a
-                // per-notional or per-contract commission was charged.
-                if w.bias == "transaction-cost neglect" && result.costs.commissions > 0.0 {
-                    continue;
-                }
                 println!("warning ({}): {}", w.bias, w.message);
             }
             if !args.flags.contains("quiet") {

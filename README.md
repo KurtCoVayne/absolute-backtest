@@ -394,6 +394,18 @@ program and prints each clause's status (`proven`, `checked`, `warned`,
 `not_applicable`); a refused precondition stops the run with exit 2, a
 failed invariant halts it naming the clause, the bar and the values.
 
+A run over a data service (`abt run --data SOCKET`) writes its outputs to
+the service's store under `kernel.<run>.*` and prints the run's id (K-7.1):
+`events` (the event log), `book` (the book at every decision barrier),
+`holdings`, `decisions` and `fills` (projections of the log), `coverage`,
+`contract` (the clauses with the run's statuses), `binding` (the versions
+read, the program's hash and normal form, the parameter point),
+`plans`, `late`, `report` (the status, `completed` or `halted(reason)`, the
+counters and the warnings), and `ledger.R` for each `observe R`. A halted
+run writes what it has. `abt data query --store DIR 'kernel.<run>.book'`
+prints one, and `--parquet FILE` writes it for pandas: the parity scripts
+read the books' runs that way (ERRATA E-52).
+
 The executor fills a bar's decisions at the next bar's close, at the price
 relation adjusted by the cost model, then writes `fill`, `position` and
 `cash` at that bar and `decided` at the decision bar. Within a bar, orders

@@ -117,4 +117,15 @@ abt run ... --returns R.parquet        # the command above
 python scripts/parity/mw14_compare.py R.parquet ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
 ```
 
+Since M-4c the comparison reads the run's book from the data layer's store
+(K-9.1, ERRATA E-52): the bundle is ingested, the run reads it through the
+data service and writes its outputs there, and the script queries them.
+
+```
+abt data ingest --store S --adapter bundle_v2 --from B --class equity corpus-v2/catalog corpus-v2/lib
+abt data serve --store S --socket S.sock &
+abt run --strategy mw14 --data S.sock corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl   # prints `run RUN: ...`
+python scripts/parity/mw14_compare.py S RUN ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
+```
+
 Inputs and their checksums: `docs/parity-inputs.md`.

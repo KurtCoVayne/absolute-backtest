@@ -449,11 +449,17 @@ impl Invariants {
                 }
             }
         }
-        let fail = |clause: &str, message: String| RunError::Invariant { clause: clause.into(), t, message };
+        // A failure halts the run, and the clause is violated in the
+        // contract a halted run writes (K-7.1).
+        let fail = |c: &mut crate::contract::Contract, clause: &str, message: String| {
+            c.set(clause, Status::Violated { at: Some(t), detail: message.clone() });
+            RunError::Invariant { clause: clause.into(), t, message }
+        };
         let c = &mut result.contract;
         if let Some((recorded, computed)) = o.nav {
             if recorded.to_bits() != computed.to_bits() {
                 return Err(fail(
+                    c,
                     "inv.nav",
                     format!("the NAV recorded is {} and cash, the marked positions and the receivables are {}", recorded, computed),
                 ));
@@ -461,23 +467,25 @@ impl Invariants {
         }
         c.checked("inv.nav");
         if let Some(d) = o.duplicate_decision {
-            return Err(fail("inv.one_decision", d));
+            return Err(fail(c, "inv.one_decision", d));
         }
         c.checked("inv.one_decision");
         if o.received > at {
             return Err(fail(
+                c,
                 "inv.no_read_past",
                 format!("a tuple received at {} precedes the barrier at {}", format_timestamp(o.received), format_timestamp(at)),
             ));
         }
         c.checked("inv.no_read_past");
         if let Some(d) = o.duplicate_tuple {
-            return Err(fail("inv.keyed_store", d));
+            return Err(fail(c, "inv.keyed_store", d));
         }
         c.checked("inv.keyed_store");
         if let Some((gross, allowed)) = o.gross {
             if gross > allowed {
                 return Err(fail(
+                    c,
                     "inv.gross",
                     format!("gross exposure {} after the bar's fills is above {} (the leverage field's multiple of equity)", gross, allowed),
                 ));
@@ -485,22 +493,23 @@ impl Invariants {
         }
         c.checked("inv.gross");
         if let Some(d) = o.position_limits {
-            return Err(fail("inv.position_limits", d));
+            return Err(fail(c, "inv.position_limits", d));
         }
         c.checked("inv.position_limits");
         if let Some(d) = o.fold {
-            return Err(fail("inv.log_fold", d));
+            return Err(fail(c, "inv.log_fold", d));
         }
         c.checked("inv.log_fold");
         if o.pushed > at {
             return Err(fail(
+                c,
                 "inv.pushdown_receipt",
                 format!("a pushed-down answer read at {} waits on a receipt at {}", format_timestamp(at), format_timestamp(o.pushed)),
             ));
         }
         c.checked("inv.pushdown_receipt");
         if let Some(d) = o.working {
-            return Err(fail("inv.working_orders", d));
+            return Err(fail(c, "inv.working_orders", d));
         }
         c.checked("inv.working_orders");
         Ok(())
