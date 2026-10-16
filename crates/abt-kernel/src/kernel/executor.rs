@@ -7,11 +7,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::events::{Book, EventKind, Fate, Funding, OrderId, Receivable, RunEvent};
 use super::time;
 use super::value::{OrderKind, Tif};
 use super::{
-    Action, ActionRecord, Ctor, Decision, DecisionRecord, ExecConfig, ExposureRecord, FillRecord, Kernel, LiquiditySummary, Lot, OnLeverage, OnMarginCall, OnOversize, OnRuin, RunError, RunResult,
-    RunWarning, Sym, Value,
+    Action, Ctor, Decision, ExecConfig, ExposureRecord, FillRecord, HoldingRecord, Kernel, LiquiditySummary, Lot, OnLeverage, OnMarginCall, OnOversize, OnRuin, RunError, RunResult, RunWarning, Sym,
+    Value,
 };
 use crate::ir::*;
 
@@ -47,12 +48,14 @@ struct Working {
     bars: u32,
     /// For a market-on-close order, the session's last bar (looked up once).
     session_last: Option<Option<i64>>,
+    #[serde(default)]
+    order_id: OrderId,
 }
 
 /// An order to fill at this step: the decision, its rule, whether it is an
-/// open target re-issued, and the base price and bar of an order that
-/// executes away from this bar's close.
-type Pending = (Decision, usize, bool, Option<(f64, i64)>);
+/// open target re-issued, the base price and bar of an order that executes
+/// away from this bar's close, its order id and its decision bar.
+type Pending = (Decision, usize, bool, Option<(f64, i64)>, OrderId, i64);
 
 /// What a working order does at a bar.
 enum Trigger {
@@ -62,28 +65,33 @@ enum Trigger {
     Expire(String),
 }
 
-/// The simulated executor: the book, the open targets, the receivables and
-/// the counters behind the run's summaries.
+/// The simulated executor: the book, the open targets, the working orders
+/// and the counters behind the run's summaries.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SimExecutor {
     cfg: ExecConfig,
-    cash: f64,
-    positions: BTreeMap<Sym, f64>,
+    /// Cash, positions and receivables: changed only by the events the
+    /// executor emits (`record`), so that the event log's fold is the book
+    /// (K-5.2).
+    book: Book,
     /// Decision bars seen so far (what ADV and realized volatility look back over).
     bars: Vec<i64>,
-    /// The decisions of the last bar, to be filled at the next.
-    pending: BTreeMap<Sym, Vec<(Decision, usize)>>,
+    /// The orders of the last bar's decisions, to be filled at the next.
+    pending: BTreeMap<Sym, Vec<(Decision, usize, OrderId)>>,
     pending_t: Option<i64>,
-    open_targets: BTreeMap<Sym, (Decision, usize)>,
+    /// Targets a capped fill left open, re-issued at every bar until met:
+    /// the decision, its rule, its order and its decision bar.
+    open_targets: BTreeMap<Sym, (Decision, usize, OrderId, i64)>,
     /// Orders working beyond the bar after their decision.
     #[serde(default)]
     working: BTreeMap<Sym, Working>,
+    /// The next order's id.
+    #[serde(default)]
+    next_order: OrderId,
     requested_total: f64,
     filled_total: f64,
     participations: Vec<f64>,
     margin_calls: usize,
-    /// (pay, sym, cash, amount, shares).
-    receivables: Vec<(i64, Sym, f64, f64, f64)>,
     delisted_done: HashSet<Sym>,
     /// The bar whose corporate actions the book carries (applied once,
     /// before the bar's fills).
@@ -97,25 +105,51 @@ pub struct SimExecutor {
 impl SimExecutor {
     pub fn new(cfg: ExecConfig) -> SimExecutor {
         SimExecutor {
-            cash: cfg.initial_cash,
+            book: Book::new(cfg.initial_cash),
             cfg,
-            positions: BTreeMap::new(),
             bars: Vec::new(),
             pending: BTreeMap::new(),
             pending_t: None,
             open_targets: BTreeMap::new(),
             working: BTreeMap::new(),
+            next_order: 0,
             requested_total: 0.0,
             filled_total: 0.0,
             participations: Vec::new(),
             margin_calls: 0,
-            receivables: Vec::new(),
             delisted_done: HashSet::new(),
             actions_done: None,
             zero_haircut_involuntary: 0,
             not_shortable: 0,
             shorts_held: false,
         }
+    }
+
+    /// The book, as the event log folds to it.
+    pub fn book(&self) -> &Book {
+        &self.book
+    }
+
+    /// Emits an event and applies it to the book: the one way the book
+    /// changes.
+    fn record(&mut self, result: &mut RunResult, e: RunEvent) {
+        let seq = result.emit(e) as usize;
+        self.book.apply(&result.events[seq]);
+    }
+
+    /// The NAV at `t`'s mark (K-5.1): cash, the positions marked at the
+    /// bar's price (or the last one), the receivables, in that order.
+    fn nav(&self, k: &mut Kernel, t: i64) -> f64 {
+        let mut nav = self.book.cash;
+        for (&sym, &q) in &self.book.positions {
+            if let Some(p) = k.price_at(sym, t) {
+                nav += q * p * k.multiplier(sym);
+            }
+        }
+        for r in &self.book.receivables {
+            nav += r.cash;
+        }
+        nav
     }
 
     /// Commission on an order of `qty` of `sym`: a future's per-contract
@@ -146,13 +180,39 @@ impl SimExecutor {
         // Funding over the calendar time to the execution bar: interest on
         // cash or on the debit, borrow fee and rebate on short notional.
         let dt = time::secs_f64(tn - t) / (365.0 * 86_400.0);
-        if self.cash > 0.0 {
-            let i = self.cash * self.cfg.cash_rate * dt;
-            self.cash += i;
+        if self.book.cash > 0.0 {
+            let i = self.book.cash * self.cfg.cash_rate * dt;
+            if i != 0.0 {
+                self.record(
+                    result,
+                    RunEvent::new(
+                        tn,
+                        None,
+                        EventKind::Funding {
+                            flow: Funding::CashInterest,
+                            amount: i,
+                        },
+                    )
+                    .cash(i),
+                );
+            }
             result.funding.cash_interest += i;
-        } else if self.cash < 0.0 {
-            let i = -self.cash * self.cfg.margin_rate * dt;
-            self.cash -= i;
+        } else if self.book.cash < 0.0 {
+            let i = -self.book.cash * self.cfg.margin_rate * dt;
+            if i != 0.0 {
+                self.record(
+                    result,
+                    RunEvent::new(
+                        tn,
+                        None,
+                        EventKind::Funding {
+                            flow: Funding::DebitInterest,
+                            amount: i,
+                        },
+                    )
+                    .cash(-i),
+                );
+            }
             result.funding.margin_interest += i;
         }
         // Then the execution bar's corporate actions: a split multiplies the
@@ -163,7 +223,7 @@ impl SimExecutor {
         // the bar.
         self.corporate_actions(k, tn, result);
         // A future is sold, not borrowed: no borrow fee, no locate.
-        let shorts: Vec<(Sym, f64)> = self.positions.iter().filter(|(s, q)| **q < 0.0 && !k.is_future(**s)).map(|(s, q)| (*s, *q)).collect();
+        let shorts: Vec<(Sym, f64)> = self.book.positions.iter().filter(|(s, q)| **q < 0.0 && !k.is_future(**s)).map(|(s, q)| (*s, *q)).collect();
         for (sym, q) in shorts {
             self.shorts_held = true;
             let Some(p) = k.price_at(sym, tn) else { continue };
@@ -171,31 +231,57 @@ impl SimExecutor {
             let bucket = self.cfg.borrow_bucket(k.adv(sym, bars, end));
             let fee = notional * bucket.fee_bps / 10_000.0 * dt;
             let rebate = notional * self.cfg.short_rebate * dt;
-            self.cash -= fee;
-            self.cash += rebate;
+            if fee != 0.0 {
+                self.record(
+                    result,
+                    RunEvent::new(
+                        tn,
+                        Some(sym),
+                        EventKind::Funding {
+                            flow: Funding::BorrowFee,
+                            amount: fee,
+                        },
+                    )
+                    .cash(-fee),
+                );
+            }
+            if rebate != 0.0 {
+                self.record(
+                    result,
+                    RunEvent::new(
+                        tn,
+                        Some(sym),
+                        EventKind::Funding {
+                            flow: Funding::ShortRebate,
+                            amount: rebate,
+                        },
+                    )
+                    .cash(rebate),
+                );
+            }
             result.funding.borrow_fees += fee;
             result.funding.short_rebate += rebate;
         }
-        // Mark the book at the execution bar.
-        let mut equity_next = self.cash;
-        for (&sym, &q) in &self.positions {
-            if let Some(p) = k.price_at(sym, tn) {
-                equity_next += q * p * k.multiplier(sym);
-            }
-        }
+        // Mark the book at the execution bar: its NAV.
+        let equity_next = self.nav(k, tn);
         // Orders that reduce a position fund the ones that open or add, so
         // within a bar they fill first (symbol order within each group). A
         // decision on an instrument supersedes its open target; the other
         // open targets are re-issued (flagged, so they are not counted as
         // new requests).
-        for sym in by_equity.keys() {
-            self.open_targets.remove(sym);
-            self.working.remove(sym);
+        for (sym, ds) in &by_equity {
+            let Some((_, _, by)) = ds.first() else { continue };
+            if let Some((_, rule, id, decided)) = self.open_targets.remove(sym) {
+                self.record(result, RunEvent::new(t, Some(*sym), EventKind::Replaced { decided, by: *by }).rule(rule).order(id));
+            }
+            if let Some(w) = self.working.remove(sym) {
+                self.record(result, RunEvent::new(t, Some(*sym), EventKind::Replaced { decided: w.t, by: *by }).rule(w.rule).order(w.order_id));
+            }
         }
         let mut pending: Vec<Pending> = Vec::new();
-        for (d, r) in by_equity.values().flatten() {
+        for (d, r, id) in by_equity.values().flatten() {
             if d.order.is_market() {
-                pending.push((d.clone(), *r, false, None));
+                pending.push((d.clone(), *r, false, None, *id, t));
             } else {
                 self.working.insert(
                     d.equity,
@@ -206,24 +292,38 @@ impl SimExecutor {
                         first_day: None,
                         bars: 0,
                         session_last: None,
+                        order_id: *id,
                     },
                 );
             }
         }
-        pending.extend(self.open_targets.values().map(|(d, r)| (d.clone(), *r, true, None)));
+        pending.extend(self.open_targets.values().map(|(d, r, id, decided)| (d.clone(), *r, true, None, *id, *decided)));
         let syms: Vec<Sym> = self.working.keys().copied().collect();
         for sym in syms {
             let Some(mut w) = self.working.remove(&sym) else { continue };
             match self.trigger(k, &mut w, tn) {
-                Trigger::Fill(p, at) => pending.push((w.d.clone(), w.rule, false, Some((p, at)))),
+                Trigger::Fill(p, at) => pending.push((w.d.clone(), w.rule, false, Some((p, at)), w.order_id, w.t)),
                 Trigger::Wait => {
                     self.working.insert(sym, w);
                 }
-                Trigger::Expire(why) => result.dropped.push((w.t, w.d.clone(), why)),
+                Trigger::Expire(why) => self.record(
+                    result,
+                    RunEvent::new(
+                        tn,
+                        Some(sym),
+                        EventKind::ExpiredOrder {
+                            decided: w.t,
+                            decision: w.d.clone(),
+                            reason: why,
+                        },
+                    )
+                    .rule(w.rule)
+                    .order(w.order_id),
+                ),
             }
         }
         let mut marks: HashMap<Sym, f64> = HashMap::new();
-        for (d, _, _, _) in &pending {
+        for (d, ..) in &pending {
             if let Some(p) = k.price_at(d.equity, tn) {
                 // The value of one unit held: price times the multiplier.
                 marks.insert(d.equity, p * k.multiplier(d.equity));
@@ -233,7 +333,7 @@ impl SimExecutor {
         // capital when profits are not reinvested.
         let base = if self.cfg.compounding { equity_next.max(0.0) } else { self.cfg.initial_cash };
         {
-            let positions = &self.positions;
+            let positions = &self.book.positions;
             let reducing = |d: &Decision| -> bool {
                 let pos = positions.get(&d.equity).copied().unwrap_or(0.0);
                 match d.ctor {
@@ -242,11 +342,11 @@ impl SimExecutor {
                     Ctor::HoldWeight => pos != 0.0 && (d.amount == 0.0 || d.amount * pos < 0.0 || d.amount.abs() * base < pos.abs() * marks.get(&d.equity).copied().unwrap_or(0.0)),
                 }
             };
-            pending.sort_by_key(|(d, _, _, _)| !reducing(d));
+            pending.sort_by_key(|(d, ..)| !reducing(d));
         }
         // Ruin: a book without positive equity cannot size or fund an order.
         if !pending.is_empty() && equity_next <= 0.0 && self.cfg.on_ruin == OnRuin::Halt {
-            let (d, rule, _, _) = &pending[0];
+            let (d, rule, ..) = &pending[0];
             return Err(RunError::Risk {
                 t,
                 rule: k.prog.rule_label(*rule),
@@ -261,12 +361,25 @@ impl SimExecutor {
         // next sizing sees (and margin interest prices).
         let mut bar_costs = 0.0;
         // Intraday positions opened at this step: flat again at their session's close.
-        let mut day_exits: Vec<(Sym, i64, usize)> = Vec::new();
-        for (d, rule, reissued, away) in &pending {
+        let mut day_exits: Vec<(Sym, i64, usize, OrderId)> = Vec::new();
+        for (d, rule, reissued, away, id, decided) in &pending {
             let sym = d.equity;
             let is_target = d.ctor.is_target();
             let name = k.symbols.name(sym).to_string();
-            let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
+            let pos = self.book.position(sym);
+            let dropped = |reason: String| {
+                RunEvent::new(
+                    tn,
+                    Some(sym),
+                    EventKind::Dropped {
+                        decided: t,
+                        decision: d.clone(),
+                        reason,
+                    },
+                )
+                .rule(*rule)
+                .order(*id)
+            };
             // The bar the order executes at, and its base price: this bar's
             // close, or what a working order triggered at.
             let at = away.map(|(_, a)| a).unwrap_or(tn);
@@ -310,13 +423,14 @@ impl SimExecutor {
                 (Ctor::HoldWeight, None) if d.amount == 0.0 => -pos,
                 (Ctor::HoldWeight, None) => {
                     self.open_targets.remove(&sym);
-                    result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
+                    self.record(result, dropped(format!("no price for {} at {}", name, time::format_timestamp(tn))));
                     continue;
                 }
             };
             if qty == 0.0 {
                 // A target that is held: nothing to do, and an open one is reached.
                 self.open_targets.remove(&sym);
+                self.record(result, RunEvent::new(tn, Some(sym), EventKind::Satisfied { decided: *decided }).rule(*rule).order(*id));
                 continue;
             }
             // Oversize: a delta order that would carry the position across zero.
@@ -334,9 +448,7 @@ impl SimExecutor {
                     }
                     OnOversize::Clamp => {
                         let excess = qty.abs() - pos.abs();
-                        result
-                            .dropped
-                            .push((t, d.clone(), format!("clamped at position: {} of {} shares filled, {} dropped", pos.abs(), qty.abs(), excess)));
+                        self.record(result, dropped(format!("clamped at position: {} of {} shares filled, {} dropped", pos.abs(), qty.abs(), excess)));
                         qty = -pos;
                     }
                     OnOversize::Allow => {}
@@ -368,9 +480,9 @@ impl SimExecutor {
             };
             if qty == 0.0 {
                 if is_target && d.order.is_market() {
-                    self.open_targets.insert(sym, (d.clone(), *rule));
+                    self.open_targets.insert(sym, (d.clone(), *rule, *id, *decided));
                 } else {
-                    result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(0.0))));
+                    self.record(result, dropped(format!("{}; remainder expired", partial_note(0.0))));
                 }
                 continue;
             }
@@ -384,7 +496,7 @@ impl SimExecutor {
                     Some(p) if reduces => (p, true),
                     _ => {
                         self.open_targets.remove(&sym);
-                        result.dropped.push((t, d.clone(), format!("no price for {} at {}", name, time::format_timestamp(tn))));
+                        self.record(result, dropped(format!("no price for {} at {}", name, time::format_timestamp(tn))));
                         continue;
                     }
                 },
@@ -409,43 +521,52 @@ impl SimExecutor {
                 if !bucket.shortable {
                     self.not_shortable += 1;
                     self.open_targets.remove(&sym);
-                    result.dropped.push((
-                        t,
-                        d.clone(),
-                        format!(
+                    self.record(
+                        result,
+                        dropped(format!(
                             "not shortable: ADV {} of {} is below {} (the smallest borrow bucket)",
                             adv.map(|a| format!("{:.0}", a)).unwrap_or_else(|| "unknown".into()),
                             name,
                             bucket.adv_below
-                        ),
-                    ));
+                        )),
+                    );
                     continue;
                 }
             }
             // Leverage: only an order that adds exposure can borrow, and only
             // up to the configured gross multiple of equity.
             if !reduces {
-                let new_cash = self.cash - cost;
+                let new_cash = self.book.cash - cost;
                 let mut gross = 0.0;
                 let mut net = new_cash;
-                for (&s2, &q2) in &self.positions {
+                for (&s2, &q2) in &self.book.positions {
                     let q2 = if s2 == sym { q2 + qty } else { q2 };
                     let p2 = if s2 == sym { p } else { k.price_at(s2, tn).unwrap_or(0.0) };
                     let m2 = k.multiplier(s2);
                     gross += q2.abs() * p2 * m2;
                     net += q2 * p2 * m2;
                 }
-                if !self.positions.contains_key(&sym) {
+                if !self.book.positions.contains_key(&sym) {
                     gross += qty.abs() * p * m;
                     net += qty * p * m;
+                }
+                // The NAV after the fill counts the receivables (K-5.1).
+                for r in &self.book.receivables {
+                    net += r.cash;
                 }
                 let tol = 1e-9 * (1.0 + net.abs()) + allowance;
                 let max_gross = self.cfg.max_gross.max(1.0);
                 // Leverage is judged against equity; when profits are not
                 // reinvested, against the fixed capital, and cash may go
-                // negative (a loss is carried, not refunded by selling).
+                // negative (a loss is carried, not refunded by selling). A
+                // receivable is a claim to cash: the borrowing it covers
+                // until it is paid is not leverage (K-5.1).
+                let mut liquid = new_cash;
+                for r in &self.book.receivables {
+                    liquid += r.cash;
+                }
                 let breach = if self.cfg.compounding {
-                    new_cash < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol
+                    liquid < -(max_gross - 1.0) * net.max(0.0) - tol || gross > max_gross * net + tol
                 } else {
                     gross > max_gross * self.cfg.initial_cash + tol
                 };
@@ -464,38 +585,22 @@ impl SimExecutor {
                             });
                         }
                         OnLeverage::Reject => {
-                            result.dropped.push((
-                                t,
-                                d.clone(),
-                                format!("rejected, would exceed {}x equity: cash {:.2}, gross {:.2} against equity {:.2}", max_gross, new_cash, gross, net),
-                            ));
+                            self.record(
+                                result,
+                                dropped(format!(
+                                    "rejected, would exceed {}x equity: cash {:.2}, gross {:.2} against equity {:.2}",
+                                    max_gross, new_cash, gross, net
+                                )),
+                            );
                             continue;
                         }
                         OnLeverage::Allow => {}
                     }
                 }
             }
-            self.cash -= cost;
-            let new_pos = pos + qty;
-            if new_pos.abs() < 1e-9 {
-                self.positions.remove(&sym);
-            } else {
-                self.positions.insert(sym, new_pos);
-            }
-            k.last_price.insert(sym, fill_price);
-            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
-            bar_costs += commission + fee + slippage + impact;
-            result.costs.commissions += commission;
-            result.costs.fees += fee;
-            result.costs.slippage += slippage;
-            result.costs.impact += impact;
-            result.costs.turnover += qty.abs() * fill_price * m;
-            self.filled_total += qty.abs();
             let participation = bar_volume.filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0);
-            if bar_volume.is_some() {
-                self.participations.push(participation);
-            }
-            result.fills.push(FillRecord {
+            let reissue = is_target && d.order.is_market();
+            let fill = FillRecord {
                 t: at,
                 equity: sym,
                 quantity: qty,
@@ -508,38 +613,46 @@ impl SimExecutor {
                 participation,
                 partial,
                 forced: false,
-            });
+            };
+            let remainder = partial.then(|| (requested - qty.abs(), if reissue { Fate::Reissued } else { Fate::Expired }));
+            self.record(result, RunEvent::new(at, Some(sym), EventKind::Fill { fill, remainder }).rule(*rule).order(*id).cash(-cost));
+            k.last_price.insert(sym, fill_price);
+            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
+            bar_costs += commission + fee + slippage + impact;
+            result.costs.commissions += commission;
+            result.costs.fees += fee;
+            result.costs.slippage += slippage;
+            result.costs.impact += impact;
+            result.costs.turnover += qty.abs() * fill_price * m;
+            self.filled_total += qty.abs();
+            if bar_volume.is_some() {
+                self.participations.push(participation);
+            }
             if d.order.kind == OrderKind::MooMoc {
-                day_exits.push((sym, at, *rule));
+                day_exits.push((sym, at, *rule, *id));
             }
             // The remainder of a capped order: a delta order expires, a target
             // re-issues itself at the next bar.
             if partial {
-                if is_target && d.order.is_market() {
-                    self.open_targets.insert(sym, (d.clone(), *rule));
+                if reissue {
+                    self.open_targets.insert(sym, (d.clone(), *rule, *id, *decided));
                 } else {
-                    result.dropped.push((t, d.clone(), format!("{}; remainder expired", partial_note(qty.abs()))));
+                    self.record(result, dropped(format!("{}; remainder expired", partial_note(qty.abs()))));
                 }
             } else if is_target {
                 self.open_targets.remove(&sym);
             }
         }
-        for (sym, at, rule) in day_exits {
+        for (sym, at, rule, id) in day_exits {
             // Entered at the session's last print: flat again at its close,
             // now; known once the session has closed (before it, a later
             // print may still come, and the exit waits as a working `moc`).
             if k.session_close(sym, at).is_none_or(|end| tn >= end) && k.session_last_bar(sym, at) == Some(tn) {
-                if let (Some(&pos), Some(p)) = (self.positions.get(&sym), k.bar_price(sym, tn)) {
+                if let (Some(&pos), Some(p)) = (self.book.positions.get(&sym), k.bar_price(sym, tn)) {
                     let qty = -pos;
                     let m = k.multiplier(sym);
                     let commission = self.commission(k, sym, qty, p);
-                    self.cash -= qty * p * m + commission;
-                    self.positions.remove(&sym);
-                    result.costs.commissions += commission;
-                    result.costs.turnover += qty.abs() * p * m;
-                    k.last_price.insert(sym, p);
-                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
-                    result.fills.push(FillRecord {
+                    let fill = FillRecord {
                         t: tn,
                         equity: sym,
                         quantity: qty,
@@ -552,7 +665,18 @@ impl SimExecutor {
                         participation: 0.0,
                         partial: false,
                         forced: false,
-                    });
+                    };
+                    self.record(
+                        result,
+                        RunEvent::new(tn, Some(sym), EventKind::Fill { fill, remainder: None })
+                            .rule(rule)
+                            .order(id)
+                            .cash(-(qty * p * m + commission)),
+                    );
+                    result.costs.commissions += commission;
+                    result.costs.turnover += qty.abs() * p * m;
+                    k.last_price.insert(sym, p);
+                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
                     continue;
                 }
             }
@@ -571,13 +695,14 @@ impl SimExecutor {
                     first_day: None,
                     bars: 0,
                     session_last: None,
+                    order_id: id,
                 },
             );
         }
-        for (&sym, &q) in &self.positions {
+        for (&sym, &q) in &self.book.positions {
             k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
         }
-        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.cash)]);
+        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.book.cash)]);
         Ok(())
     }
 
@@ -630,12 +755,12 @@ impl SimExecutor {
                 };
                 // The side of the order: a delta constructor's, or a target's
                 // from where the book is against it at the open.
-                let pos = self.positions.get(&sym).copied().unwrap_or(0.0);
+                let pos = self.book.position(sym);
                 let buying = match w.d.ctor {
                     Ctor::Trade => w.d.amount > 0.0,
                     Ctor::HoldQuantity => w.d.amount > pos,
                     Ctor::HoldWeight => {
-                        let base = if self.cfg.compounding { self.cash.max(0.0) } else { self.cfg.initial_cash };
+                        let base = if self.cfg.compounding { self.book.cash.max(0.0) } else { self.cfg.initial_cash };
                         w.d.amount * base > pos * o * k.multiplier(sym)
                     }
                 };
@@ -664,13 +789,13 @@ impl SimExecutor {
         if let Some(tus) = k.stores[position].by_time.get_mut(&t) {
             tus.clear();
         }
-        for (&sym, &q) in &self.positions {
+        for (&sym, &q) in &self.book.positions {
             k.stores[position].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
         }
         if let Some(tus) = k.stores[cash_rel].by_time.get_mut(&t) {
             tus.clear();
         }
-        k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.cash)]);
+        k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.book.cash)]);
     }
 
     /// Corporate actions at the bar (data-bundle doc, section 4), once, before
@@ -693,7 +818,7 @@ impl SimExecutor {
                 .map(|tus| tus.iter().filter_map(|tu| Some((tu[entity_pos].as_equity()?, tu.iter().rev().find_map(|v| v.as_f64())?))).collect())
                 .unwrap_or_default();
             for (sym, factor) in splits {
-                let Some(pos) = self.positions.get(&sym).copied() else { continue };
+                let Some(pos) = self.book.positions.get(&sym).copied() else { continue };
                 if factor <= 0.0 || factor == 1.0 {
                     continue;
                 }
@@ -701,27 +826,23 @@ impl SimExecutor {
                 let kept = if self.cfg.lot == Lot::Whole { exact.trunc() } else { exact };
                 let m = k.multiplier(sym);
                 let fraction_cash = k.price_at(sym, t).map(|p| (exact - kept) * p * m).unwrap_or(0.0);
-                self.cash += fraction_cash;
-                if kept.abs() < 1e-9 {
-                    self.positions.remove(&sym);
-                } else {
-                    self.positions.insert(sym, kept);
-                }
+                let split = EventKind::Action {
+                    action: Action::Split { factor },
+                    position: Some(kept),
+                    receivable: None,
+                    price: None,
+                };
+                self.record(result, RunEvent::new(t, Some(sym), split).cash(fraction_cash));
                 if let Some(lp) = k.last_price.get_mut(&sym) {
                     *lp /= factor;
                 }
-                result.actions.push(ActionRecord {
-                    t,
-                    equity: sym,
-                    action: Action::Split { factor },
-                    cash: fraction_cash,
-                });
                 book_changed = true;
             }
         }
         // Dividends going ex at t: a receivable for the shares held now, or
         // shares bought with it at the ex-date close.
         let mut reinvest: Vec<(Sym, f64, f64)> = Vec::new();
+        let mut declared: Vec<(Sym, f64, f64, i64)> = Vec::new();
         if let Some(id) = dividend_rel {
             let info = &k.rels[id];
             let entity_pos = info.entity_positions.first().copied().unwrap_or(0);
@@ -733,11 +854,11 @@ impl SimExecutor {
                     for tu in tus {
                         if let (Some(sym), Some(ex), Some(pay), Some(amount)) = (tu[entity_pos].as_equity(), tu[ex_col].as_time(), tu[pay_col].as_time(), tu[amount_col].as_f64()) {
                             if ex == t {
-                                if let Some(&pos) = self.positions.get(&sym) {
+                                if let Some(&pos) = self.book.positions.get(&sym) {
                                     if self.cfg.reinvest_dividends {
                                         reinvest.push((sym, amount, pos));
                                     } else {
-                                        self.receivables.push((pay.max(ex), sym, pos * amount, amount, pos));
+                                        declared.push((sym, amount, pos, pay.max(ex)));
                                     }
                                 }
                             }
@@ -746,28 +867,31 @@ impl SimExecutor {
                 }
             }
         }
+        for (sym, amount, shares, pay) in declared {
+            let receivable = shares * amount;
+            self.record(result, RunEvent::new(t, Some(sym), EventKind::DividendDeclared { amount, shares, pay, receivable }));
+        }
         for (sym, amount, shares) in reinvest {
             let Some(p) = k.price_at(sym, t).filter(|p| *p > 0.0) else { continue };
             let added = shares * amount / p;
-            self.positions.insert(sym, shares + added);
-            result.actions.push(ActionRecord {
-                t,
-                equity: sym,
+            let reinvested = EventKind::Action {
                 action: Action::Reinvest { amount, shares, added },
-                cash: 0.0,
-            });
+                position: Some(shares + added),
+                receivable: None,
+                price: Some(p),
+            };
+            self.record(result, RunEvent::new(t, Some(sym), reinvested));
             book_changed = true;
         }
-        let (due, later): (Vec<_>, Vec<_>) = self.receivables.drain(..).partition(|(pay, ..)| *pay <= t);
-        self.receivables = later;
-        for (_, sym, amount_cash, amount, shares) in due {
-            self.cash += amount_cash;
-            result.actions.push(ActionRecord {
-                t,
-                equity: sym,
-                action: Action::Dividend { amount, shares },
-                cash: amount_cash,
-            });
+        let due: Vec<Receivable> = self.book.receivables.iter().filter(|r| r.pay <= t).cloned().collect();
+        for r in due {
+            let paid = EventKind::Action {
+                action: Action::Dividend { amount: r.amount, shares: r.shares },
+                position: None,
+                receivable: Some(r.id),
+                price: None,
+            };
+            self.record(result, RunEvent::new(t, Some(r.instrument), paid).cash(r.cash));
             book_changed = true;
         }
         book_changed
@@ -800,7 +924,7 @@ impl SimExecutor {
                 if !self.delisted_done.insert(sym) {
                     continue;
                 }
-                let Some(pos) = self.positions.get(&sym).copied() else { continue };
+                let Some(pos) = self.book.positions.get(&sym).copied() else { continue };
                 let haircut = if self.cfg.delist_at_last_price {
                     0.0
                 } else {
@@ -815,12 +939,12 @@ impl SimExecutor {
                 let m = k.multiplier(sym);
                 let commission = if self.cfg.delist_at_last_price { 0.0 } else { self.commission(k, sym, qty, price) };
                 let proceeds = -qty * price * m - commission;
-                self.cash += proceeds;
-                self.positions.remove(&sym);
                 result.costs.commissions += commission;
                 result.costs.turnover += qty.abs() * price * m;
                 k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
-                result.fills.push(FillRecord {
+                // The forced close takes the position to zero; the action
+                // carries the proceeds.
+                let fill = FillRecord {
                     t,
                     equity: sym,
                     quantity: qty,
@@ -833,13 +957,15 @@ impl SimExecutor {
                     participation: 0.0,
                     partial: false,
                     forced: true,
-                });
-                result.actions.push(ActionRecord {
-                    t,
-                    equity: sym,
+                };
+                self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }));
+                let delisted = EventKind::Action {
                     action: Action::Delisting { reason, haircut },
-                    cash: proceeds,
-                });
+                    position: None,
+                    receivable: None,
+                    price: Some(price),
+                };
+                self.record(result, RunEvent::new(t, Some(sym), delisted).cash(proceeds));
                 book_changed = true;
             }
         }
@@ -853,7 +979,7 @@ impl Executor for SimExecutor {
         if self.bars.is_empty() {
             // Cash at the first bar, so that cash-aware rules can fire from the start.
             let cash_rel = k.rel_id("cash");
-            k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.cash)]);
+            k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.book.cash)]);
         }
         self.bars.push(t);
         result.bars.push(t);
@@ -862,17 +988,21 @@ impl Executor for SimExecutor {
         if changed {
             self.rewrite_book(k, t);
         }
-        // Mark to market before the bar's decisions.
-        let mut equity = self.cash;
+        // Mark to market before the bar's decisions: the NAV counts the
+        // receivables (K-5.1).
+        let mut equity = self.book.cash;
         let mut gross = 0.0;
         let mut net = 0.0;
-        for (&sym, &q) in &self.positions {
+        for (&sym, &q) in &self.book.positions {
             if let Some(p) = k.price_at(sym, t) {
                 let m = k.multiplier(sym);
                 equity += q * p * m;
                 gross += q.abs() * p * m;
                 net += q * p * m;
             }
+        }
+        for r in &self.book.receivables {
+            equity += r.cash;
         }
         // Maintenance: positive equity below the margin of gross exposure is
         // a margin call (a non-positive equity is ruin, judged when an order
@@ -885,6 +1015,17 @@ impl Executor for SimExecutor {
                 gross,
                 time::format_timestamp(t)
             );
+            let policy = match self.cfg.on_margin_call {
+                OnMarginCall::Halt => "halt",
+                OnMarginCall::Allow => "allow",
+                OnMarginCall::Liquidate => "liquidate",
+            };
+            let call = EventKind::MarginCall {
+                equity,
+                requirement: self.cfg.maintenance_margin * gross,
+                policy: policy.into(),
+            };
+            self.record(result, RunEvent::new(t, None, call));
             match self.cfg.on_margin_call {
                 OnMarginCall::Halt => {
                     return Err(RunError::Risk {
@@ -900,9 +1041,9 @@ impl Executor for SimExecutor {
                     // Sell the fraction f of every position with
                     // equity >= maintenance * (1 - f) * gross.
                     let f = 1.0 - equity / (self.cfg.maintenance_margin * gross);
-                    let syms: Vec<Sym> = self.positions.keys().copied().collect();
+                    let syms: Vec<Sym> = self.book.positions.keys().copied().collect();
                     for sym in syms {
-                        let pos = self.positions[&sym];
+                        let pos = self.book.position(sym);
                         let Some(p) = k.price_at(sym, t) else { continue };
                         let mut qty = -(pos * f);
                         if self.cfg.lot == Lot::Whole {
@@ -914,21 +1055,15 @@ impl Executor for SimExecutor {
                         let m = k.multiplier(sym);
                         let commission = self.commission(k, sym, qty, p);
                         let fee = if qty < 0.0 { qty.abs() * p * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
-                        self.cash -= qty * p * m + commission + fee;
+                        let flow = qty * p * m + commission + fee;
                         equity -= commission + fee;
                         gross -= qty.abs() * p * m;
                         net -= -qty * p * m;
-                        let new_pos = pos + qty;
-                        if new_pos.abs() < 1e-9 {
-                            self.positions.remove(&sym);
-                        } else {
-                            self.positions.insert(sym, new_pos);
-                        }
                         result.costs.commissions += commission;
                         result.costs.fees += fee;
                         result.costs.turnover += qty.abs() * p * m;
                         k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
-                        result.fills.push(FillRecord {
+                        let fill = FillRecord {
                             t,
                             equity: sym,
                             quantity: qty,
@@ -941,19 +1076,25 @@ impl Executor for SimExecutor {
                             participation: k.bar_volume(sym, t).filter(|v| *v > 0.0).map(|v| qty.abs() / v).unwrap_or(0.0),
                             partial: false,
                             forced: true,
-                        });
+                        };
+                        self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }).cash(-flow));
                     }
                     self.rewrite_book(k, t);
                 }
             }
         }
+        let base = if self.cfg.compounding { equity.max(0.0) } else { self.cfg.initial_cash };
         result.exposure.push(ExposureRecord {
             t,
-            cash: self.cash,
+            cash: self.book.cash,
             gross,
             net,
             equity,
             leverage: if equity > 0.0 { gross / equity } else { 0.0 },
+            receivables: self.book.receivable_cash(),
+            capital: base,
+            margin_initial: gross / self.cfg.max_gross.max(1.0),
+            margin_maintenance: self.cfg.maintenance_margin * gross,
         });
         result.equity_curve.push((t, equity));
         // `nav(T, N)`: the book's value at T's mark, before T's decisions
@@ -963,20 +1104,44 @@ impl Executor for SimExecutor {
         // `capital(T, C)`: what a weight is a fraction of (the fixed base or
         // the equity); `mark(A, T, P)`: the price each holding is marked at.
         let capital_rel = k.rel_id("capital");
-        let base = if self.cfg.compounding { equity.max(0.0) } else { self.cfg.initial_cash };
         k.stores[capital_rel].insert(t, vec![Value::Time(t), Value::Num(base)]);
         let mark_rel = k.rel_id("mark");
-        let syms: Vec<Sym> = self.positions.keys().copied().collect();
-        for sym in syms {
-            if let Some(p) = k.price_at(sym, t) {
+        let held: Vec<(Sym, f64)> = self.book.positions.iter().map(|(s, q)| (*s, *q)).collect();
+        for (sym, q) in held {
+            let (mark, source) = match k.bar_price(sym, t) {
+                Some(p) => (Some(p), "price"),
+                None => match k.price_at(sym, t) {
+                    Some(p) => (Some(p), "stale"),
+                    None => (None, "none"),
+                },
+            };
+            if let Some(p) = mark {
                 k.stores[mark_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
             }
+            result.holdings.push(HoldingRecord {
+                t,
+                instrument: sym,
+                position: q,
+                avg_cost: self.book.avg_cost.get(&sym).copied().unwrap_or(0.0),
+                mark,
+                mark_source: source.into(),
+            });
         }
         Ok(())
     }
 
-    fn on_decisions(&mut self, _k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, _result: &mut RunResult) -> Result<(), RunError> {
-        self.pending = by_equity.clone();
+    fn on_decisions(&mut self, _k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, result: &mut RunResult) -> Result<(), RunError> {
+        // Every decision becomes an order, with its id (K-5.2 `order_sent`).
+        let mut pending: BTreeMap<Sym, Vec<(Decision, usize, OrderId)>> = BTreeMap::new();
+        for (sym, ds) in by_equity {
+            for (d, rule) in ds {
+                let id = self.next_order;
+                self.next_order += 1;
+                self.record(result, RunEvent::new(t, Some(*sym), EventKind::OrderSent { decision: d.clone() }).rule(*rule).order(id));
+                pending.entry(*sym).or_default().push((d.clone(), *rule, id));
+            }
+        }
+        self.pending = pending;
         self.pending_t = Some(t);
         Ok(())
     }
@@ -1013,8 +1178,13 @@ impl Executor for SimExecutor {
         // fills + dropped.
         if let Some(t) = self.pending_t.take() {
             for ds in std::mem::take(&mut self.pending).values() {
-                for (d, _) in ds {
-                    result.dropped.push((t, d.clone(), "no next bar".to_string()));
+                for (d, rule, id) in ds {
+                    let dropped = EventKind::Dropped {
+                        decided: t,
+                        decision: d.clone(),
+                        reason: "no next bar".to_string(),
+                    };
+                    self.record(result, RunEvent::new(t, Some(d.equity), dropped).rule(*rule).order(*id));
                 }
             }
         }
@@ -1035,8 +1205,14 @@ impl Executor for SimExecutor {
                 });
             }
         }
+        let end = self.bars.last().copied();
         for w in std::mem::take(&mut self.working).into_values() {
-            result.dropped.push((w.t, w.d.clone(), format!("{}: the data ended before it executed", w.d.order)));
+            let expired = EventKind::ExpiredOrder {
+                decided: w.t,
+                decision: w.d.clone(),
+                reason: format!("{}: the data ended before it executed", w.d.order),
+            };
+            self.record(result, RunEvent::new(end.unwrap_or(w.t), Some(w.d.equity), expired).rule(w.rule).order(w.order_id));
         }
         result.liquidity = LiquiditySummary {
             fill_ratio: if self.requested_total > 0.0 { self.filled_total / self.requested_total } else { 1.0 },
@@ -1108,8 +1284,8 @@ impl Executor for SimExecutor {
                 ),
             });
         }
-        result.final_cash = self.cash;
-        result.final_positions = self.positions.clone();
+        result.final_cash = self.book.cash;
+        result.final_positions = self.book.positions.clone();
     }
 }
 
@@ -1201,7 +1377,7 @@ impl Kernel<'_> {
         }
         for ds in by_equity.values() {
             for (d, rule) in ds {
-                result.decisions.push(DecisionRecord { t, decision: d.clone(), rule: *rule });
+                result.emit(RunEvent::new(t, Some(d.equity), EventKind::Decision { decision: d.clone() }).rule(*rule));
                 self.stores[decided].insert(t, vec![Value::Time(t), Value::Decision(Box::new(d.clone()))]);
             }
         }

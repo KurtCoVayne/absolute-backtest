@@ -387,9 +387,14 @@ supersedes it; a capped `trade`'s remainder expires. Corporate actions act
 on the book at the bar's open, before the mark: a split multiplies the
 position at its ex-date, a dividend's receivable is recorded at the ex-date
 and paid at the pay date, a delisted name is force-closed at its last trade
-less the haircut for the reason. A decision the executor cannot carry out
-is dropped with a reason in `RunResult.dropped` (`no price for E3 at
-2022-05-04`) and is still recorded in `decided`; `abt run` prints
+less the haircut for the reason. The NAV is cash, the marked positions and
+the receivables. Every change to the book is an event of the run's log
+(`RunResult.events`: decisions, orders with their ids, fills, drops,
+replacements, expiries, actions, funding, margin calls, each with the cash
+it moved), and the log folds to the book bit for bit; the decisions, fills,
+drops and actions lists are projections of it. A decision the executor
+cannot carry out is dropped with a reason in `RunResult.dropped` (`no price
+for E3 at 2022-05-04`) and is still recorded in `decided`; `abt run` prints
 `decisions: 11   fills: 9   dropped: 2` and then each dropped decision with
 its reason. `--all` prints every decision instead of the first twenty,
 `--fills` prints the fills (`fill 2022-02-24 E3 +100 @ 69.5578`), and

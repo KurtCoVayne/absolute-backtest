@@ -36,7 +36,10 @@ Conventions of the contract, in the order the bar runs them:
 3. Opening T: the corporate actions if no fill step ran them (the first
    bar), a delisted name force-closed at its last trade less the haircut
    for the reason; then the mark, the maintenance check (halt, liquidate
-   pro rata to the level, or allow), and the NAV record.
+   pro rata to the level, or allow), and the NAV record. The NAV is cash,
+   the marked positions and the receivables (dividends gone ex and not yet
+   paid), in that order (K-5.1); it is what sizing, the leverage check and
+   the maintenance check read.
 4. A decision at the last bar has no bar to fill at and is dropped.
 """
 
@@ -323,6 +326,9 @@ class Reference:
                 equity += q * p
                 gross += abs(q) * p
                 net += q * p
+        # The NAV counts the dividends gone ex and not yet paid.
+        for r in self.receivables:
+            equity += r[2]
         mm = float(self.cfg.maintenance_margin)
         if gross > 0.0 and equity > 0.0 and equity < mm * gross - 1e-9 * gross:
             policy = self.cfg.policy("on_margin_call")
@@ -433,6 +439,8 @@ class Reference:
             p = self.price_at(sym, tn)
             if p is not None:
                 equity_next += q * p
+        for r in self.receivables:
+            equity_next += r[2]
         # Group the bar's decisions by instrument (symbol order), then the
         # open targets of the instruments without a decision.
         by_equity: dict[str, list] = {}
@@ -560,10 +568,17 @@ class Reference:
                 if sym not in self.positions:
                     gross += abs(qty) * p
                     net += qty * p
+                for r in self.receivables:
+                    net += r[2]
                 tol = 1e-9 * (1.0 + abs(net)) + allowance
                 max_gross = max(float(cfg.max_gross), 1.0)
+                # A receivable is a claim to cash: the borrowing it covers
+                # until it is paid is not leverage.
+                liquid = new_cash
+                for r in self.receivables:
+                    liquid += r[2]
                 if cfg.compounding:
-                    breach = new_cash < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol
+                    breach = liquid < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol
                 else:
                     # On a fixed base leverage is gross against the capital; cash may go negative.
                     breach = gross > max_gross * float(cfg.initial_cash) + tol

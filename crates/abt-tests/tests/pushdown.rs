@@ -7,63 +7,19 @@
 
 #![allow(clippy::result_large_err)]
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use abt_kernel::check::{check_program, Program, Workspace};
-use abt_kernel::data::{synthetic_daily, synthetic_for_program};
+use abt_kernel::check::Program;
+use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::pushdown::{eligibilities, eligibility};
 use abt_kernel::kernel::{Dataset, ExecConfig, RunResult, Value};
 use abt_kernel::verify::tv::{digest, first_difference};
 use abt_tests as common;
 use abt_tests::StrategyParts;
 
-fn corpus() -> PathBuf {
-    abt_tests::repo_root().join("corpus-v2")
-}
-
-fn files(dir: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "dsl")).collect();
-    out.sort();
-    out
-}
-
-/// A corpus program with the catalog and the library, on its synthetic
-/// market (as the golden runs).
+/// A corpus program on its golden market.
 fn program_and_market(f: &Path) -> (Program, Dataset) {
-    let mut ws = Workspace::new();
-    for dir in ["catalog", "lib"] {
-        for g in files(&corpus().join(dir)) {
-            ws.add_source(&fs::read_to_string(&g).unwrap()).unwrap();
-        }
-    }
-    let src = fs::read_to_string(f).unwrap();
-    ws.add_source(&src).unwrap();
-    let name = src
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("strategy ").map(|r| r.split_whitespace().next().unwrap().trim_end_matches('{').to_string()))
-        .unwrap();
-    let (prog, diags) = check_program(&ws, &name);
-    let mut prog = prog.unwrap_or_else(|| panic!("{}: {:?}", name, diags));
-    let syms: Vec<&str> = if prog.class == "future" {
-        vec![
-            "ES", "NQ", "KC", "6J", "ZB", "ZF", "ZN", "RTY", "ZT", "CL", "GC", "HE", "HO", "LE", "NG", "PL", "RB", "SI", "ZC", "ZL", "ZM", "ZS", "ZW", "GF", "SB", "ETH",
-        ]
-    } else {
-        vec!["AAA", "XYZ", "BBB", "SPY", "DDD"]
-    };
-    let days = if prog.base.is_sub_daily() { 30 } else { 400 };
-    let ds = synthetic_for_program(&prog, &syms, (2022, 1, 3), days, 11);
-    if name == "r8l" {
-        for (p, v) in [("atr_rows", 3), ("med_rows", 6), ("med_min", 3)] {
-            for params in prog.params.values_mut() {
-                if let Some(x) = params.get_mut(p) {
-                    x.value = abt_kernel::Lit::Int(v);
-                }
-            }
-        }
-    }
-    (prog, ds)
+    abt_tests::golden_inputs(f).unwrap_or_else(|e| panic!("{}", e))
 }
 
 fn run_with(p: &Program, ds: &Dataset, pushdown: bool) -> Result<RunResult, String> {
@@ -76,8 +32,7 @@ fn run_with(p: &Program, ds: &Dataset, pushdown: bool) -> Result<RunResult, Stri
 
 #[test]
 fn pushdown_and_local_evaluation_agree_on_every_corpus_program_and_book() {
-    let mut programs: Vec<PathBuf> = files(&corpus().join("strategies"));
-    programs.extend(files(&corpus().join("company")));
+    let programs = abt_tests::golden_programs();
     let mut answered = 0usize;
     let mut with_pushdown = Vec::new();
     for f in &programs {
@@ -106,7 +61,7 @@ fn pushdown_and_local_evaluation_agree_on_every_corpus_program_and_book() {
 
 #[test]
 fn every_aggregate_has_its_eligibility_and_its_reason() {
-    let (p, _) = program_and_market(&corpus().join("company").join("mw14.dsl"));
+    let (p, _) = program_and_market(&abt_tests::corpus_dir().join("company").join("mw14.dsl"));
     let all = eligibilities(&p);
     assert!(!all.is_empty());
     let pushed = all.iter().filter(|(_, e)| e.is_ok()).count();

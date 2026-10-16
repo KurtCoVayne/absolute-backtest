@@ -137,8 +137,12 @@ fn a_dividend_is_credited_on_the_pay_date_for_the_shares_held_at_the_ex_date() {
     let cash: Vec<f64> = r.exposure.iter().map(|e| e.cash).collect();
     // The day-1 decision fills on day 2 (cash 800 at that mark); the 10.00 arrives at the day-5 mark.
     assert_eq!(cash, vec![1000.0, 800.0, 800.0, 800.0, 810.0, 810.0], "{:?}", cash);
+    // The NAV counts the receivable from the ex-date (K-5.1): the 10.00 the
+    // price drops by is owed to the book until the pay date.
     let eq: Vec<f64> = r.equity_curve.iter().map(|(_, e)| *e).collect();
-    assert_eq!(eq, vec![1000.0, 1000.0, 990.0, 990.0, 1000.0, 1000.0], "equity dips between ex and pay (the receivable is not marked)");
+    assert_eq!(eq, vec![1000.0; 6], "the receivable is marked between ex and pay");
+    let owed: Vec<f64> = r.exposure.iter().map(|e| e.receivables).collect();
+    assert_eq!(owed, vec![0.0, 0.0, 10.0, 10.0, 0.0, 0.0], "{:?}", owed);
     let divs: Vec<&abt_kernel::kernel::ActionRecord> = r.actions.iter().filter(|a| matches!(a.action, Action::Dividend { .. })).collect();
     assert_eq!(divs.len(), 1, "{:?}", r.actions);
     assert_eq!(format_timestamp(divs[0].t), "2024-01-12");
@@ -147,6 +151,9 @@ fn a_dividend_is_credited_on_the_pay_date_for_the_shares_held_at_the_ex_date() {
     let r = run(&common::program(&short_hold(), "short_hold"), &m.ds, cfg(1000.0)).unwrap();
     let cash: Vec<f64> = r.exposure.iter().map(|e| e.cash).collect();
     assert_eq!(cash, vec![1000.0, 1200.0, 1200.0, 1200.0, 1190.0, 1190.0], "{:?}", cash);
+    // What it owes is a negative receivable, so its NAV holds too.
+    let eq: Vec<f64> = r.equity_curve.iter().map(|(_, e)| *e).collect();
+    assert_eq!(eq, vec![1000.0; 6], "{:?}", eq);
     // The library's total return sees the dividend: (19 + 1) / 20 - 1 = 0 on
     // the ex-date, like the flat day before it; the days after move.
     let mut m2 = market(&[Some(20.0), Some(20.0), Some(19.0), Some(20.0), Some(21.0), Some(22.0)]);

@@ -48,6 +48,29 @@ batch driver agree on every corpus program. Each bless since:
   and session bundles, which read no bar view; the second formulation's
   books are compared with this order.
 
+- **E-48 (K-5.1, K-3.3 invariant 1; the NAV counts the receivables).** A
+  dividend gone ex on a position held is a receivable until its pay date.
+  For a short, the dividend it owes is a negative receivable. The NAV is
+  now cash, plus the marked positions, plus the receivables, added in that
+  order. Sizing, the leverage check, the maintenance check and the book
+  record all read it.
+
+  The leverage check's cash floor counts the receivables as cash. A book
+  sized on that NAV borrows the receivable's amount until the payment, and
+  that borrowing is not leverage (`leverage gross <= 1` would otherwise
+  refuse every rebalance between an ex-date and its payment).
+  `reference/engine.py` changes the same way in the same commit, and G6
+  holds.
+
+  Blessed with it:
+  - `dividend_capture`, `low_vol_portfolio`, `low_volatility`,
+    `mean_reversion_zscore`, `momentum_12_1`, `momentum_top_n`,
+    `monthly_rebalance`, `pairs_trading`, `regime_momentum`,
+    `relative_strength`, `size_proxy`, `sma_crossover` and `volume_spike`.
+    Only their book lines change, between an ex-date and its payment.
+  - `total_return_momentum`, which sizes on compounding equity. Its fills
+    from the ex-date of 2023-04-17 on and its final cash change too.
+
 ## Kernel
 
 - **E-2 (K-4.2, K-5.8; the `moc` and `moo_moc` orders).** "`session_open` and
@@ -151,6 +174,49 @@ batch driver agree on every corpus program. Each bless since:
   without pushdown and compares them to the bit (G3); ten of them push
   something.
 
+- **E-49 (K-5.2, K-3.4; the event log as the executor writes it).** The
+  executor's cash, positions (with their average cost) and receivables
+  change only by applying an event of the log (`kernel::events`). The log
+  therefore folds to the book bit for bit (Proposition K-5.1;
+  `tests/events.rs`), and each event's `cash_flow` is the amount the
+  executor applied. The run's decisions, fills, drops and actions are
+  projections of the log.
+
+  Every decision becomes one order. Order ids are numbered from zero per
+  run, and a re-issued target keeps its id.
+
+  The kinds the equity and futures executor writes:
+  - `decision` and `order_sent`.
+  - `fill`: forced fills (a margin call, a delisting) are `fill` with
+    `forced` set and no order. A capped fill is `partial_fill`, with its
+    remainder and the remainder's fate (`expired` or `reissued`).
+  - `dropped`: its bar is the bar of the decisions being filled, as the
+    dropped list always gave it.
+  - `expired_order`: the time in force ran out, or the data ended.
+  - `replaced`: one kind for K-5.2's `cancelled, replaced`. A decision
+    supersedes its instrument's working order or open target.
+  - `satisfied`: an order the position already met. This is new;
+    K-3.4's identity needs it.
+  - `dividend_declared`, `split`, `dividend_paid` and `delisted`.
+    `dividend_reinvested` is new, for the reinvesting dividend option.
+  - `funding`: one event per flow.
+  - `margin_call`: the forced fills follow it.
+
+  K-3.4's identity reads, per order: filled, dropped, satisfied, replaced
+  or expired, or open at the end (a re-issuing target or a working order).
+
+  The book rows of K-5.1 are recorded at every decision barrier. The
+  book-level row holds cash, the receivables, the NAV, the capital, gross,
+  net and leverage. Until the margin models (M-7) the margin is the
+  leverage model's: initial requirement = gross / gross multiple,
+  maintenance = maintenance fraction × gross. Each holding's row holds its
+  position, average cost and mark, with the mark's source (`price`, or
+  `stale` for the last price seen).
+
+  K-2.4's kernel relation `exposure(@T, Gross, Net, Leverage)` would clash
+  with the `book` library's `exposure(@T, G)` view, so neither it nor
+  `margin_req` is added to Σ_t before M-7. Their values are in the book
+  rows.
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

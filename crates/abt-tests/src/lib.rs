@@ -74,6 +74,49 @@ pub fn corpus_program(name: &str) -> Program {
     program(&corpus_source("strategies", name), name)
 }
 
+/// A corpus-v2 program file (under `strategies/` or `company/`) checked
+/// with the catalog and the library, and the seeded synthetic market of its
+/// class the golden runs read (`tests/tv_golden.rs`): five names over 400
+/// days, or 30 days of minutes on a sub-daily base, the futures roots for a
+/// future program. R8L's features need 250 sessions and the market holds
+/// 30, so its windows are shortened, as `tests/corpus_v2.rs` does. Fails
+/// with the checker's diagnostics.
+pub fn golden_inputs(file: &Path) -> Result<(Program, Dataset), String> {
+    let src = fs::read_to_string(file).map_err(|e| format!("{}: {}", file.display(), e))?;
+    let name = src
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("strategy ").map(|r| r.split_whitespace().next().unwrap_or("").trim_end_matches('{').to_string()))
+        .ok_or_else(|| format!("{}: no strategy", file.display()))?;
+    let mut ws = base_workspace();
+    ws.add_source(&src).map_err(|e| format!("{}: {}", file.display(), e))?;
+    let (prog, diags) = check_program(&ws, &name);
+    let mut prog = prog.ok_or_else(|| format!("{}: does not check:\n{}", name, text(&diags)))?;
+    let syms: Vec<&str> = if prog.class == "future" {
+        vec![
+            "ES", "NQ", "KC", "6J", "ZB", "ZF", "ZN", "RTY", "ZT", "CL", "GC", "HE", "HO", "LE", "NG", "PL", "RB", "SI", "ZC", "ZL", "ZM", "ZS", "ZW", "GF", "SB", "ETH",
+        ]
+    } else {
+        vec!["AAA", "XYZ", "BBB", "SPY", "DDD"]
+    };
+    let days = if prog.base.is_sub_daily() { 30 } else { 400 };
+    let ds = abt_kernel::data::synthetic_for_program(&prog, &syms, (2022, 1, 3), days, 11);
+    if name == "r8l" {
+        for (p, v) in [("atr_rows", 3), ("med_rows", 6), ("med_min", 3)] {
+            for params in prog.params.values_mut() {
+                if let Some(x) = params.get_mut(p) {
+                    x.value = abt_kernel::Lit::Int(v);
+                }
+            }
+        }
+    }
+    Ok((prog, ds))
+}
+
+/// Every corpus-v2 strategy and both company books, in that order.
+pub fn golden_programs() -> Vec<PathBuf> {
+    dsl_files("strategies").into_iter().chain(dsl_files("company")).collect()
+}
+
 /// The errors of a diagnostic list as (code, text).
 pub fn errors(diags: &[Diagnostic]) -> Vec<(Code, String)> {
     diags.iter().filter(|d| d.severity == Severity::Error).map(|d| (d.code, d.to_string())).collect()

@@ -15,11 +15,13 @@ use hash::{FxHashMap, FxHashSet};
 use crate::check::Program;
 use crate::ir::*;
 pub mod bind;
+pub mod events;
 pub mod executor;
 pub mod fold;
 pub mod hash;
 pub mod pushdown;
 pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
+pub use events::{Book, EventKind, OrderId, RunEvent};
 pub use executor::{Executor, SimExecutor};
 pub use fold::{fingerprint, Checkpoint, CheckpointEvery, Event, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
@@ -559,7 +561,8 @@ pub struct FundingSummary {
     pub short_rebate: f64,
 }
 
-/// The book at a bar's mark, before that bar's decisions.
+/// The book at a bar's mark, before that bar's decisions (K-5.1, the
+/// book-level row of `kernel.<run>.book`).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExposureRecord {
     pub t: i64,
@@ -568,9 +571,38 @@ pub struct ExposureRecord {
     pub gross: f64,
     /// Σ position · price.
     pub net: f64,
+    /// The NAV: cash, the marked positions and the receivables.
     pub equity: f64,
     /// gross / equity (0 when equity is not positive).
     pub leverage: f64,
+    /// Dividends gone ex and not yet paid.
+    #[serde(default)]
+    pub receivables: f64,
+    /// What a weight is a fraction of: the equity, or the fixed capital.
+    #[serde(default)]
+    pub capital: f64,
+    /// The requirement of the leverage model at the mark (K-5.6 `approx`
+    /// until the margin models land): gross over the gross multiple to
+    /// open, the maintenance fraction of gross to hold.
+    #[serde(default)]
+    pub margin_initial: f64,
+    #[serde(default)]
+    pub margin_maintenance: f64,
+}
+
+/// One holding of the book at a bar's mark (K-5.1, an instrument's row of
+/// `kernel.<run>.book`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HoldingRecord {
+    pub t: i64,
+    pub instrument: Sym,
+    pub position: f64,
+    pub avg_cost: f64,
+    /// The price the holding is marked at, and whether the bar has it
+    /// (`price`) or it is the last one seen (`stale`); `None` when the
+    /// instrument has had no price yet.
+    pub mark: Option<f64>,
+    pub mark_source: String,
 }
 
 fn pushdown_on() -> bool {
@@ -1163,6 +1195,10 @@ pub struct FillRecord {
 pub struct RunResult {
     pub symbols: Vec<String>,
     pub bars: Vec<i64>,
+    /// The event log (K-5.2), of which `decisions`, `fills`, `dropped` and
+    /// `actions` are projections (`emit` keeps them).
+    #[serde(default)]
+    pub events: Vec<RunEvent>,
     pub decisions: Vec<DecisionRecord>,
     pub fills: Vec<FillRecord>,
     /// Decisions the executor could not carry out, with the reason.
@@ -1185,6 +1221,9 @@ pub struct RunResult {
     pub funding: FundingSummary,
     /// The book at every bar's mark, parallel to `equity_curve`.
     pub exposure: Vec<ExposureRecord>,
+    /// The holdings at every bar's mark.
+    #[serde(default)]
+    pub holdings: Vec<HoldingRecord>,
     /// Splits, dividends and delistings applied to the book.
     pub actions: Vec<ActionRecord>,
     pub stats: KernelStats,
@@ -1208,6 +1247,35 @@ pub struct RunResult {
 }
 
 impl RunResult {
+    /// Appends an event to the log, numbering it, and to the projection its
+    /// kind feeds; returns its seq.
+    pub fn emit(&mut self, mut e: RunEvent) -> u64 {
+        let seq = self.events.len() as u64;
+        e.seq = seq;
+        match &e.kind {
+            EventKind::Decision { decision } => self.decisions.push(DecisionRecord {
+                t: e.t,
+                decision: decision.clone(),
+                rule: e.rule.unwrap_or(usize::MAX),
+            }),
+            EventKind::Fill { fill, .. } => self.fills.push(fill.clone()),
+            EventKind::Dropped { decided, decision, reason } | EventKind::ExpiredOrder { decided, decision, reason } => self.dropped.push((*decided, decision.clone(), reason.clone())),
+            EventKind::Action { action, .. } => {
+                if let Some(sym) = e.instrument {
+                    self.actions.push(ActionRecord {
+                        t: e.t,
+                        equity: sym,
+                        action: action.clone(),
+                        cash: e.cash_flow.unwrap_or(0.0),
+                    });
+                }
+            }
+            _ => {}
+        }
+        self.events.push(e);
+        seq
+    }
+
     /// The bar returns under the run's accounting: the change in NAV over
     /// the previous bar's equity, or over the fixed capital when profits are
     /// not reinvested.
