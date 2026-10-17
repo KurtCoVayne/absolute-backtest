@@ -92,13 +92,31 @@ pub fn briefs_market() -> Result<Arc<DataService>, String> {
     Ok(DataService::new(store))
 }
 
-/// The adapters a catalog's sources are fetched by (D-7.7), by name, and
-/// the adapters it names that abt does not have: such a source is listed
-/// and planned, and buying from it is refused naming its adapter.
+/// The adapters a catalog's sources are fetched by (D-7.7), each
+/// configured by its source's settings and keyed by the source's name, and
+/// what could not be made of the others (an adapter abt does not have, a
+/// setting it refuses): such a source is listed and planned, and buying
+/// from it is refused naming its adapter.
 pub fn adapters_of(catalog: &abt_data::resolver::Catalog) -> (BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>>, Vec<String>) {
-    let out: BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>> = BTreeMap::new();
-    let mut missing: Vec<String> = catalog.sources.iter().map(|s| s.adapter.clone()).filter(|a| !out.contains_key(a)).collect();
-    missing.sort();
-    missing.dedup();
+    let mut out: BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>> = BTreeMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    for s in &catalog.sources {
+        let made: Result<Arc<dyn abt_data::adapters::Adapter>, String> = match s.adapter.as_str() {
+            "norgate" => abt_data::adapters::norgate::Norgate::from_settings(&s.settings).map(|n| Arc::new(n) as _).map_err(|e| e.to_string()),
+            "databento" => abt_data::adapters::databento::Databento::from_settings(&s.settings)
+                .map(|d| Arc::new(d) as _)
+                .map_err(|e| e.to_string()),
+            "databento_live" => abt_data::adapters::databento_live::DatabentoLive::from_settings(&s.settings)
+                .map(|d| Arc::new(d) as _)
+                .map_err(|e| e.to_string()),
+            other => Err(format!("`{}` (no such adapter)", other)),
+        };
+        match made {
+            Ok(a) => {
+                out.insert(s.name.clone(), a);
+            }
+            Err(e) => missing.push(format!("{} for the source `{}`", e, s.name)),
+        }
+    }
     (out, missing)
 }

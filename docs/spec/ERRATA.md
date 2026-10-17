@@ -834,9 +834,115 @@ batch driver agree on every corpus program. Each bless since:
   - **Not yet.**
     - Dynamic needs: the pre-pass waits for the option class (M-7). A
       demand with one, and `resolve_dynamic`, are refused, naming it.
-    - The front knows no vendor adapter until M-6b. A source naming an
-      adapter abt lacks is listed and planned, and buying from it is
-      refused, naming the adapter.
+    - A source naming an adapter abt lacks (or settings its adapter
+      refuses) is listed and planned, and buying from it is refused,
+      naming the adapter. The adapters are E-68's.
+- **E-68 (D-7.7, D-2.4, B-10, A-D24; the vendor adapters as built).**
+  - **Configuration.** A catalog source's `settings` (free key-value
+    pairs: a lake's root, a dataset, the environment variable that holds a
+    key, never a key) configure its adapter, which is kept under the
+    source's name. `abt data ingest --adapter norgate|databento --from
+    LOCATOR` reads what the locator holds over the dates given, whole: a
+    need and a budget go through `abt data resolve` against a catalog that
+    names the source.
+  - **Purchases.** The relations a plan buys from one offer over one span
+    are one request. What the adapter returns beside them (the registry's
+    relations that key them, `continuous` and `future_spec`) is ingested
+    with them. A fetch may state attributes of one relation only
+    (`Fetched::relation_attributes`: `dividend_dates = ex_only` is said of
+    `equity.dividend` alone).
+  - **Keys.** A fetch's keys are the vendor's (a key the registry has not
+    seen is a new instrument: Norgate's `asset_id`, a future's
+    `instrument_id`), or symbols joined to the registry's ticker spans at
+    each row's `t`, a span's last day included (a Databento equity's
+    `raw_symbol`). A symbol no span carries rejects the read, naming the row
+    (A-D24).
+  - **Norgate** reads the lake through the Parquet reader and makes the
+    ten decisions of `docs/handoff-data.md` (section 4) as the retired
+    script made them.
+    - Several lists (`--lists 'S&P 500=SP500;S&P MidCap 400=SP400'`): the
+      universe is the members, ever, of any; a member of two lists is a
+      member of each.
+    - Index series (`--series '$SPXTR=SPXTR'`, a `series_type = index`
+      asset) become the series class's `value`, keyed at the day.
+    - `equity.ticker` holds the ticker each asset carries on every day of
+      its span through its last bar, beside the registry's spans.
+    - `registry/trading_calendar` is not read. The sessions are the days
+      the bars have, as the bundles' were, and the kernel puts its own
+      calendars (M-2h).
+    - The reviewed exceptions become the attribute `reviewed_exceptions`,
+      JSON rows keyed by `asset_id`. The file and its editor move to
+      `scripts/reviewed/`.
+    - The source is a local mirror: reading the bucket (`s3://`) waits for
+      an S3 store tier (D-3.7; the owner's open item, A-8).
+  - **Databento.**
+    - DBN versions 1 to 3 are decoded by `adapters::dbn` (the standard
+      library only). Its known answers are fixtures written by Databento's
+      reference implementation (`dbn` 0.72, `crates/abt-data/tests/fixtures/dbn`).
+      A `.dbn.zst` file and a compressed response are decompressed with
+      `zstd`, which Parquet already links.
+    - The bucket's Parquet layout is read too (bars with decoded prices,
+      definitions per root).
+    - The historical API (`timeseries.get_range`) is asked with the key as
+      the basic-auth user. `https://` goes through `curl`, given the key and
+      the form on its standard input (abt carries no TLS); `http://` is
+      spoken to directly (the tests' server).
+    - **Receipt.** An OHLCV record's `ts_event` is the start of its
+      interval, so `t` is the bar's close and `r = max(ts_recv, t)` plus the
+      processing delay, or `t` plus it when the rows carry no `ts_recv`.
+      B-10's `ts_event + processing_delay` would make a bar readable before
+      it ended.
+    - **Futures.** Contracts are keyed by `instrument_id`, the root
+      (`asset`) from the definition; a bar of an instrument without one is
+      refused, and spreads and options are left out. Each root becomes one
+      back-adjusted continuous series, keyed by Databento's continuous
+      symbol (`ES.v.0`, `ES.c.0`):
+      - Sessions are the root's bars' runs; a gap over 45 minutes ends one
+        (CME Globex's daily break is an hour; `--session-gap`). A session
+        is labelled at its last bar's close and opens at its first bar's
+        start.
+      - By volume, a session holds the contract that traded the most in the
+        session before, never one expiring before the contract held. The
+        first session holds the nearest expiry, as its own volume is not
+        known until it ends. By expiry, it holds the nearest expiry that
+        trades in it.
+      - The gap at a roll is the new contract's last close minus the old's,
+        in the session before. When the new contract did not trade then, it
+        is the new contract's first open. The series before a roll is
+        shifted by the later gaps (additive), so the last contract is
+        unadjusted.
+      - `continuous` names each bar's contract and adjustment.
+        `future_spec` holds the terms: `first_trade` the activation,
+        `expiry` and `last_trade` the expiration, `tick` the minimum
+        increment, and `point_value` the `unit_of_measure_qty` unless
+        `--point-values` gives the root's (a bond's points are a percent of
+        its size). `settlement` is as configured per root, else `unstated`.
+      - `point_value` is stated per root at each session's day, and
+        `commission` when `--commission` gives it. `member` and `usable` are
+        research's, not the vendor's.
+    - Statistics (settlement prices, open interest) are decoded and not yet
+      stored: the future class gains `settlement` and `open_interest` with
+      the futures model (M-7).
+    - **Equities** are named by `raw_symbol` (the metadata's mappings, or
+      the Parquet's `symbol`) and joined to the store's tickers, so the
+      Norgate lake is ingested first. Their listing is the Norgate
+      versions'.
+    - **Live.** `databento_live` speaks the gateway's protocol: the
+      challenge answered with the hex SHA-256 of `challenge|key` and the
+      key's bucket (`sha2`), the subscription, `start_session`, then DBN.
+      Each record is stamped at acceptance, its rows' `r`. A continuous
+      symbol is subscribed with `stype_in = continuous`, and its rows are
+      keyed by it with adjustment 0. The live clock, recording and the
+      subscription to the kernel are M-6c's.
+  - **Retired.** These are gone (M principle 4):
+    - The kernel's `ingest.rs` (`norgate_daily`, `databento_minute`) and
+      `abt bundle build --from-norgate|--from-databento|--processing-delay`.
+    - `scripts/ingest/*`: the lake conversion, the reconciliation report
+      (the `actions` feed statistic of Q-6 reports what it did), and the
+      first formulation's weekly and session layouts, which no class reads
+      any more. They are in the history.
+    - `scripts/bench.sh` ingests the lake with `abt data ingest` and runs
+      over the served store.
 
 ## Aggregates
 

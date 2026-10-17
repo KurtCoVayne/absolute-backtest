@@ -169,7 +169,7 @@ fn a_demand_is_planned_and_bound_against_the_store_and_the_catalog() {
     let o = abt(&["data", "resolve", "--store", &store, "--config", &cfg, "--demand", &d, "--dry-run"]);
     let (out, err) = text(&o);
     assert_eq!(o.status.code(), Some(0), "{}", err);
-    assert!(err.contains("no adapter `absent` here"), "{}", err);
+    assert!(err.contains("no adapter `absent` (no such adapter) for the source `vendor`"), "{}", err);
     assert!(out.contains("over budget: the cheapest plan covering every span costs money 2.50"), "{}", out);
     assert!(out.contains("note: the cheapest plan that covers every span costs money 2.50"), "{}", out);
     assert!(out.contains("binding not recorded (a dry run)"), "{}", out);

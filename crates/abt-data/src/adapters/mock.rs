@@ -77,7 +77,7 @@ impl Adapter for Mock {
             securities: self.securities.clone(),
             terms: vec![],
             relations,
-            attributes: Default::default(),
+            ..Default::default()
         })
     }
 }

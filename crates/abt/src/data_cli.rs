@@ -3,16 +3,26 @@
 //!
 //! ```text
 //! abt data serve   [--store DIR] [--socket PATH] [--config FILE]
+//! abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...']
+//!                  [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]
+//! abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry]
+//!                  [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE]
+//!                  [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]
 //! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--attributes K=V,...] <files...>
 //! abt data ingest  [--store DIR] --adapter synthetic --class C [--days N] [--symbols A,B] [--seed N] <files...>
 //! abt data catalog [--store DIR] [--class C | --sources [--config FILE]]
 //! abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
 //! abt data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
-//! abt data stats   [--store DIR] [--relation R]
+//! abt data stats   [--store DIR] [--relation R] [--json]
 //! abt data pin|unpin [--store DIR] VERSION | --binding B
 //! abt data gc      [--store DIR] [--disk-budget BYTES]
 //! ```
 //!
+//! `norgate` reads the NDLake lake (D-7.7, `adapters::norgate`), ingested
+//! under the source `norgate` with Norgate's `asset_id` as the key.
+//! `databento` reads DBN or Parquet files, or the historical API at a URL
+//! (`adapters::databento`): futures keyed by `instrument_id` and rolled into
+//! continuous series, equities joined to the store's tickers.
 //! `bundle_v2` reads the present bundle formats (a bundle directory with its
 //! manifest, or a directory of one Parquet file per relation) with the
 //! kernel's loaders and ingests them through the adapter of keyed rows; the
@@ -79,7 +89,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE]\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
     );
     exit(1)
 }
@@ -146,6 +156,10 @@ pub fn main(args: &[String]) {
             let _ = handle.join();
         }
         "ingest" => {
+            if let Some(v @ ("norgate" | "databento")) = a.opts.get("adapter").map(String::as_str) {
+                vendor_ingest(&a, v);
+                return;
+            }
             let prog = class_program(&a);
             let ds = match a.opts.get("adapter").map(String::as_str) {
                 Some("bundle_v2") => {
@@ -179,15 +193,9 @@ pub fn main(args: &[String]) {
                     let start = if prog.base.is_sub_daily() { (2024, 1, 2) } else { (2022, 1, 3) };
                     synthetic_for_program(&prog, &syms, start, days, seed)
                 }
-                _ => fail("--adapter is bundle_v2 or synthetic"),
+                _ => fail("--adapter is norgate, databento, bundle_v2 or synthetic"),
             };
-            // A reviewer's statements of the versions: `--attributes
-            // reviewed=complete,receipt=recorded`.
-            let mut extra = BTreeMap::new();
-            for kv in a.opts.get("attributes").map(|s| s.split(',').map(str::to_string).collect::<Vec<_>>()).unwrap_or_default() {
-                let (k, v) = kv.split_once('=').unwrap_or_else(|| fail("--attributes takes KEY=VALUE[,KEY=VALUE...]"));
-                extra.insert(k.trim().to_string(), v.trim().to_string());
-            }
+            let extra = statements(&a);
             let attributes = crate::dataset_attributes(&ds, &prog.base.to_string(), &extra);
             let mut store = open(&a);
             crate::ingest_dataset(&mut store, &ds, &prog.class, &attributes).unwrap_or_else(|e| fail(&e));
@@ -279,6 +287,10 @@ pub fn main(args: &[String]) {
             let store = open(&a);
             let current: std::collections::BTreeSet<String> = store.registry.currents().into_iter().map(|(_, _, v)| v).collect();
             for v in store.registry.versions().filter(|v| a.opts.get("relation").is_none_or(|r| *r == v.relation)) {
+                if a.flags.iter().any(|f| f == "json") {
+                    println!("{}", serde_json::json!({ "version": v, "current": current.contains(&v.version) }));
+                    continue;
+                }
                 println!(
                     "{} {} {} rows {} {}..{}{}",
                     v.relation,
@@ -608,6 +620,115 @@ fn parse_query(store: &Store, text: &str) -> Result<(QueryForm, Option<i64>), St
     Ok((form, r_max))
 }
 
+/// A reviewer's statements of the versions an ingest writes: `--attributes
+/// reviewed=complete,receipt=recorded`.
+fn statements(a: &Args) -> BTreeMap<String, String> {
+    let mut extra = BTreeMap::new();
+    for kv in a.opts.get("attributes").map(|s| s.split(',').map(str::to_string).collect::<Vec<_>>()).unwrap_or_default() {
+        let (k, v) = kv.split_once('=').unwrap_or_else(|| fail("--attributes takes KEY=VALUE[,KEY=VALUE...]"));
+        extra.insert(k.trim().to_string(), v.trim().to_string());
+    }
+    extra
+}
+
+/// `abt data ingest --adapter norgate|databento --from LOCATOR`: what a
+/// vendor's adapter reads (D-7.7), ingested under its source (`--source`,
+/// the adapter's name by default) with the vendor's keys; `--report FILE`
+/// writes what the read did as JSON.
+fn vendor_ingest(a: &Args, adapter: &str) {
+    let from = a.opts.get("from").cloned().unwrap_or_else(|| fail("--from LOCATOR names what the adapter reads"));
+    let source = a.opts.get("source").cloned().unwrap_or_else(|| adapter.to_string());
+    let (got, vendor, report) = match adapter {
+        "norgate" => {
+            let mut settings = BTreeMap::new();
+            settings.insert("lake".to_string(), from);
+            for (opt, key) in [
+                ("lists", "lists"),
+                ("series", "series"),
+                ("start", "from"),
+                ("end", "to"),
+                ("limit", "limit"),
+                ("scheme", "scheme"),
+                ("exceptions", "exceptions"),
+            ] {
+                if let Some(v) = a.opts.get(opt) {
+                    settings.insert(key.to_string(), v.clone());
+                }
+            }
+            let n = abt_data::adapters::norgate::Norgate::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
+            let (got, r) = n.read().unwrap_or_else(|e| fail(&e.to_string()));
+            eprintln!(
+                "norgate: {} assets, {} bars from {} to {}; {} splits, {} dividends, {} delistings, {} membership intervals, {} reviewed exceptions",
+                r.universe_assets,
+                r.rows_out,
+                r.first_day.as_deref().unwrap_or("-"),
+                r.last_day.as_deref().unwrap_or("-"),
+                r.splits,
+                r.dividends,
+                r.delisting_reasons.values().sum::<usize>(),
+                r.membership_intervals,
+                r.exceptions
+            );
+            (got, "norgate", serde_json::to_value(&r).unwrap_or_default())
+        }
+        "databento" => {
+            let mut settings = BTreeMap::new();
+            let key = if from.starts_with("http://") || from.starts_with("https://") { "api" } else { "files" };
+            settings.insert(key.to_string(), from);
+            for (opt, key) in [
+                ("class", "class"),
+                ("processing-delay", "processing_delay"),
+                ("roll", "roll"),
+                ("session-gap", "session_gap"),
+                ("point-values", "point_values"),
+                ("settlement", "settlement"),
+                ("commission", "commission"),
+                ("start", "from"),
+                ("end", "to"),
+                ("dataset", "dataset"),
+                ("schema", "schema"),
+                ("symbols", "symbols"),
+                ("stype-in", "stype_in"),
+                ("key-env", "key_env"),
+            ] {
+                if let Some(v) = a.opts.get(opt) {
+                    settings.insert(key.to_string(), v.clone());
+                }
+            }
+            let d = abt_data::adapters::databento::Databento::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
+            let (got, r) = d.read(d.options()).unwrap_or_else(|e| fail(&e.to_string()));
+            let rolls: usize = r.roots.values().map(|x| x.rolls.len()).sum();
+            eprintln!(
+                "databento: {} files, {} bars kept of {} from {} to {}; {}",
+                r.files,
+                r.bars_out,
+                r.bars_in,
+                r.first.as_deref().unwrap_or("-"),
+                r.last.as_deref().unwrap_or("-"),
+                if d.options().class == "equity" {
+                    format!("{} symbols", r.symbols)
+                } else {
+                    format!("{} roots, {} contracts, {} rolls", r.roots.len(), r.roots.values().map(|x| x.contracts).sum::<usize>(), rolls)
+                }
+            );
+            for (why, n) in r.dropped.iter().filter(|(_, n)| **n > 0) {
+                eprintln!("note: {} rows left out: {}", n, why.replace('_', " "));
+            }
+            (got, "databento", serde_json::to_value(&r).unwrap_or_default())
+        }
+        _ => fail(&format!("no adapter `{}`", adapter)),
+    };
+    if let Some(path) = a.opts.get("report") {
+        let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+        std::fs::write(path, text + "\n").unwrap_or_else(|e| fail(&format!("{}: {}", path, e)));
+    }
+    let mut store = open(a);
+    got.ingest(&mut store, vendor, &source, &statements(a)).unwrap_or_else(|e| fail(&e.to_string()));
+    for (r, s, v) in store.registry.currents() {
+        println!("{} {} {}", r, s, v);
+    }
+}
+
 /// The sources beside the store: the catalog `--config FILE` names, with
 /// the adapters its sources are fetched by.
 fn sources(a: &Args) -> abt_data::resolver::Sources {
@@ -615,7 +736,7 @@ fn sources(a: &Args) -> abt_data::resolver::Sources {
     let catalog = abt_data::resolver::Catalog::load(Path::new(path)).unwrap_or_else(|e| fail(&e.to_string()));
     let (adapters, missing) = crate::adapters_of(&catalog);
     for m in missing {
-        eprintln!("note: {}: no adapter `{}` here; its sources are planned, not bought from", path, m);
+        eprintln!("note: {}: no adapter {}; it is planned, not bought from", path, m);
     }
     abt_data::resolver::Sources { catalog, adapters }
 }

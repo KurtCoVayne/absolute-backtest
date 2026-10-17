@@ -4,15 +4,15 @@
 #
 #   scripts/bench.sh LAKE OUTDIR
 #
-# LAKE is the NDLake root (a local mirror or s3://...). Env: RUNGS="100 250 500 0"
+# LAKE is a local NDLake root (a mirror of the bucket). Env: RUNGS="100 250 500 0"
 # (asset counts, 0 = every member since FROM), FROM=2014-01-01, LIMIT=1800
-# (seconds per cell), ABT=target/release/abt, PY=python3 (with duckdb).
+# (seconds per cell), ABT=target/release/abt, PY=python3.
 #
-# Each rung: convert a subset of the lake (scripts/ingest/norgate_lake_to_inputs.py
-# --limit N), build and test the bundle, then run momentum_12_1, low_volatility
-# and total_return_momentum (n = a tenth of the names, at most 50; 20 long-only) with --timing on the batch kernel, and on the fold
-# kernel at the 500 rung. Prints a Markdown table and the log-log slope of run
-# time against names.
+# Each rung: ingest a subset of the lake into a store (`abt data ingest --adapter
+# norgate --limit N`, the reviewed exceptions as the versions' attribute), serve it,
+# then run momentum_12_1, low_volatility and total_return_momentum (n = a tenth of
+# the names, at most 50; 20 long-only) over the socket with --timing. Prints a
+# Markdown table and the log-log slope of run time against names.
 #
 # Synthetic markets are not used: `abt synth` (src/data.rs) scales drift and
 # volatility with the symbol index, so at hundreds of names its prices
@@ -26,7 +26,7 @@ LIMIT=${LIMIT:-1800}
 ABT=${ABT:-target/release/abt}
 PY=${PY:-python3}
 CORPUS="corpus-v2/catalog corpus-v2/lib corpus-v2/strategies"
-EXCEPTIONS=scripts/ingest/reviewed/norgate-spx-2014.parquet
+EXCEPTIONS=scripts/reviewed/norgate-spx-2014.parquet
 mkdir -p "$OUT"
 ROWS="$OUT/rows.tsv"
 : >"$ROWS"
@@ -43,11 +43,11 @@ now() { "$PY" -c 'import time; print(time.time())'; }
 since() { "$PY" -c "print(round($(now) - $1, 2))"; }
 field() { sed -n "s/.*[ ]$2=\([^ ]*\).*/\1/p" <<<"$1"; }
 
-# cell RUNG NAMES BARS STRATEGY KERNEL -- abt run arguments...
+# cell RUNG NAMES BARS STRATEGY -- abt run arguments...
 cell() {
-  local rung=$1 names=$2 bars=$3 strategy=$4 kernel=$5; shift 5
-  local log="$OUT/run-$strategy-$kernel-$rung.log"
-  run_limited "$ABT" run --strategy "$strategy" --kernel "$kernel" --timing --quiet "$@" $CORPUS >"$log" 2>&1
+  local rung=$1 names=$2 bars=$3 strategy=$4 kernel=fold; shift 4
+  local log="$OUT/run-$strategy-$rung.log"
+  run_limited "$ABT" run --strategy "$strategy" --timing --quiet "$@" $CORPUS >"$log" 2>&1
   local code=$?
   local line; line=$(grep '^timing ' "$log" | tail -1)
   if [ $code -ne 0 ] || [ -z "$line" ]; then
@@ -62,32 +62,30 @@ cell() {
 }
 
 for rung in $RUNGS; do
-  inputs="$OUT/inputs-$rung" bundle="$OUT/bundle-$rung"
+  store="$OUT/store-$rung" sock="$OUT/data-$rung.sock"
   limit=(); [ "$rung" != 0 ] && limit=(--limit "$rung")
-  t=$(now)
-  "$PY" scripts/ingest/norgate_lake_to_inputs.py --lake "$LAKE" --out "$inputs" --from "$FROM" ${limit[@]+"${limit[@]}"} --exceptions "$EXCEPTIONS" 2>"$OUT/convert-$rung.log" || { echo "convert $rung failed" >&2; continue; }
-  convert_s=$(since "$t")
-  rm -rf "$bundle"; t=$(now)
+  rm -rf "$store"; t=$(now)
   tflag=-v; [ "$(uname)" = Darwin ] && tflag=-l
-  /usr/bin/time $tflag "$ABT" bundle build --from-norgate "$inputs" --class equity --version bench --out "$bundle" $CORPUS >"$OUT/build-$rung.log" 2>&1 \
-    || { echo "bundle build $rung failed: $(grep -v '^ ' "$OUT/build-$rung.log" | tail -1)" >&2; continue; }
-  build_s=$(since "$t"); t=$(now)
-  "$ABT" bundle test "$bundle" $CORPUS >"$OUT/test-$rung.log" 2>&1
-  test_s=$(since "$t")
-  names=$(grep -o '[0-9]* securities' "$OUT/build-$rung.log" | head -1 | cut -d' ' -f1)
-  bars=$(grep -o 'over [0-9]* trading days' "$OUT/build-$rung.log" | head -1 | cut -d' ' -f2)
-  rows=$(grep -o '^note: [0-9]* price rows' "$OUT/build-$rung.log" | cut -d' ' -f2)
-  build_rss=$(grep -E 'maximum resident set size|Maximum resident' "$OUT/build-$rung.log" | grep -o '[0-9]*' | head -1)
-  echo "== rung $rung: $names names, $bars bars, $rows price rows; convert ${convert_s}s, bundle build ${build_s}s (peak RSS ${build_rss}), bundle test ${test_s}s: $(tail -1 "$OUT/test-$rung.log")" >&2
-  echo "$names	$rows	$convert_s	$build_s	$build_rss	$test_s	$(tail -1 "$OUT/test-$rung.log")" >>"$OUT/ingest.tsv"
+  /usr/bin/time $tflag "$ABT" data ingest --store "$store" --adapter norgate --from "$LAKE" --start "$FROM" ${limit[@]+"${limit[@]}"} \
+    --exceptions "$EXCEPTIONS" --attributes reviewed=complete --report "$OUT/report-$rung.json" >"$OUT/ingest-$rung.log" 2>&1 \
+    || { echo "ingest $rung failed: $(grep -v '^ ' "$OUT/ingest-$rung.log" | tail -1)" >&2; continue; }
+  ingest_s=$(since "$t")
+  names=$(sed -n 's/^norgate: \([0-9]*\) assets.*/\1/p' "$OUT/ingest-$rung.log")
+  rows=$(sed -n 's/^norgate: [0-9]* assets, \([0-9]*\) bars.*/\1/p' "$OUT/ingest-$rung.log")
+  bars=$("$PY" -c 'import json, sys; print(json.load(open(sys.argv[1]))["days"])' "$OUT/report-$rung.json")
+  ingest_rss=$(grep -E 'maximum resident set size|Maximum resident' "$OUT/ingest-$rung.log" | grep -o '[0-9]*' | head -1)
+  echo "== rung $rung: $names names, $bars bars, $rows price rows; ingest ${ingest_s}s (peak RSS ${ingest_rss})" >&2
+  echo "$names	$rows	$ingest_s	$ingest_rss" >>"$OUT/ingest.tsv"
+  rm -f "$sock"
+  "$ABT" data serve --store "$store" --socket "$sock" 2>"$OUT/serve-$rung.log" &
+  server=$!
+  for _ in $(seq 200); do [ -S "$sock" ] && break; sleep 0.05; done
   for s in momentum_12_1 low_volatility total_return_momentum; do
     # Legs of n names each must not overlap: n is a tenth of the universe, at most 50 (20 long-only).
     n=$(( names / 10 )); [ $n -gt 50 ] && n=50; [ "$s" = total_return_momentum ] && [ $n -gt 20 ] && n=20
-    cell "$rung" "$names" "$bars" "$s" batch --bundle "$bundle" --param "n=$n"
+    cell "$rung" "$names" "$bars" "$s" --data "$sock" --param "n=$n"
   done
-  if [ "$rung" = 500 ]; then
-    cell "$rung" "$names" "$bars" low_volatility fold --bundle "$bundle" --param "n=$(( names / 10 > 50 ? 50 : names / 10 ))"
-  fi
+  kill "$server" 2>/dev/null; wait "$server" 2>/dev/null
 done
 
 echo
@@ -98,11 +96,11 @@ else
 fi
 echo "abt $(git rev-parse --short HEAD 2>/dev/null), $(rustc --version 2>/dev/null || ~/.cargo/bin/rustc --version 2>/dev/null || echo rustc unknown)"
 echo
-echo "Ingest (convert = lake to Parquet inputs, build = inputs to bundle):"
+echo "Ingest (the lake into a store, abt data ingest --adapter norgate):"
 echo
-echo "| names | price rows | convert s | bundle build s | build peak RSS bytes | bundle test s | test result |"
-echo "| ---: | ---: | ---: | ---: | ---: | ---: | --- |"
-awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7}' "$OUT/ingest.tsv"
+echo "| names | price rows | ingest s | ingest peak RSS |"
+echo "| ---: | ---: | ---: | ---: |"
+awk -F'\t' '{printf "| %s | %s | %s | %s |\n", $1,$2,$3,$4}' "$OUT/ingest.tsv"
 echo
 echo "| names | bars | strategy | kernel | load s | run s | bars/s | peak RSS MB | status |"
 echo "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | --- |"
@@ -114,7 +112,7 @@ from collections import defaultdict
 pts = defaultdict(list)
 for line in open(sys.argv[1]):
     names, bars, s, kernel, load, run, bps, rss, status = line.rstrip("\n").split("\t")
-    if status == "ok" and kernel == "batch" and float(run) > 0:
+    if status == "ok" and float(run) > 0:
         pts[s].append((math.log(int(names)), math.log(float(run)), math.log(float(rss))))
 for s, p in sorted(pts.items()):
     if len(p) < 2:

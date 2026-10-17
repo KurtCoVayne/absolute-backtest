@@ -110,6 +110,10 @@ starts in 1991) and the metric conventions. See `docs/semantic-model.md`.
 
 ## Reproduce
 
+The first formulation's input script (`scripts/ingest/ndlake_weekly.py`) and the class it wrote are
+retired (M-6, ERRATA E-68); the recipe below is the record of how the result
+was made, and the script is in the history before that step.
+
 ```
 python scripts/ingest/ndlake_weekly.py --lake ~/data/ref/mw14/ndlake --artifacts ~/data/ref/mw14/artifacts --out IN
 abt bundle build --from IN --env equities_1w --version mw14 --out B corpus/env corpus/company/mw14.dsl

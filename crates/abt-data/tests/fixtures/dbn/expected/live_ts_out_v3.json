@@ -1,0 +1,277 @@
+{
+  "metadata": {
+    "dataset": "GLBX.MDP3",
+    "end": null,
+    "limit": null,
+    "mappings": [],
+    "not_found": [],
+    "partial": [],
+    "schema": null,
+    "start": "1705674540000000000",
+    "stype_in": null,
+    "stype_out": 0,
+    "symbol_cstr_len": 71,
+    "symbols": [],
+    "ts_out": true,
+    "version": 3
+  },
+  "records": [
+    {
+      "code": 1,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674540000000001"
+      },
+      "kind": "system",
+      "msg": "Subscription request 0 for mixed data succeeded",
+      "ts_out": "1705674540000000101"
+    },
+    {
+      "end_ts": "1705708800000000000",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 0,
+        "rtype": 22,
+        "ts_event": "1705674540000000002"
+      },
+      "kind": "symbol_mapping",
+      "start_ts": "1705622400000000000",
+      "stype_in": 3,
+      "stype_in_symbol": "ES.c.0",
+      "stype_out": 1,
+      "stype_out_symbol": "ESH4",
+      "ts_out": "1705674540000000102"
+    },
+    {
+      "activation": "1671201000000000000",
+      "appl_id": 310,
+      "asset": "ES",
+      "cfi": "FFIXSX",
+      "channel_id": 4,
+      "contract_multiplier": 2147483647,
+      "contract_multiplier_unit": 127,
+      "currency": "USD",
+      "decay_quantity": 2147483647,
+      "decay_start_date": 65535,
+      "display_factor": 1000000000,
+      "exchange": "XCME",
+      "expiration": "1710509400000000000",
+      "flow_schedule_type": 127,
+      "group": "ES",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 19,
+        "ts_event": "1705622400000000000"
+      },
+      "high_limit_price": 5011750000000,
+      "inst_attrib_value": 27649,
+      "instrument_class": 70,
+      "kind": "instrument_def",
+      "leg_count": 0,
+      "leg_delta": "9223372036854775807",
+      "leg_index": 0,
+      "leg_instrument_class": 0,
+      "leg_instrument_id": 0,
+      "leg_price": "9223372036854775807",
+      "leg_ratio_price_denominator": 0,
+      "leg_ratio_price_numerator": 0,
+      "leg_ratio_qty_denominator": 0,
+      "leg_ratio_qty_numerator": 0,
+      "leg_raw_symbol": "",
+      "leg_side": 78,
+      "leg_underlying_id": 0,
+      "low_limit_price": 4549250000000,
+      "main_fraction": 1,
+      "market_depth": 10,
+      "market_depth_implied": 2,
+      "market_segment_id": 64,
+      "match_algorithm": 70,
+      "maturity_day": 15,
+      "maturity_month": 3,
+      "maturity_week": 3,
+      "maturity_year": 2024,
+      "max_price_variation": 60000000000,
+      "max_trade_vol": 3000,
+      "md_security_trading_status": 255,
+      "min_lot_size": 1,
+      "min_lot_size_block": 25,
+      "min_lot_size_round_lot": 5,
+      "min_price_increment": 250000000,
+      "min_price_increment_amount": 12500000000,
+      "min_trade_vol": 1,
+      "original_contract_size": 2147483647,
+      "price_display_format": 2,
+      "price_ratio": "9223372036854775807",
+      "raw_instrument_id": 2001,
+      "raw_symbol": "ESH4",
+      "secsubtype": "",
+      "security_type": "FUT",
+      "security_update_action": 65,
+      "settl_currency": "USD",
+      "settl_price_type": 255,
+      "strike_price": "9223372036854775807",
+      "strike_price_currency": "",
+      "sub_fraction": 0,
+      "tick_rule": 255,
+      "trading_reference_date": 65535,
+      "trading_reference_price": "9223372036854775807",
+      "ts_out": "1705674540000000103",
+      "ts_recv": "1705622401234567890",
+      "underlying": "",
+      "underlying_id": 0,
+      "underlying_product": 5,
+      "unit_of_measure": "IPNT",
+      "unit_of_measure_qty": 50000000000,
+      "user_defined_instrument": 78
+    },
+    {
+      "close": 4780500000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 32,
+        "ts_event": "1705674540000000000"
+      },
+      "high": 4780500000000,
+      "kind": "ohlcv",
+      "low": 4780250000000,
+      "open": 4780250000000,
+      "ts_out": "1705674540000000104",
+      "volume": 42
+    },
+    {
+      "close": 4780250000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674480000000000"
+      },
+      "high": 4780750000000,
+      "kind": "ohlcv",
+      "low": 4779750000000,
+      "open": 4780000000000,
+      "ts_out": "1705674540000000105",
+      "volume": 1307
+    },
+    {
+      "close": 4779750000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 34,
+        "ts_event": "1705669200000000000"
+      },
+      "high": 4782500000000,
+      "kind": "ohlcv",
+      "low": 4769250000000,
+      "open": 4771000000000,
+      "ts_out": "1705674540000000106",
+      "volume": 98204
+    },
+    {
+      "close": 4779500000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 35,
+        "ts_event": "1705536000000000000"
+      },
+      "high": 4790000000000,
+      "kind": "ohlcv",
+      "low": 4735250000000,
+      "open": 4741750000000,
+      "ts_out": "1705674540000000107",
+      "volume": 1643225
+    },
+    {
+      "close": 4780500000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 36,
+        "ts_event": "1705615200000000000"
+      },
+      "high": 4790000000000,
+      "kind": "ohlcv",
+      "low": 4735250000000,
+      "open": 4742250000000,
+      "ts_out": "1705674540000000108",
+      "volume": 1598101
+    },
+    {
+      "close": 4780000000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 17,
+        "ts_event": "1705674420000000000"
+      },
+      "high": 4780250000000,
+      "kind": "ohlcv",
+      "low": 4779250000000,
+      "open": 4779500000000,
+      "ts_out": "1705674540000000109",
+      "volume": 1188
+    },
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705674540000000000"
+      },
+      "kind": "statistics",
+      "price": 4779500000000,
+      "quantity": "9223372036854775807",
+      "sequence": 1234600,
+      "stat_flags": 3,
+      "stat_type": 3,
+      "ts_in_delta": 18000,
+      "ts_out": "1705674540000000110",
+      "ts_recv": "1705674540001234567",
+      "ts_ref": "1705536000000000000",
+      "update_action": 1
+    },
+    {
+      "body": "001d010c590400000700000054418100130a2103f5c5ab1794260000902d0100",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 0,
+        "ts_event": "1705674540000000011"
+      },
+      "kind": "other",
+      "ts_out": "1705674540000000111"
+    },
+    {
+      "code": 0,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674600000000000"
+      },
+      "kind": "system",
+      "msg": "Heartbeat",
+      "ts_out": "1705674600000000100"
+    },
+    {
+      "code": 7,
+      "err": "Slow client detected for 2 seconds",
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 21,
+        "ts_event": "1705674540000000013"
+      },
+      "is_last": true,
+      "kind": "error",
+      "ts_out": "1705674540000000113"
+    }
+  ]
+}

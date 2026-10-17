@@ -3,7 +3,7 @@
 for the record; `abt synth --class future` writes the catalog's layout), for
 running the R8L book and the usability experiment without the company's
 TradeStation data. Nothing here is real; the shapes follow
-`scripts/ingest/tradestation_sessions.py`:
+`scripts/ingest/tradestation_sessions.py` (retired at M-6, in the history):
 
   roots      a few futures roots, each with its own session window
              (minute k of a session is labelled open + k + 1 minutes, the

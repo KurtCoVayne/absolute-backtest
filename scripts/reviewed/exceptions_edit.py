@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Show and edit a reviewed bundle-test exceptions file (Parquet with the
-columns test,symbol,date,reason; see `abt bundle build --from-norgate`).
+"""Show and edit a reviewed exceptions file (Parquet with the columns
+test,symbol,date,reason), which `abt data ingest --adapter norgate --exceptions
+FILE` states on the versions it writes (attribute `reviewed_exceptions`).
 
   exceptions_edit.py FILE show [--symbol S] [--grep TEXT]
   exceptions_edit.py FILE add --test T --symbol S --date YYYY-MM-DD --reason TEXT
   exceptions_edit.py FILE remove --symbol S --date YYYY-MM-DD [--test T]
-  exceptions_edit.py FILE merge DRAFT.parquet     (rows of a reviewed draft, e.g. from reconcile_report.py --propose)
+  exceptions_edit.py FILE merge DRAFT.parquet     (rows of a reviewed draft, e.g. drafted from `abt feed`'s actions statistic)
 
 Every row is a claim a person checked: the reason says why the data is right
 and the test too strict there. A row without a reason is refused.

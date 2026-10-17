@@ -131,6 +131,38 @@ fn known_ids(store: &Store, vendor: &str) -> Result<BTreeMap<String, u64>, DataE
     Ok(out)
 }
 
+/// The registry's ticker spans by symbol: `(from, to, id)`, `to` the last
+/// instant carried (none while carried), in the order of their starts.
+pub type TickerSpans = BTreeMap<String, Vec<(i64, Option<i64>, u64)>>;
+
+/// The store's [`TickerSpans`].
+pub fn ticker_spans(store: &Store) -> Result<TickerSpans, DataError> {
+    let mut out = TickerSpans::new();
+    let Some(v) = store.registry.current("ticker", Some(REGISTRY_SOURCE)) else { return Ok(out) };
+    let s = store.schema("ticker")?;
+    let pos = |n: &str| s.columns.iter().position(|c| c.name == n).expect("the registry's ticker");
+    for b in store.read(
+        v,
+        &RowFilter {
+            latest_only: true,
+            ..RowFilter::default()
+        },
+    )? {
+        let ids = b.column(pos("id")).as_primitive::<arrow::datatypes::UInt64Type>();
+        let from = b.column(pos("t")).as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        let to = b.column(pos("to")).as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        let symbols = b.column(pos("symbol")).as_primitive::<arrow::datatypes::UInt32Type>();
+        for i in 0..b.num_rows() {
+            let symbol = store.registry.label_text(symbols.value(i)).unwrap_or("").to_string();
+            out.entry(symbol).or_default().push((from.value(i), (!to.is_null(i)).then(|| to.value(i)), ids.value(i)));
+        }
+    }
+    for spans in out.values_mut() {
+        spans.sort();
+    }
+    Ok(out)
+}
+
 /// What an ingest of keyed tables wrote: each relation's new version, and
 /// the registry's ids of the source's keys.
 #[derive(Clone, Debug, Default)]
@@ -156,6 +188,22 @@ pub fn ingest_keyed(
     relations: &[(String, RecordBatch)],
     source: &str,
     attributes: &BTreeMap<String, String>,
+) -> Result<Ingested, DataError> {
+    ingest_keyed_with(store, vendor, securities, terms, relations, source, attributes, &BTreeMap::new())
+}
+
+/// [`ingest_keyed`], with what the source states of some relations only:
+/// a relation's version carries `attributes` and then its own `per` entry.
+#[allow(clippy::too_many_arguments)]
+pub fn ingest_keyed_with(
+    store: &mut Store,
+    vendor: &str,
+    securities: &[Security],
+    terms: &[Terms],
+    relations: &[(String, RecordBatch)],
+    source: &str,
+    attributes: &BTreeMap<String, String>,
+    per: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<Ingested, DataError> {
     let mut ids = known_ids(store, vendor)?;
     // New keys, in the order the source names them: its security table,
@@ -331,7 +379,9 @@ pub fn ingest_keyed(
             }
         }
         let b = RecordBatch::try_new(b.schema(), cols)?;
-        let v = store.ingest(&relation, &[b], source, attributes.clone())?;
+        let mut a = attributes.clone();
+        a.extend(per.get(&relation).cloned().unwrap_or_default());
+        let v = store.ingest(&relation, &[b], source, a)?;
         versions.insert(relation, v);
     }
     Ok(Ingested { versions, ids })

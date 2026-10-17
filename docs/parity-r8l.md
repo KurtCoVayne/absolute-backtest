@@ -115,6 +115,10 @@ the performance work in `docs/assessment.md`).
 
 ## Reproduce
 
+The first formulation's input script (`scripts/ingest/tradestation_sessions.py`) and the class it wrote are
+retired (M-6, ERRATA E-68); the recipe below is the record of how the result
+was made, and the script is in the history before that step.
+
 ```
 python scripts/ingest/tradestation_sessions.py --cache ~/data/ref/r8l/cache \
   --config ~/data/ref/r8l/config --commissions ~/data/ref/r8l/commissions_per_side.json \

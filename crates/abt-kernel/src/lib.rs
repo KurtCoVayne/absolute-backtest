@@ -15,7 +15,6 @@ pub mod compiler;
 pub mod contract;
 pub mod data;
 pub mod dump;
-pub mod ingest;
 pub mod ir;
 pub mod kernel;
 pub mod kernel_cli;

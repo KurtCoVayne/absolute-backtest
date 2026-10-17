@@ -1,8 +1,9 @@
 //! A plan's purchases (D-7.5): for each source the plan buys from, its
-//! quota checked against the plan's requests, then each part fetched
-//! through the source's adapter, ingested under the source's name and
-//! sealed into a version, which is the store's from then on (`cached`).
-//! The parts then name their versions.
+//! quota checked against the plan's requests, then the parts fetched
+//! through the source's adapter (one request for the relations of one
+//! offer over one span), ingested under the source's name and sealed into
+//! versions, which are the store's from then on (`cached`). The parts then
+//! name their versions.
 
 use std::collections::BTreeMap;
 
@@ -10,7 +11,6 @@ use abt_wire::generated::abt::wire::Demand;
 
 use super::plan::{date, Origin, Planned};
 use super::Sources;
-use crate::adapter::ingest_keyed;
 use crate::adapters::FetchRequest;
 use crate::error::DataError;
 use crate::store::Store;
@@ -38,52 +38,70 @@ pub fn fetch(store: &mut Store, sources: &Sources, demand: &Demand, planned: &mu
                 )));
             }
         }
-        if !sources.adapters.contains_key(&s.adapter) {
+        if sources.adapter(s).is_none() {
             return Err(DataError::Unresolved(format!(
                 "the source `{}` is fetched by the adapter `{}`, which this service does not have",
                 name, s.adapter
             )));
         }
     }
+    // One request per (source, offer, span): the relations a plan buys
+    // from one offer over one span are fetched together.
+    // (source, offer, from, to) to the (relation, part) indices it buys.
+    type Span = (String, usize, Option<i64>, Option<i64>);
+    let mut groups: BTreeMap<Span, Vec<(usize, usize)>> = BTreeMap::new();
+    for (ri, r) in planned.relations.iter().enumerate() {
+        for (pi, p) in r.parts.iter().enumerate() {
+            if let Origin::Fetch(k) = p.origin {
+                groups.entry((p.source.clone(), k, p.from, p.to)).or_default().push((ri, pi));
+            }
+        }
+    }
     let mut bought = Vec::new();
     // The versions each (relation, source) ends at: a later part from the
     // same source extends the version an earlier one sealed.
     let mut last: BTreeMap<(String, String), String> = BTreeMap::new();
-    let class = demand.class.clone();
-    for r in &mut planned.relations {
-        for p in &mut r.parts {
-            let Origin::Fetch(k) = p.origin else { continue };
-            let s = sources.catalog.source(&p.source).expect("checked above");
-            let adapter = sources.adapters.get(&s.adapter).expect("checked above");
-            let offer = &s.offers[k];
-            let (from, to) = (p.from.unwrap_or(i64::MIN), p.to.unwrap_or(i64::MAX));
-            let req = FetchRequest {
-                source: s.name.clone(),
-                class: class.clone(),
-                relations: vec![p.relation.clone()],
-                calendar: offer.calendar.clone(),
-                from,
-                to,
-                scope: offer.scope.clone(),
-            };
-            let got = adapter.fetch(&req)?;
-            let mut attributes = p.attributes.clone();
-            attributes.extend(got.attributes.clone());
-            let ingested = ingest_keyed(store, adapter.vendor(), &got.securities, &got.terms, &got.relations, &s.name, &attributes)?;
+    for ((source, k, from, to), members) in groups {
+        let s = sources.catalog.source(&source).expect("checked above");
+        let adapter = sources.adapter(s).expect("checked above");
+        let offer = &s.offers[k];
+        let (t0, t1) = (from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX));
+        let mut relations: Vec<String> = members.iter().map(|&(ri, pi)| planned.relations[ri].parts[pi].relation.clone()).collect();
+        relations.sort();
+        relations.dedup();
+        let req = FetchRequest {
+            source: s.name.clone(),
+            class: demand.class.clone(),
+            relations: relations.clone(),
+            calendar: offer.calendar.clone(),
+            from: t0,
+            to: t1,
+            scope: offer.scope.clone(),
+        };
+        // What the adapter returns beside the relations asked for (the
+        // registry's relations that key them) is ingested too.
+        let got = adapter.fetch(&req)?;
+        let (ri, pi) = members[0];
+        let offered = planned.relations[ri].parts[pi].attributes.clone();
+        let ingested = got.ingest(store, adapter.vendor(), &s.name, &offered)?;
+        for &(ri, pi) in &members {
+            let p = &mut planned.relations[ri].parts[pi];
             let version = ingested
                 .versions
                 .get(&p.relation)
                 .cloned()
-                .ok_or_else(|| DataError::NotFound(format!("`{}` returned no rows of `{}` over {}..{}", s.name, p.relation, date(from), date(to))))?;
+                .ok_or_else(|| DataError::NotFound(format!("`{}` returned no rows of `{}` over {}..{}", s.name, p.relation, date(t0), date(t1))))?;
             bought.push(format!(
                 "bought `{}` from `{}` over {}..{}: version {}",
                 p.relation,
                 s.name,
-                date(from),
-                date(to),
+                date(t0),
+                date(t1),
                 &version[..12.min(version.len())]
             ));
             last.insert((p.relation.clone(), s.name.clone()), version);
+            let mut attributes = offered.clone();
+            attributes.extend(got.attributes_of(&p.relation));
             p.attributes = attributes;
         }
     }

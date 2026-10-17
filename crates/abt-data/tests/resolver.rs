@@ -361,6 +361,7 @@ fn vendor(quota: Option<u64>) -> (Sources, Arc<Mock>) {
                 bytes: None,
             }),
             throughput: None,
+            settings: BTreeMap::new(),
         }],
     };
     let volumes = {

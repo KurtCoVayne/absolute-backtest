@@ -1,0 +1,196 @@
+{
+  "metadata": {
+    "dataset": "PATTERN.DATASET",
+    "end": "1311768467463790320",
+    "limit": "1147797409030816545",
+    "mappings": [
+      {
+        "intervals": [
+          {
+            "end_date": 20240301,
+            "start_date": 20240229,
+            "symbol": "EFGHIJKLMNOPQRSTUVWXY"
+          }
+        ],
+        "raw_symbol": "DEFGHIJKLMNOPQRSTUVWX"
+      }
+    ],
+    "not_found": [
+      "CDEFGHIJKLMNOPQRSTUVW"
+    ],
+    "partial": [
+      "BCDEFGHIJKLMNOPQRSTUV"
+    ],
+    "schema": 0,
+    "start": "81985529216486895",
+    "stype_in": 0,
+    "stype_out": 1,
+    "symbol_cstr_len": 22,
+    "symbols": [
+      "ABCDEFGHIJKLMNOPQRSTU"
+    ],
+    "ts_out": false,
+    "version": 1
+  },
+  "records": [
+    {
+      "close": "5849161343635304296",
+      "hd": {
+        "instrument_id": 1766096216,
+        "publisher_id": 13164,
+        "rtype": 34,
+        "ts_event": "8597984555812148528"
+      },
+      "high": "3850095151979983180",
+      "kind": "ohlcv",
+      "low": "4862857571713032538",
+      "open": "2837333135973835582",
+      "ts_out": null,
+      "volume": "6861923761791319414"
+    },
+    {
+      "activation": "6934263934629396087",
+      "appl_id": 20009,
+      "asset": "]$In5Z",
+      "cfi": "Fk2W|C",
+      "channel_id": 28747,
+      "contract_multiplier": 845891105,
+      "contract_multiplier_unit": 67,
+      "currency": "7\\#",
+      "decay_quantity": 1749253207,
+      "decay_start_date": 9823,
+      "display_factor": "4935197744551109211",
+      "exchange": "`'Lq",
+      "expiration": "5921501516473380969",
+      "flow_schedule_type": 104,
+      "group": "Gl3X}Di0UzAf-Rw>c*Ot",
+      "hd": {
+        "instrument_id": 1782939225,
+        "publisher_id": 13421,
+        "rtype": 19,
+        "ts_event": "8670324728650225201"
+      },
+      "high_limit_price": "7946923000269458471",
+      "inst_attrib_value": 1014321195,
+      "instrument_class": 122,
+      "kind": "instrument_def",
+      "leg_count": 0,
+      "leg_delta": "9223372036854775807",
+      "leg_index": 0,
+      "leg_instrument_class": 0,
+      "leg_instrument_id": 0,
+      "leg_price": "9223372036854775807",
+      "leg_ratio_price_denominator": 0,
+      "leg_ratio_price_numerator": 0,
+      "leg_ratio_qty_denominator": 0,
+      "leg_ratio_qty_numerator": 0,
+      "leg_raw_symbol": "",
+      "leg_side": 78,
+      "leg_underlying_id": 0,
+      "low_limit_price": "8959685419996371509",
+      "main_fraction": 73,
+      "market_depth": 1479765063,
+      "market_depth_implied": 576403055,
+      "market_segment_id": 812205181,
+      "match_algorithm": 93,
+      "maturity_day": 50,
+      "maturity_month": 107,
+      "maturity_week": 87,
+      "maturity_year": 14963,
+      "max_price_variation": "3199034000164218947",
+      "max_trade_vol": 1715567189,
+      "md_security_trading_status": 36,
+      "min_lot_size": 1048007213,
+      "min_lot_size_block": 1951345251,
+      "min_lot_size_round_lot": 1277648955,
+      "min_price_increment": "3922435324818059853",
+      "min_price_increment_amount": "6210862207825687661",
+      "min_trade_vol": 610089073,
+      "original_contract_size": 1081693231,
+      "price_display_format": 110,
+      "price_ratio": "7223624625981702779",
+      "raw_instrument_id": 1243962937,
+      "raw_symbol": "g.Sx?d+Pu<a(Mr9^%Jo6[",
+      "secsubtype": "Ej1V{",
+      "security_type": "/Ty@e,",
+      "security_update_action": 77,
+      "settl_currency": "m4Y",
+      "settl_price_type": 53,
+      "strike_price": "8380964037297918509",
+      "strike_price_currency": "Di0",
+      "sub_fraction": 90,
+      "tick_rule": 47,
+      "trading_reference_date": 25149,
+      "trading_reference_price": "4211796016170366545",
+      "ts_out": null,
+      "ts_recv": "2909673308811912255",
+      "underlying": "+Pu<a(Mr9^%Jo6[\"Gl3X",
+      "underlying_id": 1917659233,
+      "underlying_product": 33,
+      "unit_of_measure": "v=b)Ns:_&Kp7\\#Hm4Y~Ej1V{Bg.Sx?",
+      "unit_of_measure_qty": "5198099788092614239",
+      "user_defined_instrument": 89
+    },
+    {
+      "channel_id": 24892,
+      "hd": {
+        "instrument_id": 1799758170,
+        "publisher_id": 13678,
+        "rtype": 24,
+        "ts_event": "8742664901488301874"
+      },
+      "kind": "statistics",
+      "price": "5007537917389185884",
+      "quantity": 2069246314,
+      "sequence": 1395550018,
+      "stat_flags": 77,
+      "stat_type": 30032,
+      "ts_in_delta": 727990136,
+      "ts_out": null,
+      "ts_recv": "2982013481649988928",
+      "ts_ref": "3994775497656136526",
+      "update_action": 40
+    },
+    {
+      "end_ts": "3343714345840372293",
+      "hd": {
+        "instrument_id": 1816601179,
+        "publisher_id": 13935,
+        "rtype": 22,
+        "ts_event": "8815005074326378547"
+      },
+      "kind": "symbol_mapping",
+      "start_ts": "9104365765672524855",
+      "stype_in": null,
+      "stype_in_symbol": "Af-Rw>c*Ot;`'Lq8]$In5",
+      "stype_out": null,
+      "stype_out_symbol": "!Fk2W|Ch/Ty@e,Qv=b)Ns",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "err": "Bg.Sx?d+Pu<a(Mr9^%Jo6[\"Gl3X}Di0UzAf-Rw>c*Ot;`'Lq8]$In5Z!Fk2W|Ch",
+      "hd": {
+        "instrument_id": 1833444188,
+        "publisher_id": 14192,
+        "rtype": 21,
+        "ts_event": "8887345247164455220"
+      },
+      "is_last": null,
+      "kind": "error",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "hd": {
+        "instrument_id": 1850287197,
+        "publisher_id": 14449,
+        "rtype": 23,
+        "ts_event": "8959685419996371509"
+      },
+      "kind": "system",
+      "msg": "Ch/Ty@e,Qv=b)Ns:_&Kp7\\#Hm4Y~Ej1V{Bg.Sx?d+Pu<a(Mr9^%Jo6[\"Gl3X}Di",
+      "ts_out": null
+    }
+  ]
+}

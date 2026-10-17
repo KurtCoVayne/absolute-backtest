@@ -32,7 +32,8 @@ pub use catalog::Catalog;
 pub use plan::{calendar_nanos, IDENTITY};
 
 /// What a resolution may draw on beside the store: the catalog's sources
-/// and the adapters they are fetched by, by name.
+/// and the adapters they are fetched by, by the source's name (an adapter
+/// its settings configure) or the adapter's.
 #[derive(Clone, Default)]
 pub struct Sources {
     pub catalog: Catalog,
@@ -43,6 +44,12 @@ impl Sources {
     /// The store alone.
     pub fn store_only() -> Sources {
         Sources::default()
+    }
+
+    /// The adapter a source is fetched by: the one configured for it, else
+    /// the one of its adapter's name.
+    pub fn adapter(&self, source: &catalog::Source) -> Option<&Arc<dyn Adapter>> {
+        self.adapters.get(&source.name).or_else(|| self.adapters.get(&source.adapter))
     }
 }
 

@@ -57,7 +57,8 @@ silently misaligns every bucket.
 | `crates/abt-kernel/src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation under the three-valued reading of section 5; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver, `ExecConfig::from_program` (the configuration the `execution`, `decisions` and `report` blocks fix), `explain` and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers, and its checkpoints; `time.rs` is calendar arithmetic and buckets; `value.rs` the runtime values. |
 | `crates/abt-kernel/src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
 | `crates/abt-kernel/src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
-| `crates/abt-kernel/src/bundle.rs`, `crates/abt-kernel/src/ingest.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests) and the vendor adapters behind `abt bundle build --from-norgate` and `--from-databento`. |
+| `crates/abt-kernel/src/bundle.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests), read by the data layer's `bundle_v2` adapter. |
+| `crates/abt-data/src/adapters/` | The vendor adapters (D-7.7): `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `dbn` (DBN versions 1 to 3, known answers from the reference implementation), `http` (the historical API's request), and `mock` (the resolver's tests). |
 | `crates/abt-kernel/src/dump.rs` | `--dump DIR` (what `reference/` replays). The study API it sat beside (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness) is the query layer's, `crates/abt-query/` (ERRATA E-66). |
 | `crates/abt-kernel/src/cli.rs`, `crates/abt/src/main.rs` | The command line, and `abt`, the front binary that dispatches to it (the layers' own command lines join it as they land). |
 | `corpus-v2/catalog/` | The three classes a program is written against: `equity` (bars as traded at a daily base; `listed`, `ticker`, `split`, `dividend`, `delisted`, `member`, `classification`; the vocabularies of lists, reasons and schemes), `future` (bars per root at a minute base, `session`, `point_value`, `commission`, `member`, `usable`) and `series` (`value` by name, each on its native calendar). A program never names them; its `data` block names what it needs. |
@@ -69,7 +70,7 @@ silently misaligns every bucket.
 | `crates/abt-tests/src/lib.rs`, `crates/abt-tests/tests/fixtures.rs` | The shared fixtures of the integration tests: the catalog and the library as the base workspace, strategies checked into programs, a strategy skeleton the tests fill in (`StrategyParts`, `strategy(name, params, rules, decides)`), crafted markets (`market`, `markets`, `market_from`); and the test that the skeleton checks and runs. |
 | `crates/abt-tests/tests/*.rs`, `crates/abt/tests/*.rs` | The integration suites (those that drive the `abt` binary are the front's): the checker and its messages, the kernel's hand-computed outcomes, the executor's contracts, costs, liquidity, margin and policies, orders, actions, as-of joins, the fold with its windows, checkpoints and availability, the state tables, the compiler stages, translation validation and verification, the study, the command line. They are being ported from the first formulation's programs to this one. |
 | `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies. |
-| `scripts/` | `ingest/norgate_lake_to_inputs.py` writes the Norgate-style inputs of `abt bundle build --from-norgate` from the NDLake lake; `parity/` holds the comparisons of the two books with their references; `bench.sh` is the performance ladder. `ingest/ndlake_weekly.py`, `ingest/tradestation_sessions.py` and `synth/` write the first formulation's layouts and are kept for the record. |
+| `scripts/` | `parity/` holds the comparisons of the two books with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake read and their editor; `bench.sh` is the performance ladder; `synth/` writes the first formulation's layouts and is kept for the record. The lake and the vendors are read by the data layer's adapters (`abt data ingest --adapter norgate|databento`). |
 
 ## The surface syntax in one page
 
@@ -584,13 +585,14 @@ abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data S
 abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
 abt activation --run RUN [--json] (--data SOCKET | --store DIR)
 abt data serve [--store DIR] [--socket PATH] [--config FILE]
+abt data ingest [--store DIR] --adapter norgate|databento|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
 abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
 abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
 abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
-abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
+abt bundle build (--from DIR | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>
 abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
 ```
@@ -682,16 +684,27 @@ and what it lacks); `allow unreviewed` runs on it with a warning. `abt synth`,
 program whose demand covers the class whole (`check::class_program`). The
 crate depends on `serde`, `serde_json`, `arrow` and `parquet` for all this.
 
-Vendor exports become bundles through adapters (`crates/abt-kernel/src/ingest.rs`): `abt
-bundle build --from-norgate DIR --class equity` reads a Norgate-style daily
-layout of Parquet files (`prices` as traded, `symbols` for the symbol
-history, `splits`, `dividends`, `delistings`, `membership`,
-`classification`, and `exceptions`, reviewed bundle-test exceptions;
-`scripts/ingest/norgate_lake_to_inputs.py` writes it from the NDLake lake);
-`--from-databento DIR [--processing-delay S]` reads a Databento-style minute
-layout (`ohlcv-1m.parquet` keyed at the bar close with an optional
-`ts_recv`, `symbology.parquet`) with every tuple's availability recorded as
-its receipt time plus the delay.
+A vendor's data enters a store through the data layer's adapters (D-7.7,
+`crates/abt-data/src/adapters/`, ERRATA E-68), named by `abt data ingest
+--adapter` or by a catalog's source:
+
+- `norgate` reads the NDLake lake directly (`--from LAKE`): the equity class
+  of the members, ever, of its lists (`--lists 'S&P 500=SPX'`), keyed by
+  Norgate's `asset_id`, with index series (`--series '$SPXTR=SPXTR'`) and
+  the ten decisions of `docs/handoff-data.md` (section 4) stated on the
+  versions; `--exceptions FILE` adds the reviewed exceptions
+  (`scripts/reviewed/norgate-spx-2014.parquet`).
+- `databento` reads DBN files (`.dbn`, `.dbn.zst`), the bucket's Parquet
+  layout, or the historical API (`--from https://hist.databento.com` with
+  `--dataset --schema --symbols --stype-in`, the key from
+  `$DATABENTO_API_KEY`). Futures are contracts by `instrument_id`, rolled
+  per root into a back-adjusted continuous series (`ES.v.0`, by volume, or
+  `ES.c.0`, by expiry) with `continuous`, `future_spec`, sessions and point
+  values; equities are joined to the store's tickers by symbol. Bars are
+  keyed at their close and received at `ts_recv` or the close, plus
+  `--processing-delay S`.
+- `databento_live` is the live gateway's session (CRAM, the subscription,
+  DBN), every record stamped at acceptance.
 
 ## Company books
 

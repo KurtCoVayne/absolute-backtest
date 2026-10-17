@@ -1,0 +1,164 @@
+{
+  "metadata": {
+    "dataset": "GLBX.MDP3",
+    "end": "1705708800000000000",
+    "limit": null,
+    "mappings": [
+      {
+        "intervals": [
+          {
+            "end_date": 20240120,
+            "start_date": 20240119,
+            "symbol": "2001"
+          }
+        ],
+        "raw_symbol": "ESH4"
+      },
+      {
+        "intervals": [
+          {
+            "end_date": 20240120,
+            "start_date": 20240119,
+            "symbol": "2002"
+          }
+        ],
+        "raw_symbol": "NQH4"
+      }
+    ],
+    "not_found": [],
+    "partial": [],
+    "schema": 10,
+    "start": "1705622400000000000",
+    "stype_in": 1,
+    "stype_out": 0,
+    "symbol_cstr_len": 22,
+    "symbols": [
+      "ESH4",
+      "NQH4"
+    ],
+    "ts_out": false,
+    "version": 1
+  },
+  "records": [
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705698005000000000"
+      },
+      "kind": "statistics",
+      "price": 4780500000000,
+      "quantity": "9223372036854775807",
+      "sequence": 1234567,
+      "stat_flags": 3,
+      "stat_type": 3,
+      "ts_in_delta": 18250,
+      "ts_out": null,
+      "ts_recv": "1705698005001234567",
+      "ts_ref": "1705622400000000000",
+      "update_action": 1
+    },
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705671000000000000"
+      },
+      "kind": "statistics",
+      "price": "9223372036854775807",
+      "quantity": 2345678,
+      "sequence": 1100200,
+      "stat_flags": 0,
+      "stat_type": 9,
+      "ts_in_delta": 9120,
+      "ts_out": null,
+      "ts_recv": "1705671000001234567",
+      "ts_ref": "1705536000000000000",
+      "update_action": 1
+    },
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705671001000000000"
+      },
+      "kind": "statistics",
+      "price": "9223372036854775807",
+      "quantity": 1532009,
+      "sequence": 1100201,
+      "stat_flags": 0,
+      "stat_type": 6,
+      "ts_in_delta": -48,
+      "ts_out": null,
+      "ts_recv": "1705671001001234567",
+      "ts_ref": "1705536000000000000",
+      "update_action": 1
+    },
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705698006000000000"
+      },
+      "kind": "statistics",
+      "price": 16955750000000,
+      "quantity": "9223372036854775807",
+      "sequence": 1234570,
+      "stat_flags": 3,
+      "stat_type": 3,
+      "ts_in_delta": 17900,
+      "ts_out": null,
+      "ts_recv": "1705698006001234567",
+      "ts_ref": "1705622400000000000",
+      "update_action": 1
+    },
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705671002000000000"
+      },
+      "kind": "statistics",
+      "price": "9223372036854775807",
+      "quantity": 254321,
+      "sequence": 1100202,
+      "stat_flags": 0,
+      "stat_type": 9,
+      "ts_in_delta": 8800,
+      "ts_out": null,
+      "ts_recv": "1705671002001234567",
+      "ts_ref": "1705536000000000000",
+      "update_action": 1
+    },
+    {
+      "channel_id": 4,
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 1,
+        "rtype": 24,
+        "ts_event": "1705698007000000000"
+      },
+      "kind": "statistics",
+      "price": 16955750000000,
+      "quantity": "9223372036854775807",
+      "sequence": 1234571,
+      "stat_flags": 3,
+      "stat_type": 3,
+      "ts_in_delta": 15000,
+      "ts_out": null,
+      "ts_recv": "1705698007001234567",
+      "ts_ref": "1705622400000000000",
+      "update_action": 2
+    }
+  ]
+}

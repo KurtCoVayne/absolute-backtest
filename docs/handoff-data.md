@@ -82,6 +82,9 @@ contract multiplier, roll or margin by contract. Both stay recorded as gaps
 
 Script: `scripts/ingest/norgate_lake_to_inputs.py` (formerly `norgate_parquet_to_csv.py`; DuckDB, streamed to Parquet since 2026-10-06, CSV before
 with `COPY`). The report is `ingest-report.json` in the output directory.
+Since M-6 the data layer's `norgate` adapter makes these decisions reading the
+lake directly (`abt data ingest --adapter norgate --from LAKE --report FILE`,
+`crates/abt-data/src/adapters/norgate.rs`); the script is retired (ERRATA E-68).
 
 | # | Decision | Why |
 | --- | --- | --- |
@@ -124,8 +127,8 @@ Action reconciliation, in detail:
    carry **reviewed exceptions** (`exceptions.parquet`: `test,security,date,reason`; a text file until 2026-10-06).
    The test accepts a listed problem and counts it in its detail. **Added in
    `src/bundle.rs`, `src/ingest.rs` and `abt bundle build`.** The reviewed file
-   is `scripts/ingest/reviewed/norgate-spx-2014.parquet` (383 rows; edit with `scripts/ingest/exceptions_edit.py`), drafted by
-   `scripts/ingest/reconcile_report.py --propose` and reviewed by category.
+   is `scripts/reviewed/norgate-spx-2014.parquet` (383 rows; edit with `scripts/reviewed/exceptions_edit.py`), drafted by
+   `scripts/ingest/reconcile_report.py --propose` (retired at M-6: the `actions` feed statistic reports the same problems) and reviewed by category.
 3. **Real data errors kept, not corrected:**
    - TFCF and TFCFA on 2019-03-19: Norgate books the Fox Corp separation as a
      0.736817 split with no price move, so a holder loses about 26% that day.

@@ -137,9 +137,6 @@ fn usage_documents_every_option() {
         "--version",
         "--out",
         "--from",
-        "--from-norgate",
-        "--from-databento",
-        "--processing-delay",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }
@@ -159,6 +156,9 @@ fn usage_documents_every_option() {
         "--haircut",
         "--report-by",
         "--periods-per-year",
+        "--from-norgate",
+        "--from-databento",
+        "--processing-delay",
     ] {
         assert!(!stderr.contains(gone), "usage still offers {} (the execution and report blocks own it):\n{}", gone, stderr);
     }

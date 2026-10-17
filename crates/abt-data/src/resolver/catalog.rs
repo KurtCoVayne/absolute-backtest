@@ -15,8 +15,12 @@
 //!                                "calendar": "1m", "from": "2010-06-06",
 //!                                "has_receipt": false, "instruments": 30 } ],
 //!                  "price": [ { "unit": "gb", "money": "databento.gb" } ],
-//!                  "quota": { "window": "1s", "requests": 100 } } ] }
+//!                  "quota": { "window": "1s", "requests": 100 },
+//!                  "settings": { "dataset": "GLBX.MDP3", "key_env": "DATABENTO_API_KEY" } } ] }
 //! ```
+//!
+//! A source's `settings` configure its adapter (D-7.7); each adapter names
+//! the settings it reads.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -137,6 +141,10 @@ pub struct Source {
     /// the seconds of a plan are estimated from.
     #[serde(default)]
     pub throughput: Option<f64>,
+    /// What its adapter is configured with (a lake's root, a dataset, the
+    /// environment variable holding a key; never a key itself).
+    #[serde(default)]
+    pub settings: BTreeMap<String, String>,
 }
 
 /// The catalog: A-8's prices and the sources beside the store.
@@ -253,6 +261,9 @@ impl Catalog {
                     q.requests.map(|r| r.to_string()).unwrap_or_else(|| "any".into()),
                     q.bytes.map(|b| b.to_string()).unwrap_or_else(|| "any".into())
                 ));
+            }
+            if !s.settings.is_empty() {
+                out.push_str(&format!("  settings {}\n", s.settings.iter().map(|(k, v)| format!("{} = {}", k, v)).collect::<Vec<_>>().join(", ")));
             }
         }
         out

@@ -1,0 +1,226 @@
+{
+  "metadata": {
+    "dataset": "GLBX.MDP3",
+    "end": "1705968000000000000",
+    "limit": null,
+    "mappings": [
+      {
+        "intervals": [
+          {
+            "end_date": 20240122,
+            "start_date": 20240118,
+            "symbol": "1001"
+          },
+          {
+            "end_date": 20240123,
+            "start_date": 20240122,
+            "symbol": "1002"
+          }
+        ],
+        "raw_symbol": "CL.c.0"
+      },
+      {
+        "intervals": [
+          {
+            "end_date": 20240123,
+            "start_date": 20240118,
+            "symbol": "2001"
+          }
+        ],
+        "raw_symbol": "ES.c.0"
+      },
+      {
+        "intervals": [
+          {
+            "end_date": 20240123,
+            "start_date": 20240119,
+            "symbol": "3001"
+          }
+        ],
+        "raw_symbol": "GC.c.0"
+      },
+      {
+        "intervals": [
+          {
+            "end_date": 20240123,
+            "start_date": 20240118,
+            "symbol": "2002"
+          }
+        ],
+        "raw_symbol": "NQ.c.0"
+      }
+    ],
+    "not_found": [
+      "ZZ.c.0"
+    ],
+    "partial": [
+      "GC.c.0"
+    ],
+    "schema": 6,
+    "start": "1705536000000000000",
+    "stype_in": 3,
+    "stype_out": 0,
+    "symbol_cstr_len": 22,
+    "symbols": [
+      "ES.c.0",
+      "NQ.c.0",
+      "CL.c.0",
+      "GC.c.0",
+      "ZZ.c.0"
+    ],
+    "ts_out": false,
+    "version": 1
+  },
+  "records": [
+    {
+      "close": 4780500000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674600000000000"
+      },
+      "high": 4781000000000,
+      "kind": "ohlcv",
+      "low": 4779750000000,
+      "open": 4780250000000,
+      "ts_out": null,
+      "volume": 1523
+    },
+    {
+      "close": 16955750000000,
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674600000000000"
+      },
+      "high": 16958250000000,
+      "kind": "ohlcv",
+      "low": 16947500000000,
+      "open": 16950000000000,
+      "ts_out": null,
+      "volume": 812
+    },
+    {
+      "close": 73500000000,
+      "hd": {
+        "instrument_id": 1001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674600000000000"
+      },
+      "high": 73520000000,
+      "kind": "ohlcv",
+      "low": 73410000000,
+      "open": 73450000000,
+      "ts_out": null,
+      "volume": 2201
+    },
+    {
+      "close": 4782000000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674660000000000"
+      },
+      "high": 4782250000000,
+      "kind": "ohlcv",
+      "low": 4780250000000,
+      "open": 4780500000000,
+      "ts_out": null,
+      "volume": 2045
+    },
+    {
+      "close": 16960250000000,
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674660000000000"
+      },
+      "high": 16961000000000,
+      "kind": "ohlcv",
+      "low": 16954000000000,
+      "open": 16955750000000,
+      "ts_out": null,
+      "volume": 1109
+    },
+    {
+      "close": 73490000000,
+      "hd": {
+        "instrument_id": 1001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674660000000000"
+      },
+      "high": 73550000000,
+      "kind": "ohlcv",
+      "low": 73480000000,
+      "open": 73500000000,
+      "ts_out": null,
+      "volume": 1876
+    },
+    {
+      "close": 4781250000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674720000000000"
+      },
+      "high": 4782500000000,
+      "kind": "ohlcv",
+      "low": 4780750000000,
+      "open": 4782000000000,
+      "ts_out": null,
+      "volume": 1688
+    },
+    {
+      "close": 16953750000000,
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674720000000000"
+      },
+      "high": 16962500000000,
+      "kind": "ohlcv",
+      "low": 16951000000000,
+      "open": 16960250000000,
+      "ts_out": null,
+      "volume": 1342
+    },
+    {
+      "close": 73400000000,
+      "hd": {
+        "instrument_id": 1001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674720000000000"
+      },
+      "high": 73510000000,
+      "kind": "ohlcv",
+      "low": 73370000000,
+      "open": 73490000000,
+      "ts_out": null,
+      "volume": 2560
+    },
+    {
+      "close": 74180000000,
+      "hd": {
+        "instrument_id": 1002,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705933800000000000"
+      },
+      "high": 74220000000,
+      "kind": "ohlcv",
+      "low": 74050000000,
+      "open": 74100000000,
+      "ts_out": null,
+      "volume": 3010
+    }
+  ]
+}
