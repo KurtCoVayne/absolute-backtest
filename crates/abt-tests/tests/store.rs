@@ -6,7 +6,11 @@ use abt_kernel::data::Rng;
 use abt_kernel::kernel::{Store, Value};
 
 fn scan(st: &Store, key: i64, e: usize, sym: u32) -> Vec<Vec<Value>> {
-    let mut v: Vec<Vec<Value>> = st.by_time.get(&key).map(|b| b.iter().filter(|t| t[e] == Value::Equity(sym)).cloned().collect()).unwrap_or_default();
+    let mut v: Vec<Vec<Value>> = st
+        .by_time
+        .get(&key)
+        .map(|b| b.iter().filter(|t| t[e] == Value::Equity(sym)).map(|t| t.to_vec()).collect())
+        .unwrap_or_default();
     v.sort();
     v
 }

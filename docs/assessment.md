@@ -217,6 +217,18 @@ threads what the kernel frees on its own:
 The owner's machine runs macOS, whose allocator is not glibc's, so nothing
 is changed for Linux alone. A Linux run can set `MALLOC_ARENA_MAX`.
 
+M-8b then stores a key's tuples row-major in one buffer, with no allocation
+per tuple (ERRATA E-76). Measured back to back with the M-8c binary (at 100
+names the faster of two runs):
+
+| Names | M-8c | M-8b |
+| ---: | ---: | ---: |
+| 100 | 14.5 s, 957 MB | 13.8 s, 791 MB |
+| 300 | 54.2 s, 2.77 GB | 44.0 s, 2.21 GB |
+
+The rows still hold 16 B values with the key's time in each. 3.1's typed
+columns would take a close to 12 B.
+
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:
 

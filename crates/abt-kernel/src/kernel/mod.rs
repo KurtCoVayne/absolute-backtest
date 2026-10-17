@@ -5,6 +5,7 @@
 
 pub mod eval;
 pub(crate) mod eval_set;
+pub mod rows;
 pub mod time;
 pub mod value;
 
@@ -14,6 +15,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hash::{FxHashMap, FxHashSet};
+pub use rows::{RowSlice, Rows};
 
 use crate::check::Program;
 use crate::ir::*;
@@ -1654,7 +1656,7 @@ impl RunResult {
 /// indexed lookup sorts it once (bulk loads and event streams stay linear).
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Store {
-    pub by_time: BTreeMap<i64, Vec<Tuple>>,
+    pub by_time: BTreeMap<i64, Rows>,
     /// The argument position the blocks are sorted by; `None` for a
     /// relation without an entity (then every lookup scans).
     #[serde(default)]
@@ -1666,6 +1668,25 @@ pub struct Store {
     /// tuples it has brought to each key since (`Kernel::insert_fact`).
     #[serde(skip)]
     runs: Option<(i64, FxHashMap<i64, Run>)>,
+    /// The key the latest insert went to.
+    #[serde(skip)]
+    open: Option<i64>,
+}
+
+/// The block of `key` for a tuple of `width` values. A new key's block is
+/// sized like the block inserts went to before, which is shrunk to its rows:
+/// a bar's tuples arrive together, and the bars of a relation hold about as
+/// many.
+fn block_for<'a>(by_time: &'a mut BTreeMap<i64, Rows>, open: &mut Option<i64>, key: i64, width: usize) -> &'a mut Rows {
+    let mut rows = 0;
+    if *open != Some(key) {
+        if let Some(prev) = open.and_then(|k| by_time.get_mut(&k)) {
+            prev.shrink_to_fit();
+            rows = prev.len();
+        }
+        *open = Some(key);
+    }
+    by_time.entry(key).or_insert_with(|| Rows::with_capacity(width, rows))
 }
 
 /// The tuples one receipt instant of the stream has brought to a key of a
@@ -1691,7 +1712,7 @@ impl Store {
         self.by_time.values().all(|v| v.is_empty())
     }
     pub fn insert(&mut self, key: i64, tuple: Tuple) {
-        self.by_time.entry(key).or_default().push(tuple);
+        block_for(&mut self.by_time, &mut self.open, key, tuple.len()).push(tuple);
         if self.entity_pos.is_some() {
             self.dirty.insert(key);
         }
@@ -1704,12 +1725,18 @@ impl Store {
     /// already (two versions of one fact), so a bar received whole searches
     /// none.
     pub fn insert_received(&mut self, key: i64, tuple: Tuple, identity: &[usize], r: i64) {
-        let Store { by_time, entity_pos, dirty, runs } = self;
+        let Store {
+            by_time,
+            entity_pos,
+            dirty,
+            runs,
+            open,
+        } = self;
         if runs.as_ref().is_none_or(|(at, _)| *at != r) {
             *runs = Some((r, FxHashMap::default()));
         }
         let runs = &mut runs.as_mut().expect("just set").1;
-        let block = by_time.entry(key).or_default();
+        let block = block_for(by_time, open, key, tuple.len());
         let len = block.len();
         let run = runs.entry(key).or_default();
         if run.after != len || run.seen.is_empty() {
@@ -1719,7 +1746,7 @@ impl Store {
                 seen: FxHashSet::default(),
             };
         }
-        let same = |t: &Tuple| identity.iter().all(|&i| t[i] == tuple[i]);
+        let same = |t: &[Value]| identity.iter().all(|&i| t[i] == tuple[i]);
         let ident = {
             let mut h = hash::FxHasher::default();
             for &i in identity {
@@ -1727,13 +1754,13 @@ impl Store {
             }
             h.finish()
         };
-        let found = match block[..run.start].iter().position(same) {
+        let found = match (0..run.start).find(|&i| same(block.row(i))) {
             Some(i) => Some(i),
-            None if run.seen.contains(&ident) => block[run.start..].iter().position(same).map(|i| run.start + i),
+            None if run.seen.contains(&ident) => (run.start..len).find(|&i| same(block.row(i))),
             None => None,
         };
         match found {
-            Some(i) => block[i] = tuple,
+            Some(i) => block.set(i, tuple),
             None => {
                 block.push(tuple);
                 run.seen.insert(ident);
@@ -1754,13 +1781,13 @@ impl Store {
     /// The tuples at `key`, narrowed to those whose entity is `entity` when
     /// the store is indexed and the entity is bound (a superset of the
     /// matches otherwise: callers still filter on the full pattern).
-    pub fn lookup(&mut self, key: i64, entity: Option<&Value>) -> &[Tuple] {
+    pub fn lookup(&mut self, key: i64, entity: Option<&Value>) -> RowSlice<'_> {
         let Some(e) = self.entity_pos else {
-            return self.by_time.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+            return self.by_time.get(&key).map(|v| v.all()).unwrap_or_default();
         };
-        let Some(block) = self.by_time.get_mut(&key) else { return &[] };
+        let Some(block) = self.by_time.get_mut(&key) else { return RowSlice::default() };
         if self.dirty.remove(&key) {
-            block.sort_by(|a, b| a[e].cmp(&b[e]));
+            block.sort_by_column(e);
             // The sort moves the run's tuples among the earlier ones.
             if let Some((_, runs)) = &mut self.runs {
                 runs.remove(&key);
@@ -1769,10 +1796,10 @@ impl Store {
         match entity {
             Some(v) => {
                 let lo = block.partition_point(|t| t[e] < *v);
-                let hi = lo + block[lo..].partition_point(|t| t[e] <= *v);
-                &block[lo..hi]
+                let hi = block.partition_point(|t| t[e] <= *v);
+                block.slice(lo, hi)
             }
-            None => block,
+            None => block.all(),
         }
     }
 }

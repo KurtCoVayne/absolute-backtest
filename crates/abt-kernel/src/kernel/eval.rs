@@ -436,10 +436,10 @@ impl<'p> Kernel<'p> {
             Some(Value::Time(t)) => *t,
             _ => return Err(RunError::Internal(format!("`{}` requested with an unbound temporal key", info.name))),
         };
-        let matches = |tu: &Tuple| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
+        let matches = |tu: &[Value]| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
         if info.stored {
             let entity = info.entity_positions.first().and_then(|&e| pattern[e].as_ref());
-            let tuples: Vec<(Tuple, usize)> = self.stores[rel].lookup(key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)).collect();
+            let tuples: Vec<(Tuple, usize)> = self.stores[rel].lookup(key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)).collect();
             let cov = &mut self.coverage[rel];
             cov.0 += 1;
             cov.1 += usize::from(!tuples.is_empty());
@@ -1023,12 +1023,12 @@ impl<'p> Kernel<'p> {
         let mut pat = self.atom_pattern(cr, atom, env)?;
         pat[info.key_pos] = None;
         let tuples = if info.stored {
-            let matches = |tu: &Tuple| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
+            let matches = |tu: &[Value]| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
             let mut found: Vec<(Tuple, usize)> = Vec::new();
             let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
             let mut cur = t;
             while let Some(k) = self.stores[rel].by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
-                found.extend(self.stores[rel].lookup(k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.clone(), usize::MAX)));
+                found.extend(self.stores[rel].lookup(k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)));
                 if !found.is_empty() || k == i64::MIN {
                     break;
                 }

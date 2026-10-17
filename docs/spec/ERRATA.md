@@ -794,6 +794,29 @@ batch driver agree on every corpus program. Each bless since:
     bitmap. The nested solves of aggregates and cases stay one environment
     at a time. The measured gain is in docs/assessment.md.
 
+- **E-76 (06-performance 3.1, K-4.2; the kernel's stored tables).**
+  - **A revision is searched for among earlier instants only.** A tuple of
+    the stream replaces the row of its key that it revises (K-4.2), and the
+    check searched the key's whole block for every tuple: N² comparisons
+    for a bar of N names. A store now keeps the run of tuples the current
+    receipt instant has brought to each key, with their identities hashed.
+    A tuple searches the rows received at earlier instants, and the run's
+    own only when the run has brought its identity already: two versions
+    of one fact bound together. Another writer's insert, or a lookup's lazy
+    sort, ends the run.
+  - **A key's tuples are one buffer.** A block is its rows row-major
+    (`kernel/rows.rs`): a tuple has no allocation of its own and is read as
+    a slice. A bar's block is sized like the bar before and shrunk to its
+    rows when the stream moves on.
+  - **The command line keeps one copy of the data.** The dataset it loaded
+    is dropped once the data service holds it, unless `--dump` or
+    `--verify-causality` reads it after the run.
+  - **What 3.1 has that this does not.** A value is a `Value` (16 B), not a
+    typed column: a key column `u32`, an `f64` per price. The key's time is
+    kept in every row, and there is no per-name index of the latest row
+    (`latest` walks back over the bars). The measurements are in
+    docs/assessment.md.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the
