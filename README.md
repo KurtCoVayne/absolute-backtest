@@ -318,6 +318,21 @@ and the mode, 64 hex digits. The executor
 is a trait (`kernel::Executor`), so a live run attaches another executor to
 the same fold.
 
+The data layer resolves the demand (`docs/spec/01-data.md`, section 7). Each
+need's relations are bound at the store's versions that satisfy the need,
+chosen as before: the version a preference names, the finest calendar, else
+the first source by name. A catalog of sources (`abt data serve --config
+FILE`: each source's offers, its prices with A-8's placeholders given
+values, its quota) lets the resolver buy the parts of a need's span that
+the store does not hold. It buys the cheapest cover of the span (money
+first, then seconds, bytes and requests) through the source's adapter, and
+only within the program's `budget`, whose money is 0 by default: nothing is
+bought unless the program allows it. What it buys is ingested, versioned
+and the store's from then on. A plan over budget binds what the store holds
+and reports the cheapest plan that covers every span. `abt data resolve
+--demand FILE --dry-run --explain` prints a plan without buying, and `abt
+data catalog --sources` prints the catalog (ERRATA E-67).
+
 A tuple carries its receipt time `r` (`Dataset::add_available`; an
 `available_at` column in a loose Parquet file or in a bundle's partitions):
 a decision at a barrier sees the tuples received by the barrier's instant,
@@ -568,6 +583,9 @@ abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--j
 abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data SOCKET | --store DIR)
 abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
 abt activation --run RUN [--json] (--data SOCKET | --store DIR)
+abt data serve [--store DIR] [--socket PATH] [--config FILE]
+abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
+abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]

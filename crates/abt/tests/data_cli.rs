@@ -3,7 +3,9 @@
 //! versions' statistics, queries in the text form (the typed request printed
 //! first, D-4.5), and a run reading the store through `abt data serve` on a
 //! socket deciding as the run that holds the market in process (G3 across
-//! processes).
+//! processes), and a demand resolved against the store and a source
+//! catalog: planned in a dry run with what it would buy, bound to the store
+//! at money budget 0 (D-7).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -124,5 +126,57 @@ fn a_run_reads_a_served_store_as_it_reads_the_market_in_process() {
     // The report's status, as text.
     let o = abt(&["data", "query", "--store", &store, &format!("kernel.{}.report", run)]);
     assert!(text(&o).0.lines().any(|l| l.starts_with("status | ") && l.contains("\"completed\"")), "{}", text(&o).0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_demand_is_planned_and_bound_against_the_store_and_the_catalog() {
+    let dir = scratch("resolve");
+    let store = dir.to_string_lossy().to_string();
+    let mut args = vec!["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "30"];
+    args.extend(FILES);
+    assert_eq!(abt(&args).status.code(), Some(0));
+    let config = dir.join("sources.json");
+    std::fs::write(
+        &config,
+        r#"{ "prices": { "vendor.req": 2.5 },
+             "sources": [ { "name": "vendor", "kind": "vendor", "adapter": "absent",
+               "offers": [ { "class": "equity", "relations": ["close"], "calendar": "1d", "from": "2021-01-04" } ],
+               "price": [ { "unit": "request", "money": "vendor.req" } ] } ] }"#,
+    )
+    .unwrap();
+    let cfg = config.to_string_lossy().to_string();
+    let o = abt(&["data", "catalog", "--sources", "--config", &cfg]);
+    assert!(
+        text(&o).0.contains("source vendor (Vendor, adapter absent") && text(&o).0.contains("price 2.5 USD per Request (vendor.req)"),
+        "{}",
+        text(&o).0
+    );
+    // Closes from a year before the store's first bar: the store holds the
+    // rest, the vendor would sell the year before.
+    let demand = dir.join("demand.json");
+    let from = abt_wire::scalar::parse_timestamp("2021-01-04").unwrap();
+    let to = abt_wire::scalar::parse_timestamp("2022-02-11").unwrap();
+    std::fs::write(
+        &demand,
+        format!(
+            r#"{{ "class": "equity", "needs": [ {{ "relations": ["close"], "calendar": "1d", "from": {}, "to": {}, "label": "bars @1d" }} ] }}"#,
+            from, to
+        ),
+    )
+    .unwrap();
+    let d = demand.to_string_lossy().to_string();
+    let o = abt(&["data", "resolve", "--store", &store, "--config", &cfg, "--demand", &d, "--dry-run"]);
+    let (out, err) = text(&o);
+    assert_eq!(o.status.code(), Some(0), "{}", err);
+    assert!(err.contains("no adapter `absent` here"), "{}", err);
+    assert!(out.contains("over budget: the cheapest plan covering every span costs money 2.50"), "{}", out);
+    assert!(out.contains("note: the cheapest plan that covers every span costs money 2.50"), "{}", out);
+    assert!(out.contains("binding not recorded (a dry run)"), "{}", out);
+    // Bound at budget 0: the store's version, nothing bought.
+    let o = abt(&["data", "resolve", "--store", &store, "--config", &cfg, "--demand", &d, "--explain"]);
+    let out = text(&o).0;
+    assert!(out.contains("need 0: equity.close from dataset at ") && out.lines().any(|l| l.starts_with("binding ")), "{}", out);
+    assert!(!out.contains("to buy"), "{}", out);
     let _ = std::fs::remove_dir_all(&dir);
 }

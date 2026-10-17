@@ -6,6 +6,7 @@
 //! its queries.
 
 pub mod adapter;
+pub mod adapters;
 pub mod agg;
 pub mod catalog;
 pub mod error;

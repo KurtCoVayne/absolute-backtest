@@ -92,6 +92,13 @@ fn bucket_of(calendar: Option<&str>, t: i64) -> String {
     }
 }
 
+/// Rows to write: a writer's, conformed to the schema on the way in, or
+/// rows read from the store, conformed already.
+enum Rows<'a> {
+    Input(&'a [RecordBatch]),
+    Stored(&'a [RecordBatch]),
+}
+
 /// The store.
 pub struct Store {
     root: PathBuf,
@@ -193,7 +200,18 @@ impl Store {
     /// becomes current (D-2.6, D-3.3). Returns the version.
     pub fn ingest(&mut self, relation: &str, input: &[RecordBatch], source: &str, attributes: BTreeMap<String, String>) -> Result<String, DataError> {
         let schema = self.schema(relation)?;
-        let (version, _) = self.write(&schema, input, source, attributes, false)?;
+        let (version, _) = self.write_rows(&schema, Rows::Input(input), source, attributes, false)?;
+        Ok(version)
+    }
+
+    /// Rows read from the store's own versions (`read`'s batches), sealed
+    /// whole as the relation's next version from `source`: what the
+    /// resolver writes when a relation's span is covered by several
+    /// versions (D-7.5). The rows keep their identities and receipt times
+    /// and are numbered anew in the source's log.
+    pub fn ingest_stored(&mut self, relation: &str, rows: &[RecordBatch], source: &str, attributes: BTreeMap<String, String>) -> Result<String, DataError> {
+        let schema = self.schema(relation)?;
+        let (version, _) = self.write_rows(&schema, Rows::Stored(rows), source, attributes, true)?;
         Ok(version)
     }
 
@@ -203,7 +221,7 @@ impl Store {
     /// version (a row already there must be the same row).
     pub fn put(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str) -> Result<(String, (u64, u64)), DataError> {
         self.registry.register_schema(schema)?;
-        self.write(schema, input, source, BTreeMap::new(), false)
+        self.write_rows(schema, Rows::Input(input), source, BTreeMap::new(), false)
     }
 
     /// A `put` whose rows are the relation's next version whole: the
@@ -212,23 +230,39 @@ impl Store {
     /// under its key); its earlier versions stay readable by id (E-56).
     pub fn replace(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str) -> Result<(String, (u64, u64)), DataError> {
         self.registry.register_schema(schema)?;
-        self.write(schema, input, source, BTreeMap::new(), true)
+        self.write_rows(schema, Rows::Input(input), source, BTreeMap::new(), true)
     }
 
-    fn write(&mut self, schema: &RelationSchema, input: &[RecordBatch], source: &str, mut attributes: BTreeMap<String, String>, fresh: bool) -> Result<(String, (u64, u64)), DataError> {
+    fn write_rows(&mut self, schema: &RelationSchema, input: Rows<'_>, source: &str, mut attributes: BTreeMap<String, String>, fresh: bool) -> Result<(String, (u64, u64)), DataError> {
         let relation = schema.name.clone();
         let key = (relation.clone(), source.to_string());
         let first_seq = match self.next_seq.get(&key) {
             Some(&s) => s,
             None => self.scan_log(&relation, source)?,
         };
-        // Conform every input batch; the sequence numbers follow the input.
+        // Conform every input batch (rows of the store's are conformed
+        // already); the sequence numbers follow the input.
         let mut conformed = Vec::new();
         let mut seq = first_seq;
-        for b in input {
-            let c = rows::conform(schema, b, &mut self.registry, seq)?;
-            seq += c.num_rows() as u64;
-            conformed.push(c);
+        match input {
+            Rows::Input(input) => {
+                for b in input {
+                    let c = rows::conform(schema, b, &mut self.registry, seq)?;
+                    seq += c.num_rows() as u64;
+                    conformed.push(c);
+                }
+            }
+            Rows::Stored(input) => {
+                let stored = stored_schema(schema);
+                for b in input {
+                    let n = b.num_rows() as u64;
+                    let mut cols: Vec<arrow::array::ArrayRef> = b.columns().to_vec();
+                    let last = cols.len().checked_sub(1).ok_or_else(|| DataError::Schema(format!("`{}`: a stored batch without its seq", relation)))?;
+                    cols[last] = std::sync::Arc::new(arrow::array::UInt64Array::from((seq..seq + n).collect::<Vec<_>>()));
+                    conformed.push(RecordBatch::try_new(stored.clone(), cols)?);
+                    seq += n;
+                }
+            }
         }
         let stored = stored_schema(schema);
         let all = rows::concat(&stored, &conformed)?;

@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use abt_wire::generated::abt::wire::{AggregateResponse, Binding, Done, ExplainResponse, Layer, Message, PutResponse, ResolveResponse, SchemaResponse, SubscribeResponse};
+use abt_wire::generated::abt::wire::{AggregateResponse, Done, ExplainResponse, Layer, Message, PutResponse, ResolveResponse, SchemaResponse, SubscribeResponse};
 use abt_wire::rpc::{error, serve, Request, Responder, Service, WireError};
 use abt_wire::transport::{bind, channel_pair, Connection};
 use abt_wire::{ErrorCode, ErrorMessage};
@@ -22,6 +22,7 @@ use arrow::array::{ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampNa
 use crate::agg;
 use crate::error::DataError;
 use crate::query::{self, ResolvedView};
+use crate::resolver::{Resolution, Sources};
 use crate::store::Store;
 use crate::stream::{self, Stream, BATCH_EVENTS, SUBSCRIPTION_WINDOW};
 
@@ -32,6 +33,8 @@ pub struct DataService {
     store: RwLock<Store>,
     /// A subscription's window of unacknowledged events (D-5.6).
     window: usize,
+    /// The sources beside the store a demand may be bought from (D-7.1).
+    sources: Sources,
 }
 
 fn wire(e: WireError) -> ErrorMessage {
@@ -53,7 +56,24 @@ impl DataService {
         Arc::new(DataService {
             store: RwLock::new(store),
             window: window.max(1),
+            sources: Sources::store_only(),
         })
+    }
+
+    /// A service whose demands may be bought from `sources` beside the
+    /// store (D-7): the catalog of `abt data serve --config FILE` and the
+    /// adapters its sources name.
+    pub fn with_sources(store: Store, sources: Sources) -> Arc<DataService> {
+        Arc::new(DataService {
+            store: RwLock::new(store),
+            window: SUBSCRIPTION_WINDOW,
+            sources,
+        })
+    }
+
+    /// The catalog of the sources beside the store.
+    pub fn catalog(&self) -> &crate::resolver::Catalog {
+        &self.sources.catalog
     }
 
     /// The store, for the process that owns the service (an adapter run in
@@ -68,15 +88,17 @@ impl DataService {
 
     /// The binding of a demand (crate::resolver), recorded under its id
     /// unless the request is a dry run.
-    fn resolve(&self, demand: &abt_wire::generated::abt::wire::Demand, dry_run: bool) -> Result<(Binding, abt_wire::generated::abt::wire::ResolvePlan), DataError> {
+    /// A demand resolved (D-7.4, D-7.5): bought and bound unless a dry run;
+    /// the binding recorded, its versions pinned.
+    pub fn resolve(&self, demand: &abt_wire::generated::abt::wire::Demand, dry_run: bool) -> Result<Resolution, DataError> {
         let mut st = self.store_mut();
-        let (mut b, plan) = crate::resolver::resolve(&st, demand)?;
+        let mut r = crate::resolver::resolve_with(&mut st, &self.sources, demand, dry_run)?;
         if !dry_run {
-            let id = st.registry.record_binding(&b)?;
+            let id = st.registry.record_binding(&r.binding)?;
             st.registry.save()?;
-            b.id = Some(id);
+            r.binding.id = Some(id);
         }
-        Ok((b, plan))
+        Ok(r)
     }
 
     fn stats(&self, relation: Option<&str>) -> Result<RecordBatch, DataError> {
@@ -162,15 +184,20 @@ impl Service for DataService {
                 out.respond(Message::SchemaResponse(Box::new(SchemaResponse { schemas: Some(schemas) }))).map_err(wire)
             }
             Message::ResolveRequest(r) => {
-                let (b, plan) = self.resolve(&r.demand, r.dry_run).map_err(data)?;
-                let cost = plan.cost.clone();
+                let res = self.resolve(&r.demand, r.dry_run).map_err(data)?;
+                let cost = res.plan.cost.clone();
                 out.respond(Message::ResolveResponse(Box::new(ResolveResponse {
-                    plan: Some(Box::new(plan)),
+                    plan: Some(Box::new(res.plan)),
                     cost,
-                    binding: Some(Box::new(b)),
-                    over_budget: None,
+                    binding: Some(Box::new(res.binding)),
+                    over_budget: res.over_budget.map(Box::new),
+                    notes: (!res.notes.is_empty()).then_some(res.notes),
                 })))
                 .map_err(wire)
+            }
+            Message::ResolveDynamicRequest(r) => {
+                crate::resolver::prepass::resolve_dynamic(&r.need).map_err(data)?;
+                Err(error(ErrorCode::Internal, "resolve_dynamic answered nothing"))
             }
             Message::QueryRequest(r) => {
                 let st = self.store();

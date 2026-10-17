@@ -103,22 +103,23 @@ impl DataClient {
         }
     }
 
-    /// The binding of a demand (D-7.2), with the plan's steps: the version
-    /// each need's relations are bound at, its span and its attributes.
-    pub fn resolve(&self, demand: Demand) -> Result<(Binding, Vec<PlanStep>), RunError> {
+    /// The binding of a demand (D-7.2), with the plan's steps (the version
+    /// each need's relations are bound at, its span and its attributes)
+    /// and the resolver's notes (what it bought, what it could not cover).
+    pub fn resolve(&self, demand: Demand) -> Result<(Binding, Vec<PlanStep>, Vec<String>), RunError> {
         let answer = self.client.request(Message::ResolveRequest(Box::new(ResolveRequest {
             demand: Box::new(demand),
             dry_run: false,
         })));
         let answer = match answer {
-            Err(WireError::Remote(e)) if e.code == abt_wire::ErrorCode::Unresolved => return Err(RunError::Unbound(e.message.unwrap_or_default())),
+            Err(WireError::Remote(e)) if matches!(e.code, abt_wire::ErrorCode::Unresolved | abt_wire::ErrorCode::OutOfBudget) => return Err(RunError::Unbound(e.message.unwrap_or_default())),
             other => other.map_err(wire)?,
         };
         match answer {
             Message::ResolveResponse(r) => {
                 let steps = r.plan.and_then(|p| p.steps).unwrap_or_default();
                 let binding = r.binding.map(|b| *b).ok_or_else(|| RunError::Config("the data service resolved no binding".into()))?;
-                Ok((binding, steps))
+                Ok((binding, steps, r.notes.unwrap_or_default()))
             }
             _ => Err(RunError::Config("the data service answered a resolve with another message".into())),
         }
@@ -472,8 +473,10 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Res
     let primitives: Vec<&str> = prog.relations.iter().filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. })).map(|(n, _)| n.as_str()).collect();
     let mut demand = demand_of(prog, &stored_name);
     demand.point = Some(point.to_vec());
-    let (binding, steps) = client.resolve(demand)?;
-    let warnings = binding_warnings(prog, &steps);
+    let (binding, steps, notes) = client.resolve(demand)?;
+    let mut warnings = binding_warnings(prog, &steps);
+    // What the resolver bought, or could not cover, is stated with the run.
+    warnings.extend(notes.into_iter().map(|message| RunWarning { bias: "binding".into(), message }));
     let view = View {
         versions: None,
         binding: binding.id.clone(),

@@ -91,3 +91,14 @@ pub fn briefs_market() -> Result<Arc<DataService>, String> {
     ingest_dataset(&mut store, &ds, "equity", &dataset_attributes(&ds, "@1d", &BTreeMap::new()))?;
     Ok(DataService::new(store))
 }
+
+/// The adapters a catalog's sources are fetched by (D-7.7), by name, and
+/// the adapters it names that abt does not have: such a source is listed
+/// and planned, and buying from it is refused naming its adapter.
+pub fn adapters_of(catalog: &abt_data::resolver::Catalog) -> (BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>>, Vec<String>) {
+    let out: BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>> = BTreeMap::new();
+    let mut missing: Vec<String> = catalog.sources.iter().map(|s| s.adapter.clone()).filter(|a| !out.contains_key(a)).collect();
+    missing.sort();
+    missing.dedup();
+    (out, missing)
+}

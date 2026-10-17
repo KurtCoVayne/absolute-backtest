@@ -329,7 +329,7 @@ table ResolvePlan {
 table SchemaRequest { class: string; relation: string; }
 table SchemaResponse { schemas: [RelationSchema]; }
 table ResolveRequest { demand: Demand (required); dry_run: bool; }
-table ResolveResponse { plan: ResolvePlan; cost: CostVector; binding: Binding; over_budget: ResolvePlan; }
+table ResolveResponse { plan: ResolvePlan; cost: CostVector; binding: Binding; over_budget: ResolvePlan; notes: [string]; }
 table ResolveDynamicRequest { binding: Binding (required); need: DynamicNeed (required); underlying: ulong; t: long; }
 table ResolveDynamicResponse { binding: Binding; }
 

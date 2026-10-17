@@ -2,10 +2,11 @@
 //! (`--store DIR`, else `$ABT_STORE`, else `./abt-store`).
 //!
 //! ```text
-//! abt data serve   [--store DIR] [--socket PATH]
+//! abt data serve   [--store DIR] [--socket PATH] [--config FILE]
 //! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--attributes K=V,...] <files...>
 //! abt data ingest  [--store DIR] --adapter synthetic --class C [--days N] [--symbols A,B] [--seed N] <files...>
-//! abt data catalog [--store DIR] [--class C]
+//! abt data catalog [--store DIR] [--class C | --sources [--config FILE]]
+//! abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
 //! abt data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
 //! abt data stats   [--store DIR] [--relation R]
 //! abt data pin|unpin [--store DIR] VERSION | --binding B
@@ -43,7 +44,7 @@ struct Args {
     flags: Vec<String>,
 }
 
-const FLAGS: [&str; 2] = ["json", "explain"];
+const FLAGS: [&str; 4] = ["json", "explain", "dry-run", "sources"];
 
 fn parse(args: &[String]) -> Args {
     let mut out = Args {
@@ -78,7 +79,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R]\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
     );
     exit(1)
 }
@@ -139,7 +140,7 @@ pub fn main(args: &[String]) {
     match a.cmd.as_str() {
         "serve" => {
             let path = a.opts.get("socket").map(PathBuf::from).unwrap_or_else(|| abt_wire::transport::default_socket("data"));
-            let svc = DataService::new(open(&a));
+            let svc = DataService::with_sources(open(&a), sources(&a));
             let handle = listen(&path, svc).unwrap_or_else(|e| fail(&format!("{}: {}", path.display(), e)));
             eprintln!("serving {} on {}", store_dir(&a).display(), path.display());
             let _ = handle.join();
@@ -195,6 +196,10 @@ pub fn main(args: &[String]) {
             }
         }
         "catalog" => {
+            if a.flags.iter().any(|f| f == "sources") {
+                print!("{}", sources(&a).catalog.render());
+                return;
+            }
             let store = open(&a);
             match a.opts.get("class") {
                 Some(c) => match classes().into_iter().find(|k| k.name == c) {
@@ -206,6 +211,68 @@ pub fn main(args: &[String]) {
                         println!("{} ({})", s.name, s.class);
                     }
                 }
+            }
+        }
+        "resolve" => {
+            let path = a.opts.get("demand").cloned().unwrap_or_else(|| usage());
+            let text = if path == "-" {
+                let mut t = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).unwrap_or_else(|e| fail(&format!("standard input: {}", e)));
+                t
+            } else {
+                std::fs::read_to_string(&path).unwrap_or_else(|e| fail(&format!("{}: {}", path, e)))
+            };
+            let demand: abt_wire::generated::abt::wire::Demand = serde_json::from_str(&text).unwrap_or_else(|e| fail(&format!("{}: not a demand: {}", path, e)));
+            let dry_run = a.flags.iter().any(|f| f == "dry-run");
+            let svc = DataService::with_sources(open(&a), sources(&a));
+            let r = svc.resolve(&demand, dry_run).unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                exit(1)
+            });
+            if a.flags.iter().any(|f| f == "json") {
+                let out = serde_json::json!({ "binding": r.binding, "plan": r.plan, "over_budget": r.over_budget, "notes": r.notes });
+                println!("{}", out);
+                return;
+            }
+            if a.flags.iter().any(|f| f == "explain") || dry_run {
+                for step in r.plan.steps.iter().flatten() {
+                    let c = step.cost.as_deref();
+                    println!(
+                        "need {}: {} from {} {} over {}..{}: money {:.2}, {:.1} s, {} bytes, {} requests",
+                        step.need,
+                        step.relation,
+                        step.source,
+                        step.version.as_deref().map(|v| format!("at {}", &v[..12.min(v.len())])).unwrap_or_else(|| "to buy".into()),
+                        step.from.map(|t| Time(t).iso()).unwrap_or_else(|| "-".into()),
+                        step.to.map(|t| Time(t).iso()).unwrap_or_else(|| "-".into()),
+                        c.map_or(0.0, |c| c.money),
+                        c.map_or(0.0, |c| c.seconds),
+                        c.map_or(0, |c| c.bytes),
+                        c.map_or(0, |c| c.requests)
+                    );
+                }
+                if let Some(c) = r.plan.cost.as_deref() {
+                    println!("cost: money {:.2}, {:.1} s, {} bytes, {} requests", c.money, c.seconds, c.bytes, c.requests);
+                }
+                if let Some(o) = &r.over_budget {
+                    let c = o.cost.as_deref();
+                    println!(
+                        "over budget: the cheapest plan covering every span costs money {:.2}, {} bytes, {} requests",
+                        c.map_or(0.0, |c| c.money),
+                        c.map_or(0, |c| c.bytes),
+                        c.map_or(0, |c| c.requests)
+                    );
+                }
+                for n in &r.notes {
+                    println!("note: {}", n);
+                }
+            }
+            match &r.binding.id {
+                Some(id) => println!("binding {}", id),
+                None => println!("binding not recorded (a dry run)"),
+            }
+            for p in r.binding.pairs.iter().flatten() {
+                println!("  {} {}", p.relation, p.version);
             }
         }
         "stats" => {
@@ -539,4 +606,16 @@ fn parse_query(store: &Store, text: &str) -> Result<(QueryForm, Option<i64>), St
         _ => return Err("one of: `at T` with at most one key, `latest at T`, `over T0..T1` with at most one key, or none".into()),
     };
     Ok((form, r_max))
+}
+
+/// The sources beside the store: the catalog `--config FILE` names, with
+/// the adapters its sources are fetched by.
+fn sources(a: &Args) -> abt_data::resolver::Sources {
+    let Some(path) = a.opts.get("config") else { return abt_data::resolver::Sources::store_only() };
+    let catalog = abt_data::resolver::Catalog::load(Path::new(path)).unwrap_or_else(|e| fail(&e.to_string()));
+    let (adapters, missing) = crate::adapters_of(&catalog);
+    for m in missing {
+        eprintln!("note: {}: no adapter `{}` here; its sources are planned, not bought from", path, m);
+    }
+    abt_data::resolver::Sources { catalog, adapters }
 }

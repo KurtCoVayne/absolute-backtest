@@ -771,6 +771,72 @@ batch driver agree on every corpus program. Each bless since:
     - A reply dropped before its end sends `cancel`.
   - **Unchanged.** Other answers (tables, a run's frames) are bounded by
     their request, so the client holds them as they come.
+- **E-67 (D-7.1 to D-7.6, A-8, A-D22; the resolver as built).**
+  - **The catalog** is a JSON file, named by `abt data serve --config FILE`
+    (and `abt data resolve|catalog --config FILE`):
+    - `prices`: A-8's symbolic unit prices, given values;
+    - `sources`: each with its name, kind, adapter, freshness, the bytes a
+      second it delivers, its quota, and its offers. An offer states its
+      class, relations, calendar, first and last day, scope, receipt
+      times, supplies, attributes, and the instruments a request covers.
+    - A price named but not given is refused at load.
+    - The store is the source `store`; what it holds of each source
+      (`cached`) is the registry's versions.
+  - **The cost of a purchase.** D-7.2 leaves the units' counts open. One
+    relation of an offer over `[from, to]` is estimated as:
+    - rows: the days, times the bars a day (one at a day or coarser, a
+      390-minute session's bars below), times the offer's instruments (one
+      when absent);
+    - 32 bytes a row, and one request;
+    - money: the unit prices times their units (requests; bytes / 1e9;
+      instruments × days; ⌈days / 30.44⌉ months);
+    - seconds: the bytes over the source's throughput (1e7 B/s when not
+      stated), plus 0.1 s a request.
+  - **A version the store holds costs nothing,** its read included. So the
+    store's versions are chosen as the transitional resolver chose them:
+    the version a preference names, the finest under `finest`, reviewed
+    first under `reviewed`, else the first source by name.
+  - **Spans.** A need's span is `[from, to]`. An unstated end is the
+    store's: the first or last instant it holds. Two spans abut within four
+    days (a weekend and a holiday), at the need's ends too. An offer is
+    priced only over the parts of the span no held version reaches.
+  - **The cover** (Proposition D-7.4) is computed per need and relation,
+    over the candidates in the order of their ends, in O(m²) for the
+    handful there are. Ties go to the candidates listed first: the store's,
+    by source name.
+  - **No cover.** A relation whose span no source covers whole is bound to
+    the store's version, and the kernel's precondition on the span warns
+    of it (K-3.2). The resolver adds a note only when some source offers
+    the relation.
+  - **The budget** caps the whole demand: money 0 unless given (A-D22),
+    then bytes, requests and seconds when given.
+    - A plan over budget buys nothing. Each relation a purchase would
+      complete is bound to what the store holds. The response carries the
+      cheapest full plan (`over_budget`) and a note.
+    - A relation the store holds none of is refused with `out_of_budget`,
+      naming that plan's cost.
+    - A plan whose requests of one source exceed the source's quota for
+      its window is refused before anything is bought.
+  - **Fetch, ingest, version.** The `Adapter` trait (`vendor`, `offers`,
+    `fetch`) returns keyed rows. They are ingested under the source's name
+    with the offer's attributes and calendar. The version is the store's
+    from then on, so resolving again buys nothing.
+  - **Merged versions.** A relation covered by parts of several versions is
+    bound to one version of their rows, written under the source `cover`
+    (`Store::ingest_stored`). Each part contributes the rows from the end
+    of the part before it to its own end. The version states what every
+    part states, and `cover` names the parts.
+    - The version is content-addressed, so resolving again gives the same
+      binding (Proposition D-7.5).
+  - **Notes.** `ResolveResponse` gains `notes`: what was bought, what could
+    not be covered, the budget. The kernel adds them to the run's warnings
+    under the bias `binding`.
+  - **Not yet.**
+    - Dynamic needs: the pre-pass waits for the option class (M-7). A
+      demand with one, and `resolve_dynamic`, are refused, naming it.
+    - The front knows no vendor adapter until M-6b. A source naming an
+      adapter abt lacks is listed and planned, and buying from it is
+      refused, naming the adapter.
 
 ## Aggregates
 

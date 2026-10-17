@@ -24,6 +24,9 @@ pub enum DataError {
     Malformed(String),
     /// A demand no version of the store satisfies (D-7.4).
     Unresolved(String),
+    /// A demand whose cheapest plan exceeds its budget, and that the store
+    /// alone cannot bind (D-7.4).
+    OutOfBudget(String),
 }
 
 impl fmt::Display for DataError {
@@ -33,7 +36,9 @@ impl fmt::Display for DataError {
             DataError::Json(e) => write!(f, "{}", e),
             DataError::Arrow(e) => write!(f, "{}", e),
             DataError::Parquet(e) => write!(f, "{}", e),
-            DataError::Schema(m) | DataError::Identity(m) | DataError::Order(m) | DataError::NotFound(m) | DataError::Malformed(m) | DataError::Unresolved(m) => f.write_str(m),
+            DataError::Schema(m) | DataError::Identity(m) | DataError::Order(m) | DataError::NotFound(m) | DataError::Malformed(m) | DataError::Unresolved(m) | DataError::OutOfBudget(m) => {
+                f.write_str(m)
+            }
             DataError::UnknownRelation(r) => write!(f, "unknown relation `{}`", r),
             DataError::UnknownVersion(v) => write!(f, "unknown version {}", v),
         }
@@ -76,6 +81,7 @@ impl DataError {
             DataError::Malformed(_) | DataError::Schema(_) => ErrorCode::Malformed,
             DataError::Identity(_) | DataError::Order(_) => ErrorCode::Refused,
             DataError::Unresolved(_) => ErrorCode::Unresolved,
+            DataError::OutOfBudget(_) => ErrorCode::OutOfBudget,
             _ => ErrorCode::Internal,
         };
         error(code, self.to_string())
