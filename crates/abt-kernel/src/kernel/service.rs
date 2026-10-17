@@ -17,7 +17,7 @@ use abt_wire::transport::{bind, channel_pair, Connection};
 use abt_wire::{ErrorCode, ErrorMessage, Layer};
 use arrow::record_batch::RecordBatch;
 
-use super::{Checkpoint, CheckpointEvery, DataClient, ExecConfig, Next, Progress, Replay, RunError, RunResult, SimExecutor};
+use super::{Checkpoint, CheckpointEvery, DataClient, ExecConfig, Executor, Next, Progress, Replay, RunError, RunMode, RunResult, SimExecutor};
 use crate::check::{check_program, Program, Workspace};
 use crate::query::{self, Answer, Query};
 
@@ -33,6 +33,9 @@ pub struct KernelService {
 struct RunEntry {
     tx: mpsc::Sender<Ask>,
     state: Arc<Mutex<RunState>>,
+    /// A live run's kill switch (K-6.5): what `control halt` and `control
+    /// flatten` set.
+    control: Option<crate::live::LiveControl>,
 }
 
 /// A run's state as `status` reports it.
@@ -142,8 +145,37 @@ impl KernelService {
         let mut cfg = Self::config(&prog, r)?;
         cfg.embargo_mask = r.embargo_mask.iter().flatten().map(|s| (s.from, s.to)).collect();
         let every = r.progress_every.unwrap_or(0);
+        // The mode (P-3.4): a live run's deployment, its kill switch kept
+        // here for `control`.
+        let deployment = match r.deployment.as_deref() {
+            Some(text) => Some(crate::live::deployment::parse(text).map_err(|e| refused(format!("the deployment: {}", e)))?),
+            None => None,
+        };
+        let mode = match r.mode.as_deref() {
+            None | Some("replay-sim") => RunMode::ReplaySim,
+            Some("live-sim") => RunMode::LiveSim {
+                session: r.session.clone().ok_or_else(|| refused("a live-sim run names the live session it reads"))?,
+            },
+            Some("live-broker") => {
+                let d = deployment.as_ref().ok_or_else(|| refused("a live-broker run takes its deployment document (K-6.5)"))?;
+                RunMode::LiveBroker {
+                    session: crate::live::session_of(r.session.clone(), d).map_err(refused)?,
+                }
+            }
+            Some(m) => return Err(refused(format!("mode `{}` is not replay-sim, live-sim or live-broker", m))),
+        };
+        if deployment.is_some() && mode == RunMode::ReplaySim {
+            return Err(refused("a deployment document is a live run's (K-6.5): mode live-sim or live-broker"));
+        }
+        if r.session.is_some() && mode == RunMode::ReplaySim {
+            return Err(refused("a session is a live run's: mode live-sim or live-broker"));
+        }
+        let control = deployment.as_ref().map(crate::live::LiveControl::of);
         let client = (self.connect)().map_err(run_error)?;
         let opts = Replay {
+            mode,
+            deployment,
+            control: control.clone(),
             write_outputs: true,
             to_seq: r.to_seq,
             horizon: r.horizon,
@@ -164,6 +196,9 @@ impl KernelService {
             },
             ..Default::default()
         };
+        // The executor the mode takes: a broker this build has no adapter
+        // for is refused here.
+        let exec = super::executor_for(&cfg, &opts).map_err(run_error)?;
         let (tx, rx) = mpsc::channel::<Ask>();
         let (ptx, prx) = mpsc::channel::<Frame>();
         let state = Arc::new(Mutex::new(RunState {
@@ -174,7 +209,7 @@ impl KernelService {
         let connect = self.connect.clone();
         std::thread::Builder::new()
             .stack_size(512 << 20)
-            .spawn(move || hold(ws, prog, cfg, opts, client, connect, rx, ptx, st, every))
+            .spawn(move || hold(ws, prog, cfg, opts, exec, client, connect, rx, ptx, st, every))
             .map_err(|e| error(ErrorCode::Internal, format!("cannot spawn a run: {}", e)))?;
         let mut started = false;
         for frame in prx {
@@ -186,7 +221,14 @@ impl KernelService {
                         let _ = tx.send(Ask::Halt);
                         return Err(error(ErrorCode::Busy, format!("run {} is running", run_id)));
                     }
-                    runs.insert(run_id.clone(), RunEntry { tx: tx.clone(), state: state.clone() });
+                    runs.insert(
+                        run_id.clone(),
+                        RunEntry {
+                            tx: tx.clone(),
+                            state: state.clone(),
+                            control: control.clone(),
+                        },
+                    );
                     drop(runs);
                     let mut m = response(KernelOp::Run);
                     m.run_id = Some(run_id);
@@ -226,16 +268,17 @@ impl KernelService {
         Err(error(ErrorCode::Internal, "the run's thread ended without a last frame"))
     }
 
-    fn entry(&self, r: &KernelRequest) -> Result<(mpsc::Sender<Ask>, Arc<Mutex<RunState>>), ErrorMessage> {
+    #[allow(clippy::type_complexity)]
+    fn entry(&self, r: &KernelRequest) -> Result<(mpsc::Sender<Ask>, Arc<Mutex<RunState>>, Option<crate::live::LiveControl>), ErrorMessage> {
         let id = r.run_id.as_deref().ok_or_else(|| refused("the request names no run"))?;
         let runs = self.runs.lock().expect("the runs");
         let e = runs.get(id).ok_or_else(|| error(ErrorCode::NotFound, format!("no run {} here", id)))?;
-        Ok((e.tx.clone(), e.state.clone()))
+        Ok((e.tx.clone(), e.state.clone(), e.control.clone()))
     }
 
     fn query(&self, r: &KernelRequest, out: &Responder) -> Result<(), ErrorMessage> {
         let text = r.text.clone().ok_or_else(|| refused("a query request carries the query's text"))?;
-        let (tx, _) = self.entry(r)?;
+        let (tx, ..) = self.entry(r)?;
         let (rtx, rrx) = mpsc::channel();
         tx.send(Ask::Query(text, rtx)).map_err(|_| error(ErrorCode::NotFound, "the run is no longer held"))?;
         let answer = rrx.recv().map_err(|_| error(ErrorCode::Internal, "the run ended before it answered"))?.map_err(run_error)?;
@@ -296,7 +339,7 @@ impl Service for KernelService {
                 let what = r.what.clone().unwrap_or_else(|| "program".into());
                 // Of a run held here: answered over its state.
                 if r.run_id.is_some() {
-                    let (tx, _) = self.entry(&r)?;
+                    let (tx, ..) = self.entry(&r)?;
                     let (rtx, rrx) = mpsc::channel();
                     tx.send(Ask::Query(format!("show {}", what), rtx))
                         .map_err(|_| error(ErrorCode::NotFound, "the run is no longer held"))?;
@@ -359,13 +402,18 @@ impl Service for KernelService {
                 respond(m)
             }
             KernelOp::Control => {
-                let (tx, state) = self.entry(&r)?;
+                let (tx, state, control) = self.entry(&r)?;
                 match r.what.as_deref() {
                     Some("halt") => {
                         if state.lock().expect("a run's state").status != "running" {
                             return Err(refused("the run is not running"));
                         }
-                        tx.send(Ask::Halt).map_err(|_| error(ErrorCode::NotFound, "the run is no longer held"))?;
+                        // A live run's kill switch logs its `halt_all`
+                        // (K-6.5); any other run stops at its next barrier.
+                        match &control {
+                            Some(c) => c.halt(),
+                            None => tx.send(Ask::Halt).map_err(|_| error(ErrorCode::NotFound, "the run is no longer held"))?,
+                        }
                         let mut m = response(KernelOp::Control);
                         m.run_id = r.run_id.clone();
                         m.status = Some("halting".into());
@@ -384,7 +432,21 @@ impl Service for KernelService {
                         m.text = Some(key);
                         respond(m)
                     }
-                    Some("flatten") => Err(refused("flatten acts on a live broker's book (M-10); a simulated run has none")),
+                    Some("flatten") => {
+                        // `flatten_all` through decisions (K-6.5): a live
+                        // run's; a replay's decisions are its program's.
+                        let Some(c) = &control else {
+                            return Err(refused("flatten acts on a live run (K-6.5): this run has no deployment, and a replay's decisions are its program's"));
+                        };
+                        if state.lock().expect("a run's state").status != "running" {
+                            return Err(refused("the run is not running"));
+                        }
+                        c.flatten();
+                        let mut m = response(KernelOp::Control);
+                        m.run_id = r.run_id.clone();
+                        m.status = Some("flattening".into());
+                        respond(m)
+                    }
                     other => Err(refused(format!("control takes halt, checkpoint, flatten or release, not {:?}", other))),
                 }
             }
@@ -448,6 +510,7 @@ fn hold(
     prog: Program,
     cfg: ExecConfig,
     opts: Replay,
+    mut exec: Box<dyn Executor + Send>,
     client: DataClient,
     connect: Arc<Connect>,
     rx: mpsc::Receiver<Ask>,
@@ -456,7 +519,7 @@ fn hold(
     every: u64,
 ) {
     let compiled = crate::compiler::compile(&prog, &crate::compiler::CompileOptions::default());
-    let mut exec = SimExecutor::new(cfg.clone());
+    let mode = opts.mode.name();
     let mut barriers = 0u64;
     // A checkpoint is written through the data layer as it is taken; the
     // control requests waiting for one get its key.
@@ -470,7 +533,7 @@ fn hold(
             let _ = w.send(key.clone());
         }
     };
-    let outcome = super::replay_observed(&prog, Some(&compiled.lowered), &client, cfg.clone(), &mut exec, &opts, &mut on_checkpoint, &mut |p, k, result| {
+    let outcome = super::replay_observed(&prog, Some(&compiled.lowered), &client, cfg.clone(), exec.as_mut(), &opts, &mut on_checkpoint, &mut |p, k, result| {
         let mut next = Next::Continue;
         match p {
             Progress::Started { run_id } => {
@@ -520,7 +583,7 @@ fn hold(
             for ask in rx {
                 match ask {
                     Ask::Query(text, reply) => {
-                        let _ = reply.send(answer_held(&mut kernel, &ws, &prog, &result, &compiled.plan, &client, &connect, &cfg, &text));
+                        let _ = reply.send(answer_held(&mut kernel, &ws, &prog, &result, &compiled.plan, &client, &connect, &cfg, mode, &text));
                     }
                     Ask::Checkpoint(reply) => {
                         let _ = reply.send(Err(RunError::Request("the run ended".into())));
@@ -574,7 +637,8 @@ fn answer_live(k: &mut super::Kernel, prog: &Program, result: &RunResult, plan: 
 
 /// A query of a run that ended: over its final state, or, for a `?` over
 /// more than one atom, over a run of the program holding the query as a
-/// rule (Definition V-8.1), on the same binding.
+/// rule (Definition V-8.1), on the same binding. A live run (`mode`) does
+/// not run again: such a query is a replay-sim run's.
 #[allow(clippy::too_many_arguments)]
 fn answer_held(
     k: &mut super::Kernel,
@@ -585,6 +649,7 @@ fn answer_held(
     client: &DataClient,
     connect: &Arc<Connect>,
     cfg: &ExecConfig,
+    mode: &str,
     text: &str,
 ) -> Result<Answer, RunError> {
     let q = query::parse(text).map_err(RunError::Request)?;
@@ -597,6 +662,12 @@ fn answer_held(
             out: Some((client, result.run_id.as_str())),
         };
         return query::answer(k, &cx, 0, &q);
+    }
+    if mode != "replay-sim" {
+        return Err(RunError::Request(format!(
+            "a `?` over more than one atom is answered by a run of the program holding it as a rule (V-8.1), and a {} run does not run again: ask it of a replay-sim run",
+            mode
+        )));
     }
     let prepared = query::prepare(ws, &prog.strategy, prog, std::slice::from_ref(&q)).map_err(RunError::Request)?;
     let p = &prepared.program;

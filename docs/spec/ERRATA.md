@@ -959,6 +959,170 @@ batch driver agree on every corpus program. Each bless since:
     since this work does not edit `.github/workflows/`. The suites that test
     a transport (`determinism.rs`, the services' own tests) name theirs.
 
+- **E-82 (K-6.1, K-6.4, K-6.5, Proposition A-4.3, M-10's gate; the live
+  interface).**
+  - **The broker interface** (`crates/abt-kernel/src/live/broker.rs`) is
+    K-6.4's `Broker`: `send`, `cancel`, `replace`, `events`, `snapshot`.
+    `events` returns a vector rather than an `impl Iterator`, which keeps
+    the trait an object (`Box<dyn Broker>`). An `OrderRequest` carries:
+    - the run's order id (K-5.2) as the client's id;
+    - the instrument by its binding's name, and the signed quantity;
+    - the order as decided, and the broker's time in force for its kind,
+      from the deployment's `tif_map`;
+    - the legs (always empty, see below), the multiplier, the price the
+      order was sized at, and the destination.
+  - **Polling, not `on_event`.** K-6.4 delivers fills through `on_event`,
+    as stream events the data layer records (D-5.4). Here the executor
+    drains `Broker::events` at every fill step, before the bar's decisions
+    (K-4.2's `fill(ℓ)`), and the `Executor` trait keeps its methods. A
+    broker's events are therefore not in the run's stream, and a
+    live-broker run does not replay from its recording alone. Its log holds
+    every fill with the broker's order id: `fills.source` is `broker`, and
+    `events.detail` carries `broker_order`. Recording the broker's events
+    in the stream comes with the adapter (A-D27).
+  - **`BrokerExecutor`** (`live/executor.rs`) wraps `SimExecutor` and uses
+    its book.
+    - **What the simulation still does:** the bar's own events (corporate
+      actions, delistings, expiries and assignments, a future's roll and
+      settlement), the marks, the margin and the bar's records. These are
+      `open_actions` and `open_marks`, the two halves `open_bar` is now
+      split into.
+    - **`on_decisions`** records the orders and applies the limits (K-3.5)
+      as the simulation does. It sizes each decision at the decision bar's
+      mark (a target against the book, a weight against the base), sends
+      the reductions first, and cancels or replaces the order working on
+      the instrument.
+    - **Leverage** is estimated before sending, at the bar's marks, with
+      the working orders and this order at the price it was sized at.
+      `inv.gross` (K-3.3) is not checked on a broker's fills: their prices
+      are not the kernel's, and a book sized at one bar's marks is marked
+      at the next.
+    - **`fill`** applies the broker's reports:
+      - fills at the broker's price and commission, with no simulated
+        cost;
+      - a partial fill, its remainder `working` (a new `Fate`);
+      - a reject as `rejected`, with the broker's reason;
+      - an expiry as `expired_order`;
+      - a cancel the broker made as `dropped`.
+    - **`finish`** cancels what still works at the broker (`dropped`,
+      "the run ended"), then takes the last reports.
+    - **Not routed.** Combos and exercises are dropped, with the reason:
+      the interface sends single orders, and NewOrderMultileg is the
+      adapter's. The trades the instrument models make at a bar's open (a
+      roll, a margin call's liquidation, an expiry) stay simulated;
+      reconciliation finds them if the broker disagrees. Funding (interest,
+      borrow) is the broker's, and the book takes it under `adopt`.
+  - **The lifecycle** (`live/lifecycle.rs`) has the states sent, new,
+    partial, filled, cancelled, rejected and expired. From the run's side,
+    an order superseded by a later decision, or cancelled at the end, is
+    `replaced`. A report the lifecycle does not admit is ignored and
+    warned: a fill of a filled order, or a report of an order the run did
+    not send. One order works per instrument (`inv.working_orders`).
+  - **Reconciliation** (`live/reconcile.rs`) runs at a session's open (the
+    first bar of a calendar day) and at the bar after a reconnect, when the
+    deployment lists the event. It runs after the bar's own events and
+    before its marks.
+    - A difference is a position apart by more than a billionth of a unit,
+      or cash apart by more than `cash_tolerance` (default a cent). It is
+      a `reconciliation` event carrying both sides.
+    - `halt` halts the run (`(reconciliation)`). `adopt` makes the book the
+      broker's account: the positions, and the cash through the event's
+      cash flow. `warn` keeps the book and warns once, with the count.
+    - A position the broker holds in an instrument the run does not know
+      cannot be adopted: the run halts.
+  - **The deployment document** (`live/deployment.rs`) gives K-6.5's six
+    lines a concrete grammar:
+    - fields in any order, separated by white space, commas or semicolons;
+      `#` comments; quoted words;
+    - `routing` inline or braced; `halt_all` sources separated by `|`;
+    - `reconcile POLICY [at E, E] [cash_tolerance X]`; durations in `ms`,
+      `s`, `min` or `h`;
+    - `account` and `broker` required.
+
+    Its hash is BLAKE3 over the RFC 8785 form of what it parses to, so
+    neither layout nor comments change it. It is outside the run's id (the
+    mode is in it, A-4.1), and recorded as `binding.deployment_hash`.
+    - `deadline base` is the live deadline (K-6.3) when `--deadline` gives
+      none.
+    - `deadline session` is how long, in the stream's time, the broker may
+      stay down before the run halts.
+    - `recording stream NAME` is the session a live-broker run reads when
+      `--session` names none. When both are given they must agree.
+  - **A rehearsal without a session.** `RunMode::LiveBroker { session:
+    None }` runs over the stream a replay-sim run would read, or over a
+    recorded run's stream (`replay_of`). This is what the gate runs. With a
+    session the run is live: K-6.2's clock and the late policy.
+  - **`broker mock`.** This build has one broker, `MockBroker`
+    (`live/mock.rs`): an account in memory, and a policy saying what
+    becomes of each working order whenever the broker is asked for its
+    events.
+    - By default an order fills in full at the price it was sized at,
+      without commission. A limit or a stop the reference does not reach
+      works until cancelled.
+    - Its account does not carry the data's corporate actions, so a
+      rehearsal over a dividend or a split finds it apart at the next
+      session's open.
+    - Any other broker is refused, naming the adapter it lacks.
+  - **The kill switch** (`live/control.rs`) is checked at every decision
+    barrier.
+    - `halt_all` comes from a control request (the kernel service's
+      `control halt` on a run with a deployment), from the deployment's
+      file appearing, or from its signal (SIGHUP, SIGINT, SIGQUIT, SIGTERM,
+      SIGUSR1, SIGUSR2; the handler only counts). It is a `control` event
+      at the end of the barrier, then the run halts (`(kill switch)`).
+    - `flatten_all` (`control flatten`) replaces the next decision bar's
+      decisions with a closing decision on every position held and every
+      instrument with an order working.
+      - The program's decisions at that bar are `dropped` before they are
+        orders. `post.decisions` (K-3.4) now counts such drops, which also
+        accounts for `late reject`'s.
+      - The closing decisions are the control's: rule `NO_RULE`, labelled
+        `(control)`. `inv.one_decision` holds of the program's decisions.
+        They are logged, limited and sent like any decision.
+    - A run without a deployment refuses `flatten`: a replay's decisions
+      are its program's.
+  - **The commands.**
+    - `abt run --mode live-broker --deployment FILE [--session S]`.
+    - `abt kernel run` takes `--mode`, `--session` and `--deployment`. The
+      document's text travels in `KernelRequest.deployment`, beside `mode`
+      and `session` (P-3.4).
+    - `abt kernel control --run RUN flatten`.
+
+    `kernel::executor_for` picks the executor a run's mode takes. A live
+    run the kernel service holds answers queries over its final state, but
+    refuses a `?` over more than one atom: V-8.1 answers that with a run of
+    the program holding it as a rule, and a live run does not run again. A broker
+    without an adapter refuses the run (`run refused: ...`, exit 1).
+  - **The gate** is `crates/abt-tests/tests/live_mock.rs`, with
+    `kernel_service.rs` and `crates/abt/tests/cli.rs`.
+    - **Proposition A-4.3**, twice:
+      - six corpus programs, whose decisions read the book no further than
+        `held` and `flat`, decide the same events in replay-sim and in a
+        live-broker rehearsal of the same store's stream;
+      - a minute program decides the same in a live-sim run of a recorded
+        session and in a live-broker rehearsal of the recording.
+
+      The fills are the mock's (another price, no commission, partial under
+      a policy), and each carries the broker's id.
+    - **The lifecycle's transitions**, admitted and refused. Through runs:
+      new, partial and filled; rejected; expired; cancelled by the broker;
+      replaced by the next decision; cancelled at the end; a report it does
+      not admit, ignored.
+    - **Reconciliation:**
+      - `halt` at the session's open;
+      - `adopt`, of a position and of cash;
+      - `warn` at every open;
+      - a reconnect after a drop, with the orders refused while the session
+        was down;
+      - the session deadline;
+      - an unknown instrument under `adopt`.
+    - **The kill switch:** halt by a control request, by a file, and by a
+      signal (a unit test); flatten through decisions, in process and
+      through the kernel service.
+    - **The document:** it parses, its hash ignores layout, and it says why
+      when it is refused. The modes refuse a run with no deployment, a
+      broker with no adapter, and a document on a replay.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

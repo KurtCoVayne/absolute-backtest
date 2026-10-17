@@ -513,8 +513,18 @@ impl Program {
     }
 }
 
+/// The rule of a decision no rule made: the kill switch's (`flatten_all`,
+/// K-6.5). `usize::MAX` is the program's `silence flat`.
+pub const NO_RULE: usize = usize::MAX - 1;
+
 pub fn rule_label(rules: &[Rule], i: usize) -> String {
-    let r = &rules[i];
+    let Some(r) = rules.get(i) else {
+        return match i {
+            usize::MAX => "silence".to_string(),
+            NO_RULE => "(control)".to_string(),
+            _ => format!("(rule {})", i),
+        };
+    };
     let k = rules[..i].iter().filter(|o| o.unit == r.unit && o.head.name == r.head.name).count() + 1;
     format!("{}::{}#{}", r.unit, r.head.name, k)
 }

@@ -238,6 +238,7 @@ impl SimExecutor {
                         forced: true,
                         spread: 0.0,
                         reference: self.fill_reference(k, sym, p),
+                        broker: None,
                     };
                     fills.push(result.events.len() as u64);
                     self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }).cash(-flow));

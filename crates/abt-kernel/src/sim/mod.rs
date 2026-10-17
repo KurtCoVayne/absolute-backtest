@@ -192,14 +192,42 @@ impl SimExecutor {
 
     /// Emits an event and applies it to the book: the one way the book
     /// changes.
-    fn record(&mut self, result: &mut RunResult, e: RunEvent) {
+    pub(crate) fn record(&mut self, result: &mut RunResult, e: RunEvent) {
         let seq = result.emit(e) as usize;
         self.book.apply(&result.events[seq]);
     }
 
+    /// The configuration the executor runs with.
+    pub(crate) fn cfg(&self) -> &ExecConfig {
+        &self.cfg
+    }
+
+    /// The book.
+    pub(crate) fn book_ref(&self) -> &Book {
+        &self.book
+    }
+
+    /// A fill's notional, for the turnover limits (K-3.5).
+    pub(crate) fn note_traded(&mut self, at: i64, notional: f64) {
+        self.limit_state.traded.push_back((at, notional));
+    }
+
+    /// An order's size, and what of one filled with its participation, for
+    /// the run's liquidity summary (a broker's orders, K-6.4).
+    pub(crate) fn note_requested(&mut self, quantity: f64) {
+        self.requested_total += quantity;
+    }
+
+    pub(crate) fn note_filled(&mut self, quantity: f64, participation: Option<f64>) {
+        self.filled_total += quantity;
+        if let Some(p) = participation {
+            self.participations.push(p);
+        }
+    }
+
     /// The NAV at `t`'s mark (K-5.1): cash, the positions marked at the
     /// bar's price (or the last one), the receivables, in that order.
-    fn nav(&self, k: &mut Kernel, t: i64) -> f64 {
+    pub(crate) fn nav(&self, k: &mut Kernel, t: i64) -> f64 {
         let mut nav = self.book.cash;
         for (&sym, &q) in &self.book.positions {
             if let Some(p) = k.price_at(sym, t) {
@@ -772,6 +800,7 @@ impl SimExecutor {
                 forced: false,
                 spread: if option { (fill_price - mid) * qty * m } else { 0.0 },
                 reference: self.fill_reference(k, sym, fill_price),
+                broker: None,
             };
             let remainder = partial.then(|| (requested - qty.abs(), if reissue { Fate::Reissued } else { Fate::Expired }));
             self.record(result, RunEvent::new(at, Some(sym), EventKind::Fill { fill, remainder }).rule(*rule).order(*id).cash(-cost));
@@ -839,6 +868,7 @@ impl SimExecutor {
                         forced: false,
                         spread: 0.0,
                         reference,
+                        broker: None,
                     };
                     self.record(result, RunEvent::new(tn, Some(sym), EventKind::Fill { fill, remainder: None }).rule(rule).order(id).cash(-flow));
                     self.limit_state.traded.push_back((tn, qty.abs() * p * m));
@@ -988,9 +1018,12 @@ impl SimExecutor {
     }
 }
 
-impl Executor for SimExecutor {
-    fn open_bar(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> Result<(), RunError> {
-        let fill_rel = k.rel_id("fill");
+impl SimExecutor {
+    /// The first half of `open_bar` (K-6.1): the bar's own events before
+    /// its marks (corporate actions, delistings, option expiries and
+    /// assignments, a future's roll, expiry and settlement); whether they
+    /// changed the book.
+    pub(crate) fn open_actions(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
         if self.bars.is_empty() {
             // Cash at the first bar, so that cash-aware rules can fire from the start.
             let cash_rel = k.rel_id("cash");
@@ -1012,6 +1045,14 @@ impl Executor for SimExecutor {
         changed |= self.rolls(k, t, result);
         changed |= self.contract_expiries(k, t, result);
         changed |= self.settlements(k, t, result);
+        changed
+    }
+
+    /// The second half: the executor relations rewritten when the book
+    /// changed outside a fill, then the marks, the margin and the bar's
+    /// records.
+    pub(crate) fn open_marks(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult, changed: bool) -> Result<(), RunError> {
+        let fill_rel = k.rel_id("fill");
         if changed {
             self.rewrite_book(k, t);
         }
@@ -1103,6 +1144,7 @@ impl Executor for SimExecutor {
                             forced: true,
                             spread: 0.0,
                             reference,
+                            broker: None,
                         };
                         self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }).cash(-flow));
                     }
@@ -1174,6 +1216,13 @@ impl Executor for SimExecutor {
         }
         self.write_contract_relation(k, t);
         Ok(())
+    }
+}
+
+impl Executor for SimExecutor {
+    fn open_bar(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> Result<(), RunError> {
+        let changed = self.open_actions(k, t, result);
+        self.open_marks(k, t, result, changed)
     }
 
     fn on_decisions(&mut self, k: &mut Kernel, t: i64, by_equity: &BTreeMap<Sym, Vec<(Decision, usize)>>, result: &mut RunResult) -> Result<(), RunError> {

@@ -168,6 +168,70 @@ fn a_ledger_query_over_a_store_writes_to_the_store() {
     assert!(format!("{}{}", stdout, stderr).contains("--data STORE|SOCKET"), "stdout: {}\nstderr: {}", stdout, stderr);
 }
 
+/// K-6.4 at the command line: `--mode live-broker --deployment FILE` sends
+/// the program's orders to the broker the document names (`mock`, the one
+/// this build has), the document's hash logged with the run; the refusals
+/// name why.
+#[test]
+fn a_live_broker_run_goes_through_the_deployments_broker() {
+    let dir = scratch("live-broker");
+    let store = dir.join("store").to_string_lossy().to_string();
+    let lib = [corpus("catalog").to_string_lossy().to_string(), corpus("lib").to_string_lossy().to_string()];
+    let ingest = abt(&["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "200", &lib[0], &lib[1]]);
+    assert!(ingest.status.success(), "{:?}", text(&ingest));
+    let document = |name: &str, body: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p.to_string_lossy().to_string()
+    };
+    // The mock's account does not carry the data's corporate actions:
+    // reported, not halted on.
+    let mock = document("mock.deployment", "deployment rehearsal {\n  account DU0001   broker mock\n  reconcile warn\n}\n");
+    let files = strategy_files("sma_crossover");
+    let run = |extra: &[&str]| {
+        let mut args = vec!["run", "--strategy", "sma_crossover", "--data", store.as_str()];
+        args.extend(extra);
+        args.extend(files.iter().map(String::as_str));
+        abt(&args)
+    };
+    let out = run(&["--mode", "live-broker", "--deployment", &mock]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    let hash = abt_kernel::live::Deployment::read(std::path::Path::new(&mock)).unwrap().hash();
+    let line = stdout.lines().find(|l| l.starts_with("mode: live-broker")).unwrap_or_else(|| panic!("stdout: {}", stdout));
+    assert!(line.contains(&format!("deployment {}", hash)), "{}", line);
+    let by_broker: usize = line.rsplit(' ').next().unwrap().parse().unwrap();
+    assert!(by_broker > 0, "{}", line);
+    // The binding the run wrote records the mode and the hash.
+    let run_id: String = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run "))
+        .map(|r| r.chars().take_while(|c| c.is_ascii_hexdigit()).collect())
+        .unwrap_or_else(|| panic!("stdout: {}", stdout));
+    let binding = abt(&["data", "query", "--store", &store, &format!("kernel.{}.binding", run_id)]);
+    let shown = text(&binding).0;
+    assert!(shown.contains("live-broker") && shown.contains(&hash), "{}", shown);
+    // A broker without an adapter refuses the run (1); a mode without its
+    // document, a document without a live mode, a document that does not
+    // parse are the options' (2).
+    let ibkr = document("ibkr.deployment", "deployment { account U1 broker ibkr }");
+    let bad = document("bad.deployment", "deployment { account U1 }");
+    for (extra, code, why) in [
+        (
+            vec!["--mode", "live-broker", "--deployment", ibkr.as_str()],
+            1,
+            "run refused: configuration error: broker `ibkr`: this build has no adapter for it",
+        ),
+        (vec!["--mode", "live-broker"], 2, "--deployment FILE"),
+        (vec!["--deployment", mock.as_str()], 2, "is a live run's"),
+        (vec!["--mode", "live-broker", "--deployment", bad.as_str()], 2, "names its `broker`"),
+    ] {
+        let out = run(&extra);
+        assert_eq!(out.status.code(), Some(code), "{:?}: {:?}", extra, text(&out));
+        assert!(text(&out).1.contains(why), "{:?}: {}", extra, text(&out).1);
+    }
+}
+
 /// A Parquet market for the equity class with one symbol over five
 /// weekdays, with no close on 2024-01-10 (the bar exists: its volume and
 /// listing do), next to a strategy that buys on an up day against the

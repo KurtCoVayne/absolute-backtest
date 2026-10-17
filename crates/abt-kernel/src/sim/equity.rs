@@ -176,6 +176,7 @@ impl SimExecutor {
                     forced: true,
                     spread: 0.0,
                     reference: None,
+                    broker: None,
                 };
                 self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }));
                 let delisted = EventKind::Action {

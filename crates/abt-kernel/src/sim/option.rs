@@ -563,6 +563,7 @@ impl SimExecutor {
             forced: false,
             spread: 0.0,
             reference: None,
+            broker: None,
         };
         self.record(
             result,
@@ -903,6 +904,7 @@ impl SimExecutor {
                 forced: false,
                 spread: if k.is_option(sym) { (p - mid) * q * m } else { 0.0 },
                 reference: self.fill_reference(k, sym, p),
+                broker: None,
             };
             result.costs.commissions += commission;
             result.costs.turnover += q.abs() * p * m;

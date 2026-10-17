@@ -13,13 +13,13 @@
 //! backtest is this fold over a replayed stream; live is the same fold on a
 //! live stream with another executor attached.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::eval::{WindowKey, WindowRows};
 use super::time;
-use super::{Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
+use super::{Ctor, Decision, Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
 use crate::ir::Cal;
 use crate::sim::Executor;
 
@@ -102,6 +102,8 @@ pub struct Fold<'p, 'e> {
     invariants: crate::contract::check::Invariants,
     /// A live run's lag against its deadline (K-6.3).
     live: Option<Lag>,
+    /// The kill switch (K-6.5), read at every decision barrier.
+    control: Option<crate::live::LiveControl>,
 }
 
 /// What a live run measures (K-6.3): each decision bar's lag, the time
@@ -152,7 +154,17 @@ impl<'p, 'e> Fold<'p, 'e> {
             recent: Default::default(),
             invariants,
             live: None,
+            control: None,
         }
+    }
+
+    /// Reads the kill switch at every decision barrier (K-6.5): `flatten_all`
+    /// emits closing decisions through the normal path, so they are logged
+    /// and limited like any decision; `halt_all` stops evaluation after the
+    /// barrier.
+    pub fn with_control(mut self, control: crate::live::LiveControl) -> Self {
+        self.control = Some(control);
+        self
     }
 
     /// Measures every decision bar's lag against a live run's deadline: a
@@ -315,6 +327,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             ran_decision: false,
             recent: Default::default(),
             live: None,
+            control: None,
         })
     }
 
@@ -392,6 +405,9 @@ impl<'p, 'e> Fold<'p, 'e> {
         }
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
         let mut by_equity = self.kernel.decide_at(label, &mut self.result)?;
+        if let Some(source) = self.control.as_ref().and_then(|c| c.take_flatten()) {
+            by_equity = self.flatten(label, by_equity, source);
+        }
         // Live, a bar evaluated past its deadline is late (K-6.3): its
         // decisions are sent flagged, or dropped under `late reject`.
         if let Some(lag) = self.live.as_mut() {
@@ -438,7 +454,58 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.last_bar = Some(label);
         self.ran_decision = true;
         self.bars_since_checkpoint += 1;
+        if let Some(source) = self.control.as_ref().and_then(|c| c.halt_requested()) {
+            self.result.emit(super::RunEvent::new(
+                label,
+                None,
+                super::EventKind::Control {
+                    action: "halt_all".into(),
+                    source: source.clone(),
+                },
+            ));
+            return Err(RunError::Risk {
+                t: label,
+                rule: "(kill switch)".into(),
+                decision: "(halt_all)".into(),
+                message: format!("the kill switch halted the run after its barrier at {} ({})", time::format_timestamp(label), source),
+            });
+        }
         Ok(())
+    }
+
+    /// `flatten_all` (K-6.5): the bar's decisions give way to a closing
+    /// decision on every position the book holds and every instrument with
+    /// an order working, each a decision of the run (logged, then limited
+    /// and sent like the program's, its rule `NO_RULE`). The program's own
+    /// decisions at the bar are dropped, naming why.
+    fn flatten(&mut self, label: i64, by_equity: BTreeMap<Sym, Vec<(Decision, usize)>>, source: String) -> BTreeMap<Sym, Vec<(Decision, usize)>> {
+        self.result.emit(super::RunEvent::new(label, None, super::EventKind::Control { action: "flatten_all".into(), source }));
+        for (sym, ds) in by_equity {
+            for (decision, rule) in ds {
+                self.result.emit(
+                    super::RunEvent::new(
+                        label,
+                        Some(sym),
+                        super::EventKind::Dropped {
+                            decided: label,
+                            decision,
+                            reason: "flatten_all: the kill switch closes every position".into(),
+                        },
+                    )
+                    .rule(rule),
+                );
+            }
+        }
+        let mut closing: BTreeSet<Sym> = self.exec.book().map(|b| b.positions.keys().copied().collect()).unwrap_or_default();
+        closing.extend(self.exec.working());
+        let mut out: BTreeMap<Sym, Vec<(Decision, usize)>> = BTreeMap::new();
+        for sym in closing {
+            let close = Decision::single(Ctor::HoldQuantity, sym, 0.0, super::value::Order::default());
+            self.result
+                .emit(super::RunEvent::new(label, Some(sym), super::EventKind::Decision { decision: close.clone() }).rule(crate::check::NO_RULE));
+            out.entry(sym).or_default().push((close, crate::check::NO_RULE));
+        }
+        out
     }
 
     /// The stream ended: close every open bucket (finer first) and let the

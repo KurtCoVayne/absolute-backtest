@@ -1410,6 +1410,10 @@ pub struct FillRecord {
     /// against after the fill (E-10): the opening fill's, else unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<f64>,
+    /// A broker's fill (K-6.4): the broker's id of the order; none for a
+    /// simulated one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker: Option<String>,
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -1485,6 +1489,12 @@ pub struct RunResult {
     /// The binding the run read (β, D-7.5).
     #[serde(default)]
     pub binding_id: String,
+    /// The run's mode (A-5), and in a live mode its deployment's hash
+    /// (K-6.5): what `binding` records with β.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_hash: Option<String>,
     /// How the report block's calendar partitions the run (what the query
     /// layer's period metrics read, Q-3.1).
     #[serde(default)]
@@ -1556,6 +1566,9 @@ pub struct Identity {
     /// blocks do not state (a test's override).
     #[serde(default)]
     pub config: String,
+    /// The hash of a live run's deployment document (K-6.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<String>,
 }
 
 /// A tuple that arrived after its bucket's barrier (K-4.4): its place in
@@ -3810,6 +3823,31 @@ pub enum RunMode {
     ReplaySim,
     /// A live session's stream (D-5.2 live), recorded as it is read.
     LiveSim { session: String },
+    /// The executor is a broker's (K-6.4, `live::BrokerExecutor`): over a
+    /// live session's stream, or with none over the stream a replay-sim run
+    /// would read (a recorded run's with `replay_of`), a rehearsal against
+    /// recorded data (ERRATA E-82). Its deployment document is required.
+    LiveBroker { session: Option<String> },
+}
+
+impl RunMode {
+    /// The mode's name (A-5), part of a run's identity (A-4.1).
+    pub fn name(&self) -> &'static str {
+        match self {
+            RunMode::ReplaySim => "replay-sim",
+            RunMode::LiveSim { .. } => "live-sim",
+            RunMode::LiveBroker { .. } => "live-broker",
+        }
+    }
+
+    /// The live session the run reads, if any.
+    pub fn session(&self) -> Option<&str> {
+        match self {
+            RunMode::LiveSim { session } => Some(session),
+            RunMode::LiveBroker { session } => session.as_deref(),
+            RunMode::ReplaySim => None,
+        }
+    }
 }
 
 /// How a run reads its stream (K-4.2, K-4.7): where it stops, whether it
@@ -3847,6 +3885,13 @@ pub struct Replay {
     pub write_outputs: bool,
     /// π, the plan step that asked for the run (Q-2.5): part of its id.
     pub plan_step: Option<serde_json::Value>,
+    /// The deployment document of a live run (K-6.5): required in
+    /// `live-broker`, its kill switch read in `live-sim` too. Outside the
+    /// run's id; its hash is logged with the run.
+    pub deployment: Option<crate::live::Deployment>,
+    /// The run's kill switch (K-6.5): what a control request, or the
+    /// deployment's file, sets; checked at every decision barrier.
+    pub control: Option<crate::live::LiveControl>,
 }
 
 /// The fold over a data service (K-4.1, K-4.2): Bind, the calendars put
@@ -3930,12 +3975,20 @@ pub fn replay_observed<'p>(
     // end, not at the instant a live barrier was emitted: both evaluate
     // every aggregate (E-69).
     let mut recorded = None;
-    if opts.replay_of.is_some() && opts.mode != RunMode::ReplaySim {
-        return Err(RunError::Config("a replay of a recorded run is a replay-sim run".into()));
+    // A recorded run is replayed by a replay-sim run, or rehearsed by a
+    // broker's run without a session (E-82).
+    if opts.replay_of.is_some() && !matches!(opts.mode, RunMode::ReplaySim | RunMode::LiveBroker { session: None }) {
+        return Err(RunError::Config("a replay of a recorded run is a replay-sim run, or a live-broker rehearsal without a session".into()));
     }
-    if let RunMode::LiveSim { session } = &opts.mode {
+    if matches!(opts.mode, RunMode::LiveBroker { .. }) && opts.deployment.is_none() {
+        return Err(RunError::Config("a live-broker run takes its deployment document (K-6.5)".into()));
+    }
+    if let Some(session) = opts.mode.session() {
         if opts.horizon.is_some() || opts.to_seq.is_some() || opts.from.is_some() {
-            return Err(RunError::Config("a live-sim run reads its session from now on: no horizon, truncation or resumption".into()));
+            return Err(RunError::Config(format!(
+                "a {} run reads its session from now on: no horizon, truncation or resumption",
+                opts.mode.name()
+            )));
         }
         bound.base_bars = bind::session_bars(client, session)?;
         cfg.pushdown = false;
@@ -3955,10 +4008,7 @@ pub fn replay_observed<'p>(
     let identity = Identity {
         program_hash: crate::compiler::normalise(prog).hash,
         binding_id: bound.binding.id.clone().unwrap_or_default(),
-        mode: match &opts.mode {
-            RunMode::ReplaySim => "replay-sim".into(),
-            RunMode::LiveSim { .. } => "live-sim".into(),
-        },
+        mode: opts.mode.name().into(),
         run_id: String::new(),
         // Through a JSON value: a field that is infinite (no leverage
         // limit) is null there, and canonical JSON has no infinity.
@@ -3968,6 +4018,7 @@ pub fn replay_observed<'p>(
                 .as_bytes(),
         )
         .hex(),
+        deployment: opts.deployment.as_ref().map(|d| d.hash()),
     };
     let run = bind::run_id(
         &identity.program_hash,
@@ -3977,9 +4028,9 @@ pub fn replay_observed<'p>(
     );
     let identity = Identity { run_id: run.clone(), ..identity };
     let (mut spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
-    if let RunMode::LiveSim { session } = &opts.mode {
+    if let Some(session) = opts.mode.session() {
         spec.clock = abt_wire::generated::abt::wire::ClockSource::Live;
-        spec.session = Some(session.clone());
+        spec.session = Some(session.to_string());
     }
     if let Some(clock) = recorded {
         bind::with_recorded_clock(&mut spec, clock);
@@ -4020,10 +4071,14 @@ pub fn replay_observed<'p>(
     if let Some(e) = opts.checkpoint_every {
         fold = fold.with_checkpoints(e);
     }
-    if matches!(opts.mode, RunMode::LiveSim { .. }) {
+    // The kill switch: the run's control, else the deployment's (K-6.5).
+    if let Some(control) = opts.control.clone().or_else(|| opts.deployment.as_ref().map(crate::live::LiveControl::of)) {
+        fold = fold.with_control(control);
+    }
+    if opts.mode.session().is_some() {
         fold = fold.with_live(fold::Live {
             clock: opts.clock.clone().unwrap_or_else(LiveClock::wall),
-            deadline: opts.deadline.unwrap_or_else(|| deadline_of(prog)),
+            deadline: opts.deadline.or(opts.deployment.as_ref().and_then(|d| d.deadline_base)).unwrap_or_else(|| deadline_of(prog)),
             fraction: 0.01,
         });
     }
@@ -4088,6 +4143,8 @@ pub fn replay_observed<'p>(
             let mut partial = fold.result().clone();
             partial.run_id = run.clone();
             partial.binding_id = bound.binding.id.clone().unwrap_or_default();
+            partial.mode = opts.mode.name().to_string();
+            partial.deployment_hash = opts.deployment.as_ref().map(|d| d.hash());
             partial.periods = periods;
             let ids = fold.kernel.data_ids.clone();
             let put = outputs::tables(&run, prog, &bound, &ids, &fold.kernel.cfg, &partial, &format!("halted({})", e), written).and_then(|t| outputs::write(client, t));
@@ -4100,6 +4157,8 @@ pub fn replay_observed<'p>(
     let (mut result, mut kernel) = fold.finish()?;
     result.run_id = run.clone();
     result.binding_id = bound.binding.id.clone().unwrap_or_default();
+    result.mode = opts.mode.name().to_string();
+    result.deployment_hash = opts.deployment.as_ref().map(|d| d.hash());
     result.periods = periods;
     if !opts.write_outputs {
         if !prog.observes.is_empty() {
@@ -4164,12 +4223,23 @@ pub fn on_kernel_thread<T: Send>(f: impl FnOnce() -> Result<T, RunError> + Send)
     })
 }
 
-/// A run over a data service with the simulated executor: the closed loop
-/// of section 7 as the fold over the stream.
+/// The executor a run's mode takes (K-6.1): the simulation, or in
+/// `live-broker` the broker its deployment names (`live::connect`), its
+/// account opening with the run's initial cash.
+pub fn executor_for(cfg: &ExecConfig, opts: &Replay) -> Result<Box<dyn Executor + Send>, RunError> {
+    match (&opts.mode, &opts.deployment) {
+        (RunMode::LiveBroker { .. }, Some(d)) => Ok(Box::new(crate::live::BrokerExecutor::new(cfg.clone(), crate::live::connect(d, cfg.initial_cash)?, d.clone()))),
+        (RunMode::LiveBroker { .. }, None) => Err(RunError::Config("a live-broker run takes its deployment document (K-6.5)".into())),
+        _ => Ok(Box::new(SimExecutor::new(cfg.clone()))),
+    }
+}
+
+/// A run over a data service with the executor its mode takes: the closed
+/// loop of section 7 as the fold over the stream.
 pub fn run_on(prog: &Program, lowered: Option<&crate::lower::Lowered>, client: &DataClient, cfg: ExecConfig, opts: &Replay) -> Result<RunResult, RunError> {
     on_kernel_thread(|| {
-        let mut exec = SimExecutor::new(cfg.clone());
-        replay(prog, lowered, client, cfg, &mut exec, opts, &mut |_| {}).map(|(r, k)| {
+        let mut exec = executor_for(&cfg, opts)?;
+        replay(prog, lowered, client, cfg, exec.as_mut(), opts, &mut |_| {}).map(|(r, k)| {
             std::mem::forget(k);
             r
         })
@@ -4187,8 +4257,8 @@ pub fn run_keeping<T: Send>(
     f: impl for<'k> FnOnce(&RunResult, &mut Kernel<'k>) -> Result<T, RunError> + Send,
 ) -> Result<(RunResult, T), RunError> {
     on_kernel_thread(|| {
-        let mut exec = SimExecutor::new(cfg.clone());
-        let (r, mut k) = replay(prog, lowered, client, cfg, &mut exec, opts, &mut |_| {})?;
+        let mut exec = executor_for(&cfg, opts)?;
+        let (r, mut k) = replay(prog, lowered, client, cfg, exec.as_mut(), opts, &mut |_| {})?;
         let out = f(&r, &mut k)?;
         std::mem::forget(k);
         Ok((r, out))

@@ -886,7 +886,61 @@ prints each key, `--resume KEY` runs from one, and `abt kernel control
 --run RUN checkpoint` takes one while the run runs and prints its key.
 `abt kernel status`, `control RUN halt`, `check`, `contract` and `show`
 complete the commands (`--kernel SOCKET` names the service; ERRATA E-54,
-E-56).
+E-56). `abt kernel run --mode live-broker --deployment FILE` runs through
+the deployment's broker, and `abt kernel control --run RUN flatten` closes
+that run's positions (below).
+
+### A broker: `live-broker`
+
+The third run mode sends the program's orders to a broker (K-6.4,
+`crates/abt-kernel/src/live/`, ERRATA E-82). `abt run --mode live-broker
+--deployment FILE` takes a deployment document (K-6.5). It names:
+- the account, and the broker with its session;
+- the routing, and the broker's time in force for each order kind;
+- the kill switch and the reconciliation policy;
+- the deadlines, and the stream the session records into.
+
+```
+deployment rehearsal {
+  account DU0001   broker mock
+  routing destination SMART   tif_map { market -> DAY, moc -> MOC }
+  kill_switch { halt_all on SIGTERM | file /run/abt/halt | socket; flatten_all through decisions }
+  reconcile warn at session_open, reconnect
+  deadline { base 55s; session 5min }
+}
+```
+
+The document is hashed apart from the run's id, and the hash is recorded
+with the run (`binding.deployment_hash`). The executor is
+`BrokerExecutor`:
+- the limits act as in the simulation;
+- each decision is sized at its bar's mark and sent, replacing the order
+  working on its instrument (one order works per instrument);
+- the book moves by the broker's fills, at the broker's prices and
+  commissions, as its execution reports (new, partial, filled, cancelled,
+  rejected, expired) come in at the next barrier.
+
+At every session's open and after a reconnect, the book is reconciled with
+the broker's account. On a difference, `halt` (the default) stops the run,
+`adopt` takes the broker's positions and cash, and `warn` reports it.
+
+The kill switch either halts the run after its barrier, or closes every
+position at the next bar through decisions:
+- `abt kernel control --run RUN halt`, the document's file or its signal
+  halts it;
+- `control flatten` closes the positions: the program's decisions at that
+  bar are dropped, and the closing ones are logged, limited and sent like
+  any.
+
+With no session (`--session`, or the document's `recording stream`), the
+run is a rehearsal over the data's replay, or over a recorded run's stream
+with `--replay-of`. This build has no broker adapter (A-D27). `broker mock`
+is a broker in memory that fills every order at the price it was sized at;
+any other broker is refused, naming the adapter it lacks. On the same
+stream a broker's run decides what the simulation decides, and only its
+fills differ (Proposition A-4.3, `crates/abt-tests/tests/live_mock.rs`).
+`abt run` prints the mode, the document's hash and the fills that came from
+the broker after its decision counts.
 
 ## The query layer: `abt-query`
 
@@ -1017,7 +1071,7 @@ abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
         [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
-abt run ... [--mode replay-sim|live-sim --session S] [--replay-of RUN [--paced]] [--deadline SECONDS|none] [--memory-budget BYTES]
+abt run ... [--mode replay-sim|live-sim|live-broker [--session S] [--deployment FILE]] [--replay-of RUN [--paced]] [--deadline SECONDS|none] [--memory-budget BYTES]
 abt hash --strategy NAME [--json | --show] <files...>
 abt show --strategy NAME <files...>
 abt graph --strategy NAME <files...>
@@ -1047,7 +1101,8 @@ abt data pin|unpin [--store DIR] VERSION | --binding B
 abt data gc [--store DIR] [--disk-budget BYTES]
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
-abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
+abt kernel run ... [--mode replay-sim|live-sim|live-broker] [--session S] [--deployment FILE]
+abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint | flatten | release]
 abt query serve [--socket PATH] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
 abt plan|metrics|test|claim|feed|activation|lineage|dispute ... --query SOCKET   (asked of the query service)
 abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
@@ -1121,6 +1176,11 @@ The gates of A-7.1, and where each is checked here:
 | G9 tests | `crates/abt-query/tests/known_answers_*.rs` |
 | G10 performance | `scripts/bench.sh`, measured here and recorded in `docs/assessment.md`; asserted on the reference machine by the owner |
 
+M-10's gate, the live interface over the mock broker, is
+`crates/abt-tests/tests/live_mock.rs`: Proposition A-4.3 (the same
+decisions as the simulation on the same stream, the broker's fills), the
+order lifecycle, reconciliation under each policy, and the kill switch.
+
 ### Company books
 
 The company's two production strategies are written in the language:
@@ -1184,6 +1244,7 @@ the ranges with a note without one.
 | `crates/abt-kernel/src/compiler/`, `analysis/`, `rewrite/`, `plan/`, `lower/` | Normalise (the normal form and the program hash, `abt hash`) and the stage printing behind `abt ir`; Analyse (strata, the open-loop partition, keyedness, demand, window lengths, the abstract interpretation); the rewrites R1 to R6 with their log; the planner and the lowering the kernel executes (`abt show plan`). |
 | `crates/abt-kernel/src/verify/`, `contract/` | The verification tiers (`abt verify`) and the contract derived from a program (`abt contract`, K-3). |
 | `crates/abt-kernel/src/kernel/` | The kernel: `bind.rs` (Bind and the client of the data layer), `fold.rs` (the fold over the stream), `eval.rs` and `eval_set.rs` (rule bodies under Kleene's three-valued conjunction, over blocks of bindings), `rows.rs` (the stored tables' blocks), `pushdown.rs`, `events.rs` (the event log), `outputs.rs` (`kernel.<run>.*`), `checkpoints.rs`, `service.rs` (the kernel service), `mod.rs` (the kernel, `ExecConfig::from_program`, the causality check), `time.rs`, `value.rs`. |
+| `crates/abt-kernel/src/live/` | The live interface (K-6.4, K-6.5): the `Broker` trait, `BrokerExecutor`, the deployment document, reconciliation, the order lifecycle, the kill switch, and `MockBroker`. |
 | `crates/abt-kernel/src/sim/`, `functions/` | The market simulation behind the `Executor` trait (`SimExecutor`): equities, futures, options, the margin models and the limits; the pricing functions (Black–Scholes–Merton, Black 1976, Bjerksund–Stensland 2002, implied volatility). |
 | `crates/abt-kernel/src/query/`, `state/`, `observe.rs` | The query language (parse, check, answer), the state tables and the provenance of a run, the program graph and the coverage report. |
 | `crates/abt-kernel/src/data.rs`, `bundle.rs`, `table.rs` | The Parquet loaders and the bundle format that `bundle_v2` imports with, the deterministic synthetic markets of the three classes (`synthetic_daily`, `synthetic_minute`, `synthetic_futures`), and Parquet tables. |
@@ -1232,7 +1293,7 @@ root, which covers every member.
 
 ## Status
 
-The migration of `docs/spec/05-migration.md` has landed through M-9:
+The migration of `docs/spec/05-migration.md` has landed, M-0 to M-10:
 - Step 0 merged the specification and set up the golden runs.
 - M-0 to M-8 built the workspace, `abt-agg`, the data layer, the second
   formulation over it, contracts and the kernel's outputs, the query layer,
@@ -1241,9 +1302,13 @@ The migration of `docs/spec/05-migration.md` has landed through M-9:
 - M-9 retires the first formulation's commands, and adds the query
   service: each layer now runs as a process of its own, and the
   three-process deployment is tested (ERRATA E-81).
+- M-10 freezes the live interface: the broker trait, `BrokerExecutor`,
+  the deployment document, reconciliation, the order lifecycle and the kill
+  switch, over a mock broker (ERRATA E-82).
 
-M-8's entity-parallel strata were not built (ERRATA E-77 says why). M-10,
-the live interface, is next.
+M-8's entity-parallel strata were not built (ERRATA E-77 says why). No
+broker adapter is part of this build: IBKR's is the live deployment's
+(A-D27).
 
 What this tree cannot run is the owner's:
 - G1's parity runs, against `~/data/ref`;

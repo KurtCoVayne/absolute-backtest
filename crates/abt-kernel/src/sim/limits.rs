@@ -89,7 +89,7 @@ impl SimExecutor {
     /// limit, or warns, and is a `limit_triggered` event. A limit never
     /// stops an order that reduces a position, except a participation
     /// limit, which is the order's size against the bar's volume.
-    pub(super) fn apply_limits(&mut self, k: &mut Kernel, t: i64, pending: &mut BTreeMap<Sym, Vec<(Decision, usize, OrderId)>>, result: &mut RunResult) -> Result<(), RunError> {
+    pub(crate) fn apply_limits(&mut self, k: &mut Kernel, t: i64, pending: &mut BTreeMap<Sym, Vec<(Decision, usize, OrderId)>>, result: &mut RunResult) -> Result<(), RunError> {
         use crate::check::{LimitKind, LimitPolicy};
         let nav = self.nav(k, t);
         let capital = if self.cfg.compounding { nav.max(0.0) } else { self.cfg.initial_cash };

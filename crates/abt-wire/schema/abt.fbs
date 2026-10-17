@@ -407,7 +407,7 @@ table KernelRequest {
   strategy: string;
   point: [ParamValue];
   // `show`: program | plan [R] | schedule | calendars | contract;
-  // `control`: halt | checkpoint | flatten.
+  // `control`: halt | checkpoint | flatten | release.
   what: string;
   run_id: string;
   // `query`: the query's text (V-8).
@@ -435,6 +435,12 @@ table KernelRequest {
   // `run`: relations observed beyond the program's own (`run ... observe`,
   // Q-2.2).
   observe: [string];
+  // `run`: the mode (replay-sim, the default; live-sim; live-broker), the
+  // live session a live run reads, and a live run's deployment document as
+  // its text (K-6.5).
+  mode: string;
+  session: string;
+  deployment: string;
 }
 
 // A span of times, `[from, to)`.

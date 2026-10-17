@@ -5,10 +5,11 @@
 //! abt kernel check    [--kernel SOCKET] --strategy NAME <files...>
 //! abt kernel contract [--kernel SOCKET] --strategy NAME <files...>
 //! abt kernel show     [--kernel SOCKET] (--run RUN | --strategy NAME <files...>) [--what program|plan R|schedule|calendars|contract]
-//! abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
+//! abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY]
+//!                     [--mode replay-sim|live-sim|live-broker] [--session S] [--deployment FILE] <files...>
 //! abt kernel query    [--kernel SOCKET] --run RUN --text QUERY [--json]
 //! abt kernel status   [--kernel SOCKET] [--run RUN]
-//! abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten
+//! abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten|release
 //! ```
 //!
 //! The kernel's socket defaults to the layer's (`$XDG_RUNTIME_DIR/abt/kernel.sock`
@@ -41,7 +42,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt kernel serve    [--socket PATH] --data SOCKET\n  abt kernel check    [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel contract [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel show     [--kernel SOCKET] (--run RUN | --strategy NAME <files...>) [--what program|plan R|schedule|calendars|contract]\n  abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>\n  abt kernel query    [--kernel SOCKET] --run RUN --text QUERY [--json]\n  abt kernel status   [--kernel SOCKET] [--run RUN]\n  abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten"
+        "usage:\n  abt kernel serve    [--socket PATH] --data SOCKET\n  abt kernel check    [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel contract [--kernel SOCKET] --strategy NAME <files...>\n  abt kernel show     [--kernel SOCKET] (--run RUN | --strategy NAME <files...>) [--what program|plan R|schedule|calendars|contract]\n  abt kernel run      [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY]\n                      [--mode replay-sim|live-sim|live-broker] [--session S] [--deployment FILE] <files...>\n  abt kernel query    [--kernel SOCKET] --run RUN --text QUERY [--json]\n  abt kernel status   [--kernel SOCKET] [--run RUN]\n  abt kernel control  [--kernel SOCKET] --run RUN halt|checkpoint|flatten|release"
     );
     exit(2)
 }
@@ -123,6 +124,9 @@ fn request(op: KernelOp) -> KernelRequest {
         plan_step: None,
         embargo_mask: None,
         observe: None,
+        mode: None,
+        session: None,
+        deployment: None,
     }
 }
 
@@ -229,6 +233,14 @@ pub fn main(args: &[String]) {
             r.progress_every = a.opts.get("progress").map(|n| n.parse().unwrap_or_else(|_| fail("--progress takes a number of barriers")));
             r.checkpoint_every = a.opts.get("checkpoint-every").cloned();
             r.from_checkpoint = a.opts.get("resume").cloned();
+            // A live run (K-6.2, K-6.4): its mode, session and deployment
+            // document, sent as its text.
+            r.mode = a.opts.get("mode").cloned();
+            r.session = a.opts.get("session").cloned();
+            r.deployment = a
+                .opts
+                .get("deployment")
+                .map(|p| std::fs::read_to_string(p).unwrap_or_else(|e| fail(&format!("--deployment {}: {}", p, e))));
             let c = client(&a);
             let (mut m, mut reply) = answer(&c, r);
             loop {

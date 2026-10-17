@@ -55,7 +55,7 @@ impl SimExecutor {
 
     /// What `q` units of `sym` at `p` add to the NAV: the notional, or for a
     /// future margined daily, the variation against `reference` (E-10).
-    pub(super) fn value_at(&self, k: &Kernel, sym: Sym, q: f64, p: f64, reference: Option<f64>) -> f64 {
+    pub(crate) fn value_at(&self, k: &Kernel, sym: Sym, q: f64, p: f64, reference: Option<f64>) -> f64 {
         match reference {
             Some(r) if self.settled_daily(k, sym) => q * (p - r) * k.multiplier(sym),
             _ => q * p * k.multiplier(sym),
@@ -63,7 +63,7 @@ impl SimExecutor {
     }
 
     /// The book's value of its position in `sym` at `p` (K-5.1).
-    pub(super) fn position_value(&self, k: &Kernel, sym: Sym, q: f64, p: f64) -> f64 {
+    pub(crate) fn position_value(&self, k: &Kernel, sym: Sym, q: f64, p: f64) -> f64 {
         self.value_at(k, sym, q, p, self.book.reference.get(&sym).copied())
     }
 
@@ -82,7 +82,7 @@ impl SimExecutor {
 
     /// The reference a future margined daily is valued against after a
     /// fill at `price`: the position's, or the fill's when it opens one.
-    pub(super) fn fill_reference(&self, k: &Kernel, sym: Sym, price: f64) -> Option<f64> {
+    pub(crate) fn fill_reference(&self, k: &Kernel, sym: Sym, price: f64) -> Option<f64> {
         if !self.settled_daily(k, sym) {
             return None;
         }
@@ -92,7 +92,7 @@ impl SimExecutor {
     /// The cash a fill of `qty` at `price` moves before its costs: the
     /// notional, or for a future margined daily, the variation of the units
     /// against the reference.
-    pub(super) fn traded_cash(&self, k: &Kernel, sym: Sym, qty: f64, price: f64) -> f64 {
+    pub(crate) fn traded_cash(&self, k: &Kernel, sym: Sym, qty: f64, price: f64) -> f64 {
         match self.fill_reference(k, sym, price) {
             Some(r) => qty * (price - r) * k.multiplier(sym),
             None => qty * price * k.multiplier(sym),

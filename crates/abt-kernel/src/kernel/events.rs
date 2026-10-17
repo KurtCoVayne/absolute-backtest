@@ -68,6 +68,9 @@ pub enum Fate {
     Expired,
     /// A target's remainder re-issues at the next bar.
     Reissued,
+    /// A broker's partial fill: the remainder works on at the broker
+    /// (K-6.4).
+    Working,
 }
 
 /// The four flows of funding (K-5.2 `funding`).
@@ -187,6 +190,21 @@ pub enum EventKind {
     /// requirement, the equity, and the forced fills by their seq, the
     /// largest maintenance per unit first.
     ForcedLiquidation { requirement: f64, equity: f64, fills: Vec<u64> },
+    /// The book against the broker's account at a session open or a
+    /// reconnect (K-6.4), where they differ: each instrument's position in
+    /// the book and at the broker, the cash in each, and the deployment's
+    /// policy. Under `adopt` the book becomes the broker's (the positions
+    /// here, the cash by the event's cash flow); under `warn` it stands.
+    Reconciliation {
+        policy: String,
+        at: String,
+        positions: Vec<(Sym, f64, f64)>,
+        cash: (f64, f64),
+        adopted: bool,
+    },
+    /// The kill switch (K-6.5): `halt_all` or `flatten_all`, and what asked
+    /// for it (a control request, a file).
+    Control { action: String, source: String },
 }
 
 impl EventKind {
@@ -220,6 +238,8 @@ impl EventKind {
             EventKind::Roll { .. } => "roll",
             EventKind::ContractExpiry { .. } => "contract_expiry",
             EventKind::ForcedLiquidation { .. } => "forced_liquidation",
+            EventKind::Reconciliation { .. } => "reconciliation",
+            EventKind::Control { .. } => "control",
         }
     }
 }
@@ -376,6 +396,11 @@ impl Book {
                         *c /= price_divisor;
                     }
                     self.set_position(sym, *position);
+                }
+            }
+            EventKind::Reconciliation { positions, adopted: true, .. } => {
+                for &(sym, _, broker) in positions {
+                    self.set_position(sym, broker);
                 }
             }
             _ => {}

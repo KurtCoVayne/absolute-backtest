@@ -552,7 +552,9 @@ impl Invariants {
         for e in result.events[self.applied..].iter() {
             if let EventKind::Decision { decision } = &e.kind {
                 decisions += 1;
-                if e.t == t && !seen.insert(decision.equity) {
+                // The program's decisions (F-5): the kill switch's closing
+                // decisions supersede them (K-6.5).
+                if e.t == t && e.rule != Some(crate::check::NO_RULE) && !seen.insert(decision.equity) {
                     duplicate_decision = Some(format!("two decisions on {} at the bar", k.symbols.name(decision.equity)));
                 }
             }
@@ -579,11 +581,14 @@ impl Invariants {
         }
         // Gross after the bar's fills that added exposure, against the
         // leverage field when it refuses or halts (the costs of the bar are
-        // never leverage; `allow` lets a fill borrow past the multiple).
+        // never leverage; `allow` lets a fill borrow past the multiple). A
+        // broker's fill is the broker's, at a price the kernel did not set:
+        // its leverage is the estimate the order was sent under (K-6.4,
+        // ERRATA E-82).
         let mut gross = None;
         if k.cfg.max_gross.is_finite() && k.cfg.on_leverage != crate::kernel::OnLeverage::Allow {
             let adding = result.events[self.applied..].iter().any(|e| match &e.kind {
-                EventKind::Fill { fill, .. } if !fill.forced && fill.t == t => {
+                EventKind::Fill { fill, .. } if !fill.forced && fill.broker.is_none() && fill.t == t => {
                     let before = self.shadow.position(fill.equity);
                     (before + fill.quantity).abs() > before.abs()
                 }
@@ -682,7 +687,8 @@ pub fn order_outcomes(result: &RunResult) -> BTreeMap<OrderId, &'static str> {
                 remainder: Some((_, Fate::Reissued)), ..
             } => "open",
             EventKind::Fill {
-                remainder: Some((_, Fate::Expired)), ..
+                remainder: Some((_, Fate::Expired | Fate::Working)),
+                ..
             } => "open",
             EventKind::Fill { .. } => "filled",
             EventKind::Dropped { .. } | EventKind::Rejected { .. } => "dropped",
@@ -698,16 +704,25 @@ pub fn order_outcomes(result: &RunResult) -> BTreeMap<OrderId, &'static str> {
 
 /// The postconditions when the run finishes, and the limits' report.
 pub fn postconditions(result: &mut RunResult, prog: &Program, initial_cash: f64, observed: bool) {
-    // Every decision is one order; every order ends once or is open.
+    // Every decision is one order, or is dropped before it is one (`late
+    // reject`, the kill switch's `flatten_all`); every order ends once or
+    // is open.
     let decisions = result.events.iter().filter(|e| matches!(e.kind, EventKind::Decision { .. })).count();
+    let unsent = result.events.iter().filter(|e| e.order_id.is_none() && matches!(e.kind, EventKind::Dropped { .. })).count();
     let outcomes = order_outcomes(result);
     let open = outcomes.values().filter(|o| **o == "open").count();
-    let status = if outcomes.len() == decisions && open <= result.symbols.len() {
+    let status = if outcomes.len() + unsent == decisions && open <= result.symbols.len() {
         Status::Checked { times: outcomes.len() as u64 }
     } else {
         Status::Violated {
             at: None,
-            detail: format!("{} decisions, {} orders with an outcome, {} open at the end", decisions, outcomes.len(), open),
+            detail: format!(
+                "{} decisions, {} orders with an outcome and {} dropped unsent, {} open at the end",
+                decisions,
+                outcomes.len(),
+                unsent,
+                open
+            ),
         }
     };
     result.contract.set("post.decisions", status);

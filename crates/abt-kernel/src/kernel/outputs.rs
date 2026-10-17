@@ -201,8 +201,11 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
                     participation[i] = Some(fill.participation);
                     partial[i] = Some(fill.partial);
                     forced[i] = Some(fill.forced);
-                    source[i] = Some("sim".to_string());
+                    source[i] = Some(if fill.broker.is_some() { "broker" } else { "sim" }.to_string());
                     let mut d = serde_json::json!({"at_last_price": fill.at_last_price});
+                    if let Some(order) = &fill.broker {
+                        d["broker_order"] = serde_json::json!(order);
+                    }
                     if let Some((left, fate)) = remainder {
                         d["remainder"] = serde_json::json!(left);
                         d["fate"] = serde_json::json!(format!("{:?}", fate).to_lowercase());
@@ -317,6 +320,18 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
                 }
                 EventKind::ForcedLiquidation { requirement, equity, fills } => {
                     detail[i] = Some(serde_json::json!({"requirement": requirement, "equity": equity, "fills": fills}).to_string());
+                }
+                EventKind::Reconciliation { policy, at, positions, cash, adopted } => {
+                    reason[i] = Some(format!("reconcile {} at {}", policy, at));
+                    let held: Vec<serde_json::Value> = positions
+                        .iter()
+                        .map(|(s, book, broker)| serde_json::json!({"instrument": id_of(*s), "name": result.symbols.get(*s as usize), "book": book, "broker": broker}))
+                        .collect();
+                    detail[i] = Some(serde_json::json!({"policy": policy, "at": at, "adopted": adopted, "positions": held, "cash": {"book": cash.0, "broker": cash.1}}).to_string());
+                }
+                EventKind::Control { action, source: from } => {
+                    reason[i] = Some(action.clone());
+                    detail[i] = Some(serde_json::json!({"action": action, "source": from}).to_string());
                 }
             }
         }
@@ -450,7 +465,11 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
             )
             .col("forced", Role::Value, Col::Bool(fills.iter().map(|f| Some(f.1.forced)).collect()))
             .col("partial", Role::Value, Col::Bool(fills.iter().map(|f| Some(f.1.partial)).collect()))
-            .col("source", Role::Value, Col::Label(fills.iter().map(|_| Some("sim".to_string())).collect()))
+            .col(
+                "source",
+                Role::Value,
+                Col::Label(fills.iter().map(|f| Some(if f.1.broker.is_some() { "broker" } else { "sim" }.to_string())).collect()),
+            )
             .finish()?,
     );
     // The late tuples.
@@ -584,8 +603,12 @@ fn summaries(run: &str, prog: &Program, bound: &Bound, cfg: &ExecConfig, result:
                 .col("version", Role::Value, Col::Label(rows.iter().map(|r| Some(r.1.clone())).collect()))
                 .col("program_hash", Role::Value, Col::Label(vec![Some(nir.hash.clone()); n]))
                 .col("binding_id", Role::Value, Col::Label(vec![bound.binding.id.clone(); n]))
-                .col("mode", Role::Value, Col::Label(vec![Some("replay-sim".to_string()); n]))
-                .col("deployment_hash", Role::Value, Col::Label(vec![None; n]))
+                .col(
+                    "mode",
+                    Role::Value,
+                    Col::Label(vec![Some(if result.mode.is_empty() { "replay-sim".to_string() } else { result.mode.clone() }); n]),
+                )
+                .col("deployment_hash", Role::Value, Col::Label(vec![result.deployment_hash.clone(); n]))
                 .col("point", Role::Value, Col::Bytes(vec![Some(point.to_string()); n]))
                 .col("normal_form", Role::Value, Col::Bytes(vec![Some(nir.source(prog)); n]))
                 .col("configuration", Role::Value, Col::Bytes(vec![Some(serde_json::to_string(cfg).unwrap_or_default()); n]))

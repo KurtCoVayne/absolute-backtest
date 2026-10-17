@@ -98,6 +98,9 @@ fn request(op: KernelOp) -> KernelRequest {
         plan_step: None,
         embargo_mask: None,
         observe: None,
+        mode: None,
+        session: None,
+        deployment: None,
     }
 }
 

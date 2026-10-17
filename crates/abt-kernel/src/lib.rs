@@ -18,6 +18,7 @@ pub mod functions;
 pub mod ir;
 pub mod kernel;
 pub mod kernel_cli;
+pub mod live;
 pub mod lower;
 pub mod observe;
 pub mod plan;
