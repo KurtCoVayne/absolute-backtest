@@ -460,6 +460,39 @@ table KernelResponse {
   has_table: bool;
 }
 
+// ---------------------------------------------------------------- query service
+
+// P-3.5: the query layer's requests, one table for its commands (`op` says
+// which; ERRATA E-81). A request carries what its command reads, so the
+// service reads no file of the client's: the command's words, a plan's
+// text, and the program a plan or a lineage names. The service runs the
+// command against the data and kernel services it was started with.
+enum QueryLayerOp : ubyte { Plan = 0, Lineage = 1, Dispute = 2, Metrics = 3, Test = 4, Claim = 5, Feed = 6, Activation = 7 }
+
+table QueryLayerRequest {
+  op: QueryLayerOp;
+  // The command's words after its name, as its command line writes them
+  // (`run PLAN`, `--json`, `--threads 4`, a test's `NAME on INPUT`), less
+  // the transport options; the files they name travel below.
+  args: [string];
+  // `plan`: the plan's text.
+  plan: string;
+  // `plan`, `lineage`, `dispute`: the program's sources and its strategy.
+  sources: [SourceFile];
+  strategy: string;
+}
+
+// The command's answer, in parts of at most 256 KiB: what it printed (its
+// JSON under `--json`) and its notes. The last part is `done` and carries
+// the exit status the command line reports.
+table QueryLayerResponse {
+  op: QueryLayerOp;
+  out: string;
+  err: string;
+  done: bool;
+  status: int;
+}
+
 // Every control message; a frame's kind says which half (request, response)
 // the receiver expects, the correlation id pairs them (P-2.3).
 union Message {
@@ -487,7 +520,9 @@ union Message {
   TableFollows,
   Done,
   KernelRequest,
-  KernelResponse
+  KernelResponse,
+  QueryLayerRequest,
+  QueryLayerResponse
 }
 
 table Envelope {

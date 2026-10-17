@@ -13,11 +13,61 @@ pub mod data_cli;
 pub mod query_cli;
 
 use abt_data::adapter::{ingest_empty, ingest_keyed, securities_of, terms_of};
-use abt_data::service::{inproc, DataService};
+use abt_data::service::DataService;
 use abt_data::Store;
 use abt_kernel::check::Program;
 use abt_kernel::kernel::bind::{keyed_tables, schema_in};
+use abt_kernel::kernel::service::KernelService;
 use abt_kernel::kernel::{Connector, Dataset};
+use abt_wire::rpc::{serve, Service};
+use abt_wire::transport::{bind, Connection};
+
+/// Whether the layers of this process reach each other over Unix sockets
+/// rather than in-process channels: `ABT_TRANSPORT=socket`. The frames are
+/// the same either way (P-2.1), so the suite runs both ways, and CI runs it
+/// over sockets too (M-9, ERRATA E-81).
+pub fn over_sockets() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ABT_TRANSPORT").is_ok_and(|v| v == "socket"))
+}
+
+/// A connection to a service of this process over a socket listened on for
+/// it alone: accepted once, its file removed once connected.
+fn socket_to(service: Arc<dyn Service>) -> Result<Connection, String> {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir().join("abt-sockets").join(format!("{}-{}.sock", std::process::id(), n));
+    let listener = bind(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            if let Ok(conn) = Connection::socket(stream) {
+                let _ = serve(conn, service);
+            }
+        }
+    });
+    let conn = Connection::connect(&path).map_err(|e| format!("{}: {}", path.display(), e));
+    let _ = std::fs::remove_file(&path);
+    conn
+}
+
+/// A connection to a data service of this process: an in-process channel,
+/// or a socket under `ABT_TRANSPORT=socket`.
+pub fn connect_data(service: &Arc<DataService>) -> Result<Connection, String> {
+    if over_sockets() {
+        socket_to(service.clone())
+    } else {
+        Ok(abt_data::service::inproc(service))
+    }
+}
+
+/// A connection to a kernel service of this process, as `connect_data`.
+pub fn connect_kernel(service: &Arc<KernelService>) -> Result<Connection, String> {
+    if over_sockets() {
+        socket_to(service.clone())
+    } else {
+        Ok(abt_kernel::kernel::service::inproc(service))
+    }
+}
 
 /// The source a dataset held in memory is ingested under.
 pub const SOURCE: &str = "dataset";
@@ -68,7 +118,7 @@ pub fn serve_dataset(ds: &Dataset, prog: &Program) -> Result<Arc<DataService>, S
 /// one is asked for.
 pub fn provider(ds: &Dataset, prog: &Program) -> Result<Connector, String> {
     let svc = serve_dataset(ds, prog)?;
-    Ok(Arc::new(move || Ok(inproc(&svc))))
+    Ok(Arc::new(move || connect_data(&svc)))
 }
 
 /// The provider the kernel reaches a store directory through: a service in
@@ -76,7 +126,7 @@ pub fn provider(ds: &Dataset, prog: &Program) -> Result<Connector, String> {
 pub fn store_provider(dir: &std::path::Path) -> Result<Connector, String> {
     let store = Store::open(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     let svc = DataService::new(store);
-    Ok(Arc::new(move || Ok(inproc(&svc))))
+    Ok(Arc::new(move || connect_data(&svc)))
 }
 
 /// Registers with the kernel the providers of in-process data services

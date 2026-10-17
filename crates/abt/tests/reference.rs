@@ -17,7 +17,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use abt_data::service::{inproc, DataService};
+use abt_data::service::DataService;
 use abt_data::Store;
 use abt_kernel::check::Program;
 use abt_kernel::data::{business_days, synthetic_daily};
@@ -52,7 +52,7 @@ fn stored(tag: &str, prog: &Program, ds: &Dataset, cfg: ExecConfig) -> Result<(S
     let attributes = abt::dataset_attributes(ds, &prog.base.to_string(), &BTreeMap::new());
     abt::ingest_dataset(&mut store, ds, &prog.class, &attributes).map_err(RunError::Config)?;
     let svc = DataService::new(store);
-    let client = DataClient::connect(inproc(&svc))?;
+    let client = DataClient::connect(abt::connect_data(&svc).map_err(RunError::Config)?)?;
     let opts = Replay {
         write_outputs: true,
         ..Default::default()

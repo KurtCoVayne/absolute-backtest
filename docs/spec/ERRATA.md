@@ -908,6 +908,56 @@ batch driver agree on every corpus program. Each bless since:
     Before, it was refused unless a socket was named. The query reuses its
     run's data service rather than opening a second one over the same
     directory. The usage says the same of checkpoints and `--resume`.
+- **E-81 (P-3.5, Q-9, Definition A-2.1, M-9's gate; the query service and
+  the three processes).**
+  - **The query service.** `abt query serve [--socket PATH] (--data SOCKET
+    | --store DIR) [--kernel SOCKET... | --kernels N]` serves the query
+    layer's commands (P-3.5) and runs each against the data and kernel
+    services it was started with. P-3.5's requests are one message,
+    `QueryLayerRequest`, whose `op` names the command (plan, lineage,
+    dispute, metrics, test, claim, feed, activation). It carries:
+    - the command's words as its command line writes them, less the
+      transport options;
+    - what the command reads from files: a plan's text, and the program a
+      plan or a lineage names (its sources and strategy). The service
+      reads no file of the client's.
+  - **The answer** is what the command printed, its notes and its exit
+    status (`QueryLayerResponse`, in parts of at most 256 KiB, the last one
+    `done`). It is the command's text, or its JSON under `--json`, rather
+    than P-3.5's records per request, so a command answers the same
+    through the service as in the client's process. A plan's progress is
+    not streamed: the answer comes when the plan has run.
+  - **The client.** A query-layer command given `--query SOCKET` is asked
+    of the service. The front reads the files the command names and sends
+    them with it. The command prints the same and exits the same, but for
+    the instant a plan's execution records.
+  - **The binaries.** Definition 2.1's `abt-data` and `abt-query` are not
+    binaries of their own. Their commands and `serve` modes are the
+    front's (`abt data ...`, `abt query serve`, `abt plan ...`), as `abt
+    kernel serve` is beside `abt-kernel`. The data layer's synthetic and
+    bundle imports use the kernel crate's generators and bundle reader,
+    which `abt-data` may not depend on. Each layer's library is its crate,
+    and each layer's service runs as a process of its own, which is what
+    the gates need.
+  - **The three-process deployment** (`crates/abt/tests/deployment.rs`)
+    starts `abt data serve`, `abt kernel serve` and `abt query serve`. It
+    runs a plan through the query service and a program through the kernel
+    service, and the same commands in one process over a second store of
+    the same market. Then:
+    - the plan's execution is the same, but for its instant `at`;
+    - the runs have the same ids;
+    - every run's outputs hold the same rows. Those keyed by time and an
+      entity or the run's seq come out byte for byte. Those keyed by a
+      label come out in the order of each store's label codes (E-32),
+      which two stores written in a different interleaving need not share.
+  - **The suite over sockets.** `ABT_TRANSPORT=socket` connects the layers
+    of one process over Unix sockets rather than in-process channels: the
+    front's data services over a dataset or a store directory, its kernel
+    services, and the shared fixtures'. Each connection gets a socket of its
+    own, removed once connected. `ABT_TRANSPORT=socket cargo test
+    --workspace` passes here. A CI job running it is the owner's to add,
+    since this work does not edit `.github/workflows/`. The suites that test
+    a transport (`determinism.rs`, the services' own tests) name theirs.
 
 ## Data layer and protocol
 

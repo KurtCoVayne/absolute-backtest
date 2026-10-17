@@ -46,16 +46,17 @@ abt query --strategy sma_crossover --text 'trace decide at 2022-04-07' --text 'w
 abt query --strategy sma_crossover --text '? above(A, T), close(A, T, P), P > 50 USD/share at T = 2022-04-07' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 ```
 
-As three processes over sockets (a socket's path must be shorter than 108
-bytes):
+As three processes over sockets, one per layer (a socket's path must be
+shorter than 108 bytes):
 
 ```
 abt data serve --store ./store --socket data.sock &
 abt kernel serve --socket kernel.sock --data data.sock &
+abt query serve --socket query.sock --data data.sock --kernel kernel.sock &
 abt kernel run --kernel kernel.sock --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN`
 abt kernel query --kernel kernel.sock --run RUN --text 'coverage'
-abt metrics --run RUN --data data.sock
-abt plan run study.plan corpus-v2/catalog corpus-v2/lib --data data.sock --kernel kernel.sock
+abt plan run study.plan corpus-v2/catalog corpus-v2/lib --query query.sock
+abt metrics --run RUN --query query.sock
 ```
 
 A run reads its data from a store:
@@ -893,7 +894,11 @@ The query layer never evaluates a program. It asks the kernel for runs and
 reads their tables back from the store, through the data service like every
 other reader (A-D13, A-D17). Its commands are `abt plan`, `abt metrics`,
 `abt test`, `abt claim`, `abt feed`, `abt activation`, `abt lineage`,
-`abt dispute` and `abt briefs`.
+`abt dispute` and `abt briefs`. Each runs in the process that gives it, or,
+with `--query SOCKET`, in the query service `abt query serve` (P-3.5),
+which reaches the data and kernel services it was started with. The front
+reads the files a command names and sends them with it, and the command
+prints the same, with the same exit status (ERRATA E-81).
 
 ### Metrics
 
@@ -1043,6 +1048,8 @@ abt data gc [--store DIR] [--disk-budget BYTES]
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
+abt query serve [--socket PATH] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt plan|metrics|test|claim|feed|activation|lineage|dispute ... --query SOCKET   (asked of the query service)
 abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
 ```
 
@@ -1105,7 +1112,7 @@ The gates of A-7.1, and where each is checked here:
 | --- | --- |
 | G1 parity | The owner's: `scripts/parity/` against the books' references (`docs/parity-inputs.md`). Its stand-in here is `crates/abt-tests/tests/tv_golden.rs`: every corpus-v2 strategy and both books held to their golden runs, which change only in a commit that names the change, recorded in the ERRATA. |
 | G2 corpus | `crates/abt-tests/tests/corpus_v2.rs` |
-| G3 determinism | `crates/abt-tests/tests/determinism.rs`: in process against a socket, 1 against 8 data threads, 1 against 4 kernels |
+| G3 determinism | `crates/abt-tests/tests/determinism.rs`: in process against a socket, 1 against 8 data threads, 1 against 4 kernels. `crates/abt/tests/deployment.rs`: the three-process deployment (`abt data serve`, `abt kernel serve`, `abt query serve`) gives the runs the front gives in one process. `ABT_TRANSPORT=socket` runs the whole suite with the layers of each process connected over sockets |
 | G4 replay | `crates/abt-tests/tests/replay.rs`, on a recorded synthetic feed; a recorded Databento session is the owner's |
 | G5 fold | `crates/abt-tests/tests/fold.rs` (truncation at every sampled barrier), `checkpoint.rs` and `fold_checkpoint.rs` (resume from every monthly checkpoint) |
 | G6 reference | `crates/abt/tests/reference.rs` (below) |
@@ -1181,8 +1188,8 @@ the ranges with a note without one.
 | `crates/abt-kernel/src/query/`, `state/`, `observe.rs` | The query language (parse, check, answer), the state tables and the provenance of a run, the program graph and the coverage report. |
 | `crates/abt-kernel/src/data.rs`, `bundle.rs`, `table.rs` | The Parquet loaders and the bundle format that `bundle_v2` imports with, the deterministic synthetic markets of the three classes (`synthetic_daily`, `synthetic_minute`, `synthetic_futures`), and Parquet tables. |
 | `crates/abt-kernel/src/cli.rs`, `kernel_cli.rs` | The kernel's command line and `abt kernel ...`. |
-| `crates/abt-query/src/` | The query layer: `plan/` (parse, normal form, the executor, claims, lineages, trials), `metrics/`, `tests/` (the framework, dependence, resampling, HAC, the starting set), `feed.rs`, `activation.rs`, `report.rs`, `briefs.rs`, and `kernel.rs` and `data.rs`, its clients of the other two. |
-| `crates/abt/src/` | The front: `main.rs` dispatches, `lib.rs` wires the layers in one process, `data_cli.rs` and `query_cli.rs` are the data and query layers' commands. |
+| `crates/abt-query/src/` | The query layer: `plan/` (parse, normal form, the executor, claims, lineages, trials), `metrics/`, `tests/` (the framework, dependence, resampling, HAC, the starting set), `feed.rs`, `activation.rs`, `report.rs`, `briefs.rs`, `service.rs` (the query service, P-3.5), and `kernel.rs` and `data.rs`, its clients of the other two. |
+| `crates/abt/src/` | The front: `main.rs` dispatches, `lib.rs` wires the layers in one process (over in-process channels, or sockets under `ABT_TRANSPORT=socket`), `data_cli.rs` and `query_cli.rs` are the data and query layers' commands and `abt query serve`. |
 | `corpus-v2/catalog/` | The three classes a program is written against: `equity`, `future` and `series`. A program never names them; its `data` block names what it needs. |
 | `corpus-v2/lib/` | The standard library of V-7, one module a file (`calendar`, `catalog`, `stat`, `bars`, `xsec`, `state`, `book`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
 | `corpus-v2/strategies/`, `company/`, `negative/` | 24 strategies that must check clean; MW14 and R8L as V-9 gives them; 35 negative cases, one or more per judgment code, each file's `# expect:` header asserted by `crates/abt-tests/tests/corpus_v2.rs`. |
@@ -1195,6 +1202,7 @@ the ranges with a note without one.
 ```
 cargo test --test corpus_v2      # the acceptance corpus: checks, negative cases, runs on synthetic data
 cargo test                       # every suite
+ABT_TRANSPORT=socket cargo test  # every suite, the layers of each process connected over sockets
 cargo build --release
 ```
 
@@ -1230,7 +1238,9 @@ The migration of `docs/spec/05-migration.md` has landed through M-9:
   formulation over it, contracts and the kernel's outputs, the query layer,
   the resolver and the vendors, options and futures, and the performance
   work.
-- M-9 retires the first formulation's commands.
+- M-9 retires the first formulation's commands, and adds the query
+  service: each layer now runs as a process of its own, and the
+  three-process deployment is tested (ERRATA E-81).
 
 M-8's entity-parallel strata were not built (ERRATA E-77 says why). M-10,
 the live interface, is next.

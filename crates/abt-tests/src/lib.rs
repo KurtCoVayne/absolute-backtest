@@ -350,13 +350,13 @@ pub fn run_keeping<T: Send>(
 pub fn stored_run(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> Result<(abt_kernel::kernel::RunResult, abt_query::run::Run), String> {
     init();
     let svc = abt::serve_dataset(ds, prog)?;
-    let client = abt_kernel::kernel::DataClient::connect(abt_data::service::inproc(&svc)).map_err(|e| e.to_string())?;
+    let client = abt_kernel::kernel::DataClient::connect(abt::connect_data(&svc)?).map_err(|e| e.to_string())?;
     let opts = abt_kernel::kernel::Replay {
         write_outputs: true,
         ..Default::default()
     };
     let r = abt_kernel::kernel::run_on(prog, None, &client, cfg, &opts).map_err(|e| e.to_string())?;
-    let data = abt_query::data::Data::connect(abt_data::service::inproc(&svc)).map_err(|e| e.to_string())?;
+    let data = abt_query::data::Data::connect(abt::connect_data(&svc)?).map_err(|e| e.to_string())?;
     let stored = abt_query::run::Run::read(&data, &r.run_id).map_err(|e| e.to_string())?;
     Ok((r, stored))
 }
@@ -449,12 +449,14 @@ pub fn plan_program(src: &str, name: &str) -> abt_query::kernel::Program {
 /// in this process; the query layer's clients of them.
 pub fn plan_services(prog: &Program, ds: &Dataset, n: usize) -> (abt_query::data::Data, Vec<abt_query::kernel::Kernel>) {
     let svc = abt::serve_dataset(ds, prog).unwrap();
-    let data = abt_query::data::Data::connect(abt_data::service::inproc(&svc)).unwrap();
+    let data = abt_query::data::Data::connect(abt::connect_data(&svc).unwrap()).unwrap();
     let kernels = (0..n)
         .map(|_| {
             let s = svc.clone();
-            let k = abt_kernel::kernel::service::KernelService::new(std::sync::Arc::new(move || abt_kernel::kernel::DataClient::connect(abt_data::service::inproc(&s))));
-            abt_query::kernel::Kernel::connect(abt_kernel::kernel::service::inproc(&k)).unwrap()
+            let k = abt_kernel::kernel::service::KernelService::new(std::sync::Arc::new(move || {
+                abt::connect_data(&s).map_err(abt_kernel::kernel::RunError::Config).and_then(abt_kernel::kernel::DataClient::connect)
+            }));
+            abt_query::kernel::Kernel::connect(abt::connect_kernel(&k).unwrap()).unwrap()
         })
         .collect();
     (data, kernels)

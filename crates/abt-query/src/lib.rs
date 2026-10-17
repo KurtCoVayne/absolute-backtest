@@ -15,6 +15,7 @@ pub mod plan;
 pub mod relation;
 pub mod report;
 pub mod run;
+pub mod service;
 pub mod sheet;
 pub mod tests;
 pub mod time;

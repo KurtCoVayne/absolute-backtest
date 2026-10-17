@@ -9,6 +9,67 @@ use crate::data::Data;
 use crate::metrics;
 use crate::run::Run;
 
+/// Where a command writes: the process's standard output and error (the
+/// front), or buffers the query service answers with (P-3.5).
+pub trait Io {
+    fn out(&mut self, s: &str);
+    fn err(&mut self, s: &str);
+}
+
+/// Standard output and error.
+pub struct Console;
+
+impl Io for Console {
+    fn out(&mut self, s: &str) {
+        print!("{}", s);
+    }
+
+    fn err(&mut self, s: &str) {
+        eprint!("{}", s);
+    }
+}
+
+/// What a command wrote, kept.
+#[derive(Clone, Debug, Default)]
+pub struct Captured {
+    pub out: String,
+    pub err: String,
+}
+
+impl Io for Captured {
+    fn out(&mut self, s: &str) {
+        self.out.push_str(s);
+    }
+
+    fn err(&mut self, s: &str) {
+        self.err.push_str(s);
+    }
+}
+
+/// A line to a command's output.
+macro_rules! say {
+    ($io:expr) => {
+        $io.out("\n")
+    };
+    ($io:expr, $($t:tt)*) => {
+        $io.out(&format!("{}\n", format_args!($($t)*)))
+    };
+}
+
+/// Text to a command's output, as it is.
+macro_rules! put {
+    ($io:expr, $($t:tt)*) => {
+        $io.out(&format!($($t)*))
+    };
+}
+
+/// A line to a command's error output.
+macro_rules! complain {
+    ($io:expr, $($t:tt)*) => {
+        $io.err(&format!("{}\n", format_args!($($t)*)))
+    };
+}
+
 /// A run's metrics as one record (`--json`), with the versions of the
 /// tables they were computed from (Q-3.1: every metric is recorded with its
 /// tables' versions).
@@ -91,13 +152,18 @@ pub fn run_lines(conn: Connection, run: &str, calendar: &str) -> Result<RunLines
     })
 }
 
-fn usage() -> i32 {
-    eprintln!("usage:\n  abt metrics --run RUN (--data SOCKET | --store DIR) [--json]   (a run's metrics, from the tables it wrote to the store: returns, trading, the report block's periods, capacity, sub-period Sharpe ratios)");
+fn usage(io: &mut dyn Io) -> i32 {
+    complain!(io, "usage:\n  abt metrics --run RUN (--data SOCKET | --store DIR | --query SOCKET) [--json]   (a run's metrics, from the tables it wrote to the store: returns, trading, the report block's periods, capacity, sub-period Sharpe ratios)");
     2
 }
 
 /// `abt metrics` over a connection to the data service; the exit code.
 pub fn metrics_main(args: &[String], conn: Connection) -> i32 {
+    metrics_main_io(args, conn, &mut Console)
+}
+
+/// `abt metrics`, written to `io`.
+pub fn metrics_main_io(args: &[String], conn: Connection, io: &mut dyn Io) -> i32 {
     let mut run = None;
     let mut json = false;
     let mut i = 0;
@@ -109,60 +175,67 @@ pub fn metrics_main(args: &[String], conn: Connection) -> i32 {
             }
             "--json" => json = true,
             "--data" | "--store" => i += 1,
-            _ => return usage(),
+            _ => return usage(io),
         }
         i += 1;
     }
-    let Some(run) = run else { return usage() };
+    let Some(run) = run else { return usage(io) };
     let data = match Data::connect(conn) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{}", e);
+            complain!(io, "{}", e);
             return 2;
         }
     };
     let m = match run_metrics(&data, &run) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{}", e);
+            complain!(io, "{}", e);
             return 1;
         }
     };
     if json {
-        println!("{}", serde_json::to_string(&m).unwrap_or_default());
+        say!(io, "{}", serde_json::to_string(&m).unwrap_or_default());
         return 0;
     }
     let r = &m.returns;
-    println!("run {}", m.run);
-    println!(
+    say!(io, "run {}", m.run);
+    say!(io,
         "returns ({} a year, {} returns): total {:.6}   cagr {:.6}   volatility {:.6}   sharpe {:.4} (Lo {:.4}, se {:.4})   sortino {:.4}   max_drawdown {:.6} over {} bars   cvar_5 {:.6}   skew {:.4}   kurtosis {:.4}   worst_month {:.6}   t {:.4}   rho_1 {:.4}",
         m.periods_per_year, r.n, r.total_return, r.cagr, r.volatility, r.sharpe, r.sharpe_lo, r.sharpe_se, r.sortino, r.max_drawdown, r.max_drawdown_duration, r.cvar_5, r.skew, r.kurtosis, r.worst_month, r.t_stat, r.autocorrelation_1
     );
     let t = &m.trading;
-    println!(
+    say!(io,
         "trading: decisions {}   fills {}   dropped {}   turnover {:.4}   fill_ratio {:.4}   participation {:.4} (max {:.4})   gross {:.4}   net {:.4}   max_leverage {:.4}   cost_drag {:.6}   impact_drag {:.6}",
         t.decisions, t.fills, t.dropped, t.turnover, t.fill_ratio, t.avg_participation, t.max_participation, t.avg_gross, t.avg_net, t.max_leverage, t.cost_drag, t.impact_drag
     );
     let c = &m.convention;
-    println!(
+    say!(io,
         "periods ({} a year, {} periods): cagr {:.6}   max_drawdown {:.6}   sharpe {:.4} (population {:.4})   annual_return {:.6}   max_drawdown_additive {:.6}   total_pnl {:.2}   profit_factor {:.3} per period, {:.3} per trade   trades {}   win_rate {:.3}",
         c.periods_per_year, c.periods, c.cagr, c.max_drawdown, c.sharpe, c.sharpe_population, c.annual_return, c.max_drawdown_additive, c.total_pnl, c.profit_factor, c.profit_factor_trades, c.trades, c.win_rate
     );
     match m.capacity {
-        Some(x) => println!("capacity at 5% impact drag: {:.0}", x),
-        None => println!("capacity: unmeasured (the run paid no impact)"),
+        Some(x) => say!(io, "capacity at 5% impact drag: {:.0}", x),
+        None => say!(io, "capacity: unmeasured (the run paid no impact)"),
     }
     for (y, s) in &m.subperiods {
-        println!("sharpe {}: {:.4}", y, s);
+        say!(io, "sharpe {}: {:.4}", y, s);
     }
     let b = &m.book;
-    println!(
+    say!(
+        io,
         "book: margin_utilisation {:.4} (max {:.4}, maintenance max {:.4})   max_weight {:.4}   effective_names {:.2}   funding_paid {:.2}",
-        b.margin_utilisation, b.max_margin_utilisation, b.max_maintenance_utilisation, b.max_weight, b.effective_names, b.funding_paid
+        b.margin_utilisation,
+        b.max_margin_utilisation,
+        b.max_maintenance_utilisation,
+        b.max_weight,
+        b.effective_names,
+        b.funding_paid
     );
     if let Some(o) = &m.options {
         let days = |d: Option<f64>| d.map(|d| format!("{:.1}", d)).unwrap_or_else(|| "-".into());
-        println!(
+        say!(
+            io,
             "options: premium paid {:.2} collected {:.2}   exercises {}   assignments {}   expiries {}   days to expiry at entry {} at exit {}",
             o.premium_paid,
             o.premium_collected,
@@ -178,7 +251,8 @@ pub fn metrics_main(args: &[String], conn: Connection) -> i32 {
             (mean, v.iter().map(|x| x.abs()).fold(0.0, f64::max))
         };
         let (d, g, v, t) = (range(&|x| x.delta_money), range(&|x| x.gamma), range(&|x| x.vega), range(&|x| x.theta));
-        println!(
+        say!(
+            io,
             "options greeks over {} bars (mean, max |.|): delta·S {:.2}, {:.2}   gamma {:.4}, {:.4}   vega {:.2}, {:.2}   theta {:.2}, {:.2}",
             o.greeks.len(),
             d.0,
@@ -191,17 +265,26 @@ pub fn metrics_main(args: &[String], conn: Connection) -> i32 {
             t.1
         );
         let a = &o.attribution;
-        println!(
+        say!(
+            io,
             "options attribution over {} bars: pnl {:.2} = delta {:.2} + gamma {:.2} + theta {:.2} + vega {:.2} + residual {:.2}   unattributed {} bars, {:.2}",
-            a.bars, a.pnl, a.delta, a.gamma, a.theta, a.vega, a.residual, a.unattributed, a.unattributed_pnl
+            a.bars,
+            a.pnl,
+            a.delta,
+            a.gamma,
+            a.theta,
+            a.vega,
+            a.residual,
+            a.unattributed,
+            a.unattributed_pnl
         );
         for u in &o.volatility {
             let v = |x: Option<f64>| x.map(|x| format!("{:.4}", x)).unwrap_or_else(|| "-".into());
-            println!("volatility of {}: realised {} over {} returns, implied {}", u.underlying, v(u.realised), u.returns, v(u.implied));
+            say!(io, "volatility of {}: realised {} over {} returns, implied {}", u.underlying, v(u.realised), u.returns, v(u.implied));
         }
     }
     for (rel, v) in &m.versions {
-        println!("read {} at {}", rel, v);
+        say!(io, "read {} at {}", rel, v);
     }
     0
 }
@@ -310,19 +393,7 @@ fn strategy_of(text: &str) -> Option<String> {
 fn load(a: &Args) -> Result<(Plan, Program), String> {
     let file = a.positional.first().ok_or("a plan file names the study")?;
     let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
-    let units = plan::parse(&text).map_err(|e| format!("{}: {}", file, e))?;
-    let name = match a.opts.get("study") {
-        Some(n) => n.clone(),
-        None => {
-            let studies: Vec<&str> = units.iter().filter(|u| !matches!(u, plan::Unit::Template { .. })).map(plan::Unit::name).collect();
-            match studies.as_slice() {
-                [one] => one.to_string(),
-                [] => return Err(format!("{} holds no study", file)),
-                _ => return Err(format!("{} holds several studies ({}): name one with --study", file, studies.join(", "))),
-            }
-        }
-    };
-    let p = plan::plan(&units, &name).map_err(|e| format!("{}: {}", file, e))?;
+    let p = select(&text, file, a.opts.get("study"))?;
     let rest: Vec<String> = a.positional.iter().skip(1).cloned().collect();
     let mut sources = dsl_sources(&rest)?;
     let strategy = match &p.program {
@@ -341,6 +412,24 @@ fn load(a: &Args) -> Result<(Plan, Program), String> {
     Ok((p, Program { sources, strategy }))
 }
 
+/// The plan among a text's units (`origin` names the text): the one
+/// `--study` names, else its only study.
+fn select(text: &str, origin: &str, study: Option<&String>) -> Result<Plan, String> {
+    let units = plan::parse(text).map_err(|e| format!("{}: {}", origin, e))?;
+    let name = match study {
+        Some(n) => n.clone(),
+        None => {
+            let studies: Vec<&str> = units.iter().filter(|u| !matches!(u, plan::Unit::Template { .. })).map(plan::Unit::name).collect();
+            match studies.as_slice() {
+                [one] => one.to_string(),
+                [] => return Err(format!("{} holds no study", origin)),
+                _ => return Err(format!("{} holds several studies ({}): name one with --study", origin, studies.join(", "))),
+            }
+        }
+    };
+    plan::plan(&units, &name).map_err(|e| format!("{}: {}", origin, e))
+}
+
 fn kernels(conns: Vec<abt_wire::transport::Connection>) -> Result<Vec<Kernel>, String> {
     conns.into_iter().map(|c| Kernel::connect(c).map_err(|e| e.to_string())).collect()
 }
@@ -349,9 +438,9 @@ fn short(h: &str) -> &str {
     &h[..16.min(h.len())]
 }
 
-fn plan_usage() -> i32 {
-    eprintln!(
-        "usage:\n  abt plan check  PLAN [SOURCES...] [--study NAME] [--json]   (the plan's normal form, its hash H(Π), its steps in order and the trials it will count)\n  abt plan run    PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json]   (every step but the reveals; the runs, trials and outcomes written to the data layer)\n  abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json]   (one reveal step: the committed point over the whole sample, the embargoed bars reported)\n  abt plan report PLAN [SOURCES...] [--study NAME] [--json]   (the latest execution's outcomes, from the data layer)\n  abt plan drop   PLAN [SOURCES...] [--study NAME]   (the plan leaves query.plans; its bindings are unpinned; its trials stay)\n  (--store DIR | --data SOCKET) [--kernel SOCKET | --kernels N]: the data layer, and the kernels the runs are spread over"
+fn plan_usage(io: &mut dyn Io) -> i32 {
+    complain!(io,
+        "usage:\n  abt plan check  PLAN [SOURCES...] [--study NAME] [--json]   (the plan's normal form, its hash H(Π), its steps in order and the trials it will count)\n  abt plan run    PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json]   (every step but the reveals; the runs, trials and outcomes written to the data layer)\n  abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json]   (one reveal step: the committed point over the whole sample, the embargoed bars reported)\n  abt plan report PLAN [SOURCES...] [--study NAME] [--json]   (the latest execution's outcomes, from the data layer)\n  abt plan drop   PLAN [SOURCES...] [--study NAME]   (the plan leaves query.plans; its bindings are unpinned; its trials stay)\n  (--store DIR | --data SOCKET) [--kernel SOCKET | --kernels N]: the data layer, and the kernels the runs are spread over; or --query SOCKET, the query service (abt query serve) that runs the command"
     );
     2
 }
@@ -381,37 +470,84 @@ fn expected(p: &Plan, folds: Option<usize>) -> Vec<(String, String)> {
 
 /// `abt plan`; the exit code.
 pub fn plan_main(raw: &[String], data: Connection, kernel_conns: Vec<Connection>) -> i32 {
-    let Some(cmd) = raw.first().cloned() else { return plan_usage() };
-    let a = match args(&raw[1..]) {
+    plan_main_io(raw, data, kernel_conns, &mut Console)
+}
+
+/// `abt plan`, its plan and program read from the files it names, written
+/// to `io`.
+pub fn plan_main_io(raw: &[String], data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> i32 {
+    let Some(cmd) = raw.first().cloned() else { return plan_usage(io) };
+    let mut a = match args(&raw[1..]) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("{}", e);
-            return plan_usage();
+            complain!(io, "{}", e);
+            return plan_usage(io);
         }
     };
-    match plan_command(&cmd, a, data, kernel_conns) {
+    let Some(reveal) = plan_operands(&cmd, &mut a) else { return plan_usage(io) };
+    match load(&a).and_then(|(p, prog)| plan_on(&cmd, &a, reveal, p, prog, data, kernel_conns, io)) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("{}", e);
+            complain!(io, "{}", e);
             1
         }
     }
 }
 
-fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Connection>) -> Result<i32, String> {
-    let json = a.flags.iter().any(|f| f == "json");
-    let reveal = if cmd == "reveal" {
-        if a.positional.len() < 2 {
-            return Ok(plan_usage());
+/// `abt plan` as the query service runs it (P-3.5): the plan's text and its
+/// program come with the request, and no file is read.
+pub fn plan_served(raw: &[String], text: &str, prog: Program, data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> i32 {
+    let Some(cmd) = raw.first().cloned() else { return plan_usage(io) };
+    let mut a = match args(&raw[1..]) {
+        Ok(a) => a,
+        Err(e) => {
+            complain!(io, "{}", e);
+            return plan_usage(io);
         }
-        Some(a.positional.remove(1))
-    } else {
-        None
     };
-    if !matches!(cmd, "check" | "run" | "reveal" | "report" | "drop") {
-        return Ok(plan_usage());
+    let Some(reveal) = plan_operands(&cmd, &mut a) else { return plan_usage(io) };
+    match select(text, "the request's plan", a.opts.get("study")).and_then(|p| plan_on(&cmd, &a, reveal, p, prog, data, kernel_conns, io)) {
+        Ok(code) => code,
+        Err(e) => {
+            complain!(io, "{}", e);
+            1
+        }
     }
-    let (p, prog) = load(&a)?;
+}
+
+/// What `abt plan` reads from files, for a request to the query service:
+/// the plan's text and its program; `None` when the words are not a plan
+/// command's, which the service answers with the usage.
+pub fn plan_files(raw: &[String]) -> Result<Option<(String, Program)>, String> {
+    let Some(cmd) = raw.first() else { return Ok(None) };
+    let Ok(mut a) = args(&raw[1..]) else { return Ok(None) };
+    if plan_operands(cmd, &mut a).is_none() {
+        return Ok(None);
+    }
+    let file = a.positional.first().ok_or("a plan file names the study")?;
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {}", file, e))?;
+    let (_, prog) = load(&a)?;
+    Ok(Some((text, prog)))
+}
+
+/// A plan command's reveal step, taken out of its operands (`reveal PLAN
+/// STEP`); `None` when the command is not a plan command or lacks its step.
+fn plan_operands(cmd: &str, a: &mut Args) -> Option<Option<String>> {
+    if !matches!(cmd, "check" | "run" | "reveal" | "report" | "drop") {
+        return None;
+    }
+    if cmd != "reveal" {
+        return Some(None);
+    }
+    if a.positional.len() < 2 {
+        return None;
+    }
+    Some(Some(a.positional.remove(1)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_on(cmd: &str, a: &Args, reveal: Option<String>, p: Plan, prog: Program, data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> Result<i32, String> {
+    let json = a.flags.iter().any(|f| f == "json");
     let data = Data::connect(data).map_err(|e| e.to_string())?;
     let kernels = kernels(kernel_conns)?;
     let kernel = kernels.first().ok_or("a plan needs a kernel")?;
@@ -438,20 +574,22 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
                 .collect();
             let trials = expected(&p, folds);
             if json {
-                println!(
+                say!(
+                    io,
                     "{}",
                     serde_json::json!({"plan": p.name, "hash": normal.hash, "program_hash": checked.program_hash, "normal_form": normal.text, "dag": dag, "trials_expected": trials, "binding": sample.binding, "bars": sample.bars})
                 );
                 return Ok(0);
             }
-            println!("plan {} {}", p.name, normal.hash);
-            println!("program {} {}", prog.strategy, checked.program_hash);
-            println!("sample {} decision bars on {} (binding {})", sample.bars, sample.calendar, short(&sample.binding));
-            println!("steps, in order:");
+            say!(io, "plan {} {}", p.name, normal.hash);
+            say!(io, "program {} {}", prog.strategy, checked.program_hash);
+            say!(io, "sample {} decision bars on {} (binding {})", sample.bars, sample.calendar, short(&sample.binding));
+            say!(io, "steps, in order:");
             for (i, c) in &normal.order {
                 let s = &p.steps[*i];
                 let inputs = s.inputs();
-                println!(
+                say!(
+                    io,
                     "  {:<4} {} {}{}",
                     c,
                     s.kind(),
@@ -459,16 +597,17 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
                     if inputs.is_empty() { String::new() } else { format!(" (reads {})", inputs.join(", ")) }
                 );
             }
-            println!("trials it will count:");
+            say!(io, "trials it will count:");
             for (step, what) in &trials {
-                println!("  {}: {}", step, what);
+                say!(io, "  {}: {}", step, what);
             }
-            println!("normal form:\n{}", normal.text);
+            say!(io, "normal form:\n{}", normal.text);
             Ok(0)
         }
         "run" | "reveal" => {
             if a.flags.iter().any(|f| f == "dry-run") {
-                println!(
+                say!(
+                    io,
                     "plan {} {}: would run {}",
                     p.name,
                     normal.hash,
@@ -488,9 +627,9 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
             };
             let ex = exec::execute(&p, &prog, &exec::Endpoints { data: &data, kernels: &kernels }, &opts).map_err(|e| e.to_string())?;
             if json {
-                println!("{}", serde_json::to_string(&ex).map_err(|e| e.to_string())?);
+                say!(io, "{}", serde_json::to_string(&ex).map_err(|e| e.to_string())?);
             } else {
-                print_execution(&ex);
+                print_execution(&ex, io);
             }
             Ok(0)
         }
@@ -499,18 +638,22 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
             // when the report block asked for one, else its tables.
             let of = |n: &str| plan::trials::relation_of(&normal.hash, &format!("report.{}", n));
             if let Some(b) = crate::relation::read(&data, &of("text")).map_err(|e| e.to_string())? {
-                println!("plan {} {}", p.name, normal.hash);
-                print!("{}", crate::relation::texts(&b, "text").map_err(|e| e.to_string())?.into_iter().flatten().next().unwrap_or_default());
+                say!(io, "plan {} {}", p.name, normal.hash);
+                put!(
+                    io,
+                    "{}",
+                    crate::relation::texts(&b, "text").map_err(|e| e.to_string())?.into_iter().flatten().next().unwrap_or_default()
+                );
                 return Ok(0);
             }
             let mut any = false;
             for t in ["summary", "trials", "claims", "tests", "contract", "warnings", "biases", "surface", "folds", "subperiods"] {
                 if let Some(b) = crate::relation::read(&data, &of(t)).map_err(|e| e.to_string())? {
                     if !any {
-                        println!("plan {} {}", p.name, normal.hash);
+                        say!(io, "plan {} {}", p.name, normal.hash);
                         any = true;
                     }
-                    print!("{}", stored_sheet(t, &b)?.text());
+                    put!(io, "{}", stored_sheet(t, &b)?.text());
                 }
             }
             if !any {
@@ -540,14 +683,15 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
                         v
                     })
                     .collect();
-                println!("{}", serde_json::json!({"plan": p.name, "hash": normal.hash, "outcomes": rows}));
+                say!(io, "{}", serde_json::json!({"plan": p.name, "hash": normal.hash, "outcomes": rows}));
                 return Ok(0);
             }
-            println!("plan {} {}", p.name, normal.hash);
+            say!(io, "plan {} {}", p.name, normal.hash);
             for (i, s) in stored.iter().enumerate() {
                 let point: Vec<String> = s.point.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
                 let f = |c: usize| values[c][i].map(|v| format!("{:.4}", v)).unwrap_or_else(|| "-".into());
-                println!(
+                say!(
+                    io,
                     "  {} {} {}{}  sharpe {}  cagr {}  max_drawdown {}  objective {}",
                     s.step,
                     short(&s.run_id),
@@ -563,7 +707,8 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
         }
         _ => {
             let row = plan::trials::drop_plan(&data, &normal.hash).map_err(|e| e.to_string())?;
-            println!(
+            say!(
+                io,
                 "dropped plan {} {}: {} binding(s) no other plan holds are unpinned; its trials stay",
                 row.name,
                 row.hash,
@@ -574,9 +719,10 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
     }
 }
 
-fn print_execution(ex: &exec::Execution) {
-    println!("plan {} {}", ex.plan, ex.hash);
-    println!(
+fn print_execution(ex: &exec::Execution, io: &mut dyn Io) {
+    say!(io, "plan {} {}", ex.plan, ex.hash);
+    say!(
+        io,
         "program {} lineage {} holdout {}{}",
         short(&ex.program_hash),
         short(&ex.lineage),
@@ -586,7 +732,8 @@ fn print_execution(ex: &exec::Execution) {
     for o in &ex.outcomes {
         let point: Vec<String> = o.point.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
         let fold = o.fold.as_ref().map(|f| format!(" fold {}/{} {}", f.k, f.of, f.phase)).unwrap_or_default();
-        println!(
+        say!(
+            io,
             "  {} {} {}{}{}  {}: sharpe {:.4}  cagr {:.4}  max_drawdown {:.4}  objective {:.4}",
             o.step,
             short(&o.run_id),
@@ -602,19 +749,20 @@ fn print_execution(ex: &exec::Execution) {
     }
     for g in &ex.grids {
         let best = &ex.outcomes[g.runs[g.best]];
-        println!("grid {}: best {}", g.step, best.point.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" "));
+        say!(io, "grid {}: best {}", g.step, best.point.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" "));
         if let Some(p) = &g.pbo {
-            println!("  PBO {:.3} over {} points", p.pbo, p.trials);
+            say!(io, "  PBO {:.3} over {} points", p.pbo, p.trials);
         }
         if let Some(s) = &g.surface {
-            println!("  surface: {:.0}% of {} neighbours within {:.3}", s.stability * 100.0, s.neighbours, s.tolerance);
+            say!(io, "  surface: {:.0}% of {} neighbours within {:.3}", s.stability * 100.0, s.neighbours, s.tolerance);
         }
         for (y, s) in &g.subperiods {
-            println!("  sharpe {}: {:.4}", y, s);
+            say!(io, "  sharpe {}: {:.4}", y, s);
         }
     }
     for w in &ex.walk_forwards {
-        println!(
+        say!(
+            io,
             "walk-forward {} ({}): {} folds, efficiency {}, out of sample sharpe {:.4}",
             w.step,
             w.scheme.describe(),
@@ -624,17 +772,18 @@ fn print_execution(ex: &exec::Execution) {
         );
     }
     for c in &ex.comparisons {
-        println!("compare {}:", c.step);
+        say!(io, "compare {}:", c.step);
         for (run, values) in &c.rows {
-            println!("  {} {}", short(run), values.iter().map(|(m, v)| format!("{} {:.4}", m, v)).collect::<Vec<_>>().join("  "));
+            say!(io, "  {} {}", short(run), values.iter().map(|(m, v)| format!("{} {:.4}", m, v)).collect::<Vec<_>>().join("  "));
         }
     }
     for (step, rel) in &ex.ledgers {
-        println!("ledger {}: {}", step, rel);
+        say!(io, "ledger {}: {}", step, rel);
     }
     for j in ex.claims.iter().chain(&ex.tests) {
         let r = j.result.as_ref();
-        println!(
+        say!(
+            io,
             "{} {}{}: {}@{} on {}  statistic {}  p {}  adjusted {}{}",
             j.kind,
             j.name,
@@ -653,26 +802,26 @@ fn print_execution(ex: &exec::Execution) {
         );
     }
     for s in &ex.sheets {
-        print!("{}", s.text());
+        put!(io, "{}", s.text());
     }
     for (step, why) in &ex.skipped {
-        println!("step {} did not run: {}", step, why);
+        say!(io, "step {} did not run: {}", step, why);
     }
     for r in &ex.reports {
-        println!("report {}", r);
+        say!(io, "report {}", r);
     }
     if let Some(d) = &ex.dsr {
-        println!("deflated sharpe {:.4} over {} trials in the lineage", d.dsr, ex.trials);
+        say!(io, "deflated sharpe {:.4} over {} trials in the lineage", d.dsr, ex.trials);
     } else {
-        println!("{} trials in the lineage", ex.trials);
+        say!(io, "{} trials in the lineage", ex.trials);
     }
     for w in &ex.warnings {
-        println!("warning [{}]: {}", w.bias, w.message);
+        say!(io, "warning [{}]: {}", w.bias, w.message);
     }
 }
 
-fn lineage_usage() -> i32 {
-    eprintln!("usage:\n  abt lineage PROGRAM [SOURCES...] [--json]   (the lineage of a strategy, a .dsl file or a name among SOURCES: its members, its trials by kind, its disputes)\n  abt dispute PROGRAM --reason TEXT [SOURCES...]   (a dispute of the strategy's attachment to its lineage, a row; the counts stand)\n  (--store DIR | --data SOCKET) [--kernel SOCKET]");
+fn lineage_usage(io: &mut dyn Io) -> i32 {
+    complain!(io, "usage:\n  abt lineage PROGRAM [SOURCES...] [--json]   (the lineage of a strategy, a .dsl file or a name among SOURCES: its members, its trials by kind, its disputes)\n  abt dispute PROGRAM --reason TEXT [SOURCES...]   (a dispute of the strategy's attachment to its lineage, a row; the counts stand)\n  (--store DIR | --data SOCKET) [--kernel SOCKET], or --query SOCKET (the query service, abt query serve)");
     2
 }
 
@@ -693,58 +842,99 @@ fn named_program(a: &Args) -> Result<Program, String> {
 
 /// `abt lineage` and `abt dispute`; the exit code.
 pub fn lineage_main(cmd: &str, raw: &[String], data: Connection, kernel_conns: Vec<Connection>) -> i32 {
-    let run = || -> Result<i32, String> {
-        let a = args(raw)?;
-        if a.positional.is_empty() {
-            return Ok(lineage_usage());
+    lineage_main_io(cmd, raw, data, kernel_conns, &mut Console)
+}
+
+/// `abt lineage` and `abt dispute`, the program read from the files they
+/// name, written to `io`.
+pub fn lineage_main_io(cmd: &str, raw: &[String], data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> i32 {
+    let a = match args(raw) {
+        Ok(a) if !a.positional.is_empty() => a,
+        Ok(_) => return lineage_usage(io),
+        Err(e) => {
+            complain!(io, "{}", e);
+            return lineage_usage(io);
         }
-        let prog = named_program(&a)?;
-        let data = Data::connect(data).map_err(|e| e.to_string())?;
-        let kernels = kernels(kernel_conns)?;
-        let checked = kernels.first().ok_or("a lineage needs a kernel")?.check(&prog).map_err(|e| e.to_string())?;
-        let members = plan::lineage::members(&data).map_err(|e| e.to_string())?;
-        let me = members
-            .iter()
-            .find(|m| m.program_hash == checked.program_hash)
-            .ok_or_else(|| format!("strategy `{}` ({}) is in no lineage: no plan has run it", prog.strategy, short(&checked.program_hash)))?;
-        if cmd == "dispute" {
-            let reason = a.opts.get("reason").ok_or("a dispute gives its --reason")?;
-            let d = plan::lineage::dispute(&data, &checked.program_hash, reason, exec::now()).map_err(|e| e.to_string())?;
-            println!("disputed {} in lineage {}: {}", short(&d.program_hash), short(&d.lineage), d.reason);
-            return Ok(0);
-        }
-        let counted = plan::lineage::trials(&data, &me.lineage).map_err(|e| e.to_string())?;
-        let disputes: Vec<plan::lineage::Dispute> = plan::lineage::disputes(&data).map_err(|e| e.to_string())?.into_iter().filter(|d| d.lineage == me.lineage).collect();
-        let mine: Vec<&plan::lineage::Member> = members.iter().filter(|m| m.lineage == me.lineage).collect();
-        if a.flags.iter().any(|f| f == "json") {
-            println!("{}", serde_json::json!({"lineage": me.lineage, "members": mine, "trials": counted, "disputes": disputes}));
-            return Ok(0);
-        }
-        println!("lineage {}", me.lineage);
-        for m in &mine {
-            let how = match (&m.similar_to, m.similarity) {
-                (Some(to), Some(s)) => format!("similar to {} ({:.0}%)", short(to), s * 100.0),
-                _ => m.attachment.clone(),
-            };
-            println!("  {} {} {}", short(&m.program_hash), m.strategy, how);
-        }
-        println!(
-            "trials {}: {}",
-            counted.count,
-            counted.by_kind.iter().map(|(k, n)| format!("{} {}", n, k)).collect::<Vec<_>>().join(", ")
-        );
-        for d in &disputes {
-            println!("dispute {}: {}", short(&d.program_hash), d.reason);
-        }
-        Ok(0)
     };
-    match run() {
+    match named_program(&a).and_then(|prog| lineage_on(cmd, &a, prog, data, kernel_conns, io)) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("{}", e);
+            complain!(io, "{}", e);
             1
         }
     }
+}
+
+/// `abt lineage` and `abt dispute` as the query service runs them (P-3.5):
+/// the program comes with the request.
+pub fn lineage_served(cmd: &str, raw: &[String], prog: Program, data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> i32 {
+    let a = match args(raw) {
+        Ok(a) if !a.positional.is_empty() => a,
+        Ok(_) => return lineage_usage(io),
+        Err(e) => {
+            complain!(io, "{}", e);
+            return lineage_usage(io);
+        }
+    };
+    match lineage_on(cmd, &a, prog, data, kernel_conns, io) {
+        Ok(c) => c,
+        Err(e) => {
+            complain!(io, "{}", e);
+            1
+        }
+    }
+}
+
+/// What `abt lineage` and `abt dispute` read from files, for a request to
+/// the query service: the program they name; `None` when the words name
+/// none, which the service answers with the usage.
+pub fn lineage_files(raw: &[String]) -> Result<Option<Program>, String> {
+    match args(raw) {
+        Ok(a) if !a.positional.is_empty() => named_program(&a).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn lineage_on(cmd: &str, a: &Args, prog: Program, data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> Result<i32, String> {
+    let data = Data::connect(data).map_err(|e| e.to_string())?;
+    let kernels = kernels(kernel_conns)?;
+    let checked = kernels.first().ok_or("a lineage needs a kernel")?.check(&prog).map_err(|e| e.to_string())?;
+    let members = plan::lineage::members(&data).map_err(|e| e.to_string())?;
+    let me = members
+        .iter()
+        .find(|m| m.program_hash == checked.program_hash)
+        .ok_or_else(|| format!("strategy `{}` ({}) is in no lineage: no plan has run it", prog.strategy, short(&checked.program_hash)))?;
+    if cmd == "dispute" {
+        let reason = a.opts.get("reason").ok_or("a dispute gives its --reason")?;
+        let d = plan::lineage::dispute(&data, &checked.program_hash, reason, exec::now()).map_err(|e| e.to_string())?;
+        say!(io, "disputed {} in lineage {}: {}", short(&d.program_hash), short(&d.lineage), d.reason);
+        return Ok(0);
+    }
+    let counted = plan::lineage::trials(&data, &me.lineage).map_err(|e| e.to_string())?;
+    let disputes: Vec<plan::lineage::Dispute> = plan::lineage::disputes(&data).map_err(|e| e.to_string())?.into_iter().filter(|d| d.lineage == me.lineage).collect();
+    let mine: Vec<&plan::lineage::Member> = members.iter().filter(|m| m.lineage == me.lineage).collect();
+    if a.flags.iter().any(|f| f == "json") {
+        say!(io, "{}", serde_json::json!({"lineage": me.lineage, "members": mine, "trials": counted, "disputes": disputes}));
+        return Ok(0);
+    }
+    say!(io, "lineage {}", me.lineage);
+    for m in &mine {
+        let how = match (&m.similar_to, m.similarity) {
+            (Some(to), Some(s)) => format!("similar to {} ({:.0}%)", short(to), s * 100.0),
+            _ => m.attachment.clone(),
+        };
+        say!(io, "  {} {} {}", short(&m.program_hash), m.strategy, how);
+    }
+    say!(
+        io,
+        "trials {}: {}",
+        counted.count,
+        counted.by_kind.iter().map(|(k, n)| format!("{} {}", n, k)).collect::<Vec<_>>().join(", ")
+    );
+    for d in &disputes {
+        say!(io, "dispute {}: {}", short(&d.program_hash), d.reason);
+    }
+    Ok(0)
 }
 
 /// A stored table as a sheet of text cells (its key columns left out).
@@ -805,15 +995,21 @@ fn window_arg(a: &Args) -> Result<(Option<i64>, Option<i64>), String> {
     }
 }
 
-fn query_usage() -> i32 {
-    eprintln!(
-        "usage:\n  abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json]   (one test outside a plan, counted: INPUT as a claim's, its runs named by id)\n  abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json]   (one claim on a run, counted)\n  abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json]   (coverage, revisions, latency, returns, liquidity, survivorship, actions, membership, chains)\n  abt activation --run RUN [--json]   (the rules' firing, their pairs, the cross-lag co-activation, the effective number of rules)\n  (--store DIR | --data SOCKET)"
+fn query_usage(io: &mut dyn Io) -> i32 {
+    complain!(io,
+        "usage:\n  abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json]   (one test outside a plan, counted: INPUT as a claim's, its runs named by id)\n  abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json]   (one claim on a run, counted)\n  abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json]   (coverage, revisions, latency, returns, liquidity, survivorship, actions, membership, chains)\n  abt activation --run RUN [--json]   (the rules' firing, their pairs, the cross-lag co-activation, the effective number of rules)\n  (--store DIR | --data SOCKET | --query SOCKET: the query service, abt query serve)"
     );
     2
 }
 
 /// `abt test`, `abt claim`, `abt feed` and `abt activation`; the exit code.
 pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
+    query_main_io(cmd, raw, conn, &mut Console)
+}
+
+/// `abt test`, `abt claim`, `abt feed` and `abt activation`, written to
+/// `io`.
+pub fn query_main_io(cmd: &str, raw: &[String], conn: Connection, io: &mut dyn Io) -> i32 {
     let go = || -> Result<i32, String> {
         let a = args(raw)?;
         let json = a.flags.iter().any(|f| f == "json");
@@ -825,13 +1021,13 @@ pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
                 let bound = match (a.opts.get("binding"), &run) {
                     (Some(b), _) => bound_of_binding(&data, b)?,
                     (None, Some(r)) => bound_of_run(&data, r)?,
-                    (None, None) => return Ok(query_usage()),
+                    (None, None) => return Ok(query_usage(io)),
                 };
                 let s = crate::feed::statistic(&data, &bound.relations, stat, a.opts.get("relation").map(String::as_str), window_arg(&a)?).map_err(|e| e.to_string())?;
                 if json {
-                    println!("{}", serde_json::to_string(&s).map_err(|e| e.to_string())?);
+                    say!(io, "{}", serde_json::to_string(&s).map_err(|e| e.to_string())?);
                 } else {
-                    print!("{}", s.text());
+                    put!(io, "{}", s.text());
                 }
                 Ok(0)
             }
@@ -850,10 +1046,10 @@ pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
                 let seed = a.opts.get("seed").map(|s| s.parse().map_err(|_| format!("--seed: `{}` is not a number", s))).transpose()?.unwrap_or(0);
                 let act = crate::activation::activation(&data, &run, &strategy, seed, crate::activation::PHI_THRESHOLD).map_err(|e| e.to_string())?;
                 if json {
-                    println!("{}", serde_json::to_string(&act).map_err(|e| e.to_string())?);
+                    say!(io, "{}", serde_json::to_string(&act).map_err(|e| e.to_string())?);
                 } else {
                     for s in act.sheets() {
-                        print!("{}", s.text());
+                        put!(io, "{}", s.text());
                     }
                 }
                 Ok(0)
@@ -937,13 +1133,14 @@ pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
                 }
                 plan::trials::write_judged(&data, &opened.lineage, &bound.program_hash, &bound.binding, now, &judged).map_err(|e| e.to_string())?;
                 if json {
-                    println!("{}", serde_json::to_string(&judged).map_err(|e| e.to_string())?);
+                    say!(io, "{}", serde_json::to_string(&judged).map_err(|e| e.to_string())?);
                     return Ok(0);
                 }
                 let r = judged.result.as_ref();
-                println!("{}@{} on {}", judged.test, judged.test_version, judged.input);
+                say!(io, "{}@{} on {}", judged.test, judged.test_version, judged.input);
                 if let Some(r) = r {
-                    println!(
+                    say!(
+                        io,
                         "statistic {:.6}  p {}  effect {}  interval {}  n {}",
                         r.statistic,
                         r.p_value.map(|p| format!("{:.6}", p)).unwrap_or_else(|| "-".into()),
@@ -952,30 +1149,30 @@ pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
                         r.n
                     );
                     for n in &r.notes {
-                        println!("note: {}", n);
+                        say!(io, "note: {}", n);
                     }
                 }
                 if let Some(e) = &judged.error {
-                    println!("error: {}", e);
+                    say!(io, "error: {}", e);
                 }
                 if let Some(v) = &judged.verdict {
-                    println!("verdict: {}", v.text());
+                    say!(io, "verdict: {}", v.text());
                 }
-                println!("dependence {}", judged.dependence);
-                println!("counted in lineage {}", short(&opened.lineage));
+                say!(io, "dependence {}", judged.dependence);
+                say!(io, "counted in lineage {}", short(&opened.lineage));
                 Ok(if judged.error.is_some() && judged.result.is_none() { 1 } else { 0 })
             }
-            _ => Ok(query_usage()),
+            _ => Ok(query_usage(io)),
         }
     };
     go().unwrap_or_else(|e| {
-        eprintln!("{}", e);
+        complain!(io, "{}", e);
         1
     })
 }
 
-fn briefs_usage() -> i32 {
-    eprintln!(
+fn briefs_usage(io: &mut dyn Io) -> i32 {
+    complain!(io,
         "usage:\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>   (every brief with the model's attempts at it, ATTEMPTS/<brief>/<n>.dsl, checked against the files' library; the first valid attempt run as an instance of the template `briefs_harness`; the attempts recorded as rows of query.briefs.attempts; --out FILE writes the report as JSON)"
     );
     2
@@ -984,29 +1181,34 @@ fn briefs_usage() -> i32 {
 /// `abt briefs report` over the data service and kernels the front set up
 /// (a market the attempts run on); the exit code.
 pub fn briefs_main(raw: &[String], data: Connection, kernel_conns: Vec<Connection>) -> i32 {
+    briefs_main_io(raw, data, kernel_conns, &mut Console)
+}
+
+/// `abt briefs report`, written to `io`.
+pub fn briefs_main_io(raw: &[String], data: Connection, kernel_conns: Vec<Connection>, io: &mut dyn Io) -> i32 {
     let run = || -> Result<i32, String> {
         let mut a = args(raw)?;
         if a.positional.first().map(String::as_str) != Some("report") {
-            return Ok(briefs_usage());
+            return Ok(briefs_usage(io));
         }
         a.positional.remove(0);
         let (Some(briefs), Some(attempts)) = (a.opts.get("briefs"), a.opts.get("attempts")) else {
-            return Ok(briefs_usage());
+            return Ok(briefs_usage(io));
         };
         let library = dsl_sources(&a.positional)?;
         let data = Data::connect(data).map_err(|e| e.to_string())?;
         let kernels = kernels(kernel_conns)?;
         let r = crate::briefs::report(&data, &kernels, &library, Path::new(briefs), Path::new(attempts))?;
-        print!("{}", r.render());
+        put!(io, "{}", r.render());
         if let Some(out) = a.opts.get("out") {
             let json = serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?;
             std::fs::write(out, json).map_err(|e| format!("--out {}: {}", out, e))?;
-            println!("report written to {}", out);
+            say!(io, "report written to {}", out);
         }
         Ok(0)
     };
     run().unwrap_or_else(|e| {
-        eprintln!("{}", e);
+        complain!(io, "{}", e);
         1
     })
 }
