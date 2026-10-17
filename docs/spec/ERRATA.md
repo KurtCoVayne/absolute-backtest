@@ -817,6 +817,27 @@ batch driver agree on every corpus program. Each bless since:
     (`latest` walks back over the bars). The measurements are in
     docs/assessment.md.
 
+- **E-77 (06-performance 3.2 to 3.4, M-8; what M-8 leaves).** M-8 builds
+  the resident layer and the aggregate pass (E-74), the set evaluator and
+  the window cache (E-75), and the stored tables' blocks (E-76).
+  `scripts/bench.sh` measures A-7.3's targets (docs/assessment.md). Not
+  built:
+  - **Entity-parallel strata (3.2, Proposition 3.1).** The evaluator's
+    state is one kernel's: the memo, the window groups and the lazily
+    sorted blocks, all behind `&mut`. Strata in parallel need that state
+    split by entity. Each relation's tuples must then merge back in the
+    order one thread derives them (rules in order, each rule's solutions
+    in order), with late tuples invalidating and checkpoints holding every
+    part. That is a rewrite of who owns what, not a step of M-8. The
+    data layer's aggregate pass, the stream and a plan's runs are parallel
+    already, each bit-identical across thread counts (G3).
+  - **Stream projection (3.3).** The stream carries every primitive
+    relation the binding names, read or not: a program that needs bars
+    gets `open`, `high` and `low` though only the executor's order types
+    read them.
+  - **Typed columns (3.1, E-76),** bump arenas per barrier, and
+    copy-on-write checkpoints.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

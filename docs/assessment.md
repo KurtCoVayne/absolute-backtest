@@ -229,6 +229,25 @@ names the faster of two runs):
 The rows still hold 16 B values with the key's time in each. 3.1's typed
 columns would take a close to 12 B.
 
+**At M-8: the targets of A-7.3.** `scripts/bench.sh none OUT` runs the
+synthetic ladder and the data layer's budgets here; with the lake and the
+books' stores it runs the rest on the owner's machine:
+
+| Target | Value | Measured here | |
+| --- | --- | --- | --- |
+| Sustained ingest | 200,000 rows/s | 2.93M rows/s | within |
+| Cross-section of one bar | < 1 ms | 308 µs at 2,000 names, resident | within |
+| Point lookup | O(log n) | 39 µs, resident | |
+| Storage per stored value | ≤ 16 B resident, ≤ 4 B on disk | 10.0 B resident, 3.05 B on disk | within |
+| MW14 full replay | ≤ 60 s, ≤ 1.5 GB | the owner's data | |
+| R8L full replay | ≤ 3 s, ≤ 0.6 GB | the owner's data | |
+| Barrier to decision, live | < 50 ms | a live feed | |
+
+The synthetic ladder runs `momentum_12_1` with n a tenth of the names:
+14.8 s and 0.80 GB at 100 names, 46.5 s and 2.35 GB at 300. The log-log
+slopes against names are 1.04 for run time and 0.98 for memory: both
+linear.
+
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:
 
