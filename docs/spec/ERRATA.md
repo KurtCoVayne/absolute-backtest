@@ -943,6 +943,74 @@ batch driver agree on every corpus program. Each bless since:
       any more. They are in the history.
     - `scripts/bench.sh` ingests the lake with `abt data ingest` and runs
       over the served store.
+- **E-69 (D-5.2 live, D-5.4, D-5.5, K-6.2, K-6.3, A-4.4; live-sim as
+  built).**
+  - **Sessions.** A live session records a feed (`adapters::Feed`, an
+    adapter's `subscribe`) into the store, write-ahead, with the session's
+    name as the source. Opening it ingests two things:
+    - its prelude: the names it trades, and every relation it records,
+      empty, so that a demand binds the session's versions before they
+      hold a row;
+    - its planned bars, `live.<session>.plan`: the base labels of the
+      exchange's session. A live-sim run builds its schedule from them,
+      since its data does not hold them yet.
+  - **Receipt.** A batch is received at its acceptance: `r` is the clock,
+    never below the last row's and always past the last barrier emitted.
+    So the order of acceptance is the canonical order (D-5.3).
+  - **The live stream.** A subscription whose clock is `Live` follows the
+    session's versions of the spec's relations (`StreamSpec.session`, new).
+    It emits the barriers of the spec's clock relation (the kernel's
+    labels):
+    - a barrier is due at its label plus its calendar's grace (`abt data
+      serve --grace`; by default 0 for sessions and 250 ms otherwise);
+    - it is emitted at the clock's instant, after every row accepted
+      before it;
+    - it is recorded as `kernel.<run>.clock`, under the source `live`.
+    A barrier's events are the merge of the session's versions with the
+    recorded clock up to it. So the live stream is the replay of its
+    recording, seq for seq (Proposition D-5.4).
+  - **Replay of a live run.** `abt run --replay-of RUN` reads the session's
+    versions, now whole, and RUN's recorded clock. Its base bars are the
+    recorded barriers', so its schedule is the live run's. `--paced` sends
+    each barrier once the data layer's clock has gone as far past the first
+    barrier's instant as the barrier is (D-5.5).
+  - **The kernel.**
+    - `abt run --mode live-sim --session S`; the run's identity names the
+      mode `live-sim`.
+    - The instant a barrier was emitted at is the kernel's `now`; in replay
+      that instant is the bucket's end, as before.
+    - Pushdown is off for both runs of a live session. The data layer
+      answers a pushed aggregate at the bucket's end, not at the instant a
+      live barrier was emitted at.
+  - **Lag and `late`.** The kernel measures each decision bar's lag against
+    the clock it shares with the data layer (the wall clock, or a test's):
+    the instant it evaluates the bar minus the barrier's `at`.
+    - The deadline is one bar of the decision calendar by default
+      (`--deadline S|none`). Past it, the bar's decisions are late.
+    - `late send` sends them flagged (`decisions.late`); it is the default,
+      and the field is optional, so no program's hash changes. `late
+      reject` drops them with the reason `late`.
+    - When over 1 % of the bars are late, the run is warned under the bias
+      `latency`, with the lag measured.
+    - Lag marks on the control channel (D-5.4) are not sent. The kernel's
+      own measurement is what its rule reads, and a mark in the stream
+      would give a replay other seqs.
+  - **Replay equals live (G4)** within the deadline, as the gate runs it.
+    The replay reads no lag, so a decision dropped as late live is not
+    dropped in its replay.
+  - **Rehearsal.** `abt data serve --record synthetic --session S --symbols
+    A,B --start T --end T [--clock-rate R]` records the synthetic feed
+    while the service serves.
+    - A vendor's live feed is recorded through `DataService::record` with
+      its adapter's subscription (`databento_live`'s feed). The command
+      line for a vendor source comes with the live deployment (M-10).
+    - With `--clock-rate`, a kernel in another process does not share the
+      service's clock: it runs with `--deadline none`.
+  - **Not yet.** The names a session first meets mid-session are not in a
+    live-sim run's binding, whose symbols are fixed when it binds: a
+    session declares its names in its prelude. A tuple of a closed bucket
+    that arrives after its barrier is late and is handled by the fold's
+    late rule (K-4.4), as in replay.
 
 ## Aggregates
 

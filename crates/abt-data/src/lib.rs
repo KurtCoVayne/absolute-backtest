@@ -10,6 +10,7 @@ pub mod adapters;
 pub mod agg;
 pub mod catalog;
 pub mod error;
+pub mod live;
 pub mod query;
 pub mod registry;
 pub mod resolver;

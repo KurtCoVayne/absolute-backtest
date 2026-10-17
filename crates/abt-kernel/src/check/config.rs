@@ -275,6 +275,18 @@ pub struct ExecBlock {
     /// The pre-trade limits (K-3.5), optional.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits: Vec<Limit>,
+    /// What a decision evaluated after its barrier's deadline becomes
+    /// (K-6.3): `send` (the default, flagged late) or `reject`.
+    #[serde(default = "late_send", skip_serializing_if = "is_late_send")]
+    pub late: String,
+}
+
+fn late_send() -> String {
+    "send".to_string()
+}
+
+fn is_late_send(s: &String) -> bool {
+    s == "send"
 }
 
 impl ExecBlock {
@@ -366,6 +378,9 @@ impl fmt::Display for ExecBlock {
         if !self.limits.is_empty() {
             let parts: Vec<String> = self.limits.iter().map(|l| l.to_string()).collect();
             writeln!(f, "  limits        {{ {} }}", parts.join("; "))?;
+        }
+        if self.late != "send" {
+            writeln!(f, "  late          {}", self.late)?;
         }
         write!(f, "}}")
     }
@@ -519,6 +534,7 @@ pub fn expand_execution(block: &ExecutionBlock, presets: &[(String, Vec<ExecFiel
         ruin: word("ruin"),
         numerics: word("numerics"),
         limits,
+        late: if seen.contains(&"late") { word("late") } else { late_send() },
     })
 }
 

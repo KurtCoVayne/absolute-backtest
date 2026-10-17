@@ -7,8 +7,8 @@
 //! `t`, so the merge opens it when its frontier reaches the partition's
 //! least `r` and reads it in receipt order (E-14). The clock source is the
 //! `calendar_label` rows of the spec's view (Definition D-5.1): a relation of
-//! the spec named `calendar_label` or `<namespace>.calendar_label`, else the
-//! registry's current one.
+//! the spec named `calendar_label`, `<namespace>.calendar_label` or a live
+//! stream's recorded `<namespace>.clock`, else the registry's current one.
 //!
 //! The order is a deterministic function of the versions, the calendars and
 //! the receipt filter, so a subscription from `from_seq` yields the same
@@ -30,9 +30,11 @@ use crate::store::{Manifest, RowFilter, Store};
 /// The registry relation the clock is read from (D-2.4).
 pub const CLOCK: &str = "calendar_label";
 
-/// Whether a relation of a stream spec is a clock source.
+/// Whether a relation of a stream spec is a clock source: the registry's
+/// labels, a namespace's (`kernel.<run>.calendar_label`), or the barriers a
+/// live stream recorded (`kernel.<run>.clock`, crate::live).
 pub fn is_clock(relation: &str) -> bool {
-    relation == CLOCK || relation.ends_with(".calendar_label")
+    relation == CLOCK || relation.ends_with(".calendar_label") || relation.ends_with(".clock")
 }
 
 /// Rows per event batch (D-5.6's channel holds batches of this size).

@@ -157,6 +157,7 @@ fn store() -> (Store, StreamSpec) {
         calendars: Some(vec!["1d".into(), "1w".into()]),
         receipt_filter: None,
         clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+        session: None,
     };
     (s, spec)
 }
@@ -324,6 +325,7 @@ fn the_merge_is_the_sort_of_every_event() {
             calendars: Some(vec!["1d".into()]),
             receipt_filter: None,
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+            session: None,
         };
         // The naive order: every row by (r, entity, t, seq), every barrier by
         // its instant, tuples first.

@@ -212,13 +212,17 @@ enum ClockSource : ubyte { Replay = 0, Live = 1 }
 
 // D-5.1: the relations a stream carries, the calendars it emits barriers on
 // (in the order barriers of one instant are emitted, E-13), its receipt
-// filter and its clock.
+// filter and its clock. A live stream (clock Live) follows the versions of
+// the relations a session records (`session`, the source it records under)
+// and emits the barriers of its clock relation's labels as the clock passes
+// them (E-69).
 table StreamSpec {
   relations: [VersionRef];
   binding: string;
   calendars: [string];
   receipt_filter: ReceiptFilter;
   clock: ClockSource;
+  session: string;
 }
 
 // ---------------------------------------------------------- demands, bindings

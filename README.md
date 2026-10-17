@@ -584,7 +584,7 @@ abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--j
 abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data SOCKET | --store DIR)
 abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
 abt activation --run RUN [--json] (--data SOCKET | --store DIR)
-abt data serve [--store DIR] [--socket PATH] [--config FILE]
+abt data serve [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R] [--grace 'CAL=S;...'] [--record synthetic --session S --start T --end T ...]
 abt data ingest [--store DIR] --adapter norgate|databento|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
 abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
 abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
@@ -705,6 +705,18 @@ A vendor's data enters a store through the data layer's adapters (D-7.7,
   `--processing-delay S`.
 - `databento_live` is the live gateway's session (CRAM, the subscription,
   DBN), every record stamped at acceptance.
+
+A live session (D-5.4, `crates/abt-data/src/live.rs`, ERRATA E-69) records
+a feed into the store write-ahead, every row received at its acceptance.
+`abt run --mode live-sim --session S --data SOCKET` reads it as it arrives:
+the data service emits each barrier when its clock passes the label plus the
+calendar's grace, after the bars accepted before it, and records the
+instants. `abt run --replay-of RUN` replays that recorded stream (`--paced`
+at the clock's pace) and decides and fills as the live run did (G4,
+`crates/abt-tests/tests/replay.rs`). A bar evaluated past its deadline
+(`--deadline`, one bar by default) is late: the execution block's `late send`
+flags its decisions, `late reject` drops them. `abt data serve --record
+synthetic --clock-rate R` records a rehearsal session of the synthetic feed.
 
 ## Company books
 

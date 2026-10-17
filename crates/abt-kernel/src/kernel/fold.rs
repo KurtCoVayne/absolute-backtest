@@ -67,15 +67,15 @@ pub enum Event {
     /// A stored relation's tuple, in the kernel's symbol order, keyed at
     /// `key` and received at `r`; `seq` is its position in the stream.
     Tuple { seq: u64, rel: usize, key: i64, r: i64, tuple: Tuple },
-    /// The close of bucket `label` of a calendar.
-    Barrier { seq: u64, cal: Cal, label: i64 },
+    /// The close of bucket `label` of a calendar, emitted at `at`.
+    Barrier { seq: u64, cal: Cal, label: i64, at: i64 },
 }
 
 impl From<super::bind::StreamEvent> for Event {
     fn from(e: super::bind::StreamEvent) -> Event {
         match e {
             super::bind::StreamEvent::Tuple { seq, rel, key, r, tuple } => Event::Tuple { seq, rel, key, r, tuple },
-            super::bind::StreamEvent::Barrier { seq, cal, label } => Event::Barrier { seq, cal, label },
+            super::bind::StreamEvent::Barrier { seq, cal, label, at } => Event::Barrier { seq, cal, label, at },
         }
     }
 }
@@ -100,6 +100,28 @@ pub struct Fold<'p, 'e> {
     recent: std::collections::VecDeque<i64>,
     /// What the invariants keep between barriers (K-3.3).
     invariants: crate::contract::check::Invariants,
+    /// A live run's lag against its deadline (K-6.3).
+    live: Option<Lag>,
+}
+
+/// What a live run measures (K-6.3): each decision bar's lag, the time
+/// between its barrier's instant and its evaluation, against the deadline.
+#[derive(Clone, Debug)]
+pub struct Live {
+    pub clock: super::LiveClock,
+    /// How long after its barrier a bar may be evaluated.
+    pub deadline: i64,
+    /// The fraction of late bars past which the run is warned.
+    pub fraction: f64,
+}
+
+#[derive(Clone, Debug)]
+struct Lag {
+    live: Live,
+    bars: u64,
+    late: u64,
+    max: i64,
+    sum: i128,
 }
 
 impl<'p, 'e> Fold<'p, 'e> {
@@ -129,7 +151,21 @@ impl<'p, 'e> Fold<'p, 'e> {
             ran_decision: false,
             recent: Default::default(),
             invariants,
+            live: None,
         }
+    }
+
+    /// Measures every decision bar's lag against a live run's deadline: a
+    /// late bar's decisions are flagged, or dropped under `late reject`.
+    pub fn with_live(mut self, live: Live) -> Self {
+        self.live = Some(Lag {
+            live,
+            bars: 0,
+            late: 0,
+            max: 0,
+            sum: 0,
+        });
+        self
     }
 
     /// The contract its preconditions were checked against at bind (K-3.2);
@@ -278,6 +314,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             checkpoint_requested: false,
             ran_decision: false,
             recent: Default::default(),
+            live: None,
         })
     }
 
@@ -332,17 +369,17 @@ impl<'p, 'e> Fold<'p, 'e> {
                 }
                 Ok(())
             }
-            Event::Barrier { cal, label, .. } => {
+            Event::Barrier { cal, label, at, .. } => {
                 // Every tuple received by the barrier's instant precedes it
                 // (D-5.3): the kernel holds what was received by `now`.
-                self.kernel.now = super::bind::barrier_at(self.kernel.prog, label);
+                self.kernel.now = at;
                 self.kernel.open_bucket(&cal, label);
-                self.barrier(&cal, label)
+                self.barrier(&cal, label, at)
             }
         }
     }
 
-    fn barrier(&mut self, res: &Cal, label: i64) -> Result<(), RunError> {
+    fn barrier(&mut self, res: &Cal, label: i64, at: i64) -> Result<(), RunError> {
         if *res != self.kernel.prog.decision_cal {
             return Ok(());
         }
@@ -354,7 +391,37 @@ impl<'p, 'e> Fold<'p, 'e> {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
-        let by_equity = self.kernel.decide_at(label, &mut self.result)?;
+        let mut by_equity = self.kernel.decide_at(label, &mut self.result)?;
+        // Live, a bar evaluated past its deadline is late (K-6.3): its
+        // decisions are sent flagged, or dropped under `late reject`.
+        if let Some(lag) = self.live.as_mut() {
+            let d = lag.live.clock.now() - at;
+            lag.bars += 1;
+            lag.max = lag.max.max(d);
+            lag.sum += d as i128;
+            if d > lag.live.deadline {
+                lag.late += 1;
+                self.result.late_bars.insert(label);
+                if self.kernel.cfg.late_reject {
+                    for (sym, ds) in std::mem::take(&mut by_equity) {
+                        for (decision, rule) in ds {
+                            self.result.emit(
+                                super::RunEvent::new(
+                                    label,
+                                    Some(sym),
+                                    super::EventKind::Dropped {
+                                        decided: label,
+                                        decision,
+                                        reason: "late".into(),
+                                    },
+                                )
+                                .rule(rule),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
         // The invariants after the executor's take (K-3.3, K-4.2).
         let working = self.exec.working();
@@ -384,6 +451,22 @@ impl<'p, 'e> Fold<'p, 'e> {
             return Err(RunError::NoBars);
         }
         self.exec.finish(&mut self.kernel, &mut self.result);
+        if let Some(lag) = &self.live {
+            if lag.bars > 0 && lag.late as f64 > lag.live.fraction * lag.bars as f64 {
+                self.result.warnings.push(super::RunWarning {
+                    bias: "latency".into(),
+                    message: format!(
+                        "{} of {} decision bars were evaluated more than {:.3} s after their barrier (the lag was {:.3} s at most, {:.3} s on average): their decisions are {}",
+                        lag.late,
+                        lag.bars,
+                        lag.live.deadline as f64 / 1e9,
+                        lag.max as f64 / 1e9,
+                        lag.sum as f64 / lag.bars as f64 / 1e9,
+                        if self.kernel.cfg.late_reject { "dropped (`late reject`)" } else { "flagged late (`late send`)" }
+                    ),
+                });
+            }
+        }
         // A commission per contract or on notional was charged: the costs
         // are not neglected, whatever the per-share fields say.
         if self.result.costs.commissions > 0.0 {

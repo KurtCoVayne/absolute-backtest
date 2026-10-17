@@ -212,12 +212,18 @@ impl DataClient {
     }
 
     pub fn subscribe(&self, spec: StreamSpec, from: u64, to: Option<u64>) -> Result<Subscription, RunError> {
+        self.subscribe_paced(spec, from, to, false)
+    }
+
+    /// A subscription; `paced`, a replay sent at the data layer's clock's
+    /// pace (D-5.5).
+    pub fn subscribe_paced(&self, spec: StreamSpec, from: u64, to: Option<u64>, paced: bool) -> Result<Subscription, RunError> {
         let mut reply = self
             .client
             .call(Message::SubscribeRequest(Box::new(SubscribeRequest {
                 spec: Box::new(spec),
                 from_seq: from,
-                paced: false,
+                paced,
                 to_seq: to,
                 with_index: false,
             })))
@@ -1156,9 +1162,77 @@ pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) ->
             calendars: Some(names),
             receipt_filter: None,
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+            session: None,
         },
         cal_of,
     ))
+}
+
+/// The current version of a relation, from the data layer's statistics.
+fn current_version(client: &DataClient, relation: &str) -> Result<Option<String>, RunError> {
+    for b in client.stats()? {
+        let (rel, version, current) = (strings(col(&b, "relation")?)?, strings(col(&b, "version")?)?, col(&b, "current")?.as_boolean().clone());
+        for i in 0..b.num_rows() {
+            if rel[i].as_deref() == Some(relation) && current.value(i) {
+                return Ok(version[i].clone());
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The labels of a clock relation's calendar (`base`), read at its current
+/// version.
+fn clock_labels(client: &DataClient, relation: &str, calendar: &str) -> Result<BTreeSet<i64>, RunError> {
+    let view = View {
+        versions: None,
+        binding: None,
+        as_of_seq: None,
+    };
+    let mut out = BTreeSet::new();
+    let form = QueryForm::Scan(Box::new(Scan {
+        relation: relation.to_string(),
+        t0: i64::MIN,
+        t1: i64::MAX,
+        predicate: None,
+        columns: None,
+    }));
+    for b in client.query(&view, form)? {
+        let cals = strings(col(&b, "calendar")?)?;
+        let labels = times(col(&b, "label")?);
+        for i in 0..b.num_rows() {
+            if cals[i].as_deref() == Some(calendar) {
+                out.extend(labels[i]);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The bars a live session plans (`live.<session>.plan`, D-5.2 live): a
+/// live-sim run's base bars, which its data does not hold yet.
+pub fn session_bars(client: &DataClient, session: &str) -> Result<BTreeSet<i64>, RunError> {
+    let bars = clock_labels(client, &format!("live.{}.plan", session), "base")?;
+    if bars.is_empty() {
+        return Err(RunError::Config(format!("the live session `{}` plans no bar (live.{}.plan)", session, session)));
+    }
+    Ok(bars)
+}
+
+/// The clock a live-sim run's stream recorded (`kernel.<run>.clock`, D-5.5)
+/// and its base bars: what a replay of that run reads.
+pub fn recorded_clock(client: &DataClient, run: &str) -> Result<(VersionRef, BTreeSet<i64>), RunError> {
+    let relation = format!("kernel.{}.clock", run);
+    let version = current_version(client, &relation)?.ok_or_else(|| RunError::Config(format!("the run `{}` recorded no live stream ({})", run, relation)))?;
+    let bars = clock_labels(client, &relation, "base")?;
+    Ok((VersionRef { relation, version }, bars))
+}
+
+/// A stream spec reading a recorded clock in place of the run's own.
+pub fn with_recorded_clock(spec: &mut StreamSpec, clock: VersionRef) {
+    let mut relations: Vec<VersionRef> = spec.relations.take().unwrap_or_default().into_iter().filter(|v| !v.relation.ends_with(".calendar_label")).collect();
+    relations.push(clock);
+    spec.relations = Some(relations);
 }
 
 /// How an event batch's columns become a kernel tuple of one relation.
@@ -1168,11 +1242,13 @@ struct Converter {
     args: Vec<Option<(usize, Ty)>>,
 }
 
-/// An event of the stream, as the fold takes it.
+/// An event of the stream, as the fold takes it: a barrier with the instant
+/// it was emitted at (its bucket's end in replay, D-5.1; the clock's instant
+/// in a live stream, after the grace).
 #[derive(Clone, Debug)]
 pub enum StreamEvent {
     Tuple { seq: u64, rel: usize, key: i64, r: i64, tuple: Tuple },
-    Barrier { seq: u64, cal: Cal, label: i64 },
+    Barrier { seq: u64, cal: Cal, label: i64, at: i64 },
 }
 
 /// Turns event batches into the fold's events: relation columns into the
@@ -1237,6 +1313,7 @@ impl Decoder {
         let calendar = b.column_by_name("calendar").ok_or_else(|| bad("without calendar"))?.as_dictionary::<UInt32Type>().clone();
         let cal_names = strings(calendar.values())?;
         let label = times(b.column_by_name("label").ok_or_else(|| bad("without label"))?);
+        let at = times(b.column_by_name("at").ok_or_else(|| bad("without at"))?);
         let mut out = Vec::with_capacity(b.num_rows());
         for i in 0..b.num_rows() {
             let s = seq.value(i);
@@ -1262,10 +1339,12 @@ impl Decoder {
                 Some("barrier") => {
                     let name = cal_names.get(calendar.keys().value(i) as usize).cloned().flatten().ok_or_else(|| bad("barrier without a calendar"))?;
                     let cal = self.cal_of.get(&name).cloned().ok_or_else(|| bad("barrier of an unknown calendar"))?;
+                    let l = label[i].ok_or_else(|| bad("barrier without a label"))?;
                     out.push(StreamEvent::Barrier {
                         seq: s,
                         cal,
-                        label: label[i].ok_or_else(|| bad("barrier without a label"))?,
+                        label: l,
+                        at: at[i].unwrap_or(l),
                     });
                 }
                 _ => {}

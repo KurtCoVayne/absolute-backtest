@@ -2,7 +2,8 @@
 //! (`--store DIR`, else `$ABT_STORE`, else `./abt-store`).
 //!
 //! ```text
-//! abt data serve   [--store DIR] [--socket PATH] [--config FILE]
+//! abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...']
+//!                  [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]
 //! abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...']
 //!                  [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]
 //! abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry]
@@ -89,7 +90,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE]\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
     );
     exit(1)
 }
@@ -150,9 +151,18 @@ pub fn main(args: &[String]) {
     match a.cmd.as_str() {
         "serve" => {
             let path = a.opts.get("socket").map(PathBuf::from).unwrap_or_else(|| abt_wire::transport::default_socket("data"));
-            let svc = DataService::with_sources(open(&a), sources(&a));
+            let (clock, grace) = live_clock(&a);
+            let svc = DataService::with_clock(open(&a), sources(&a), clock.clone(), grace);
+            let recording = a.opts.get("record").map(|source| record(&a, &svc, source, clock));
             let handle = listen(&path, svc).unwrap_or_else(|e| fail(&format!("{}: {}", path.display(), e)));
             eprintln!("serving {} on {}", store_dir(&a).display(), path.display());
+            if let Some(r) = recording {
+                match r.join() {
+                    Ok(Ok(state)) => eprintln!("the session recorded {} batches, {} rows", state.batches, state.rows),
+                    Ok(Err(e)) => eprintln!("the session's feed failed: {}", e),
+                    Err(_) => eprintln!("the session's recorder stopped"),
+                }
+            }
             let _ = handle.join();
         }
         "ingest" => {
@@ -618,6 +628,77 @@ fn parse_query(store: &Store, text: &str) -> Result<(QueryForm, Option<i64>), St
         _ => return Err("one of: `at T` with at most one key, `latest at T`, `over T0..T1` with at most one key, or none".into()),
     };
     Ok((form, r_max))
+}
+
+/// The clock of the service's live streams: the wall clock, or with
+/// `--clock-rate R` one running R times as fast from `--clock-origin T`
+/// (default: one bar before the recorded session's start), a rehearsal's;
+/// and the calendars' graces, `--grace 'base=0.25;days=0'` in seconds.
+fn live_clock(a: &Args) -> (Arc<dyn abt_data::live::Clock>, BTreeMap<String, i64>) {
+    let mut grace = BTreeMap::new();
+    for kv in a.opts.get("grace").map(|s| s.split(';').map(str::to_string).collect::<Vec<_>>()).unwrap_or_default() {
+        if kv.trim().is_empty() {
+            continue;
+        }
+        let (k, v) = kv.split_once('=').unwrap_or_else(|| fail("--grace takes CALENDAR=SECONDS[;CALENDAR=SECONDS...]"));
+        let secs: f64 = v.trim().parse().unwrap_or_else(|_| fail(&format!("--grace: `{}` is not a number of seconds", v)));
+        grace.insert(k.trim().to_string(), (secs * 1e9).round() as i64);
+    }
+    let Some(rate) = a.opts.get("clock-rate") else {
+        return (Arc::new(abt_data::live::WallClock), grace);
+    };
+    let rate: f64 = rate.parse().ok().filter(|r: &f64| *r > 0.0).unwrap_or_else(|| fail("--clock-rate takes a positive number"));
+    let origin = match a.opts.get("clock-origin").or(a.opts.get("start")) {
+        Some(t) => parse_time(t) - bar_of(a) * 2,
+        None => fail("--clock-rate starts the clock at --clock-origin T (or two bars before --start)"),
+    };
+    (Arc::new(abt_data::live::ScaledClock::new(origin, rate)), grace)
+}
+
+fn parse_time(t: &str) -> i64 {
+    abt_wire::scalar::parse_timestamp(t).unwrap_or_else(|| fail(&format!("`{}` is not a date or a time", t)))
+}
+
+/// The bar a recorded session plans (`--bar 1m`).
+fn bar_of(a: &Args) -> i64 {
+    let bar = a.opts.get("bar").map(String::as_str).unwrap_or("1m");
+    abt_data::resolver::calendar_nanos(bar).unwrap_or_else(|| fail(&format!("--bar: `{}` is not a bar (1m, 5m, 1h)", bar)))
+}
+
+/// `abt data serve --record synthetic --session S --symbols A,B --start T
+/// --end T [--bar 1m] [--delay MS] [--seed N]`: a rehearsal session (D-5.4)
+/// of the synthetic feed's bars of `--symbols` at every bar from `--start`
+/// to `--end`, each arriving `--delay` milliseconds after its close (50 by
+/// default), recorded while the service serves. A vendor's live feed is
+/// recorded through the data layer's `DataService::record` with its
+/// adapter's subscription (ERRATA E-69).
+fn record(a: &Args, svc: &Arc<DataService>, source: &str, clock: Arc<dyn abt_data::live::Clock>) -> abt_data::live::Recording {
+    if source != "synthetic" {
+        fail(&format!(
+            "--record {}: the command line records the synthetic feed; a vendor's live feed is recorded through its adapter's subscription (ERRATA E-69)",
+            source
+        ));
+    }
+    let session = a.opts.get("session").cloned().unwrap_or_else(|| fail("--record names its session with --session S"));
+    let (start, end) = (
+        parse_time(a.opts.get("start").map(String::as_str).unwrap_or_else(|| fail("--record needs --start T"))),
+        parse_time(a.opts.get("end").map(String::as_str).unwrap_or_else(|| fail("--record needs --end T"))),
+    );
+    let bar = bar_of(a);
+    let labels: Vec<i64> = (0..).map(|k| start + k * bar).take_while(|t| *t <= end).collect();
+    let symbols: Vec<String> = a
+        .opts
+        .get("symbols")
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+        .unwrap_or_else(|| vec!["AAA".into(), "BBB".into()]);
+    let syms: Vec<&str> = symbols.iter().map(String::as_str).collect();
+    let delay = a.opts.get("delay").map(|d| d.parse::<f64>().unwrap_or_else(|_| fail("--delay takes milliseconds"))).unwrap_or(50.0);
+    let seed = a.opts.get("seed").map(|d| d.parse().unwrap_or_else(|_| fail("--seed takes a number"))).unwrap_or(7);
+    let feed = abt_data::live::SyntheticFeed::new(clock, &syms, labels.clone(), (delay * 1e6).round() as i64, seed);
+    let prelude = feed.prelude().unwrap_or_else(|e| fail(&e.to_string()));
+    svc.open_session(&session, "synthetic", &prelude, &labels).unwrap_or_else(|e| fail(&e.to_string()));
+    eprintln!("recording session `{}`: {} bars of {} from {}", session, labels.len(), symbols.join(", "), Time(start).iso());
+    svc.record(&session, "synthetic", Box::new(feed))
 }
 
 /// A reviewer's statements of the versions an ingest writes: `--attributes

@@ -311,7 +311,7 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
             .col("amount", Role::Value, Col::Num(d.iter().map(|(_, x)| Some(x.amount)).collect()))
             .col("order", Role::Value, Col::Bytes(d.iter().map(|(_, x)| Some(x.order.to_string())).collect()))
             .col("rule", Role::Value, Col::Label(d.iter().map(|(e, _)| rule(e.rule)).collect()))
-            .col("late", Role::Value, Col::Bool(d.iter().map(|_| Some(false)).collect()))
+            .col("late", Role::Value, Col::Bool(d.iter().map(|(e, _)| Some(result.late_bars.contains(&e.t))).collect()))
             .finish()?,
     );
     let fills: Vec<(u64, &super::FillRecord, Option<u64>)> = ev

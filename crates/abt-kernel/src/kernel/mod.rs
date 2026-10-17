@@ -9,6 +9,7 @@ pub mod value;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use hash::{FxHashMap, FxHashSet};
 
@@ -697,6 +698,10 @@ pub struct ExecConfig {
     /// The pre-trade limits of the execution block (K-3.5).
     #[serde(default)]
     pub limits: Vec<crate::check::Limit>,
+    /// The execution block's `late reject` (K-6.3): a live run drops the
+    /// decisions of a bar evaluated after its deadline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub late_reject: bool,
     /// The memory the derived state may take (K-4.6, `--memory-budget`);
     /// half the machine's memory when unset. Not part of the identity.
     #[serde(skip)]
@@ -819,6 +824,7 @@ impl Default for ExecConfig {
             window_cache: true,
             pushdown: true,
             limits: Vec::new(),
+            late_reject: false,
             memory_budget: None,
             inject: None,
             running_sums: true,
@@ -951,6 +957,7 @@ impl ExecConfig {
         };
         cfg.on_ruin = if x.ruin == "continue" { OnRuin::Continue } else { OnRuin::Halt };
         cfg.limits = x.limits.clone();
+        cfg.late_reject = x.late == "reject";
         cfg
     }
 
@@ -1242,6 +1249,9 @@ pub struct RunResult {
     pub fills: Vec<FillRecord>,
     /// Decisions the executor could not carry out, with the reason.
     pub dropped: Vec<(i64, Decision, String)>,
+    /// The decision bars a live run evaluated past their deadline (K-6.3).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub late_bars: BTreeSet<i64>,
     /// Cash plus marked positions at each bar, before that bar's decisions.
     pub equity_curve: Vec<(i64, f64)>,
     /// The fixed capital a bar's return is measured against when profits are
@@ -3366,10 +3376,68 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
     rule.body.iter().for_each(|l| lit(l, f));
 }
 
+/// A live run's deadline when none is given (K-6.3): one bar of its
+/// decision calendar (a day for a civil calendar or a session).
+pub fn deadline_of(prog: &Program) -> i64 {
+    match (&prog.decision_cal, prog.base.nanos()) {
+        (Cal::Base, Some(n)) => n,
+        (Cal::Weeks(w), _) => *w as i64 * 7 * time::DAY,
+        (Cal::Months(m), _) => *m as i64 * 30 * time::DAY,
+        (Cal::Years(y), _) => *y as i64 * 365 * time::DAY,
+        _ => time::DAY,
+    }
+}
+
+/// The clock a live run measures its lag against (K-6.3): the data layer's,
+/// the wall clock unless a test shares another.
+#[derive(Clone)]
+pub struct LiveClock(pub Arc<dyn Fn() -> i64 + Send + Sync>);
+
+impl LiveClock {
+    pub fn wall() -> LiveClock {
+        LiveClock(Arc::new(|| {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
+        }))
+    }
+
+    pub fn now(&self) -> i64 {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for LiveClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LiveClock")
+    }
+}
+
+/// The executor mode of a run (K-6.2): the stream it reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RunMode {
+    /// The data layer's replay of what it holds (D-5.5).
+    #[default]
+    ReplaySim,
+    /// A live session's stream (D-5.2 live), recorded as it is read.
+    LiveSim { session: String },
+}
+
 /// How a run reads its stream (K-4.2, K-4.7): where it stops, whether it
 /// takes checkpoints, and the checkpoint it resumes from.
 #[derive(Clone, Debug, Default)]
 pub struct Replay {
+    /// The executor mode (K-6.2).
+    pub mode: RunMode,
+    /// A live-sim run whose recorded stream this run replays (D-5.5): its
+    /// session's versions with the barriers that run's stream emitted.
+    pub replay_of: Option<String>,
+    /// Replay at the data layer's clock's pace (`--paced`, D-5.5).
+    pub paced: bool,
+    /// The clock a live run measures its lag against (the wall clock when
+    /// none).
+    pub clock: Option<LiveClock>,
+    /// How long after its barrier a decision bar may be evaluated (K-6.3);
+    /// one bar of the decision calendar when none.
+    pub deadline: Option<i64>,
     /// Stop after the event with this seq (a truncated stream, G5).
     pub to_seq: Option<u64>,
     /// Stop after the decision at this bar: what the data received by its
@@ -3464,7 +3532,29 @@ pub fn replay_observed<'p>(
     on_checkpoint: &mut dyn FnMut(Checkpoint),
     on_progress: &mut dyn FnMut(Progress, &mut Kernel<'p>, &RunResult) -> Result<Next, RunError>,
 ) -> Result<(RunResult, Kernel<'p>), RunError> {
-    let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides))?;
+    let mut bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides))?;
+    // A live-sim run's bars are its session's plan, which its data does not
+    // hold yet; a replay of one reads the bars its stream recorded (K-6.2,
+    // D-5.5). The data layer would answer a pushed aggregate at the bucket's
+    // end, not at the instant a live barrier was emitted: both evaluate
+    // every aggregate (E-69).
+    let mut recorded = None;
+    if opts.replay_of.is_some() && opts.mode != RunMode::ReplaySim {
+        return Err(RunError::Config("a replay of a recorded run is a replay-sim run".into()));
+    }
+    if let RunMode::LiveSim { session } = &opts.mode {
+        if opts.horizon.is_some() || opts.to_seq.is_some() || opts.from.is_some() {
+            return Err(RunError::Config("a live-sim run reads its session from now on: no horizon, truncation or resumption".into()));
+        }
+        bound.base_bars = bind::session_bars(client, session)?;
+        cfg.pushdown = false;
+    }
+    if let Some(run) = &opts.replay_of {
+        let (clock, bars) = bind::recorded_clock(client, run)?;
+        bound.base_bars = bars;
+        recorded = Some(clock);
+        cfg.pushdown = false;
+    }
     // The preconditions, before the first barrier (K-3.2).
     let mut contract = crate::contract::contract(prog);
     let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, &bound, client, &cfg)?;
@@ -3474,7 +3564,10 @@ pub fn replay_observed<'p>(
     let identity = Identity {
         program_hash: crate::compiler::normalise(prog).hash,
         binding_id: bound.binding.id.clone().unwrap_or_default(),
-        mode: "replay-sim".into(),
+        mode: match &opts.mode {
+            RunMode::ReplaySim => "replay-sim".into(),
+            RunMode::LiveSim { .. } => "live-sim".into(),
+        },
         run_id: String::new(),
         // Through a JSON value: a field that is infinite (no leverage
         // limit) is null there, and canonical JSON has no infinity.
@@ -3492,7 +3585,14 @@ pub fn replay_observed<'p>(
         &identity.mode,
     );
     let identity = Identity { run_id: run.clone(), ..identity };
-    let (spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
+    let (mut spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
+    if let RunMode::LiveSim { session } = &opts.mode {
+        spec.clock = abt_wire::generated::abt::wire::ClockSource::Live;
+        spec.session = Some(session.clone());
+    }
+    if let Some(clock) = recorded {
+        bind::with_recorded_clock(&mut spec, clock);
+    }
     let mut to_seq = opts.to_seq;
     let mut end_label: Option<i64> = None;
     if opts.horizon.is_some() || opts.to_seq.is_some() {
@@ -3529,6 +3629,13 @@ pub fn replay_observed<'p>(
     if let Some(e) = opts.checkpoint_every {
         fold = fold.with_checkpoints(e);
     }
+    if matches!(opts.mode, RunMode::LiveSim { .. }) {
+        fold = fold.with_live(fold::Live {
+            clock: opts.clock.clone().unwrap_or_else(LiveClock::wall),
+            deadline: opts.deadline.unwrap_or_else(|| deadline_of(prog)),
+            fraction: 0.01,
+        });
+    }
     if opts.record_summaries {
         fold.kernel.record_summaries(true);
     }
@@ -3545,7 +3652,7 @@ pub fn replay_observed<'p>(
         on_progress(Progress::Started { run_id: run.clone() }, k, r)?;
     }
     if to_seq.is_none_or(|t| t >= from) {
-        let mut sub = client.subscribe(spec, from, to_seq)?;
+        let mut sub = client.subscribe_paced(spec, from, to_seq, opts.paced)?;
         'stream: while let Some(b) = sub.next_batch()? {
             for ev in decoder.events(&mut fold.kernel, &bound, &b)? {
                 let before = fold.last_bar();

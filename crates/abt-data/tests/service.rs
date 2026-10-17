@@ -251,6 +251,7 @@ fn script(c: &Client) -> Vec<String> {
         calendars: Some(vec!["1d".into()]),
         receipt_filter: None,
         clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+        session: None,
     };
     let mut reply = c
         .call(Message::SubscribeRequest(Box::new(SubscribeRequest {

@@ -31,7 +31,7 @@ struct Args {
     flags: HashSet<String>,
 }
 
-const FLAGS: [&str; 10] = ["synthetic", "verify-causality", "quiet", "all", "fills", "timing", "json", "observed", "no-pushdown", "show"];
+const FLAGS: [&str; 11] = ["synthetic", "verify-causality", "quiet", "all", "fills", "timing", "json", "observed", "no-pushdown", "show", "paced"];
 /// Options that may repeat.
 const MULTI: [&str; 2] = ["text", "param"];
 /// Every option. The executor's fields are not among them: a run is
@@ -39,8 +39,12 @@ const MULTI: [&str; 2] = ["text", "param"];
 /// `report` block (language-v2, 4.3 and 4.5); what remains here is what
 /// describes the run itself (its data, its window, the bundle date), the
 /// compiler's choices that keep the result, and the commands' arguments.
-const OPTIONS: [&str; 36] = [
+const OPTIONS: [&str; 40] = [
     "strategy",
+    "mode",
+    "session",
+    "replay-of",
+    "deadline",
     "memory-budget",
     "table",
     "tables",
@@ -437,7 +441,7 @@ pub fn install_reporter(r: Box<Reporter>) -> bool {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--verify-causality] [--no-pushdown] [--memory-budget BYTES] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt hash --strategy NAME [--json | --show] <files...>   (H(P): BLAKE3 over the program's normal form without its report block, the program's identity; --json adds the normal form as source, --show prints the bytes hashed: the RFC 8785 form of the normal form's hash view)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the compiler's plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt contract --strategy NAME [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the contract derived from the program, K-3: preconditions, invariants, postconditions and limits with their source, discharge and policy; with data, the run's status of each)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>\n          (the query language over the run, V-8: `? BODY at T = DATE | at T | over D1 .. D2 [for A = KEY]` (a rule body checked with the program, its solutions at the bars), `why R(...)` (the derivation down to supplied tuples), `why not R(A, T) [in written order]`, `trace R at DATE` (every instance attempted, fired or the literal that excluded it), `coverage [over D1 .. D2]`, `show program|plan [R]|schedule|calendars|contract`, `ledger R into NAME` (written through --data SOCKET as kernel.<run>.NAME))\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>   (a vendor's data is ingested into a store by `abt data ingest --adapter norgate|databento`)\n  abt bundle test DIR <files...>\n  abt plan|metrics|test|claim|feed|activation|lineage|dispute|briefs ...   (the query layer's commands: plans and their trials, a run's metrics, statistical tests and claims, feed and activation statistics, lineages, the briefs harness; each prints its usage)\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --memory-budget B     the memory the derived state may take (K-4.6; default half the machine's): a program whose state bound exceeds it is refused before its first barrier\n  --no-pushdown         evaluate every aggregate in the kernel rather than having the data layer answer the eligible ones (K-4.5); a test switch: both give the same bits\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars: over --data SOCKET as a cache object of the data layer, its key printed; in process into --checkpoint-dir DIR as <bar>.json\n  --resume KEY|FILE     continue from a checkpoint (a cache key over --data SOCKET, else a file) of the same program, binding and window (the stream resumes at its cursor)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); one whose tests have not passed is unreviewed, refused under `require reviewed` and warned under `allow unreviewed`\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --rel RELATION        the relation `table` reads; --symbol SYM keeps one instrument's tuples\n  --text QUERY          a query of `abt query` (repeatable: one run answers them all)\n  --base RES            the bars a built bundle holds (default: the class's base)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics (pushed_answers: the aggregates the data layer answered)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--mode replay-sim|live-sim --session S] [--replay-of RUN [--paced]] [--deadline SECONDS|none]\n          [--verify-causality] [--no-pushdown] [--memory-budget BYTES] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt hash --strategy NAME [--json | --show] <files...>   (H(P): BLAKE3 over the program's normal form without its report block, the program's identity; --json adds the normal form as source, --show prints the bytes hashed: the RFC 8785 form of the normal form's hash view)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the compiler's plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt contract --strategy NAME [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the contract derived from the program, K-3: preconditions, invariants, postconditions and limits with their source, discharge and policy; with data, the run's status of each)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>\n          (the query language over the run, V-8: `? BODY at T = DATE | at T | over D1 .. D2 [for A = KEY]` (a rule body checked with the program, its solutions at the bars), `why R(...)` (the derivation down to supplied tuples), `why not R(A, T) [in written order]`, `trace R at DATE` (every instance attempted, fired or the literal that excluded it), `coverage [over D1 .. D2]`, `show program|plan [R]|schedule|calendars|contract`, `ledger R into NAME` (written through --data SOCKET as kernel.<run>.NAME))\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>   (a vendor's data is ingested into a store by `abt data ingest --adapter norgate|databento`)\n  abt bundle test DIR <files...>\n  abt plan|metrics|test|claim|feed|activation|lineage|dispute|briefs ...   (the query layer's commands: plans and their trials, a run's metrics, statistical tests and claims, feed and activation statistics, lineages, the briefs harness; each prints its usage)\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --memory-budget B     the memory the derived state may take (K-4.6; default half the machine's): a program whose state bound exceeds it is refused before its first barrier\n  --no-pushdown         evaluate every aggregate in the kernel rather than having the data layer answer the eligible ones (K-4.5); a test switch: both give the same bits\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --mode MODE           replay-sim (the default: the data layer's replay of what it holds) or live-sim (--session S: a live session the data service at --data SOCKET records, its barriers emitted as its clock passes them, K-6.2)\n  --replay-of RUN       replay a live-sim run's recorded stream (its session's rows and the barriers its stream emitted, D-5.5); --paced at the data layer's clock's pace\n  --deadline S          how long after its barrier a live decision bar may be evaluated before its decisions are late (K-6.3; default one bar of the decision calendar; `none` measures nothing): the execution block's `late send|reject` decides what they become\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars: over --data SOCKET as a cache object of the data layer, its key printed; in process into --checkpoint-dir DIR as <bar>.json\n  --resume KEY|FILE     continue from a checkpoint (a cache key over --data SOCKET, else a file) of the same program, binding and window (the stream resumes at its cursor)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); one whose tests have not passed is unreviewed, refused under `require reviewed` and warned under `allow unreviewed`\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --rel RELATION        the relation `table` reads; --symbol SYM keeps one instrument's tuples\n  --text QUERY          a query of `abt query` (repeatable: one run answers them all)\n  --base RES            the bars a built bundle holds (default: the class's base)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics (pushed_answers: the aggregates the data layer answered)"
     );
     exit(code)
 }
@@ -604,6 +608,47 @@ fn exec_config(args: &Args, prog: &crate::check::Program) -> ExecConfig {
     cfg
 }
 
+/// The executor mode a run's options name (K-6.2): `--mode replay-sim`
+/// (the default) or `live-sim` with `--session S` (a live session of the
+/// data service at `--data SOCKET`); `--replay-of RUN` replays a live-sim
+/// run's recorded stream, `--paced` at the data layer's clock's pace;
+/// `--deadline SECONDS|none` overrides one bar of the decision calendar.
+fn run_mode(args: &Args) -> (crate::kernel::RunMode, Option<String>, bool, Option<i64>) {
+    let fail = |m: String| -> ! {
+        eprintln!("{}", m);
+        exit(2)
+    };
+    let mode = match args.opts.get("mode").map(String::as_str) {
+        None | Some("replay-sim") => crate::kernel::RunMode::ReplaySim,
+        Some("live-sim") => crate::kernel::RunMode::LiveSim {
+            session: args
+                .opts
+                .get("session")
+                .cloned()
+                .unwrap_or_else(|| fail("--mode live-sim reads a live session: name it with --session S".into())),
+        },
+        Some("live-broker") => fail("--mode live-broker: the broker interface is the live deployment's (K-6.4, M-10)".into()),
+        Some(m) => fail(format!("--mode: `{}` is not replay-sim or live-sim", m)),
+    };
+    if args.opts.contains_key("session") && mode == crate::kernel::RunMode::ReplaySim {
+        fail("--session names the live session of --mode live-sim".into());
+    }
+    let live = mode != crate::kernel::RunMode::ReplaySim || args.opts.contains_key("replay-of");
+    if live && DATA_SOCKET.get().is_none() {
+        fail("a live session and its recording are the data service's: name it with --data SOCKET".into());
+    }
+    let deadline = args.opts.get("deadline").map(|s| match s.as_str() {
+        "none" => i64::MAX,
+        x => x
+            .parse::<f64>()
+            .ok()
+            .filter(|v| *v >= 0.0)
+            .map(|v| (v * 1e9).round() as i64)
+            .unwrap_or_else(|| fail(format!("--deadline: `{}` is not a number of seconds or `none`", x))),
+    });
+    (mode, args.opts.get("replay-of").cloned(), args.flags.contains("paced"), deadline)
+}
+
 /// What runs the program, under a plan: the fold over the data layer's
 /// stream is the only driver (M-2); `--checkpoint-every` writes its
 /// checkpoints and `--resume` continues one.
@@ -623,11 +668,16 @@ fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<
     let resume = args.opts.get("resume").map(PathBuf::from);
     // A run writes its outputs to its data service (K-7.1, E-66).
     let writes = args.cmd == "run";
+    let (mode, replay_of, paced, deadline) = run_mode(args);
     Box::new(move |prog, client, cfg, horizon| {
         let mut opts = crate::kernel::Replay {
             checkpoint_every,
             horizon,
             write_outputs: writes,
+            mode: mode.clone(),
+            replay_of: replay_of.clone(),
+            paced,
+            deadline,
             ..Default::default()
         };
         if let Some(path) = &resume {
@@ -1175,7 +1225,10 @@ pub fn main_with(raw: Vec<String>) {
                     exit(2)
                 }
             }
-            let keeps = !ledger.is_empty() || tables_out.is_some() || !args.opts.contains_key("checkpoint-every") && !args.opts.contains_key("resume");
+            // A live-sim run and a replay of one go through the runner, which
+            // reads the mode's options.
+            let live = ["mode", "session", "replay-of", "deadline"].iter().any(|o| args.opts.contains_key(*o)) || args.flags.contains("paced");
+            let keeps = !live && (!ledger.is_empty() || tables_out.is_some() || !args.opts.contains_key("checkpoint-every") && !args.opts.contains_key("resume"));
             let mut notes: Vec<String> = Vec::new();
             // The kernel is kept after the run for the coverage report's
             // explanations, the ledger and the state tables; a run that

@@ -45,6 +45,7 @@ const EXEC_FIELDS: &[&str] = &[
     "ruin",
     "numerics",
     "limits",
+    "late",
 ];
 
 pub fn parse_units(src: &str) -> PResult<Vec<Unit>> {
@@ -1568,6 +1569,7 @@ impl Parser {
             "oversize" => word(self, &["halt", "clamp", "allow"])?,
             "ruin" => word(self, &["halt", "continue"])?,
             "numerics" => word(self, &["two_pass", "running"])?,
+            "late" => word(self, &["send", "reject"])?,
             "capital" => {
                 let (amount, _) = self.number()?;
                 let (cur, csp) = self.ident()?;
