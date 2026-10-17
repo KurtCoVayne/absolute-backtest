@@ -333,7 +333,7 @@ impl Ty {
     /// class's entity sort.
     pub fn parse(name: &str, arg: Option<&str>) -> Option<Ty> {
         Some(match (name, arg) {
-            ("Equity" | "Future" | "Entity", None) => Ty::Entity,
+            ("Equity" | "Future" | "Option" | "Entity", None) => Ty::Entity,
             ("Timestamp", None) => Ty::Timestamp,
             ("Duration", None) => Ty::Duration,
             ("Count", None) => Ty::Count,

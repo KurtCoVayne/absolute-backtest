@@ -470,6 +470,9 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Res
         if by_name.contains_key(&own) {
             return Some(own);
         }
+        if let Some(b) = borrowed(&prog.class, name).filter(|b| by_name.contains_key(b)) {
+            return Some(b);
+        }
         let mut others = by_name
             .keys()
             .filter(|n| short(n) == name && n.contains('.') && !n.starts_with("kernel.") && !n.starts_with("query.") && !n.starts_with("cache."));
@@ -874,6 +877,14 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
     Ok(notes)
 }
 
+/// The store's name of a relation a class reads from another class (D-2.3,
+/// ERRATA E-70): the option class's underlyings are the equity class's
+/// bars and actions.
+pub fn borrowed(class: &str, name: &str) -> Option<String> {
+    let equity = ["open", "high", "low", "close", "volume", "split", "dividend", "special_dividend", "delisted"];
+    (class == "option" && equity.contains(&name)).then(|| format!("equity.{}", name))
+}
+
 /// The relations of a class each need of a data block admits (Definition
 /// 3.11; `Demand::need_for`).
 fn need_relations(word: &str) -> &'static [&'static str] {
@@ -976,8 +987,9 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
         .chains
         .iter()
         .map(|c| DynamicNeed {
-            relation: "quote".into(),
+            relation: stored_name("quote").unwrap_or_else(|| "option.quote".into()),
             underlying: 0,
+            underlying_symbol: Some(c.underlying.clone()),
             filters: Some(Box::new(ChainFilters {
                 expiry_from: Some(Box::new(wire_duration(&c.expiry.0))),
                 expiry_to: Some(Box::new(wire_duration(&c.expiry.1))),
@@ -989,8 +1001,12 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
                 strike_hi: None,
                 min_open_interest: None,
             })),
-            spot_relation: Some(c.spot.clone()),
-            spot_column: None,
+            spot_relation: Some(stored_name(&c.spot).unwrap_or_else(|| c.spot.clone())),
+            // The spot is the relation's price: its first value argument.
+            spot_column: prog
+                .relations
+                .get(&c.spot)
+                .and_then(|s| s.args.iter().find(|a| matches!(a.ty, crate::ir::Ty::Quantity(_))).map(|a| a.name.clone())),
             horizon: None,
         })
         .collect();
@@ -1552,6 +1568,9 @@ pub fn keyed_tables(ds: &Dataset, schema_of: &dyn Fn(&str) -> Option<RelationSch
 pub fn schema_in(schemas: &[RelationSchema], class: &str, name: &str) -> Option<RelationSchema> {
     let own = format!("{}.{}", class, name);
     if let Some(s) = schemas.iter().find(|s| s.name == own) {
+        return Some(s.clone());
+    }
+    if let Some(s) = borrowed(class, name).and_then(|b| schemas.iter().find(|s| s.name == b)) {
         return Some(s.clone());
     }
     let mut others = schemas

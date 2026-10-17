@@ -183,29 +183,26 @@ fn the_plan_states_each_versions_span_and_attributes() {
 }
 
 #[test]
-fn a_dynamic_need_waits_for_the_option_class() {
+fn a_dynamic_need_names_its_underlying_by_a_ticker_of_the_store() {
+    // The chains themselves are tests/options.rs's; an underlying no ticker
+    // span carries is refused by name (A-D24).
     let (s, _, _) = store();
     let mut d = demand(vec![need(&["close"], None, &[])], false, None);
     d.dynamic = Some(vec![DynamicNeed {
-        relation: "quote".into(),
+        relation: "option.quote".into(),
         underlying: 0,
+        underlying_symbol: Some("NOPE".into()),
         filters: Some(Box::new(ChainFilters {
-            expiry_from: None,
-            expiry_to: None,
             moneyness_lo: Some(0.9),
             moneyness_hi: Some(1.1),
-            right: None,
-            style: None,
-            strike_lo: None,
-            strike_hi: None,
-            min_open_interest: None,
+            ..ChainFilters::default()
         })),
-        spot_relation: Some("close".into()),
+        spot_relation: Some("equity.close".into()),
         spot_column: None,
         horizon: None,
     }]);
     let err = resolve(&s, &d).err().unwrap().to_string();
-    assert!(err.contains("option chains"), "{}", err);
+    assert!(err.contains("`NOPE` is carried by no instrument"), "{}", err);
 }
 
 // ---- with sources (D-7.1 to D-7.5) ----

@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use abt_wire::generated::abt::wire::{AggregateResponse, ClockSource, Done, ExplainResponse, Layer, Message, PutResponse, ResolveResponse, SchemaResponse, SubscribeRequest, SubscribeResponse};
+use abt_wire::generated::abt::wire::{
+    AggregateResponse, ClockSource, Done, ExplainResponse, Layer, Message, PutResponse, ResolveDynamicResponse, ResolveResponse, SchemaResponse, SubscribeRequest, SubscribeResponse,
+};
 use abt_wire::rpc::{error, serve, Request, Responder, Service, WireError};
 use abt_wire::transport::{bind, channel_pair, Connection};
 use abt_wire::{ErrorCode, ErrorMessage};
@@ -236,6 +238,21 @@ impl DataService {
             r.binding.id = Some(id);
         }
         Ok(r)
+    }
+
+    /// `resolve_dynamic` (P-3.3): a chain the pre-pass did not cover, bought
+    /// on demand, and the binding again with it, recorded.
+    pub fn resolve_dynamic(&self, r: &abt_wire::generated::abt::wire::ResolveDynamicRequest) -> Result<abt_wire::generated::abt::wire::Binding, DataError> {
+        let mut st = self.store_mut();
+        let binding = match r.binding.id.as_deref() {
+            Some(id) => st.registry.binding(id).ok_or_else(|| DataError::NotFound(format!("no binding {}", id)))?,
+            None => (*r.binding).clone(),
+        };
+        let mut out = crate::resolver::prepass::resolve_dynamic(&mut st, &self.sources, &binding, &r.need, r.underlying, r.t)?;
+        let id = st.registry.record_binding(&out)?;
+        st.registry.save()?;
+        out.id = Some(id);
+        Ok(out)
     }
 
     fn stats(&self, relation: Option<&str>) -> Result<RecordBatch, DataError> {
@@ -463,8 +480,9 @@ impl Service for DataService {
                 .map_err(wire)
             }
             Message::ResolveDynamicRequest(r) => {
-                crate::resolver::prepass::resolve_dynamic(&r.need).map_err(data)?;
-                Err(error(ErrorCode::Internal, "resolve_dynamic answered nothing"))
+                let binding = self.resolve_dynamic(&r).map_err(data)?;
+                out.respond(Message::ResolveDynamicResponse(Box::new(ResolveDynamicResponse { binding: Some(Box::new(binding)) })))
+                    .map_err(wire)
             }
             Message::QueryRequest(r) => {
                 let st = self.store();

@@ -1011,6 +1011,92 @@ batch driver agree on every corpus program. Each bless since:
     session declares its names in its prelude. A tuple of a closed bucket
     that arrives after its barrier is late and is handled by the fold's
     late rule (K-4.4), as in replay.
+- **E-70 (D-2.3, D-2.4, D-4.4, D-7.6, D-7.7, Q-6; the option class's data
+  as built).**
+  - **The option class** (`corpus-v2/catalog/option.dsl`, rendered from the
+    registry like the others).
+    - Its own relations are `quote` and `margin` (per contract).
+    - `greeks` is stored by the class but read through the kernel's
+      relation of the same name (K-2.4). The class file shows it as a
+      comment, so that no program reads it as a primitive.
+    - The underlyings are the equity class's bars and actions. The class
+      file lists them, and the store keeps them once, as `equity.*`. A
+      catalog relation records the class that stores it (`of`). The kernel
+      reads an option program's `close` as `equity.close`.
+    - The kernel's checker reads the class (the vocabularies `rights`,
+      `styles`, `settlements`, the sort `Option`). Libraries written for any
+      class are not probed in it: its `close` is its underlyings', not its
+      instruments'.
+  - **Relations added to the other classes:**
+    - equity: `special_dividend(A, @T, Ex, Amount)`, what OCC adjusts
+      strikes for (K-5.5.5). It is a relation of its own because a
+      `special` column would change the arity of `dividend`, which every
+      program reads. Also `margin`, per share.
+    - future: `settlement`, `open_interest`, and `margin` per contract.
+      Settlement is back-adjusted as the bars are.
+  - **The registry.**
+    - `option_spec` gains `settlement_time` (`am`: the expiry day's
+      opening prints, as for AM-settled index options; `pm`).
+    - `chain_index` keys on both of its entities, since a snapshot holds
+      many contracts of one underlying at one instant.
+    - Every adapter's registry relations (a contract's terms, a chain, a
+      root's `continuous`) are written under the registry's source, so
+      each has one current version. A binding names `option_spec`,
+      `chain_index`, `future_spec` and `continuous` whenever the store
+      holds them.
+  - **The chain filters** have one implementation, `abt_wire::chain::admits`,
+    read by the data layer's chain query, the resolver's pre-pass and the
+    kernel's `chain`.
+    - Moneyness is strike over spot. Both ends of every range are
+      included.
+    - A moneyness filter without a spot admits nothing.
+    - A contract with no quote has no open interest.
+  - **The chain query** answers from the `chain_index` snapshot of `t`'s
+    day taken at or before `t`. Without one it is empty, and `explain`
+    says `unresolved`. Its rows are each admitted contract's id and terms.
+  - **`DynamicNeed`** gains `underlying_symbol`. The kernel names the
+    underlying by its ticker and the spot by its store name and column
+    (`equity.close`, `P`); the resolver finds the id among the ticker
+    spans.
+  - **The pre-pass** evaluates the filters on each day the spot relation
+    holds a row of the underlying. The demand does not carry the decision
+    calendar's labels; a daily decision calendar's days are those rows.
+    - The contracts admitted become a static need of the dynamic need's
+      relation over the span.
+    - A day without a snapshot is bought from a source whose offers have
+      the `chain` scope, at one request per underlying and day, within the
+      money budget. An unpriced placeholder (A-8) is never within a budget.
+    - The binding records the dynamic needs, their underlyings by id.
+  - **`resolve_dynamic`** buys a chain on demand only when a request costs
+    nothing, since the request carries no budget of its own; otherwise it
+    is refused out of budget, naming the cost. The kernel's use of it
+    lands with the option model.
+  - **The ORATS adapter** reads the strikes layout of the Data API by its
+    field names (`ticker`, `tradeDate`, `expirDate`, `strike`,
+    `stockPrice`, `callBidPrice` … `putOpenInterest`, `callMidIv`,
+    `putMidIv`, `smvVol`, `delta` … `rho`, `quoteDate`, `updatedAt`), as
+    CSV or JSON, from files or from the API (`/datav2/hist/strikes`, one GET
+    per underlying and weekday, the token passed on curl's standard input).
+    - A row is two contracts, keyed by their OCC symbols. The layout has no
+      last trade, so `Last` is null.
+    - The put's delta is the call's less one. The layout gives no put theta
+      or rho, which are null.
+    - ORATS's theta per day, and vega and rho per point, are stored per year
+      and per unit, as the kernel's model states them. **The owner checks
+      these units against a real file.**
+    - The style and settlement are a setting per underlying (American,
+      physical, PM by default).
+    - The underlying's price is `series.value`, named by its ticker.
+    - Rows are received at `quoteDate`, else `updatedAt`, else 21:00 UTC of
+      the trade date. They are labelled at the trade date, or at the quote
+      instant with `snapshots`.
+    - `abt data ingest --adapter orats` reads it.
+  - **The `chains` feed statistic** (Q-6) reports, per underlying:
+    - the days it has a snapshot, and its contracts a day (mean and most);
+    - its distinct expiries, and its lowest and highest strike;
+    - the share of contract-days quoted both ways (a positive bid below
+      the ask);
+    - the mean open interest.
 
 ## Aggregates
 

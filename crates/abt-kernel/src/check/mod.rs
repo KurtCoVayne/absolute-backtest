@@ -725,6 +725,11 @@ fn probe_value(ty: &ast::TyName, unit_word: &str) -> Option<(String, String)> {
 /// The classes a library is probed against: the one its data block names,
 /// or, for `class any` (written for every class), every class of the
 /// workspace that has bars.
+/// The sort of a class relation's entity: its first argument's type name.
+fn entity_sort(r: &ast::RelDecl) -> Option<&str> {
+    r.args.first().and_then(|a| a.ty.as_ref()).map(|t| t.name.as_str())
+}
+
 pub fn probe_classes<'w>(ws: &'w Workspace, lib: &ast::Library) -> Vec<&'w ast::Class> {
     match lib.data.as_ref().and_then(|d| d.class.as_ref()).map(|(c, _)| c.as_str()) {
         Some(c) if c != "any" => ws.class(c).into_iter().collect(),
@@ -732,7 +737,9 @@ pub fn probe_classes<'w>(ws: &'w Workspace, lib: &ast::Library) -> Vec<&'w ast::
             .units
             .iter()
             .filter_map(|u| match u {
-                Unit::Class(c) if c.base.is_some() && c.rels.iter().any(|r| r.name == "close") => Some(c),
+                // A class whose `close` is its own instruments' (the option
+                // class's is its underlyings').
+                Unit::Class(c) if c.base.is_some() && c.rels.iter().any(|r| r.name == "close" && entity_sort(r) == c.rels.first().and_then(entity_sort)) => Some(c),
                 _ => None,
             })
             .collect(),

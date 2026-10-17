@@ -58,7 +58,7 @@ silently misaligns every bucket.
 | `crates/abt-kernel/src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
 | `crates/abt-kernel/src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
 | `crates/abt-kernel/src/bundle.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests), read by the data layer's `bundle_v2` adapter. |
-| `crates/abt-data/src/adapters/` | The vendor adapters (D-7.7): `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `dbn` (DBN versions 1 to 3, known answers from the reference implementation), `http` (the historical API's request), and `mock` (the resolver's tests). |
+| `crates/abt-data/src/adapters/` | The vendor adapters (D-7.7): `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `orats` (option chains from ORATS's strikes), `dbn` (DBN versions 1 to 3, known answers from the reference implementation), `http` (the vendors' HTTP requests), and `mock` (the resolver's tests). `crates/abt-data/src/options.rs` answers the chain query (D-4.4). |
 | `crates/abt-kernel/src/dump.rs` | `--dump DIR` (what `reference/` replays). The study API it sat beside (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness) is the query layer's, `crates/abt-query/` (ERRATA E-66). |
 | `crates/abt-kernel/src/cli.rs`, `crates/abt/src/main.rs` | The command line, and `abt`, the front binary that dispatches to it (the layers' own command lines join it as they land). |
 | `corpus-v2/catalog/` | The three classes a program is written against: `equity` (bars as traded at a daily base; `listed`, `ticker`, `split`, `dividend`, `delisted`, `member`, `classification`; the vocabularies of lists, reasons and schemes), `future` (bars per root at a minute base, `session`, `point_value`, `commission`, `member`, `usable`) and `series` (`value` by name, each on its native calendar). A program never names them; its `data` block names what it needs. |
@@ -70,7 +70,7 @@ silently misaligns every bucket.
 | `crates/abt-tests/src/lib.rs`, `crates/abt-tests/tests/fixtures.rs` | The shared fixtures of the integration tests: the catalog and the library as the base workspace, strategies checked into programs, a strategy skeleton the tests fill in (`StrategyParts`, `strategy(name, params, rules, decides)`), crafted markets (`market`, `markets`, `market_from`); and the test that the skeleton checks and runs. |
 | `crates/abt-tests/tests/*.rs`, `crates/abt/tests/*.rs` | The integration suites (those that drive the `abt` binary are the front's): the checker and its messages, the kernel's hand-computed outcomes, the executor's contracts, costs, liquidity, margin and policies, orders, actions, as-of joins, the fold with its windows, checkpoints and availability, the state tables, the compiler stages, translation validation and verification, the study, the command line. They are being ported from the first formulation's programs to this one. |
 | `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies. |
-| `scripts/` | `parity/` holds the comparisons of the two books with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake read and their editor; `bench.sh` is the performance ladder; `synth/` writes the first formulation's layouts and is kept for the record. The lake and the vendors are read by the data layer's adapters (`abt data ingest --adapter norgate|databento`). |
+| `scripts/` | `parity/` holds the comparisons of the two books with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake read and their editor; `bench.sh` is the performance ladder; `synth/` writes the first formulation's layouts and is kept for the record. The lake and the vendors are read by the data layer's adapters (`abt data ingest --adapter norgate|databento|orats`). |
 
 ## The surface syntax in one page
 
@@ -585,7 +585,7 @@ abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data S
 abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
 abt activation --run RUN [--json] (--data SOCKET | --store DIR)
 abt data serve [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R] [--grace 'CAL=S;...'] [--record synthetic --session S --start T --end T ...]
-abt data ingest [--store DIR] --adapter norgate|databento|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
+abt data ingest [--store DIR] --adapter norgate|databento|orats|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
 abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
 abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
 abt kernel serve [--socket PATH] --data SOCKET
@@ -705,6 +705,14 @@ A vendor's data enters a store through the data layer's adapters (D-7.7,
   `--processing-delay S`.
 - `databento_live` is the live gateway's session (CRAM, the subscription,
   DBN), every record stamped at acceptance.
+- `orats` reads ORATS's strikes, files or the Data API (`--from
+  https://api.orats.io --tickers SPY`, the token from `$ORATS_TOKEN`), as the
+  option class (ERRATA E-70): every contract an instrument keyed by its OCC
+  symbol, with its quotes, its greeks, its terms (`option_spec`, `--terms
+  'SPX=european:cash:am'`) and its day's chain (`chain_index`), the
+  underlying joined to the store's tickers. A demand's `need chain` is
+  resolved by a pre-pass that binds the quotes of the contracts the chain's
+  filters admit and buys a missing day's chain within the budget.
 
 A live session (D-5.4, `crates/abt-data/src/live.rs`, ERRATA E-69) records
 a feed into the store write-ahead, every row received at its acceptance.

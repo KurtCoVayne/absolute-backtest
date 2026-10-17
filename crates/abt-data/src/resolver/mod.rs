@@ -75,7 +75,8 @@ fn wire_plan(steps: Vec<abt_wire::generated::abt::wire::PlanStep>, cost: &cost::
 /// The binding of a demand against the store alone, and its plan (what
 /// the store's versions satisfy, nothing bought).
 pub fn resolve(store: &Store, demand: &Demand) -> Result<(Binding, ResolvePlan), DataError> {
-    prepass::check(demand)?;
+    let prepared = prepass::prepare(store, demand)?;
+    let demand = &prepass::with_static(demand, &prepared);
     let planned = plan::plan(store, &Catalog::store_only(), demand)?;
     // Against the store alone every part is a version it holds, so binding
     // writes nothing; it takes the store mutably for a merge only.
@@ -99,7 +100,7 @@ pub fn resolve(store: &Store, demand: &Demand) -> Result<(Binding, ResolvePlan),
     let binding = Binding {
         pairs: Some(pairs.into_iter().map(|(relation, version)| abt_wire::generated::abt::wire::VersionRef { relation, version }).collect()),
         point: (!point.is_empty()).then_some(point),
-        dynamic: None,
+        dynamic: demand.dynamic.clone(),
         id: None,
     };
     Ok((binding, wire_plan(bind::steps(&planned), &planned.cost)))
@@ -109,10 +110,20 @@ pub fn resolve(store: &Store, demand: &Demand) -> Result<(Binding, ResolvePlan),
 /// its purchases made and ingested, and its binding (which the caller
 /// records, pinning its versions).
 pub fn resolve_with(store: &mut Store, sources: &Sources, demand: &Demand, dry_run: bool) -> Result<Resolution, DataError> {
-    prepass::check(demand)?;
+    // The dynamic needs' chains first (D-7.6): what the store lacks of them
+    // bought within the money budget, then their contracts a static need.
+    let mut prepared = prepass::prepare(store, demand)?;
+    let money = demand.budget.as_ref().map(|b| b.money).unwrap_or(0.0);
+    let mut chain_notes = prepass::fill(store, sources, &mut prepared, money, dry_run)?;
+    if !dry_run && chain_notes.iter().any(|n| n.starts_with("bought")) {
+        prepared = prepass::prepare(store, demand)?;
+    }
+    chain_notes.extend(prepared.notes.iter().cloned());
+    let demand = &prepass::with_static(demand, &prepared);
     let mut planned = plan::plan(store, &sources.catalog, demand)?;
     let over_budget = planned.over_budget.as_ref().map(|(parts, cost, _)| wire_plan(bind::part_steps(parts), cost));
-    let mut notes = planned.notes.clone();
+    let mut notes = chain_notes;
+    notes.extend(planned.notes.clone());
     if dry_run {
         // The binding a dry run reports names the versions the store holds;
         // a part to buy is in the plan, unbound.
@@ -127,7 +138,7 @@ pub fn resolve_with(store: &mut Store, sources: &Sources, demand: &Demand, dry_r
         let binding = Binding {
             pairs: Some(pairs.into_iter().map(|(relation, version)| abt_wire::generated::abt::wire::VersionRef { relation, version }).collect()),
             point: None,
-            dynamic: None,
+            dynamic: demand.dynamic.clone(),
             id: None,
         };
         return Ok(Resolution {

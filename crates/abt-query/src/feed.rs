@@ -400,8 +400,77 @@ pub fn statistic(data: &Data, binding: &[(String, String)], name: &str, relation
             Ok(s)
         }
         "chains" => {
-            let mut s = Sheet::new("chains", &["underlying", "note"]);
-            s.push(vec![Cell::Null, Cell::text("the binding holds no option chain: options come with M-7")]);
+            // Per underlying (Q-6): its snapshots' contracts, expiries and
+            // strikes, the share of its contracts quoted both ways that day,
+            // and their open interest.
+            let mut s = Sheet::new(
+                "chains",
+                &[
+                    "underlying",
+                    "days",
+                    "contracts_per_day",
+                    "max_contracts",
+                    "expiries",
+                    "strike_min",
+                    "strike_max",
+                    "quoted_share",
+                    "mean_open_interest",
+                ],
+            );
+            let (Some(index), Some(spec)) = (relation::read(data, "chain_index")?, relation::read(data, "option_spec")?) else {
+                return Ok(s);
+            };
+            let (unds, ids, ts) = (relation::ints(&index, "underlying")?, relation::ints(&index, "id")?, relation::ints(&index, "t")?);
+            let (spec_ids, strikes, expiries) = (relation::ints(&spec, "id")?, relation::nums(&spec, "strike")?, relation::ints(&spec, "expiry")?);
+            let terms: BTreeMap<i64, (f64, i64)> = (0..spec_ids.len())
+                .filter_map(|i| Some((spec_ids[i]?, (strikes[i].unwrap_or(f64::NAN), expiries[i].unwrap_or(0)))))
+                .collect();
+            // A contract is quoted on a day when its bid is positive and
+            // below its ask.
+            let mut quoted: BTreeSet<(u64, i64)> = BTreeSet::new();
+            let mut oi: BTreeMap<(u64, i64), f64> = BTreeMap::new();
+            if let Some(q) = stored(binding, "quote").map(|r| class_rows(data, &r)).transpose()?.flatten() {
+                let (bid, ask, open) = (q.nums.get("Bid"), q.nums.get("Ask"), q.nums.get("OI"));
+                for i in 0..q.len() {
+                    let day = day_key(q.t[i]);
+                    if let (Some(b), Some(a)) = (bid, ask) {
+                        if b[i] > 0.0 && a[i] > b[i] {
+                            quoted.insert((q.entity[i], day));
+                        }
+                    }
+                    if let Some(o) = open.filter(|o| o[i].is_finite()) {
+                        oi.insert((q.entity[i], day), o[i]);
+                    }
+                }
+            }
+            let mut by: BTreeMap<u64, BTreeMap<i64, BTreeSet<u64>>> = BTreeMap::new();
+            for i in 0..ids.len() {
+                let (Some(u), Some(id), Some(t)) = (unds[i], ids[i], ts[i]) else { continue };
+                if window.0.is_some_and(|f| t < f) || window.1.is_some_and(|e| t > e) {
+                    continue;
+                }
+                by.entry(u as u64).or_default().entry(day_key(t)).or_default().insert(id as u64);
+            }
+            for (u, days) in by {
+                let sizes: Vec<usize> = days.values().map(|c| c.len()).collect();
+                let all: BTreeSet<u64> = days.values().flatten().copied().collect();
+                let expiry_set: BTreeSet<i64> = all.iter().filter_map(|id| terms.get(&(*id as i64)).map(|t| t.1)).collect();
+                let ks: Vec<f64> = all.iter().filter_map(|id| terms.get(&(*id as i64)).map(|t| t.0)).filter(|k| k.is_finite()).collect();
+                let pairs: Vec<(u64, i64)> = days.iter().flat_map(|(d, c)| c.iter().map(move |id| (*id, *d))).collect();
+                let quoted_share = pairs.iter().filter(|p| quoted.contains(p)).count() as f64 / pairs.len().max(1) as f64;
+                let ois: Vec<f64> = pairs.iter().filter_map(|p| oi.get(p).copied()).collect();
+                s.push(vec![
+                    Cell::Int(u as i64),
+                    Cell::Int(days.len() as i64),
+                    Cell::num(sizes.iter().sum::<usize>() as f64 / sizes.len().max(1) as f64),
+                    Cell::Int(sizes.iter().max().copied().unwrap_or(0) as i64),
+                    Cell::Int(expiry_set.len() as i64),
+                    ks.iter().copied().reduce(f64::min).map(Cell::num).unwrap_or(Cell::Null),
+                    ks.iter().copied().reduce(f64::max).map(Cell::num).unwrap_or(Cell::Null),
+                    Cell::num(quoted_share),
+                    if ois.is_empty() { Cell::Null } else { Cell::num(ois.iter().sum::<f64>() / ois.len() as f64) },
+                ]);
+            }
             Ok(s)
         }
         other => Err(Error::Malformed(format!("`{}` is not a feed statistic ({})", other, STATISTICS.join(", ")))),

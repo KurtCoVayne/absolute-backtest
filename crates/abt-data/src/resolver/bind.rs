@@ -92,7 +92,7 @@ pub fn bind(store: &mut Store, demand: &Demand, planned: &Planned) -> Result<(Bi
     let binding = Binding {
         pairs: Some(pairs.into_iter().map(|(relation, version)| VersionRef { relation, version }).collect()),
         point: (!point.is_empty()).then_some(point),
-        dynamic: None,
+        dynamic: demand.dynamic.clone(),
         id: None,
     };
     Ok((binding, steps))

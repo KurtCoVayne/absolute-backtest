@@ -104,10 +104,15 @@ pub fn registry_schemas() -> Vec<RelationSchema> {
                 col("settlement", Label, L),
                 col("multiplier", Num, V),
                 col("occ", Label, L),
+                // E-70: `am` (settled on the expiry day's opening prints, as
+                // AM-settled index options are) or `pm` (at its close).
+                col("settlement_time", Label, L),
                 col("r", Time, R),
             ],
         ),
-        rs("chain_index", vec![col("underlying", Entity, E), col("t", Time, T), col("id", Entity, V), col("r", Time, R)]),
+        // E-70: both entities are the key, the snapshot holding many
+        // contracts of one underlying at one instant.
+        rs("chain_index", vec![col("underlying", Entity, E), col("t", Time, T), col("id", Entity, E), col("r", Time, R)]),
         // E-13: `at` is the instant the label's bucket closes, the barrier's.
         rs("calendar_label", vec![col("calendar", Label, E), col("label", Time, T), col("at", Time, V), col("r", Time, R)]),
     ]

@@ -9,6 +9,8 @@
 //! abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry]
 //!                  [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE]
 //!                  [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]
+//! abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100]
+//!                  [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]
 //! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--attributes K=V,...] <files...>
 //! abt data ingest  [--store DIR] --adapter synthetic --class C [--days N] [--symbols A,B] [--seed N] <files...>
 //! abt data catalog [--store DIR] [--class C | --sources [--config FILE]]
@@ -24,6 +26,9 @@
 //! `databento` reads DBN or Parquet files, or the historical API at a URL
 //! (`adapters::databento`): futures keyed by `instrument_id` and rolled into
 //! continuous series, equities joined to the store's tickers.
+//! `orats` reads ORATS's strikes files, or its Data API at a URL
+//! (`adapters::orats`): option contracts keyed by their OCC symbols, their
+//! underlyings joined to the store's tickers.
 //! `bundle_v2` reads the present bundle formats (a bundle directory with its
 //! manifest, or a directory of one Parquet file per relation) with the
 //! kernel's loaders and ingests them through the adapter of keyed rows; the
@@ -90,7 +95,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
     );
     exit(1)
 }
@@ -166,7 +171,7 @@ pub fn main(args: &[String]) {
             let _ = handle.join();
         }
         "ingest" => {
-            if let Some(v @ ("norgate" | "databento")) = a.opts.get("adapter").map(String::as_str) {
+            if let Some(v @ ("norgate" | "databento" | "orats")) = a.opts.get("adapter").map(String::as_str) {
                 vendor_ingest(&a, v);
                 return;
             }
@@ -712,7 +717,7 @@ fn statements(a: &Args) -> BTreeMap<String, String> {
     extra
 }
 
-/// `abt data ingest --adapter norgate|databento --from LOCATOR`: what a
+/// `abt data ingest --adapter norgate|databento|orats --from LOCATOR`: what a
 /// vendor's adapter reads (D-7.7), ingested under its source (`--source`,
 /// the adapter's name by default) with the vendor's keys; `--report FILE`
 /// writes what the read did as JSON.
@@ -796,6 +801,37 @@ fn vendor_ingest(a: &Args, adapter: &str) {
                 eprintln!("note: {} rows left out: {}", n, why.replace('_', " "));
             }
             (got, "databento", serde_json::to_value(&r).unwrap_or_default())
+        }
+        "orats" => {
+            let mut settings = BTreeMap::new();
+            let key = if from.starts_with("http://") || from.starts_with("https://") { "api" } else { "files" };
+            settings.insert(key.to_string(), from);
+            for (opt, key) in [
+                ("tickers", "tickers"),
+                ("terms", "terms"),
+                ("multiplier", "multiplier"),
+                ("snapshots", "snapshots"),
+                ("start", "from"),
+                ("end", "to"),
+                ("token-env", "token_env"),
+            ] {
+                if let Some(v) = a.opts.get(opt) {
+                    settings.insert(key.to_string(), v.clone());
+                }
+            }
+            let o = abt_data::adapters::orats::Orats::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
+            let (got, r) = o.read(o.options()).unwrap_or_else(|e| fail(&e.to_string()));
+            eprintln!(
+                "orats: {} files, {} rows kept of {}; {} contracts in {} snapshots of {}",
+                r.files,
+                r.rows_kept,
+                r.rows_in,
+                r.contracts,
+                r.snapshots,
+                r.tickers.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+            let report = serde_json::json!({ "files": r.files, "rows_in": r.rows_in, "rows_kept": r.rows_kept, "contracts": r.contracts, "snapshots": r.snapshots, "tickers": r.tickers });
+            (got, "orats", report)
         }
         _ => fail(&format!("no adapter `{}`", adapter)),
     };

@@ -24,8 +24,11 @@ use crate::error::DataError;
 use crate::registry::VersionRecord;
 use crate::store::Store;
 
-/// The registry's relations every binding holds (D-2.4).
-pub const IDENTITY: [&str; 3] = ["instrument", "vendor_id", "ticker"];
+/// The registry's relations (D-2.4) a binding names whenever the store holds them:
+/// the instruments and their keys, and the contracts' terms the kernel's
+/// models read (an option's `option_spec` and its chains, a future's
+/// `future_spec` and its root's `continuous`; ERRATA E-70).
+pub const IDENTITY: [&str; 7] = ["instrument", "vendor_id", "ticker", "option_spec", "chain_index", "future_spec", "continuous"];
 
 /// How far apart two sources' spans may be and still abut: a weekend and a
 /// holiday, the bars no calendar has between one source's last bar and

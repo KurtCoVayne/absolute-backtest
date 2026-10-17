@@ -314,7 +314,7 @@ impl Parser {
                 }
             } else if self.eat_kw("unit") {
                 c.unit = Some(self.ident()?.0);
-            } else if self.at_kw("lists") || self.at_kw("reasons") || self.at_kw("schemes") || self.at_kw("names") {
+            } else if ["lists", "reasons", "schemes", "names", "rights", "styles", "settlements"].iter().any(|k| self.at_kw(k)) {
                 let (kind, _) = self.ident()?;
                 let mut items = Vec::new();
                 loop {

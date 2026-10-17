@@ -22,6 +22,7 @@ pub mod dbn;
 pub mod http;
 pub mod mock;
 pub mod norgate;
+pub mod orats;
 
 /// A purchase: one relation of a need over a span, as the plan priced it.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +70,10 @@ pub struct Fetched {
     pub relation_attributes: BTreeMap<String, BTreeMap<String, String>>,
     /// What the rows' keys are.
     pub keys: Keys,
+    /// Entity columns joined to the registry's tickers whatever `keys` says,
+    /// as `(relation, column)`: an option's underlying, named by its symbol
+    /// beside contracts named by the vendor's keys (D-2.4).
+    pub ticker_columns: Vec<(String, String)>,
 }
 
 const DAY: i64 = 86_400_000_000_000;
@@ -89,14 +94,15 @@ impl Fetched {
         let mut attributes = extra.clone();
         attributes.extend(self.attributes.clone());
         let relations = match self.keys {
-            Keys::Vendor => Cow::Borrowed(&self.relations),
-            Keys::Ticker => Cow::Owned(self.by_ticker(store)?),
+            Keys::Vendor if self.ticker_columns.is_empty() => Cow::Borrowed(&self.relations),
+            _ => Cow::Owned(self.by_ticker(store)?),
         };
         ingest_keyed_with(store, vendor, &self.securities, &self.terms, &relations, source, &attributes, &self.relation_attributes)
     }
 
     /// The relations with their symbols replaced by the ids whose ticker
-    /// spans carry them at each row's `t`.
+    /// spans carry them at each row's `t`: every entity column under
+    /// `Keys::Ticker`, the `ticker_columns` otherwise.
     fn by_ticker(&self, store: &Store) -> Result<Vec<(String, RecordBatch)>, DataError> {
         let spans = ticker_spans(store)?;
         let mut out = Vec::with_capacity(self.relations.len());
@@ -112,7 +118,8 @@ impl Fetched {
             let mut cols: Vec<ArrayRef> = Vec::with_capacity(b.num_columns());
             let mut fields: Vec<Field> = Vec::with_capacity(b.num_columns());
             for (j, f) in b.schema().fields().iter().enumerate() {
-                let entity = schema.columns.iter().any(|c| c.name == *f.name() && c.ty == ColumnType::Entity);
+                let entity = schema.columns.iter().any(|c| c.name == *f.name() && c.ty == ColumnType::Entity)
+                    && (self.keys == Keys::Ticker || self.ticker_columns.iter().any(|(r, c)| r == relation && c == f.name()));
                 if !entity || !matches!(f.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
                     cols.push(b.column(j).clone());
                     fields.push(f.as_ref().clone());

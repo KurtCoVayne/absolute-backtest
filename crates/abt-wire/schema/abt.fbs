@@ -274,6 +274,10 @@ table DynamicNeed {
   spot_relation: string;
   spot_column: string;
   horizon: Duration;
+  // E-70: the underlying as the program names it, resolved by the
+  // resolver to its id by ticker at the span's dates (`underlying` is 0
+  // until then).
+  underlying_symbol: string;
 }
 
 table Demand {

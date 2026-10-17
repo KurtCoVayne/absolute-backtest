@@ -381,7 +381,10 @@ pub fn ingest_keyed_with(
         let b = RecordBatch::try_new(b.schema(), cols)?;
         let mut a = attributes.clone();
         a.extend(per.get(&relation).cloned().unwrap_or_default());
-        let v = store.ingest(&relation, &[b], source, a)?;
+        // The registry's relations (a contract's terms, a chain) have one
+        // current version, whatever source extended them (D-2.4).
+        let into = if store.schema(&relation)?.class == "registry" { REGISTRY_SOURCE } else { source };
+        let v = store.ingest(&relation, &[b], into, a)?;
         versions.insert(relation, v);
     }
     Ok(Ingested { versions, ids })

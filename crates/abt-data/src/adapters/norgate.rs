@@ -789,6 +789,7 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
             attributes,
             relation_attributes: per,
             keys: super::Keys::Vendor,
+            ticker_columns: vec![],
         },
         report,
     ))

@@ -18,9 +18,11 @@ class equity {
   ticker(A: Equity, @T, S: Label) complete
   split(A: Equity, @T, Factor: Scalar) complete                     # effective at the ex-date T: new shares per old
   dividend(A: Equity, @T, Ex: Timestamp, Pay: Timestamp, Amount: Price<USD>) complete   # announced at T
+  special_dividend(A: Equity, @T, Ex: Timestamp, Amount: Price<USD>) complete   # a dividend OCC adjusts strikes for (K-5.5.5)
   delisted(A: Equity, @T, Reason: Label) complete                   # a status from the delisting bar on
   member(A: Equity, @T, List: Label) complete
   classification(A: Equity, @T, Scheme: Label, Code: Label) complete
+  margin(A: Equity, @T, Initial: Notional<USD>, Maintenance: Notional<USD>) complete   # per share, where the source publishes it (K-5.6)
 
   # Vocabularies (WF-15 checks a program's labels against them).
   lists   "SPX", "SP500", "SP400", "SP600", "ETF"

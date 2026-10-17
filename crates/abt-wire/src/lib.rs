@@ -6,9 +6,12 @@
 //! moving of frames: an in-process channel pair and a Unix socket carrying
 //! the same bytes, with the request and response exchange every service and
 //! client speaks (P-2.1 to P-2.4; docs/spec/ERRATA.md, E-29). No function
-//! here interprets a relation or answers a request.
+//! here interprets a relation or answers a request; the calendar arithmetic
+//! of durations and the chain filters of D-4.4 are here because two layers
+//! must compute them identically.
 
 pub mod canonical;
+pub mod chain;
 pub mod convert;
 pub mod frame;
 pub mod hash;

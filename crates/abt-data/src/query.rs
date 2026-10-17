@@ -224,10 +224,9 @@ fn predicate_of(form: &QueryForm) -> Option<&Predicate> {
 
 /// Answers a query: its schema and batches.
 pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool) -> Result<(SchemaRef, Vec<RecordBatch>), DataError> {
-    if let QueryForm::Chain(_) = form {
-        // Until the option class lands (M-7) no chain is indexed.
-        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
-        return Ok((schema.clone(), vec![RecordBatch::new_empty(schema)]));
+    if let QueryForm::Chain(c) = form {
+        let (schema, batches, _) = crate::options::chain(store, view, c, r_max)?;
+        return Ok((schema, batches));
     }
     let (relation, filter) = plan(store, form, r_max, view.as_of_seq)?;
     if let QueryForm::Catalog(_) = form {
@@ -325,13 +324,14 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
 /// The estimate of a query (D-4.1 `explain`): rows and bytes read, the
 /// partitions touched, whether a chain query found its chain indexed.
 pub fn explain(store: &Store, view: &ResolvedView, form: &QueryForm) -> Result<ExplainResponse, DataError> {
-    if let QueryForm::Chain(_) = form {
+    if let QueryForm::Chain(c) = form {
+        let ids = crate::options::chain_ids(store, view, c.underlying, c.t, None)?;
         return Ok(ExplainResponse {
-            rows: 0,
+            rows: ids.as_ref().map(|v| v.len() as u64).unwrap_or(0),
             bytes: 0,
             partitions: 0,
             cached: false,
-            unresolved: true,
+            unresolved: ids.is_none(),
         });
     }
     let (relation, f) = plan(store, form, None, view.as_of_seq)?;

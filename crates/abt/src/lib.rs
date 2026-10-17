@@ -109,6 +109,7 @@ pub fn adapters_of(catalog: &abt_data::resolver::Catalog) -> (BTreeMap<String, A
             "databento_live" => abt_data::adapters::databento_live::DatabentoLive::from_settings(&s.settings)
                 .map(|d| Arc::new(d) as _)
                 .map_err(|e| e.to_string()),
+            "orats" => abt_data::adapters::orats::Orats::from_settings(&s.settings).map(|o| Arc::new(o) as _).map_err(|e| e.to_string()),
             other => Err(format!("`{}` (no such adapter)", other)),
         };
         match made {

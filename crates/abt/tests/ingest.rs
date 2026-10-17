@@ -340,7 +340,8 @@ fn a_dbn_file_of_futures_becomes_a_continuous_series_in_a_store() {
     assert_eq!(o.status.code(), Some(0), "{}\n{}", out, err);
     assert!(err.contains("databento: 1 files, 15 bars kept of 30 from 2024-03-11T14:31:00"), "{}", err);
     assert!(err.contains("1 roots, 2 contracts, 1 rolls"), "{}", err);
-    for r in ["future.close databento ", "future.session databento ", "continuous databento ", "future_spec databento "] {
+    // The registry's relations have one current version, under its source.
+    for r in ["future.close databento ", "future.session databento ", "continuous registry ", "future_spec registry "] {
         assert!(out.contains(r), "{} not written: {}", r, out);
     }
     // The series is back-adjusted: the first session's closes are H4's

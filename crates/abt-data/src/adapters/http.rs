@@ -1,9 +1,10 @@
-//! Databento's historical API (`timeseries.get_range`), the one HTTP call
-//! the adapters make: a form POST with the key as the basic-auth user,
-//! answered with DBN. A plain `http://` URL (a test's server) is spoken to
-//! directly over a socket; an `https://` one through `curl`, given the key
-//! and the form on its standard input so that neither appears in a process
-//! listing (abt carries no TLS implementation, ERRATA E-68).
+//! The HTTP calls the adapters make: Databento's historical API
+//! (`timeseries.get_range`), a form POST with the key as the basic-auth
+//! user answered with DBN, and ORATS's Data API, a GET whose query string
+//! carries the token. A plain `http://` URL (a test's server) is spoken to
+//! directly over a socket; an `https://` one through `curl`, given the key,
+//! the form or the URL on its standard input so that none appears in a
+//! process listing (abt carries no TLS implementation, ERRATA E-68).
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -113,8 +114,46 @@ pub fn post(url: &str, user: &str, body: &str) -> Result<Vec<u8>, DataError> {
     Ok(out.stdout)
 }
 
+/// GETs a URL; the response's body, or an error naming the status and the
+/// body's start (the query string, which may carry a token, is not quoted).
+pub fn get(url: &str) -> Result<Vec<u8>, DataError> {
+    let shown = url.split('?').next().unwrap_or(url);
+    if let Some(rest) = url.strip_prefix("http://") {
+        return exchange_plain("GET", rest, None, "");
+    }
+    if !url.starts_with("https://") {
+        return Err(DataError::Malformed(format!("`{}` is not an http:// or https:// URL", shown)));
+    }
+    let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let config = format!("url = \"{}\"\nsilent\nshow-error\nfail-with-body\n", quote(url));
+    let mut child = Command::new("curl")
+        .args(["--config", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| DataError::Unresolved(format!("an https request needs curl on the PATH: {}", e)))?;
+    child.stdin.take().expect("piped").write_all(config.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(DataError::Unresolved(format!(
+            "{}: {} {}",
+            shown,
+            String::from_utf8_lossy(&out.stderr).trim(),
+            String::from_utf8_lossy(&out.stdout[..out.stdout.len().min(300)]).trim()
+        )));
+    }
+    Ok(out.stdout)
+}
+
 /// A POST over a plain socket (`host:port/path`).
 fn post_plain(rest: &str, user: &str, body: &str) -> Result<Vec<u8>, DataError> {
+    exchange_plain("POST", rest, Some(user), body)
+}
+
+/// A request over a plain socket (`host:port/path`), with `user` as the
+/// basic-auth user and the body a form, when given.
+fn exchange_plain(method: &str, rest: &str, user: Option<&str>, body: &str) -> Result<Vec<u8>, DataError> {
     let (host, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -122,16 +161,15 @@ fn post_plain(rest: &str, user: &str, body: &str) -> Result<Vec<u8>, DataError> 
     let addr = if host.contains(':') { host.to_string() } else { format!("{}:80", host) };
     let mut s = TcpStream::connect(&addr).map_err(|e| DataError::Unresolved(format!("http://{}: {}", host, e)))?;
     s.set_read_timeout(Some(Duration::from_secs(120)))?;
-    let auth = base64(format!("{}:", user).as_bytes());
-    write!(
-        s,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Basic {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        path,
-        host,
-        auth,
-        body.len(),
-        body
-    )?;
+    let mut head = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", method, path, host);
+    if let Some(user) = user {
+        head.push_str(&format!("Authorization: Basic {}\r\n", base64(format!("{}:", user).as_bytes())));
+    }
+    if method == "POST" {
+        head.push_str(&format!("Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n", body.len()));
+    }
+    write!(s, "{}Connection: close\r\n\r\n{}", head, body)?;
+    let path = path.split('?').next().unwrap_or(path);
     let mut raw = Vec::new();
     s.read_to_end(&mut raw)?;
     let end = raw
