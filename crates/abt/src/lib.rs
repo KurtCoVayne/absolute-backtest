@@ -17,8 +17,7 @@ use abt_data::service::{inproc, DataService};
 use abt_data::Store;
 use abt_kernel::check::Program;
 use abt_kernel::kernel::bind::{keyed_tables, schema_in};
-use abt_kernel::kernel::Dataset;
-use abt_wire::transport::Connection;
+use abt_kernel::kernel::{Connector, Dataset};
 
 /// The source a dataset held in memory is ingested under.
 pub const SOURCE: &str = "dataset";
@@ -65,13 +64,30 @@ pub fn serve_dataset(ds: &Dataset, prog: &Program) -> Result<Arc<DataService>, S
 }
 
 /// The provider the kernel reaches a dataset through: a service in this
-/// process holding it.
-pub fn provider(ds: &Dataset, prog: &Program) -> Result<Connection, String> {
+/// process holding it, reached by a new in-process connection each time
+/// one is asked for.
+pub fn provider(ds: &Dataset, prog: &Program) -> Result<Connector, String> {
     let svc = serve_dataset(ds, prog)?;
-    Ok(inproc(&svc))
+    Ok(Arc::new(move || Ok(inproc(&svc))))
 }
 
-/// Registers the provider with the kernel (idempotent).
+/// Registers with the kernel the provider of in-process data services, and
+/// the query layer's metrics as what `abt run` prints a run's returns with
+/// (E-66); idempotent.
 pub fn install() {
     abt_kernel::kernel::install_provider(Box::new(provider));
+    abt_kernel::cli::install_reporter(Box::new(|conn, run, calendar| abt_query::cli::run_lines(conn, run, calendar).map(|r| (r.lines, r.returns))));
+}
+
+/// The names of the market the briefs harness runs attempts on.
+pub const BRIEFS_SYMBOLS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
+
+/// The market the briefs harness runs attempts on (E-65): the synthetic
+/// daily equity market of its five names over 320 business days from
+/// 2022-01-03 (seed 11), in a temporary store.
+pub fn briefs_market() -> Result<Arc<DataService>, String> {
+    let ds = abt_kernel::data::synthetic_daily(&BRIEFS_SYMBOLS, (2022, 1, 3), 320, 11);
+    let mut store = Store::temporary("briefs").map_err(|e| e.to_string())?;
+    ingest_dataset(&mut store, &ds, "equity", &dataset_attributes(&ds, "@1d", &BTreeMap::new()))?;
+    Ok(DataService::new(store))
 }

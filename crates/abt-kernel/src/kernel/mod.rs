@@ -23,7 +23,7 @@ pub mod hash;
 pub mod outputs;
 pub mod pushdown;
 pub mod service;
-pub use bind::{bind, connect_dataset, install_provider, Bound, DataClient};
+pub use bind::{bind, connect_dataset, install_provider, Bound, Connector, DataClient};
 pub use events::{Book, EventKind, OrderId, RunEvent};
 pub use executor::{Executor, SimExecutor};
 pub use fold::{Checkpoint, CheckpointEvery, Event, Fold};

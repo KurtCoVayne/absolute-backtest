@@ -1162,6 +1162,75 @@ batch driver agree on every corpus program. Each bless since:
     takes `--binding B`, found through a run recorded over it, or `--run`.
     `abt activation --run RUN` prints the tables.
 
+- **E-65 (M-5, Q-2.1; the briefs harness as a plan template).** The
+  data-bundle doc's harness (section 8) is the query layer's.
+  - **Checking.** An attempt is checked by the kernel service (`check`).
+    One that does not parse is the kernel's refusal. The rest carry the
+    kernel's diagnostics as it prints them, read back into code, judgment
+    and message. The attempt's strategy replaces a library file declaring
+    a strategy of its name, so a brief may ask for a corpus program again.
+  - **Running.** A brief's first valid attempt runs as an instance of
+    `template briefs_harness(PROGRAM) { program PROGRAM }`, under the
+    instance `study brief_<brief> = briefs_harness(PROGRAM = <strategy>)`:
+    - It is one run over its binding's whole sample, and a counted trial
+      of its lineage.
+    - The run's own execution block applies; the old harness ran every
+      attempt under the default executor.
+    - The verdict reads the run's outcome: `does not trade` without a
+      fill, `does not survive costs` at a CAGR of zero or less, else
+      `trades`; `halted: …` or `failed: …` otherwise.
+  - **The market.** One synthetic daily equity market: AAA, BBB, CCC, DDD
+    and SPY over 320 business days from 2022-01-03, seed 11, the old
+    harness's daily market, in a temporary store. The old harness gave a
+    sub-daily attempt a minute market. One store holds one market here, so
+    such an attempt's binding is refused, and its verdict says so.
+  - **Rows.** The attempts are rows of `query.briefs.attempts` (brief,
+    attempt, t, strategy, valid, errors, warnings, parse error, the
+    diagnostics as JSON), replaced by each report.
+  - **The command.** `abt briefs report --briefs DIR --attempts DIR [--out
+    FILE] FILES…` is the front's. It builds the market and runs `--kernels
+    N` kernel services in the process (one by default).
+- **E-66 (M-5, M principle 4; the kernel's study retired).**
+  `abt-kernel/src/study` is deleted. The query layer's metrics, plans and
+  briefs harness replace it.
+  - **Retired.** `abt study` and `abt run --study` go, as does `--threads`,
+    which was the study's.
+  - **`abt run` writes its outputs.** It writes them under `kernel.<run>.*`
+    on whatever data service it reads, including the temporary store of a
+    dataset held in the process. This amends E-52, under which that store
+    received none.
+  - **`abt run`'s metrics.** It prints the same lines as before: the NAV's
+    start, end, total return and deepest drawdown, the accounting, and the
+    report block's period metrics.
+    - They are the query layer's, computed from the run's tables by a
+      reporter the front installs (`abt_kernel::cli::install_reporter`).
+    - The reporter reaches the run's data service over a second
+      connection. The kernel's data client can open one: the in-process
+      provider returns a connector rather than one connection.
+    - `--returns` writes the reporter's period returns. The kernel
+      computes no metric.
+  - **The untracked-trial warning.** A run outside a plan is warned as
+    before, now naming what counts it. Over a data service, its program's
+    lineage counts it (Proposition Q-2.2). In a temporary store, nothing
+    does.
+  - **The frozen records.** Three tests held the old study's values equal
+    to the query layer's, to the bit: `tests/metrics_store.rs`, and the
+    grid and walk-forward cases of `tests/plan_exec.rs`. They now compare
+    with records frozen in `golden/study/` (`metrics.json`, `grid.json`,
+    `walk_forward.json`).
+    - The records were written while the old study still computed its
+      values and the tests held the two equal.
+    - `ABT_BLESS=1` rewrites them, in a commit that names its change, as
+      for the golden runs.
+  - **The study's tests.**
+    - Those of its pure functions (embargoes, folds, the surface, Sharpe
+      ratios per year) are `crates/abt-query/tests/validate.rs`.
+    - Its split test moves to `tests/actions.rs`.
+    - Its metrics tests read the query layer's metrics, a run's from the
+      store.
+    - The rest (the old command line, `lineages.json`, `trials.jsonl`)
+      goes with what it tested. `plan_exec`, `claims_exec`, `plan_cli` and
+      `normalise` cover the plans' equivalents.
 
 ## Layout
 

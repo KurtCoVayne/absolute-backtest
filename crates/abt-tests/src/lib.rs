@@ -345,31 +345,58 @@ pub fn run_keeping<T: Send>(
     abt_kernel::kernel::run_keeping(prog, lowered, &c, cfg, opts, f)
 }
 
-/// A study's sample over a data service holding `ds` (what `run_study` and
-/// `reveal` read their bars from and run through).
-pub struct Sampled<'a> {
-    ds: &'a Dataset,
-    client: abt_kernel::kernel::DataClient,
+/// A run over a data service holding `ds` that writes its outputs there,
+/// and the run as the query layer reads it back from the store (Q-3.1).
+pub fn stored_run(prog: &Program, ds: &Dataset, cfg: abt_kernel::kernel::ExecConfig) -> Result<(abt_kernel::kernel::RunResult, abt_query::run::Run), String> {
+    init();
+    let svc = abt::serve_dataset(ds, prog)?;
+    let client = abt_kernel::kernel::DataClient::connect(abt_data::service::inproc(&svc)).map_err(|e| e.to_string())?;
+    let opts = abt_kernel::kernel::Replay {
+        write_outputs: true,
+        ..Default::default()
+    };
+    let r = abt_kernel::kernel::run_on(prog, None, &client, cfg, &opts).map_err(|e| e.to_string())?;
+    let data = abt_query::data::Data::connect(abt_data::service::inproc(&svc)).map_err(|e| e.to_string())?;
+    let stored = abt_query::run::Run::read(&data, &r.run_id).map_err(|e| e.to_string())?;
+    Ok((r, stored))
 }
 
-impl<'a> Sampled<'a> {
-    pub fn new(prog: &Program, ds: &'a Dataset) -> Sampled<'a> {
-        Sampled { ds, client: client(prog, ds) }
-    }
+// ---- frozen records ----
 
-    pub fn sample(&self) -> abt_kernel::study::Sample<'_> {
-        abt_kernel::study::Sample { ds: self.ds, client: &self.client }
+/// A record frozen under `tests/golden/<name>.json` (pretty JSON, which
+/// keeps every `f64` to the bit): `ABT_BLESS=1` writes it, otherwise the
+/// record must equal it, key by key. A bless is a commit of its own,
+/// recorded in ERRATA, like the golden runs'.
+pub fn golden_json(name: &str, value: &serde_json::Value) {
+    let path = repo_root().join("crates/abt-tests/tests/golden").join(format!("{}.json", name));
+    let text = serde_json::to_string_pretty(value).expect("a record serialises") + "\n";
+    if std::env::var("ABT_BLESS").is_ok_and(|v| v == "1") {
+        fs::create_dir_all(path.parent().expect("a golden file's directory")).unwrap();
+        fs::write(&path, &text).unwrap();
+        return;
     }
-}
-
-/// The study runner: the fold over the service, truncated at the horizon.
-pub fn study_run(
-    prog: &Program,
-    client: &abt_kernel::kernel::DataClient,
-    cfg: abt_kernel::kernel::ExecConfig,
-    horizon: Option<i64>,
-) -> Result<abt_kernel::kernel::RunResult, abt_kernel::kernel::RunError> {
-    abt_kernel::kernel::run_on(prog, None, client, cfg, &abt_kernel::kernel::Replay { horizon, ..Default::default() })
+    let want_text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {} (ABT_BLESS=1 writes it)", path.display(), e));
+    if want_text == text {
+        return;
+    }
+    let want: serde_json::Value = serde_json::from_str(&want_text).unwrap_or_else(|e| panic!("{}: {}", path.display(), e));
+    let differ: Vec<String> = match (&want, value) {
+        (serde_json::Value::Object(w), serde_json::Value::Object(g)) => w
+            .keys()
+            .chain(g.keys().filter(|k| !w.contains_key(*k)))
+            .filter(|k| w.get(*k) != g.get(*k))
+            .map(|k| {
+                format!(
+                    "{}:\n  frozen: {}\n  now:    {}",
+                    k,
+                    w.get(k).map(|v| v.to_string()).unwrap_or_default(),
+                    g.get(k).map(|v| v.to_string()).unwrap_or_default()
+                )
+            })
+            .collect(),
+        _ => vec![format!("frozen: {}\nnow:    {}", want, value)],
+    };
+    panic!("{} differs from the record frozen in {}:\n{}", name, path.display(), differ.join("\n"));
 }
 
 // ---- plans over in-process services (Q-2) ----
@@ -394,17 +421,23 @@ pub fn momentum(name: &str, execution: &str) -> String {
     .render()
 }
 
-/// The catalog, the library and a strategy's text, as the kernel service
-/// takes them.
-pub fn plan_program(src: &str, name: &str) -> abt_query::kernel::Program {
-    let mut sources: Vec<abt_wire::generated::abt::wire::SourceFile> = dsl_files("catalog")
+/// The corpus library a program is checked against (the catalog and the
+/// standard library), as the sources a kernel request carries.
+pub fn library_sources() -> Vec<abt_wire::generated::abt::wire::SourceFile> {
+    dsl_files("catalog")
         .into_iter()
         .chain(dsl_files("lib"))
         .map(|p| abt_wire::generated::abt::wire::SourceFile {
             text: fs::read_to_string(&p).unwrap(),
             path: Some(p.to_string_lossy().into_owned()),
         })
-        .collect();
+        .collect()
+}
+
+/// The catalog, the library and a strategy's text, as the kernel service
+/// takes them.
+pub fn plan_program(src: &str, name: &str) -> abt_query::kernel::Program {
+    let mut sources = library_sources();
     sources.push(abt_wire::generated::abt::wire::SourceFile {
         text: src.to_string(),
         path: Some(format!("{}.dsl", name)),

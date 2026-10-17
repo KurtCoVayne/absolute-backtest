@@ -306,3 +306,37 @@ fn the_synthetic_catalog_market_has_every_event_and_runs_the_corpus_strategy() {
         r.actions.len()
     );
 }
+
+/// A split on its ex-date is applied to the book before the bar's fills:
+/// a `hold` order filled at the post-split price finds the post-split
+/// quantity, so a book holding its whole base in the name keeps it.
+#[test]
+fn a_split_is_applied_before_the_bar_fills() {
+    let src = common::StrategyParts {
+        name: "all_in".into(),
+        needs: "need bars @1d   need listing   need actions".into(),
+        params: "    w : Scalar = 1.0".into(),
+        decides: "    decide(T, hold(A, w)) :- universe(A, T).".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&src, "all_in");
+    let mut ds = common::market("X", &[10.0, 10.0, 10.0, 5.0, 5.0, 5.0]);
+    let x = ds.symbols.get("X").unwrap();
+    let ex = common::day("2024-01-11");
+    ds.add("split", vec![Value::Equity(x), Value::Time(ex), Value::Num(2.0)]);
+    let r = run(
+        &prog,
+        &ds,
+        ExecConfig {
+            initial_cash: 1000.0,
+            ..ExecConfig::frictionless()
+        },
+    )
+    .unwrap();
+    // 100 shares at 10 become 200 at 5: nothing to trade on the ex-date,
+    // and the book is worth its base throughout.
+    assert!(r.fills.iter().all(|f| f.t != ex), "{:?}", r.fills.iter().map(|f| (f.t, f.quantity, f.price)).collect::<Vec<_>>());
+    assert_eq!(r.final_positions.get(&x).copied(), Some(200.0));
+    assert!(r.equity_curve.iter().all(|(_, e)| (e - 1000.0).abs() < 1e-9), "{:?}", r.equity_curve);
+}

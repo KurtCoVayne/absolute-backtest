@@ -125,7 +125,6 @@ fn usage_documents_every_option() {
         "--tables",
         "--ledger",
         "--ledger-out",
-        "--study",
         "--quiet",
         "--timing",
         "--text",

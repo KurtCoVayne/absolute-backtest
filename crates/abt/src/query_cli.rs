@@ -3,7 +3,8 @@
 //! a store directory served in this process (`--store DIR`, else
 //! `$ABT_STORE`, else `./abt-store`); and the kernels a plan's runs are
 //! spread over, at `--kernel SOCKET` (repeatable), or `--kernels N` kernel
-//! services in this process (one by default) reaching the same data.
+//! services in this process (one by default) reaching the same data. `abt
+//! briefs` brings its own market.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -136,4 +137,19 @@ pub fn query(cmd: &str, args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// `abt briefs`; the exit code. The attempts run on the briefs market, in a
+/// store of this process, through `--kernels N` kernel services here (one
+/// by default).
+pub fn briefs(args: &[String]) -> i32 {
+    let run = || -> Result<i32, String> {
+        let data = Reach::Here(crate::briefs_market()?);
+        let ks = kernels(args, &data)?;
+        Ok(abt_query::cli::briefs_main(args, data.connect()?, ks))
+    };
+    run().unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        2
+    })
 }

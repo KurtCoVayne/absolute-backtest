@@ -839,6 +839,26 @@ pub const METRIC_NAMES: [&str; 13] = [
     "max_leverage",
 ];
 
+/// A NAV curve's first and last value, its total return and its deepest
+/// drawdown (the first lines `abt run` prints, by name).
+pub fn summary(curve: &[(i64, f64)]) -> BTreeMap<&'static str, f64> {
+    let mut m = BTreeMap::new();
+    let (Some(first), Some(last)) = (curve.first().map(|c| c.1), curve.last().map(|c| c.1)) else {
+        return m;
+    };
+    m.insert("start_equity", first);
+    m.insert("end_equity", last);
+    m.insert("total_return", last / first - 1.0);
+    let mut peak = f64::NEG_INFINITY;
+    let mut mdd: f64 = 0.0;
+    for &(_, e) in curve {
+        peak = peak.max(e);
+        mdd = mdd.max(1.0 - e / peak);
+    }
+    m.insert("max_drawdown", mdd);
+    m
+}
+
 /// A named metric's value for a run; Calmar is the CAGR over the maximum
 /// drawdown (Q-3.1), undefined without a drawdown.
 pub fn objective_value(name: &str, m: &ReturnMetrics, t: &TradingMetrics) -> Option<f64> {

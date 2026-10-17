@@ -1,16 +1,17 @@
-//! The metrics library (data-bundle doc, section 7): return metrics with
-//! their conventions fixed by hand-computed values, the Bailey–López de
-//! Prado statistics against worked numbers, PBO on constructed grids, the
-//! trading metrics of a run, and the `book` library's metrics over `nav`
-//! agreeing with the kernel's own.
+//! The metrics library (data-bundle doc, section 7; the query layer's,
+//! Q-3.1): return metrics with their conventions fixed by hand-computed
+//! values, the Bailey–López de Prado statistics against worked numbers, PBO
+//! on constructed grids, the trading metrics of a run read back from the
+//! store, and the `book` library's metrics over `nav` agreeing with the
+//! query layer's.
 
 use abt_tests as common;
 
 use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::time::parse_timestamp;
 use abt_kernel::kernel::{ExecConfig, Value};
-use abt_kernel::study::{block_bootstrap_sharpe, capacity, deflated_sharpe, min_track_record_length, newey_west_t, pbo_cscv, probabilistic_sharpe, return_metrics, trading_metrics, Returns};
-use abt_tests::run;
+use abt_query::metrics::{block_bootstrap_sharpe, capacity, deflated_sharpe, min_track_record_length, newey_west_t, pbo_cscv, probabilistic_sharpe, return_metrics, trading_metrics, Returns};
+use abt_tests::stored_run;
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol * b.abs().max(1.0)
@@ -143,20 +144,20 @@ fn the_block_bootstrap_is_seeded_and_brackets_the_estimate() {
 fn trading_metrics_and_capacity_read_the_run() {
     let prog = common::corpus_program("momentum_top_n");
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 320, 11);
-    let r = run(&prog, &ds, ExecConfig::default()).unwrap();
-    let tm = trading_metrics(&r, 252.0);
+    let (r, stored) = stored_run(&prog, &ds, ExecConfig::default()).unwrap();
+    let tm = trading_metrics(&stored, 252.0);
     let mean_equity = r.equity_curve.iter().map(|(_, e)| e).sum::<f64>() / r.equity_curve.len() as f64;
     let years = (r.equity_curve.len() - 1) as f64 / 252.0;
     assert!(close(tm.turnover, r.costs.turnover / mean_equity / years, 1e-12));
     assert!(tm.fills > 0 && tm.fills == r.fills.len());
     assert!(tm.avg_gross > 0.0 && tm.avg_gross <= 1.0 + 1e-9, "{}", tm.avg_gross);
     assert!(tm.cost_drag > tm.impact_drag && tm.impact_drag > 0.0);
-    let cap = capacity(&r, 252.0, 0.01).unwrap();
+    let cap = capacity(&stored, 252.0, 0.01).unwrap();
     assert!(close(cap, r.equity_curve[0].1 * (0.01 / tm.impact_drag).powi(2), 1e-9));
     // Twice the tolerated drag admits four times the book.
-    assert!(close(capacity(&r, 252.0, 0.02).unwrap(), 4.0 * cap, 1e-9));
-    let r0 = run(&prog, &ds, ExecConfig::frictionless()).unwrap();
-    assert!(capacity(&r0, 252.0, 0.01).is_none());
+    assert!(close(capacity(&stored, 252.0, 0.02).unwrap(), 4.0 * cap, 1e-9));
+    let (_, frictionless) = stored_run(&prog, &ds, ExecConfig::frictionless()).unwrap();
+    assert!(capacity(&frictionless, 252.0, 0.01).is_none());
 }
 
 /// A fifth of the capital in every name while the book's drawdown is under
@@ -204,31 +205,44 @@ fn the_dsl_metrics_over_nav_agree_with_the_kernel_metrics() {
 /// Four weekly NAV changes on a base of 100: +10, -20, +5, +5.
 #[test]
 fn a_fixed_base_book_reports_compounded_and_additive_conventions() {
-    use abt_kernel::kernel::{FillRecord, RunResult};
-    use abt_kernel::study::metrics::{convention_metrics, period_returns};
+    use abt_query::metrics::{convention_metrics, period_returns};
+    use abt_query::run::{BookRow, Fill, Run};
     let day = abt_kernel::kernel::time::DAY;
-    let curve = vec![(0, 100.0), (7 * day, 110.0), (14 * day, 90.0), (21 * day, 95.0), (28 * day, 100.0)];
-    let fill = |t: i64, q: f64, p: f64| FillRecord {
+    let curve = [(0, 100.0), (7 * day, 110.0), (14 * day, 90.0), (21 * day, 95.0), (28 * day, 100.0)];
+    // A future worth 2 a point.
+    let fill = |seq: u64, t: i64, q: f64, p: f64| Fill {
+        seq,
         t,
-        equity: 0,
+        instrument: Some(0),
         quantity: q,
         price: p,
-        at_last_price: false,
         commission: 0.5,
         fee: 0.0,
         slippage: 0.0,
         impact: 0.0,
         participation: 0.0,
-        partial: false,
-        forced: false,
+        multiplier: 2.0,
     };
-    let r = RunResult {
-        equity_curve: curve,
-        base_capital: Some(100.0),
-        // Two round trips of a future worth 2 a point: +1 x 2 - 1 and -3 x 2 - 1.
-        fills: vec![fill(0, 1.0, 10.0), fill(day, -1.0, 11.0), fill(2 * day, 1.0, 10.0), fill(3 * day, -1.0, 7.0)],
-        multipliers: [(0u32, 2.0)].into_iter().collect(),
-        ..Default::default()
+    let r = Run {
+        id: "by hand".into(),
+        book: curve
+            .iter()
+            .map(|&(t, nav)| BookRow {
+                t,
+                cash: nav,
+                nav,
+                gross: 0.0,
+                net: 0.0,
+                leverage: 0.0,
+                receivables: 0.0,
+                capital: 100.0,
+            })
+            .collect(),
+        // Two round trips: +1 x 2 - 1 and -3 x 2 - 1.
+        fills: vec![fill(1, 0, 1.0, 10.0), fill(2, day, -1.0, 11.0), fill(3, 2 * day, 1.0, 10.0), fill(4, 3 * day, -1.0, 7.0)],
+        decisions: 4,
+        dropped: 0,
+        report: [("base_capital".to_string(), serde_json::json!(100.0))].into_iter().collect(),
     };
     let x: Vec<f64> = period_returns(&r, false).iter().map(|(_, x, _)| *x).collect();
     assert_eq!(x, vec![0.1, -0.2, 0.05, 0.05]);

@@ -1,15 +1,21 @@
-//! The LLM-authored corpus harness (data-bundle doc, section 8): briefs
-//! with a model's successive attempts are measured, never asserted: the
-//! first-attempt pass rate, the diagnostics, the attempts to a valid
-//! program and the verdict of the first valid one on the synthetic market.
+//! The LLM-authored corpus harness (data-bundle doc, section 8; the query
+//! layer's, E-65): briefs with a model's successive attempts are measured,
+//! never asserted: the first-attempt pass rate, the diagnostics, the
+//! attempts to a valid program and the verdict of the first valid one,
+//! run as an instance of the `briefs_harness` template on the synthetic
+//! market; every attempt is a row of `query.briefs.attempts`.
+
+#![allow(clippy::result_large_err)]
 
 use abt_tests as common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use abt_kernel::study::briefs::report;
+use abt_query::briefs::{report, BriefsReport, ATTEMPTS};
+use abt_query::data::Data;
+use abt_query::kernel::Kernel;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("abt-briefs-{}-{}", tag, std::process::id()));
@@ -50,14 +56,24 @@ fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     (root, briefs, attempts)
 }
 
+/// The briefs market and a kernel service reaching it, in this process.
+fn services() -> (Data, Vec<Kernel>) {
+    let svc = abt::briefs_market().unwrap();
+    let data = Data::connect(abt_data::service::inproc(&svc)).unwrap();
+    let k = abt_kernel::kernel::service::KernelService::new(std::sync::Arc::new(move || abt_kernel::kernel::DataClient::connect(abt_data::service::inproc(&svc))));
+    (data, vec![Kernel::connect(abt_kernel::kernel::service::inproc(&k)).unwrap()])
+}
+
+fn harness(briefs: &Path, attempts: &Path) -> (BriefsReport, Data) {
+    let (data, kernels) = services();
+    let r = report(&data, &kernels, &common::library_sources(), briefs, attempts).unwrap();
+    (r, data)
+}
+
 #[test]
 fn the_harness_records_attempts_diagnostics_and_verdicts() {
-    // The harness runs the valid attempts through the data service the
-    // front registers.
-    common::init();
     let (root, briefs, attempts) = fixture("harness");
-    let ws = common::base_workspace();
-    let r = report(&ws, &briefs, &attempts).unwrap();
+    let (r, data) = harness(&briefs, &attempts);
     assert_eq!(r.briefs.len(), 3, "the README is not a brief");
     let crossover = r.briefs.iter().find(|b| b.brief == "crossover").unwrap();
     assert_eq!(crossover.attempts.len(), 3);
@@ -83,6 +99,11 @@ fn the_harness_records_attempts_diagnostics_and_verdicts() {
     assert_eq!(r.verdicts.values().sum::<usize>(), 2);
     let text = r.render();
     assert!(text.contains("first-attempt pass rate: 50%") && text.contains("attempt 2 (2.dsl): invalid; parse error"), "{}", text);
+    // Every attempt is a row of the data layer.
+    let rows = abt_query::relation::read(&data, ATTEMPTS).unwrap().unwrap();
+    assert_eq!(rows.num_rows(), 4);
+    let valid = abt_query::relation::bools(&rows, "valid").unwrap();
+    assert_eq!(valid.iter().filter(|v| **v == Some(true)).count(), 2);
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -115,9 +136,8 @@ fn the_command_line_prints_and_writes_the_report() {
 
 #[test]
 fn the_repository_briefs_are_listed_without_attempts() {
-    let ws = common::base_workspace();
     let briefs = abt_tests::repo_root().join("briefs");
-    let r = report(&ws, &briefs, &briefs.join("attempts")).unwrap();
+    let (r, _) = harness(&briefs, &briefs.join("attempts"));
     assert!(r.briefs.len() >= 8, "{} briefs", r.briefs.len());
     assert!(r.briefs.iter().all(|b| b.attempts.is_empty()));
 }

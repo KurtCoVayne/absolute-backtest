@@ -25,7 +25,6 @@ pub mod plan;
 pub mod query;
 pub mod rewrite;
 pub mod state;
-pub mod study;
 pub mod syntax;
 pub mod table;
 pub mod verify;

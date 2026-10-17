@@ -13,9 +13,10 @@ use std::path::Path;
 use abt_kernel::bundle::load_bundle;
 use abt_kernel::data::synthetic_daily_v2;
 use abt_kernel::kernel::{ExecConfig, RunResult};
-use abt_kernel::study::{return_metrics, subperiod_sharpes, trading_metrics, ReturnMetrics};
 use abt_kernel::Lit;
-use abt_tests::run;
+use abt_query::metrics::validate::subperiod_sharpes;
+use abt_query::metrics::{return_metrics, trading_metrics, ReturnMetrics};
+use abt_tests::stored_run;
 
 const CANONICAL: [&str; 4] = ["momentum_12_1", "low_volatility", "short_term_reversal", "size_proxy"];
 
@@ -29,12 +30,12 @@ fn the_canonical_strategies_trade_both_legs_on_the_synthetic_catalog_market() {
             compounding: true,
             ..ExecConfig::default()
         };
-        let r = run(&prog, &ds, cfg).unwrap_or_else(|e| panic!("{}: {}", name, e));
+        let (r, stored) = stored_run(&prog, &ds, cfg).unwrap_or_else(|e| panic!("{}: {}", name, e));
         assert!(!r.fills.is_empty(), "{} never filled", name);
         assert!(r.fills.iter().any(|f| f.quantity < 0.0) && r.fills.iter().any(|f| f.quantity > 0.0), "{} did not trade both legs", name);
         // Four tenths of equity a leg at each rebalance: the book is never
         // levered at a fill, and the mark between rebalances stays near one.
-        let tm = trading_metrics(&r, 252.0);
+        let tm = trading_metrics(&stored, 252.0);
         assert!(tm.max_leverage < 2.0, "{}: gross exposure {} times equity", name, tm.max_leverage);
     }
 }
@@ -120,9 +121,9 @@ fn the_canonical_premiums_land_in_their_published_ranges_on_the_bundle() {
             param_overrides: vec![("n".to_string(), Lit::Int(n))],
             ..ExecConfig::default()
         };
-        let r = run(&prog, &ds, cfg).unwrap_or_else(|e| panic!("{} on {}@{}: {}", range.name, manifest.name, manifest.version, e));
+        let (r, stored) = stored_run(&prog, &ds, cfg).unwrap_or_else(|e| panic!("{} on {}@{}: {}", range.name, manifest.name, manifest.version, e));
         let m = return_metrics(&r.equity_curve, 252.0);
-        let tm = trading_metrics(&r, 252.0);
+        let tm = trading_metrics(&stored, 252.0);
         eprintln!(
             "{} on {}@{}: {} bars, CAGR {:.4}, volatility {:.4}, Sharpe {:.3} (se {:.3}), max drawdown {:.4}, turnover {:.2}, fill ratio {:.3}",
             range.name,

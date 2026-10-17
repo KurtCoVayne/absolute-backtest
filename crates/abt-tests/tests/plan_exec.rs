@@ -3,7 +3,9 @@
 //! the old in-memory study to the bit (every point's metrics, the best
 //! point, PBO, the surface, the sub-period Sharpe ratios and the deflated
 //! Sharpe over the lineage's trials), and so is a walk-forward (its folds,
-//! its efficiency, its stitched curve); a block hold-out masks the blocks
+//! its efficiency, its stitched curve), the old study's values frozen in
+//! `golden/study/` while it still computed them and these tests held the
+//! two equal (ERRATA E-66); a block hold-out masks the blocks
 //! out of the metrics and the ledgers and a reveal reports them alone; a
 //! trailing reveal reports the tail; every run is a trial row, counted once
 //! however often the plan runs over the same binding; π is in the run's id,
@@ -12,11 +14,7 @@
 
 #![allow(clippy::result_large_err)]
 
-use std::path::PathBuf;
-
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::ExecConfig;
-use abt_kernel::study::{self as old, Grid, Holdout as OldHoldout, Project, Provenance};
 use abt_query::data::Data;
 use abt_query::kernel::{Kernel, Program};
 use abt_query::plan::exec::{execute, Endpoints, Execution, Kind, Options};
@@ -47,46 +45,32 @@ fn json<T: serde::Serialize>(x: &T) -> String {
     serde_json::to_string(x).unwrap()
 }
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("abt-plan-{}-{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
 #[test]
 fn a_grid_plan_is_the_old_study_to_the_bit() {
     let src = momentum("studied");
     let prog = common::program(&src, "studied");
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 700, 5);
-    // The old study, in memory, with the program's own execution block.
-    let dir = temp_dir("parity");
-    let project = Project::open(&dir);
-    let (spec, _) = project.declare(&prog, OldHoldout::Trailing { years: 1 }, "sharpe", vec![], ExecConfig::from_program(&prog)).unwrap();
-    let axis = old::parse_grid_axis("n=1,2,3").unwrap();
-    let grid = Grid::new(vec![axis], &[]);
-    let (outcomes, report) = old::run_study(&project, &spec, &prog, &common::Sampled::new(&prog, &ds).sample(), &grid, &common::study_run, Provenance::default()).unwrap();
-    // The plan, over the services.
     let (data, kernels) = services(&prog, &ds, 2);
     let p = study("study studied { program studied\n grid { n = 1, 2, 3 }\n holdout trailing:1y\n objective sharpe }", "studied");
     let ex = run(&p, &program(&src, "studied"), &data, &kernels, None);
     assert_eq!(ex.outcomes.len(), 3);
-    assert_eq!(
-        (ex.embargo.intervals.clone(), ex.embargo.truncates),
-        (report.embargo.intervals.clone(), report.embargo.truncates),
-        "the hold-out's embargo"
-    );
-    for (o, n) in outcomes.iter().zip(&ex.outcomes) {
-        assert_eq!(json(&n.returns), json(&o.metrics), "the point {:?}", n.point);
-        assert_eq!(json(&n.trading), json(&o.trading), "the point {:?}", n.point);
-        assert_eq!(n.kind, Kind::Trial);
-    }
+    assert!(ex.outcomes.iter().all(|n| n.kind == Kind::Trial));
     let g = &ex.grids[0];
-    assert_eq!(g.best, report.best);
-    assert_eq!(json(&g.pbo), json(&report.pbo), "PBO");
-    assert_eq!(json(&g.surface), json(&report.surface), "the surface");
-    assert_eq!(json(&g.subperiods), json(&report.subperiods), "the sub-periods");
     assert_eq!(ex.trials, 3);
-    assert_eq!(json(&ex.dsr), json(&Some(report.dsr.clone())), "the deflated Sharpe ratio");
+    // The old study's embargo, every point's metrics, the best point, PBO,
+    // the surface, the sub-periods and the deflated Sharpe ratio.
+    common::golden_json(
+        "study/grid",
+        &serde_json::json!({
+            "embargo": { "intervals": ex.embargo.intervals, "truncates": ex.embargo.truncates },
+            "points": ex.outcomes.iter().map(|o| serde_json::json!({ "point": o.point, "returns": o.returns, "trading": o.trading })).collect::<Vec<_>>(),
+            "best": g.best,
+            "pbo": g.pbo,
+            "surface": g.surface,
+            "subperiods": g.subperiods,
+            "dsr": ex.dsr,
+        }),
+    );
     // The trials are rows of the data layer, and the plan pins its binding.
     let counted = plan::lineage::trials(&data, &ex.lineage).unwrap();
     assert_eq!((counted.count, counted.by_kind.get("trial").copied()), (3, Some(3)));
@@ -95,7 +79,6 @@ fn a_grid_plan_is_the_old_study_to_the_bit() {
     assert!(ex.outcomes.iter().all(|o| plans[&ex.hash].bindings.contains(&o.binding)), "{:?}", plans[&ex.hash].bindings);
     let stored = plan::trials::outcomes(&data, &ex.hash).unwrap();
     assert_eq!(stored.iter().filter(|s| s.best).count(), 1);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -103,30 +86,16 @@ fn a_walk_forward_plan_is_the_old_walk_forward() {
     let src = momentum_with("walked", FRICTIONLESS);
     let prog = common::program(&src, "walked");
     let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD"], (2022, 1, 3), 520, 6);
-    let dir = temp_dir("wf");
-    let project = Project::open(&dir);
-    let (spec, _) = project.declare(&prog, OldHoldout::None, "sharpe", vec![], ExecConfig::from_program(&prog)).unwrap();
-    let grid = Grid::new(vec![old::parse_grid_axis("n=1,2").unwrap()], &[]);
-    let scheme = old::WalkForward::parse("anchored:12mo:6mo").unwrap();
-    let (_, report) = old::run_study(
-        &project,
-        &spec,
-        &prog,
-        &common::Sampled::new(&prog, &ds).sample(),
-        &grid,
-        &common::study_run,
-        Provenance { bundle: None, scheme: Some(scheme) },
-    )
-    .unwrap();
-    let wf_old = report.walk_forward.unwrap();
     let (data, kernels) = services(&prog, &ds, 1);
     let p = study("study walked { program walked\n grid { n = 1, 2 }\n walk_forward anchored:12mo:6mo }", "walked");
     assert_eq!(p.steps.iter().map(|s| s.kind()).collect::<Vec<_>>(), vec!["grid", "walk_forward", "report"]);
     let ex = run(&p, &program(&src, "walked"), &data, &kernels, None);
     let wf = &ex.walk_forwards[0];
-    assert_eq!(json(&wf.folds), json(&wf_old.folds), "the folds");
-    assert_eq!(json(&wf.efficiency), json(&wf_old.efficiency), "the efficiency");
-    assert_eq!(json(&wf.out_of_sample), json(&wf_old.out_of_sample), "the stitched curve");
+    // The old walk-forward's folds, efficiency and stitched curve.
+    common::golden_json(
+        "study/walk_forward",
+        &serde_json::json!({ "folds": wf.folds, "efficiency": wf.efficiency, "out_of_sample": wf.out_of_sample }),
+    );
     // Two grid points, and per fold two train runs and one test: eight
     // trials, each a run of its own.
     assert_eq!(ex.outcomes.len(), 2 + 2 * 3);
@@ -134,7 +103,6 @@ fn a_walk_forward_plan_is_the_old_walk_forward() {
     assert_eq!(ex.outcomes.iter().filter(|o| o.fold.as_ref().is_some_and(|f| f.phase == "test")).count(), 2);
     let ids: std::collections::BTreeSet<&str> = ex.outcomes.iter().map(|o| o.run_id.as_str()).collect();
     assert_eq!(ids.len(), 8, "π makes every fold's run a run of its own");
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

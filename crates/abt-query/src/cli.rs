@@ -43,6 +43,49 @@ pub fn run_metrics(data: &Data, run: &str) -> Result<RunMetrics, crate::data::Er
     })
 }
 
+/// What `abt run` prints of a run's returns, and the returns per reporting
+/// period `--returns` writes (`t`, return, P&L).
+#[derive(Clone, Debug)]
+pub struct RunLines {
+    pub lines: Vec<String>,
+    pub returns: Vec<(i64, f64, f64)>,
+}
+
+/// `abt run`'s account of the run `run` the kernel wrote (the front's
+/// reporter, E-66): the NAV's start, end, total return and deepest
+/// drawdown, the accounting, and the report block's period metrics over
+/// `calendar`, as the kernel printed them before the metrics moved here.
+pub fn run_lines(conn: Connection, run: &str, calendar: &str) -> Result<RunLines, String> {
+    let data = Data::connect(conn).map_err(|e| e.to_string())?;
+    let r = Run::read(&data, run).map_err(|e| e.to_string())?;
+    let ppy = r.periods_per_year();
+    let (by_day, days) = r.periods();
+    let mut lines: Vec<String> = metrics::summary(&r.metric_curve()).into_iter().map(|(k, v)| format!("{:>14}: {:.4}", k, v)).collect();
+    if let Some(note) = r.report.get("period_note").and_then(|n| n.as_str()) {
+        lines.push(format!("note: {}", note));
+    }
+    let cm = metrics::convention_metrics_on(&r, ppy, by_day, days.as_ref());
+    lines.push(match r.base_capital() {
+        Some(b) => format!(
+            "accounting: fixed base {:.2}; a period's return is the NAV change over it (not reinvested); end_equity and total_return above compound those period returns, total_pnl below is additive on the base",
+            b
+        ),
+        None => "accounting: compounding; a period's return is the NAV change over the previous NAV".to_string(),
+    });
+    lines.push(format!(
+        "metrics per {} period ({} a year, {} periods): cagr {:.6}   max_drawdown {:.6}   sharpe {:.4} (population {:.4})   volatility {:.4}",
+        calendar, ppy, cm.periods, cm.cagr, cm.max_drawdown, cm.sharpe, cm.sharpe_population, cm.volatility_population
+    ));
+    lines.push(format!(
+        "additive: annual_return {:.6}   max_drawdown {:.6}   total_pnl {:.2}   profit_factor {:.3} per period, {:.3} per trade   trades {}   win_rate {:.3}",
+        cm.annual_return, cm.max_drawdown_additive, cm.total_pnl, cm.profit_factor, cm.profit_factor_trades, cm.trades, cm.win_rate
+    ));
+    Ok(RunLines {
+        lines,
+        returns: metrics::period_returns_on(&r, by_day, days.as_ref()),
+    })
+}
+
 fn usage() -> i32 {
     eprintln!("usage:\n  abt metrics --run RUN (--data SOCKET | --store DIR) [--json]   (a run's metrics, from the tables it wrote to the store: returns, trading, the report block's periods, capacity, sub-period Sharpe ratios)");
     2
@@ -132,7 +175,9 @@ struct Args {
 }
 
 /// The options every command takes or the front consumes; the flags.
-const OPTS: [&str; 12] = ["study", "threads", "reason", "data", "store", "kernel", "kernels", "run", "binding", "over", "relation", "seed"];
+const OPTS: [&str; 15] = [
+    "study", "threads", "reason", "data", "store", "kernel", "kernels", "run", "binding", "over", "relation", "seed", "briefs", "attempts", "out",
+];
 const FLAGS: [&str; 2] = ["json", "dry-run"];
 
 fn args(raw: &[String]) -> Result<Args, String> {
@@ -874,6 +919,43 @@ pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
         }
     };
     go().unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        1
+    })
+}
+
+fn briefs_usage() -> i32 {
+    eprintln!(
+        "usage:\n  abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>   (every brief with the model's attempts at it, ATTEMPTS/<brief>/<n>.dsl, checked against the files' library; the first valid attempt run as an instance of the template `briefs_harness`; the attempts recorded as rows of query.briefs.attempts; --out FILE writes the report as JSON)"
+    );
+    2
+}
+
+/// `abt briefs report` over the data service and kernels the front set up
+/// (a market the attempts run on); the exit code.
+pub fn briefs_main(raw: &[String], data: Connection, kernel_conns: Vec<Connection>) -> i32 {
+    let run = || -> Result<i32, String> {
+        let mut a = args(raw)?;
+        if a.positional.first().map(String::as_str) != Some("report") {
+            return Ok(briefs_usage());
+        }
+        a.positional.remove(0);
+        let (Some(briefs), Some(attempts)) = (a.opts.get("briefs"), a.opts.get("attempts")) else {
+            return Ok(briefs_usage());
+        };
+        let library = dsl_sources(&a.positional)?;
+        let data = Data::connect(data).map_err(|e| e.to_string())?;
+        let kernels = kernels(kernel_conns)?;
+        let r = crate::briefs::report(&data, &kernels, &library, Path::new(briefs), Path::new(attempts))?;
+        print!("{}", r.render());
+        if let Some(out) = a.opts.get("out") {
+            let json = serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?;
+            std::fs::write(out, json).map_err(|e| format!("--out {}: {}", out, e))?;
+            println!("report written to {}", out);
+        }
+        Ok(0)
+    };
+    run().unwrap_or_else(|e| {
         eprintln!("{}", e);
         1
     })

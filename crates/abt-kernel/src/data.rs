@@ -1,7 +1,7 @@
 //! Bundles from Parquet files, and deterministic synthetic markets for the
 //! three classes (equity, future, series) for tests and demos.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::check::Program;
@@ -544,25 +544,4 @@ pub fn synthetic_for_program(prog: &Program, symbols: &[&str], start: (i64, u32,
         _ if prog.base.is_sub_daily() => synthetic_minute(symbols, start, days, 60, seed),
         _ => synthetic_daily(symbols, start, days, seed),
     }
-}
-
-/// Summary statistics of an equity curve, for the command line.
-pub fn summarize(curve: &[(i64, f64)]) -> BTreeMap<&'static str, f64> {
-    let mut m = BTreeMap::new();
-    if curve.is_empty() {
-        return m;
-    }
-    let first = curve[0].1;
-    let last = curve[curve.len() - 1].1;
-    m.insert("start_equity", first);
-    m.insert("end_equity", last);
-    m.insert("total_return", last / first - 1.0);
-    let mut peak = f64::NEG_INFINITY;
-    let mut mdd: f64 = 0.0;
-    for &(_, e) in curve {
-        peak = peak.max(e);
-        mdd = mdd.max(1.0 - e / peak);
-    }
-    m.insert("max_drawdown", mdd);
-    m
 }

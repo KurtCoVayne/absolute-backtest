@@ -38,6 +38,9 @@ fn wire(e: WireError) -> RunError {
 /// The kernel's client of a data service.
 pub struct DataClient {
     client: Client,
+    /// How to open another connection to the same service, when the client
+    /// knows (what reads a run's outputs beside the run, E-66).
+    connector: Option<Connector>,
 }
 
 /// One barrier of a stream's index: its calendar, label, instant and seq.
@@ -65,7 +68,21 @@ impl DataClient {
     pub fn connect(conn: Connection) -> Result<DataClient, RunError> {
         Ok(DataClient {
             client: Client::connect(conn, Layer::Kernel, "abt-kernel").map_err(wire)?,
+            connector: None,
         })
+    }
+
+    /// A client over a connection `connector` opens, which can open more.
+    pub fn connect_with(connector: Connector) -> Result<DataClient, RunError> {
+        let mut c = DataClient::connect(connector().map_err(RunError::Config)?)?;
+        c.connector = Some(connector);
+        Ok(c)
+    }
+
+    /// Another connection to the service this client reads, when it knows
+    /// how to open one.
+    pub fn reconnect(&self) -> Option<Result<Connection, String>> {
+        self.connector.as_ref().map(|c| c())
     }
 
     pub fn request(&self, m: Message) -> Result<Message, RunError> {
@@ -240,9 +257,13 @@ impl DataClient {
     }
 }
 
+/// Opens a connection to one data service.
+pub type Connector = std::sync::Arc<dyn Fn() -> Result<Connection, String> + Send + Sync>;
+
 /// How a caller holding a dataset in memory reaches a data service holding
-/// it: the front registers the data layer's in-process service (E-36).
-pub type Provider = dyn Fn(&Dataset, &Program) -> Result<Connection, String> + Send + Sync;
+/// it: the front registers the data layer's in-process service (E-36),
+/// which a connector reaches as often as asked.
+pub type Provider = dyn Fn(&Dataset, &Program) -> Result<Connector, String> + Send + Sync;
 
 static PROVIDER: OnceLock<Box<Provider>> = OnceLock::new();
 
@@ -256,7 +277,7 @@ pub fn connect_dataset(ds: &Dataset, prog: &Program) -> Result<DataClient, RunEr
     let p = PROVIDER
         .get()
         .ok_or_else(|| RunError::Config("no data service: the kernel reads its data through the data layer, and no in-process service is registered (abt::install, or --data SOCKET)".into()))?;
-    DataClient::connect(p(ds, prog).map_err(RunError::Config)?)
+    DataClient::connect_with(p(ds, prog).map_err(RunError::Config)?)
 }
 
 /// The short name of a stored relation (`equity.close` is `close`).

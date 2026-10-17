@@ -18,6 +18,7 @@ fn main() {
         Some("plan") => std::process::exit(abt::query_cli::plan(&args[1..])),
         Some(cmd @ ("lineage" | "dispute")) => std::process::exit(abt::query_cli::lineage(cmd, &args[1..])),
         Some(cmd @ ("test" | "claim" | "feed" | "activation")) => std::process::exit(abt::query_cli::query(cmd, &args[1..])),
+        Some("briefs") => std::process::exit(abt::query_cli::briefs(&args[1..])),
         // The compiler's plan of a program (`show plan`; the query layer's
         // plans are `abt plan`).
         Some("show") if args.get(1).map(String::as_str) == Some("plan") => {

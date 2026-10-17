@@ -27,6 +27,15 @@ pub struct Checked {
     pub diagnostics: Vec<String>,
 }
 
+/// The kernel's check of a program, whether or not it checks.
+#[derive(Clone, Debug)]
+pub struct Check {
+    /// The program's hash and degrees of freedom, when it checks.
+    pub checked: Option<(String, String)>,
+    /// Every diagnostic, as the kernel prints it.
+    pub diagnostics: Vec<String>,
+}
+
 /// What a run of the program would read now (`show binding`): its binding
 /// and the span of its decision bars.
 #[derive(Clone, Debug, PartialEq)]
@@ -140,6 +149,16 @@ impl Kernel {
             }),
             _ => Err(Error::Missing(format!("strategy `{}` does not check:\n{}", prog.strategy, diagnostics.join("\n")))),
         }
+    }
+
+    /// The kernel's check of the program whether or not it checks. A source
+    /// that does not parse is the kernel's refusal, the `Err`.
+    pub fn check_full(&self, prog: &Program) -> Result<Check, Error> {
+        let (m, _) = self.ask(Self::of(prog, KernelOp::Check))?;
+        Ok(Check {
+            checked: m.program_hash.map(|h| (h, m.degrees_of_freedom.unwrap_or_default())),
+            diagnostics: m.diagnostics.unwrap_or_default(),
+        })
     }
 
     /// The binding a run at `at` would get now, and its decision bars' span.

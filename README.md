@@ -43,7 +43,7 @@ silently misaligns every bucket.
 | `docs/compiler-design.md` | The compiler design: the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers and the observability tables; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
 | `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D34, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached). The implementation lands step by step on this branch; `docs/spec/ERRATA.md` records where it settles what the documents leave open. |
 | `docs/llm-observability.md`, `docs/llm-usability.md` | The two studies of models writing programs with the toolchain, both on the first formulation; their material is under `experiments/`. |
-| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer: the metrics, computed from a run's tables in the store, `abt metrics`; the test framework; plans, `abt plan`, `abt lineage`, `abt dispute`), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
+| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer: the metrics, computed from a run's tables in the store, `abt metrics` and what `abt run` prints of a run's returns; the test framework; plans, `abt plan`, `abt lineage`, `abt dispute`; claims, feed and activation statistics and reports; the briefs harness, `abt briefs`), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
 | `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
 | `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
 | `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
@@ -58,7 +58,7 @@ silently misaligns every bucket.
 | `crates/abt-kernel/src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
 | `crates/abt-kernel/src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
 | `crates/abt-kernel/src/bundle.rs`, `crates/abt-kernel/src/ingest.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests) and the vendor adapters behind `abt bundle build --from-norgate` and `--from-databento`. |
-| `crates/abt-kernel/src/dump.rs`, `crates/abt-kernel/src/study/` | `--dump DIR` (what `reference/` replays) and the study API (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness). |
+| `crates/abt-kernel/src/dump.rs` | `--dump DIR` (what `reference/` replays). The study API it sat beside (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness) is the query layer's, `crates/abt-query/` (ERRATA E-66). |
 | `crates/abt-kernel/src/cli.rs`, `crates/abt/src/main.rs` | The command line, and `abt`, the front binary that dispatches to it (the layers' own command lines join it as they land). |
 | `corpus-v2/catalog/` | The three classes a program is written against: `equity` (bars as traded at a daily base; `listed`, `ticker`, `split`, `dividend`, `delisted`, `member`, `classification`; the vocabularies of lists, reasons and schemes), `future` (bars per root at a minute base, `session`, `point_value`, `commission`, `member`, `usable`) and `series` (`value` by name, each on its native calendar). A program never names them; its `data` block names what it needs. |
 | `corpus-v2/lib/` | The standard library of section 7, one module a file: `calendar` (`bar`, `prev_row`, `first_row`, `row_number`), `catalog` (`split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `total_return`, `log_return`, `tr_index`), `stat` (`mean_rows[N, R]` and the other rolling and recursive moments), `bars` (`true_range`, `range`, `gap_points`, `gap`, `price_return`, `log_price_return`, `dollar_volume`, `adv[N]`, `liquid[Floor]`), `xsec` (`decile[R]`, `zscore_xs[R]`, `share_above[R, Th]`), `state` (`latch[enter, stay]`, `bars_held`, `entry_price`, `high_since_entry`), `book` (`held`, `short`, `in_book`, `flat`, `weight_now`, `exposure`, `nav_return`, `peak_nav`, `drawdown`, `nav_vol[N]`, `bought_within[W]`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
@@ -442,8 +442,9 @@ coverage report: one line per relation `decide` reaches with the bars it
 was demanded at, the bars it held a tuple at and the tuples it derived,
 then the primitives and executor relations with their counts; when
 `decide` derived nothing, the report says so and names the first empty
-relation on each path to it (W8). A plain run also warns that it is an
-untracked trial that nothing counts (see Studies).
+relation on each path to it (W8). A plain run also warns of what counts it as
+a trial: over a data service its program's lineage does, in a temporary
+store nothing does (see Studies).
 
 Parameters are the only values a run may vary: `--param name=value`
 (repeatable; `unit::name` for a library's) replaces a default with a
@@ -547,7 +548,7 @@ or a claim made there is still counted as a trial.
 abt check <files...>
 abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
-        [--verify-causality] [--no-pushdown] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--study DIR] [--quiet] [--timing] <files...>
+        [--verify-causality] [--no-pushdown] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
 abt hash --strategy NAME [--json | --show] <files...>
 abt show --strategy NAME <files...>
@@ -573,13 +574,7 @@ abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY |
 abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
 abt bundle build (--from DIR | --from-norgate DIR | --from-databento DIR [--processing-delay S] | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
 abt bundle test DIR <files...>
-abt study declare --study DIR --strategy NAME [--holdout none|trailing:Ny|blocks:K:Nmo[:SEED]] [--objective METRIC] [--require METRIC>=X]... <files...>
-abt study run --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) [--grid NAME=V1,V2,...]... [--walk-forward SCHEME] [--param NAME=VALUE]... [--threads N] <files...>
-abt study reveal --study DIR --strategy NAME (--data DIR | --synthetic ... | --bundle DIR) <files...>
-abt study metrics --study DIR [--strategy NAME] <files...>
-abt study report --study DIR --strategy NAME <files...>
-abt study dispute --study DIR --strategy NAME --reason TEXT <files...>
-abt briefs report --briefs DIR --attempts DIR [--out FILE] <files...>
+abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
 ```
 
 The executor is the program's `execution` block and the reporting its
@@ -701,54 +696,44 @@ rerunning them on these files is step 7 of section 11.
 
 ## Studies
 
-`docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial. A
-study directory (`--study DIR`) holds `lineages.json`, the declared studies
-in `studies/` and the append-only trial log `trials.jsonl`:
+`docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial.
+The kernel's study directory is retired (ERRATA E-66): a study is a plan
+(see "Reading the kernel" above, and `docs/spec/03-query.md`), and its
+trials, lineages and disputes are rows of the store.
 
 ```
-abt study declare --study DIR --strategy sma_crossover --holdout trailing:1y --objective sharpe corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
-abt study run     --study DIR --strategy sma_crossover --synthetic --days 600 --grid fast=15d,25d --grid slow=50d,100d corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
-abt study run     --study DIR --strategy sma_crossover --synthetic --grid slow=50d,100d --walk-forward anchored:2y:6mo corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
-abt study reveal  --study DIR --strategy sma_crossover --synthetic corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
-abt study metrics --study DIR --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
-abt study report  --study DIR --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
-abt study dispute --study DIR --strategy sma_crossover --reason "a different idea" corpus-v2/catalog corpus-v2/lib corpus-v2/strategies
+abt plan check  study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt plan run    study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR --kernels 4
+abt plan reveal study.plan final corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt plan report study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt lineage sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt dispute sma_crossover --reason "a different idea" corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
 ```
 
 A strategy belongs to a *lineage*: its own when nothing like it exists, or
 the nearest one when its normalised rules are within Jaccard 0.8 of a
-member's (attached with a warning; a dispute is logged and changes
-nothing). The program hash (`abt hash` and `abt study declare` print it;
-`abt ir --stage normalised` carries it) is over the normal form of the checked program,
-with its variable names canonicalised, its literals in canonical order and
-the `report` block removed, so renaming a variable or reordering a body
-resets nothing. `declare` fixes the study's inputs (hold-out policy,
-objective, thresholds, and the execution block) and warns about what is
-missing: no hold-out, a model the block turns off. A hold-out is
-`trailing:Ny` (the last N years are truncated away from every run) or
-`blocks:K:Nmo[:seed]` (K random month-aligned blocks the runs cross but
-whose metrics are withheld); `reveal` runs a committed version over the
-whole sample and reports the embargoed bars only, logged as an
-out-of-sample trial and counted. `run` logs one trial per grid point on the
-sample the hold-out leaves, then reports the deflated Sharpe ratio of the
-best point over the lineage's whole trial count, the probability of
-backtest overfitting over the grid, the parameter surface around the best
+member's (attached with a warning; a dispute is a row and changes nothing).
+The program hash (`abt hash` prints it; `abt ir --stage normalised` carries
+it) is over the normal form of the checked program, with its variable names
+canonicalised, its literals in canonical order and the `report` block
+removed, so renaming a variable or reordering a body resets nothing. A
+lineage's trials are every run of its members the store holds, in a plan or
+not, and every claim and test judged on one; the deflated Sharpe ratio of a
+plan's best point is over that count. A hold-out is `trailing:Ny` (the last
+N years are truncated away from every run) or `blocks:K:Nmo[:seed]` (K
+random month-aligned blocks the runs cross but whose metrics are withheld);
+`abt plan reveal` runs a committed point over the whole sample and reports
+the embargoed bars only, counted as a trial. A grid's report gives the
+probability of backtest overfitting, the parameter surface around the best
 point (smoothness, and the share of its grid neighbours within 10 % of it)
-and the best point's Sharpe ratio per calendar year, with warnings for a
-short sample, a Sharpe ratio below its minimum track-record length,
-multiple testing, and a peak rather than a plateau. With `--walk-forward
-anchored:2y:6mo` (or `rolling`), each fold picks the grid's best point on
-its train window and judges it on the test window, every evaluation a
-logged trial. The metrics library behind it is `crates/abt-kernel/src/study/metrics.rs`;
-returns are reported on the `report` block's calendar and annualised by its
-`periods`. A plain `abt run` is an untracked trial: logged when it names
-`--study DIR`, warned either way. `report` reads the lineage back as a bias
-checklist: its members and disputes, the studies declared, the trial count
-by kind (in studies, untracked, reveals) and the study runs, the degrees of
-freedom, the latest trial and every reveal, the author's thresholds judged
-on them, every warning raised with its bias and how often, and the biases
-of `docs/data-bundle.md` sections 4 to 6 with their status and the rows a
-warning touched marked.
+and the best point's Sharpe ratio per calendar year; a walk-forward picks
+each fold's best point on its train window and judges it on the test
+window. The metrics library is `crates/abt-query/src/metrics/`; returns are
+reported on the `report` block's calendar and annualised by its `periods`.
+`abt plan report` reads the plan back as a bias checklist: its trials, the
+claims and tests with their verdicts, the contract, every warning with its
+bias, and the forty biases with the layer that owns each, its status and its
+source.
 
 ## The reference engine
 
@@ -786,10 +771,12 @@ strategy from a brief, its successive attempts are kept as
 --attempts attempts [--out report.json] corpus-v2/catalog corpus-v2/lib`
 records, per brief, whether the first attempt checked clean, the
 diagnostics of every attempt, the attempts to a valid program and the first
-valid one's verdict on the synthetic market (trades, does not trade, does
-not survive costs, halted), and across briefs the first-attempt pass rate,
-the distribution of diagnostics and the mean attempts to a valid program.
-Measured and stored, never asserted.
+valid one's verdict on the synthetic daily market, run as an instance of
+the plan template `briefs_harness` under the program's own execution block
+(trades, does not trade, does not survive costs, halted), and across briefs
+the first-attempt pass rate, the distribution of diagnostics and the mean
+attempts to a valid program. Every attempt is a row of
+`query.briefs.attempts` (ERRATA E-65). Measured and stored, never asserted.
 
 `docs/llm-usability.md` reports the study of whether a model can write the
 company books from the docs alone, on the first formulation, and
