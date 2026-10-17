@@ -356,7 +356,7 @@ impl<'p, 'e> Fold<'p, 'e> {
                 let dcal = self.kernel.prog.decision_cal.clone();
                 let late = self.last_bar.is_some_and(|last| self.kernel.label_on(&dcal, key).is_some_and(|l| l <= last));
                 let entity = self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity());
-                self.kernel.insert_fact(rel, tuple)?;
+                self.kernel.insert_fact(rel, tuple, r)?;
                 if late {
                     self.kernel.invalidate_from(key);
                     self.result.late.push(super::LateRecord {

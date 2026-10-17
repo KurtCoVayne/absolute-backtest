@@ -183,16 +183,39 @@ The set evaluator itself gains little here. The time is in two places:
 
 - **The window's per-bar solves.** They are nested in the aggregation and
   still one environment at a time (E-75).
-- **The stream's insertion into the stored tables.** Each tuple is checked
-  against its bar's whole block for a revision. That is 12% of the kernel's
-  time at 200 names, and it grows with the square of the names. The
-  columnar tables of M-8b remove it.
+- **The stream's insertion into the stored tables.** Each tuple was
+  checked against its bar's whole block for a revision. That was 12% of the
+  kernel's time at 200 names, and it grew with the square of the names.
+  M-8b searches only the rows received at earlier instants: at 300 names
+  the run takes 42.1 s, from 52.2 s.
 
 The whole corpus was also timed: the 24 programs and the two books, each on
 its seeded market, the faster of three runs (`tests/eval_set.rs`). It
 takes 11.4 s with the tuple evaluator and 11.2 s with the set evaluator.
 Those runs are short, 0.26 s to 1.2 s each, and mostly data setup. The
 longest, `r8l`, takes 1.23 s against 1.05 s.
+
+**Memory at M-8.** The same run peaks at 878 MB at 100 names and 2.6 GB at
+300. Valgrind's massif, on a smaller run, puts the live heap at about a
+third of that:
+
+- the stored tuples, about 80 B each;
+- the stream's batches in flight, bounded by its flow-control window. Each
+  batch row carries every relation's columns, mostly null;
+- the data layer's resident cache, about 45 MB here.
+
+The rest is glibc's per-thread arenas. The data service allocates on its
+threads what the kernel frees on its own:
+
+| Allocator | Run time | Peak |
+| --- | ---: | ---: |
+| glibc, default arenas | 14.8 s | 878 MB |
+| glibc, `MALLOC_ARENA_MAX=1` | 15.7 s | 649 MB |
+| glibc, `MALLOC_ARENA_MAX=2` | 15.2 s | 781 MB |
+| jemalloc (`LD_PRELOAD`) | 14.9 s | 763 MB |
+
+The owner's machine runs macOS, whose allocator is not glibc's, so nothing
+is changed for Linux alone. A Linux run can set `MALLOC_ARENA_MAX`.
 
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:

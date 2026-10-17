@@ -1248,6 +1248,9 @@ pub fn main_with(raw: Vec<String>) {
                 eprintln!("{}", e);
                 exit(2)
             });
+            // The data service holds the data now: the dataset is kept only
+            // for what reads it after the run.
+            let dataset = (args.opts.contains_key("dump") || verify).then_some(dataset);
             let outcome = if keeps {
                 if let Some(k) = args.opts.get("kernel") {
                     eprintln!("--kernel {}: the batch kernel is gone; every run is the fold over the data layer's stream", k);
@@ -1458,7 +1461,7 @@ pub fn main_with(raw: Vec<String>) {
                     .join(", ")
             );
             if let Some(dir) = args.opts.get("dump") {
-                crate::dump::write_dump(&prog, &dataset, &cfg, &result, Path::new(dir)).unwrap_or_else(|e| {
+                crate::dump::write_dump(&prog, dataset.as_ref().expect("kept for --dump"), &cfg, &result, Path::new(dir)).unwrap_or_else(|e| {
                     eprintln!("{}", e);
                     exit(2)
                 });
@@ -1474,7 +1477,7 @@ pub fn main_with(raw: Vec<String>) {
             if verify {
                 let n = result.bars.len();
                 let samples: Vec<i64> = (1..=5).map(|i| result.bars[(n * i / 6).min(n - 1)]).collect();
-                match crate::kernel::verify_causality(&prog, &dataset, cfg, &samples) {
+                match crate::kernel::verify_causality(&prog, dataset.as_ref().expect("kept for --verify-causality"), cfg, &samples) {
                     Ok(m) if m.is_empty() => println!("causality verified at {} sampled bars", samples.len()),
                     Ok(m) => {
                         for x in m {

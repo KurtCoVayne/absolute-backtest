@@ -9,6 +9,7 @@ pub mod time;
 pub mod value;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -1661,6 +1662,24 @@ pub struct Store {
     /// Keys whose block may be out of order.
     #[serde(default)]
     pub dirty: BTreeSet<i64>,
+    /// The receipt instant of the stream's latest tuple, and the run of
+    /// tuples it has brought to each key since (`Kernel::insert_fact`).
+    #[serde(skip)]
+    runs: Option<(i64, FxHashMap<i64, Run>)>,
+}
+
+/// The tuples one receipt instant of the stream has brought to a key of a
+/// store.
+#[derive(Clone, Debug, Default)]
+struct Run {
+    /// Where they begin in the key's block: the rows before were received
+    /// at earlier instants.
+    start: usize,
+    /// The block's length after the latest of them: anything else that
+    /// changes the block ends the run.
+    after: usize,
+    /// Their identities, hashed.
+    seen: FxHashSet<u64>,
 }
 
 impl Store {
@@ -1675,6 +1694,54 @@ impl Store {
         self.by_time.entry(key).or_default().push(tuple);
         if self.entity_pos.is_some() {
             self.dirty.insert(key);
+        }
+    }
+
+    /// A tuple of the stream at `key`, received at instant `r`: a later
+    /// receipt of a fact, one with the same `identity` at the key, replaces
+    /// it (K-4.2). Only the rows of the key received at earlier instants
+    /// are searched, and the instant's own when it has brought the identity
+    /// already (two versions of one fact), so a bar received whole searches
+    /// none.
+    pub fn insert_received(&mut self, key: i64, tuple: Tuple, identity: &[usize], r: i64) {
+        let Store { by_time, entity_pos, dirty, runs } = self;
+        if runs.as_ref().is_none_or(|(at, _)| *at != r) {
+            *runs = Some((r, FxHashMap::default()));
+        }
+        let runs = &mut runs.as_mut().expect("just set").1;
+        let block = by_time.entry(key).or_default();
+        let len = block.len();
+        let run = runs.entry(key).or_default();
+        if run.after != len || run.seen.is_empty() {
+            *run = Run {
+                start: len,
+                after: len,
+                seen: FxHashSet::default(),
+            };
+        }
+        let same = |t: &Tuple| identity.iter().all(|&i| t[i] == tuple[i]);
+        let ident = {
+            let mut h = hash::FxHasher::default();
+            for &i in identity {
+                tuple[i].hash(&mut h);
+            }
+            h.finish()
+        };
+        let found = match block[..run.start].iter().position(same) {
+            Some(i) => Some(i),
+            None if run.seen.contains(&ident) => block[run.start..].iter().position(same).map(|i| run.start + i),
+            None => None,
+        };
+        match found {
+            Some(i) => block[i] = tuple,
+            None => {
+                block.push(tuple);
+                run.seen.insert(ident);
+                run.after = len + 1;
+                if entity_pos.is_some() {
+                    dirty.insert(key);
+                }
+            }
         }
     }
 
@@ -1694,6 +1761,10 @@ impl Store {
         let Some(block) = self.by_time.get_mut(&key) else { return &[] };
         if self.dirty.remove(&key) {
             block.sort_by(|a, b| a[e].cmp(&b[e]));
+            // The sort moves the run's tuples among the earlier ones.
+            if let Some((_, runs)) = &mut self.runs {
+                runs.remove(&key);
+            }
         }
         match entity {
             Some(v) => {
@@ -2758,17 +2829,13 @@ impl<'p> Kernel<'p> {
 
     /// Insert one primitive fact (already in the kernel's symbol order) and
     /// return its temporal key.
-    pub fn insert_fact(&mut self, rel: usize, tuple: Tuple) -> Result<i64, RunError> {
+    /// A tuple of the stream, received at instant `r`; a revision (a later
+    /// receipt of the same fact) replaces the row it revises (K-4.2,
+    /// `Store::insert_received`).
+    pub fn insert_fact(&mut self, rel: usize, tuple: Tuple, r: i64) -> Result<i64, RunError> {
         let info = &self.rels[rel];
         let key = tuple[info.key_pos].as_time().ok_or_else(|| RunError::Internal(format!("non-timestamp key in `{}`", info.name)))?;
-        // A revision (a later receipt of the same fact) replaces the row it
-        // revises (K-4.2).
-        let same = |t: &Tuple| info.identity.iter().all(|&i| t[i] == tuple[i]);
-        if let Some(old) = self.stores[rel].by_time.get_mut(&key).and_then(|block| block.iter_mut().find(|t| same(t))) {
-            *old = tuple;
-            return Ok(key);
-        }
-        self.stores[rel].insert(key, tuple);
+        self.stores[rel].insert_received(key, tuple, &info.identity, r);
         Ok(key)
     }
 
@@ -4047,8 +4114,8 @@ pub fn load<'p>(prog: &'p Program, lowered: Option<&'p crate::lower::Lowered>, c
     while let Some(b) = sub.next_batch()? {
         for ev in decoder.events(&mut kernel, &bound, &b)? {
             match ev {
-                bind::StreamEvent::Tuple { rel, tuple, .. } => {
-                    kernel.insert_fact(rel, tuple)?;
+                bind::StreamEvent::Tuple { rel, r, tuple, .. } => {
+                    kernel.insert_fact(rel, tuple, r)?;
                 }
                 bind::StreamEvent::Barrier { cal, label, .. } => kernel.open_bucket(&cal, label),
             }
@@ -4160,4 +4227,77 @@ pub fn verify_causality_on(prog: &Program, client: &DataClient, cfg: ExecConfig,
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    const KEY: i64 = 7;
+    const IDENTITY: [usize; 1] = [0];
+
+    fn tu(e: Sym, v: f64) -> Tuple {
+        vec![Value::Equity(e), Value::Time(KEY), Value::Num(v)]
+    }
+
+    fn rows(s: &Store) -> Vec<(Sym, f64)> {
+        s.by_time[&KEY].iter().map(|t| (t[0].as_equity().unwrap(), t[2].as_f64().unwrap())).collect()
+    }
+
+    fn indexed() -> Store {
+        let mut s = Store::default();
+        s.index_by(Some(0));
+        s
+    }
+
+    #[test]
+    fn a_bar_received_whole_holds_every_tuple_in_the_order_received() {
+        let mut s = indexed();
+        for (e, v) in [(2, 30.0), (0, 10.0), (1, 20.0)] {
+            s.insert_received(KEY, tu(e, v), &IDENTITY, 100);
+        }
+        assert_eq!(rows(&s), vec![(2, 30.0), (0, 10.0), (1, 20.0)]);
+    }
+
+    #[test]
+    fn a_later_receipt_revises_the_row_in_place() {
+        let mut s = indexed();
+        for (e, v) in [(0, 10.0), (1, 20.0), (2, 30.0)] {
+            s.insert_received(KEY, tu(e, v), &IDENTITY, 100);
+        }
+        s.insert_received(KEY, tu(1, 21.0), &IDENTITY, 200);
+        s.insert_received(KEY, tu(3, 40.0), &IDENTITY, 200);
+        assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0), (2, 30.0), (3, 40.0)]);
+    }
+
+    #[test]
+    fn two_receipts_of_a_fact_at_one_instant_keep_the_later() {
+        // Two versions of one relation bound together can bring a fact twice
+        // at one instant.
+        let mut s = indexed();
+        for (e, v) in [(0, 10.0), (1, 20.0), (0, 12.0)] {
+            s.insert_received(KEY, tu(e, v), &IDENTITY, 100);
+        }
+        assert_eq!(rows(&s), vec![(0, 12.0), (1, 20.0)]);
+    }
+
+    #[test]
+    fn a_block_changed_by_another_writer_is_searched_whole() {
+        let mut s = indexed();
+        s.insert_received(KEY, tu(0, 10.0), &IDENTITY, 100);
+        s.insert(KEY, tu(1, 20.0));
+        s.insert_received(KEY, tu(1, 25.0), &IDENTITY, 100);
+        assert_eq!(rows(&s), vec![(0, 10.0), (1, 25.0)]);
+    }
+
+    #[test]
+    fn a_lookup_that_sorts_the_block_ends_the_instants_run() {
+        // The sort moves a row received earlier among the instant's own.
+        let mut s = indexed();
+        s.insert_received(KEY, tu(1, 20.0), &IDENTITY, 100);
+        s.insert_received(KEY, tu(0, 10.0), &IDENTITY, 200);
+        assert_eq!(s.lookup(KEY, None).len(), 2);
+        s.insert_received(KEY, tu(1, 21.0), &IDENTITY, 200);
+        assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0)]);
+    }
 }

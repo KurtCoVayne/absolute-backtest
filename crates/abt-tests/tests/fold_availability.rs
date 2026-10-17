@@ -11,7 +11,7 @@ use abt_tests as common;
 use std::collections::BTreeMap;
 use std::fs;
 
-use abt_kernel::data::{synthetic_daily, write_parquet_dir};
+use abt_kernel::data::{business_days, synthetic_daily, write_parquet_dir};
 use abt_kernel::kernel::time::format_timestamp;
 use abt_kernel::kernel::{run_on, Dataset, ExecConfig, Replay, Value};
 use abt_tests::{run, run_socket, verify_causality};
@@ -204,4 +204,40 @@ fn availability_loads_from_parquet_and_truncation_follows_it() {
     let received = count(Some(abt_kernel::kernel::bind::barrier_at(&p, t))) as usize;
     assert!(received < keyed, "{} received of {} keyed at {}", received, keyed, format_timestamp(t));
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_revision_replaces_the_row_it_revises() {
+    // Two names over six days. X's close of the second day, 10, is revised
+    // to 30, received on the fourth (K-4.2). A decision before that read 10
+    // and one after reads 30, and the bar holds one row of each name.
+    let src = common::strategy(
+        "revised",
+        "    unit : Quantity<Shares> = 1 shares\n    ten : Price<USD> = 10 USD/share",
+        "    rel peak(A: Equity, @T, M: Price<USD>)\n    peak(A, T, M) :- universe(A, T), M = max(P) over (T1 in window[10d] min 1, close(A, T1, P)).",
+        "    decide(T, trade(A, Q)) :- peak(A, T, M), Q = M / ten * unit.",
+    );
+    let p = common::program(&src, "revised");
+    let mut ds = common::markets((2024, 1, 8), &[("X", &[10.0; 6]), ("Y", &[20.0; 6])]);
+    let days = business_days((2024, 1, 8), 6);
+    let x = ds.symbols.get("X").unwrap();
+    ds.add_available("close", vec![Value::Equity(x), Value::Time(days[1]), Value::Num(30.0)], days[3]);
+    let cfg = ExecConfig {
+        pushdown: false,
+        ..ExecConfig::frictionless()
+    };
+    let (r, mut k) = common::run_kernel(&p, &ds, cfg).unwrap();
+    let amount = |t: i64, name: &str| r.decisions.iter().find(|d| d.t == t && r.describe_decision(&d.decision).contains(name)).map(|d| d.decision.amount);
+    assert_eq!(amount(days[1], "X"), Some(1.0));
+    assert_eq!(amount(days[4], "X"), Some(3.0));
+    assert_eq!(amount(days[4], "Y"), Some(2.0));
+    let names = k.symbol_names().to_vec();
+    let mut held: Vec<(String, f64)> = k
+        .query("close", days[1], &[])
+        .unwrap()
+        .iter()
+        .map(|tu| (names[tu[0].as_equity().unwrap() as usize].clone(), tu[2].as_f64().unwrap()))
+        .collect();
+    held.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(held, vec![("X".to_string(), 30.0), ("Y".to_string(), 20.0)]);
 }
