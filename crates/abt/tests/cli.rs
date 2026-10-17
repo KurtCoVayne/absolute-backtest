@@ -134,6 +134,40 @@ fn a_query_binds_a_variable() {
     assert!(!out.status.success() && stderr.contains("ZZZ"), "stderr: {}", stderr);
 }
 
+/// `ledger R into NAME` over a store directory writes R's extension to the
+/// store, as over a data service's socket; over a temporary store it is
+/// refused, naming what it needs.
+#[test]
+fn a_ledger_query_over_a_store_writes_to_the_store() {
+    let dir = scratch("ledger-store");
+    let store = dir.join("store").to_string_lossy().to_string();
+    let lib = [corpus("catalog").to_string_lossy().to_string(), corpus("lib").to_string_lossy().to_string()];
+    let ingest = abt(&["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "200", &lib[0], &lib[1]]);
+    assert!(ingest.status.success(), "{:?}", text(&ingest));
+    let files = strategy_files("sma_crossover");
+    let mut args = vec!["query", "--strategy", "sma_crossover", "--text", "ledger above into above_daily", "--data", &store];
+    args.extend(files.iter().map(String::as_str));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    // `N rows of above to kernel.<run>.above_daily`
+    let line = stdout.lines().find(|l| l.contains(" rows of above to kernel.")).unwrap_or_else(|| panic!("stdout: {}", stdout));
+    let rows: usize = line.split_whitespace().next().unwrap().parse().unwrap();
+    assert!(rows > 0, "{}", line);
+    let relation = line.rsplit(' ').next().unwrap();
+    let out = abt(&["data", "query", "--store", &store, relation]);
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "stdout: {}\nstderr: {}", stdout, stderr);
+    // The typed request, the header, then a line per row.
+    assert_eq!(stdout.lines().count(), rows + 2, "stdout: {}", stdout);
+
+    let mut args = vec!["query", "--strategy", "sma_crossover", "--text", "ledger above into above_daily", "--synthetic", "--days", "200"];
+    args.extend(files.iter().map(String::as_str));
+    let out = abt(&args);
+    let (stdout, stderr) = text(&out);
+    assert!(format!("{}{}", stdout, stderr).contains("--data STORE|SOCKET"), "stdout: {}\nstderr: {}", stdout, stderr);
+}
+
 /// A Parquet market for the equity class with one symbol over five
 /// weekdays, with no close on 2024-01-10 (the bar exists: its volume and
 /// listing do), next to a strategy that buys on an up day against the

@@ -883,6 +883,31 @@ batch driver agree on every corpus program. Each bless since:
   - **What stays.** `--nav FILE` still writes the book at every bar as
     Parquet. The command line now always drops its dataset once the data
     service holds it (E-76's exception for `--dump` is gone).
+- **E-80 (M-9; the documents).**
+  - **The README** is written around the three programs and the
+    documents. The data layer, the kernel and the query layer each have a
+    section with their commands, followed by the command line, the gates as
+    checked here, the layout and the status. Its two quick starts run as
+    written: in one process over a store, and as three processes over
+    sockets.
+  - **`docs/observability.md` is folded into the README's section on
+    K-7's commands** ("Observing a run"), as M-9 asks, updated to the query
+    language's forms. The specification's documents are not edited (no
+    step has edited them; these errata amend them). The retired forms are
+    E-53's, and the document is in the history before this entry.
+  - **Status notes.** `docs/data-bundle.md` keeps its notes as the record
+    of the first formulation's crate, each ending with where its part
+    lives now. `docs/language-v2.md` gains a status note on how section
+    11's steps were carried out.
+  - **The studies.** `experiments/llm-usability/` and
+    `experiments/llm-observability/` are records, with a note that their
+    commands no longer exist and the commits at which their scripts run.
+    Their rerun on the second formulation (A-7.2) is the owner's.
+  - **`ledger R into NAME` over a store.** It writes to the store over
+    `--data STORE`, as over a socket: a run over a store lasts (E-78).
+    Before, it was refused unless a socket was named. The query reuses its
+    run's data service rather than opening a second one over the same
+    directory. The usage says the same of checkpoints and `--resume`.
 
 ## Data layer and protocol
 

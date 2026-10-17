@@ -1,8 +1,11 @@
 //! `abt`, the front (docs/spec/00-architecture.md, Definition 2.2): every
-//! subcommand is a call on one layer; this binary parses nothing itself and
-//! dispatches. Until the layers serve their own commands (M-2 to M-5), the
-//! kernel's command line serves all of them, its data through the service
-//! `abt::install` registers.
+//! subcommand is a call on one layer, and this binary parses nothing itself
+//! but dispatches. `abt data ...` goes to the data layer's commands; `abt
+//! metrics|plan|lineage|dispute|test|claim|feed|activation|briefs` to the
+//! query layer's; `abt kernel ...` and the program commands (`check`, `run`,
+//! `query`, `show`, ...) to the kernel's. `abt::install` registers the
+//! in-process data services the kernel reaches a dataset or a store
+//! directory through.
 
 fn main() {
     abt::install();

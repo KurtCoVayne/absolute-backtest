@@ -611,7 +611,7 @@ pub fn answer(k: &mut Kernel, cx: &Context, i: usize, q: &Query) -> Result<Answe
         Query::Ledger { relation, into } => {
             let (client, run) = cx
                 .out
-                .ok_or_else(|| RunError::Request("`ledger R into NAME` writes through a data service: run over one (--data SOCKET)".into()))?;
+                .ok_or_else(|| RunError::Request("`ledger R into NAME` writes to a store that lasts: run over one (--data STORE|SOCKET)".into()))?;
             let n = crate::kernel::outputs::ledger_into(run, prog, k, client, result, relation, into)?;
             Ok(Answer::text(format!("{} rows of {} to kernel.{}.{}\n", n, relation, run, into)))
         }

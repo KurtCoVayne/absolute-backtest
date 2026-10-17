@@ -1,81 +1,240 @@
 # absolute-backtest
 
-A strategy language for backtesting, implemented as
-[`docs/language-v2.md`](docs/language-v2.md) fixes it (the second
-formulation; its grammar is `corpus-v2/README.md`): programs written as
-typed blocks, an elaborator that links a program against a class catalog and
-a standard library, a checker with one diagnostic code per judgment,
-compiler stages from the typed IR to an executable plan, and a kernel that
-evaluates a checked program bar by bar in a closed loop with a simulated
-executor whose every setting is a field of the program's `execution` block.
-One Rust crate; its dependencies are the Parquet and JSON libraries the
-bundle format needs.
+A backtesting system for programs written in a strategy language, built as
+three programs that share nothing but a protocol
+([`docs/spec/00-architecture.md`](docs/spec/00-architecture.md)):
+
+| Program | Crate | What it does | Specification |
+| --- | --- | --- | --- |
+| The data layer | `crates/abt-data` | Holds typed relations with two timestamps in a store, answers structured queries and aggregate requests, streams events in a canonical order with explicit clock barriers, and plans the cheapest way to satisfy a demand from the store, the vendors and the feeds. It interprets nothing. | `docs/spec/01-data.md` |
+| The kernel | `crates/abt-kernel` | Parses, checks, normalises, analyses and plans a program; derives its contract; binds its demand through the data layer; evaluates it as a fold over the stream; keeps the book and simulates execution for equities, futures and options; serves its state tables and its query language. | `docs/spec/02-kernel.md` |
+| The query layer | `crates/abt-query` | A client of both: runs plans (studies), computes metrics, runs statistical tests, judges claims, counts trials and writes reports. | `docs/spec/03-query.md` |
+
+The layers speak the protocol of `docs/spec/04-protocol.md`, over a Unix
+socket or an in-process channel that carries the same frames. Two crates are
+shared:
+- `crates/abt-wire` holds the FlatBuffers messages, the frames, RFC 8785
+  canonical JSON and BLAKE3 hashes;
+- `crates/abt-agg` is the one implementation of every aggregate.
+
+`abt` (`crates/abt`) is the front binary. Each subcommand is a call on one
+layer. With no socket named, it links the layers in one process, with the
+same results, bit for bit, as over sockets (G3).
+
+The language is the second formulation of
+[`docs/language-v2.md`](docs/language-v2.md); its grammar is
+`corpus-v2/README.md`. A program is written as typed blocks and linked
+against a class catalog and a standard library. A checker judges it, with
+one diagnostic code per judgment, and the compiler takes it from the typed
+IR to an executable plan. The kernel evaluates it bar by bar in a closed
+loop with a simulated executor, every setting of which is a field of the
+program's `execution` block.
+
+## Quick start
+
+In one process, the front serving a store directory itself:
 
 ```
 abt check corpus-v2/catalog corpus-v2/lib corpus-v2/strategies      # every strategy, against the catalog and the library
-abt run --strategy sma_crossover --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt data ingest --store ./store --adapter synthetic --class equity --days 500 corpus-v2/catalog corpus-v2/lib   # a synthetic market in a store
-abt run --strategy sma_crossover --data ./store --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt run --strategy sma_crossover --data ./store --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN: ...`
+abt metrics --run RUN --store ./store
+abt data query --store ./store 'kernel.RUN.book'
 abt run --strategy sma_crossover --synthetic --all --fills corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt run --strategy sma_crossover --synthetic --param fast=30d --start 2022-06-01 --end 2022-09-30 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt query --strategy sma_crossover --text 'trace decide at 2022-04-07' --text 'why not above(E3, 2022-04-07)' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt query --strategy sma_crossover --text '? above(A, T), close(A, T, P), P > 50 USD/share at T = 2022-04-07' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 ```
 
-A run reads its data from a store: `--data STORE` serves a store directory
-in the process (the run's outputs are written to it), `--data SOCKET` reads a
-running `abt data serve`, and `--synthetic` generates a market in memory.
+As three processes over sockets (a socket's path must be shorter than 108
+bytes):
+
+```
+abt data serve --store ./store --socket data.sock &
+abt kernel serve --socket kernel.sock --data data.sock &
+abt kernel run --kernel kernel.sock --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN`
+abt kernel query --kernel kernel.sock --run RUN --text 'coverage'
+abt metrics --run RUN --data data.sock
+abt plan run study.plan corpus-v2/catalog corpus-v2/lib --data data.sock --kernel kernel.sock
+```
+
+A run reads its data from a store:
+- `--data STORE` serves a store directory in the process, and the run's
+  outputs are written to it;
+- `--data SOCKET` reads a running `abt data serve`;
+- `--synthetic` generates a market into a temporary store.
+
 Data enters a store through `abt data ingest`: a synthetic market, an
-imported bundle or directory of Parquet files (one file per primitive
-relation, `close.parquet`, `listed.parquet`, ..., with columns named after
-the signature's arguments; below), or a vendor's files. Timestamps are bar
-close instants: a 09:30 to 09:31 minute bar is labelled `09:31`, the last bar
-of a session `16:00`, and a daily bar by its date. The synthetic adapter
-writes this convention; minute data labelled by open time silently
-misaligns every bucket.
+imported bundle or directory of Parquet files (below), or a vendor's files.
+Timestamps are bar close instants: a 09:30 to 09:31 minute bar is labelled
+`09:31`, the last bar of a session `16:00`, and a daily bar by its date. The
+synthetic adapter writes this convention; minute data labelled by open time
+silently misaligns every bucket.
 
-## Layout
+## The documents
 
-| Path | What it is |
+The specification is six documents, a seventh added after them, and the
+errata:
+
+| Document | What it fixes |
 | --- | --- |
-| `docs/language-v2.md` | The language: one data store per instrument class with every resolution derived (section 3), programs as typed blocks with no run-time flags (4), order-independent rule bodies with sound short-circuiting (5), what the semantics licenses the kernel to do (6), the standard library (7), the query facility with its state tables and algorithms (8), MW14 and R8L rewritten in it (9), the checker's judgments (10) and the implementation order (11). The code cites it by section. |
-| `corpus-v2/README.md` | The grammar the corpus assumes: the nine blocks, the `data` block's needs, universes, calendars, signatures, the literal forms, decisions, the kernel relations, literals with units, the corpus headers and the diagnostic codes. |
-| `docs/semantic-model.md` | The first formulation's model. What `docs/language-v2.md` section 10 retains unchanged (WF-3 types, WF-5 closedness, WF-6 causality, WF-7 total orders, WF-8 stratification, W5 and W6, the kernel's semantics of its section 7) is specified there; its syntax, environments and corpus are gone. |
-| `docs/formal-foundations.md` | The formal foundations: the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results. |
-| `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API. |
-| `docs/observability.md` | The observability commands: `abt show` and `abt graph` (the program graph, with the compiler's facts), the coverage report every run prints, `abt query` (the query language: `?`, `why`, `why not`, `trace`, `coverage`, `show`, `ledger ... into`), `--ledger`, the state tables (`abt table`, `--tables DIR`), and the compiler's `ir`, `rewrite-log`, `plan` and `verify`. |
-| `docs/compiler-design.md` | The compiler design: the pipeline from the typed IR to an executable plan (Normalise, Analyse, Rewrite, Plan, Lower), the invariants that make translation validation exact, the verification tiers and the observability tables; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
-| `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D34, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached). The implementation lands step by step on this branch; `docs/spec/ERRATA.md` records where it settles what the documents leave open. |
-| `docs/llm-observability.md`, `docs/llm-usability.md` | The two studies of models writing programs with the toolchain, both on the first formulation; their material is under `experiments/`. |
-| `Cargo.toml`, `crates/` | The workspace of `docs/spec/05-migration.md` (M-0): `abt-wire` (the shared types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, RFC 8785 canonical forms, BLAKE3 hashes), `abt-agg` (the aggregate kernels), `abt-data` (the data layer: the store, whose decoded row groups stay resident under a budget, half the machine's memory or `ABT_RESIDENT_BUDGET` bytes, ERRATA E-74; the query engine; the stream; the aggregate pass; the resolver), `abt-kernel` (the language, its compiler and the kernel: every `crates/abt-kernel/src/` row below), `abt-query` (the query layer: the metrics, computed from a run's tables in the store, `abt metrics` and what `abt run` prints of a run's returns; the test framework; plans, `abt plan`, `abt lineage`, `abt dispute`; claims, feed and activation statistics and reports; the briefs harness, `abt briefs`), `abt` (the front binary) and `abt-tests` (the suites that span layers, with the shared fixtures). The layers fill in step by step as the migration lands. |
-| `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
-| `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
-| `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call (bracketed inputs and calendars substituted at link time), and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` block (fifteen fields, from a preset and its overrides) and the `report` block (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
-| `crates/abt-kernel/src/compiler/` | Normalise (the normal form, canonical order and names, the program hash H(P): BLAKE3 over the RFC 8785 form of the normal form without its `report` block, what `abt hash` prints and `abt hash --show` prints the bytes of) and the stage printing behind `abt ir`; `compile` runs the pipeline. |
-| `crates/abt-kernel/src/analysis/` | Analyse: strata, the open-loop partition, keyedness labels, demand, window lengths, and the abstract interpretation with its warnings. |
-| `crates/abt-kernel/src/rewrite/` | The rewrites R1 to R6 with the rewrite log (`abt rewrite-log`). |
-| `crates/abt-kernel/src/plan/`, `crates/abt-kernel/src/lower/` | The planner (statistics, cost model, exact order search, plan printing) and the lowering the kernel executes (`abt show plan`). |
-| `crates/abt-kernel/src/verify/` | The verification tiers: exact linear feasibility, the SMT-LIB2 driver with replay files, constrained Horn clauses, translation validation, the runtime checks (`abt verify`). |
-| `crates/abt-kernel/src/state/` | The state tables and the provenance of a run: extension, carried, summary, derivation, failure, coverage, plan, book, binding; derivation trees and why-not (`abt table`, `--tables`, and the query language's `why` and `why not`). |
-| `crates/abt-kernel/src/observe.rs` | The program graph and the coverage report behind `abt show`, `abt graph` and the run's coverage lines. |
-| `crates/abt-kernel/src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation under the three-valued reading of section 5; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver, `ExecConfig::from_program` (the configuration the `execution`, `decisions` and `report` blocks fix), `explain` and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers, and its checkpoints; `time.rs` is calendar arithmetic and buckets; `value.rs` the runtime values. |
-| `crates/abt-kernel/src/data.rs` | The Parquet loader for a loose data directory, and the deterministic synthetic markets of the three classes: `synthetic_daily` (equities with a split, dividends, a ticker change, a delisting, membership, a classification and the `SPXTR` and `VIX` series), `synthetic_minute` (minute equities) and `synthetic_futures` (minute futures with sessions, point values and commissions); `synthetic_for_program` picks the one a program's class and base ask for. |
-| `crates/abt-kernel/src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
-| `crates/abt-kernel/src/bundle.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests), read by the data layer's `bundle_v2` adapter. |
-| `crates/abt-data/src/adapters/` | The vendor adapters (D-7.7): `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `orats` (option chains from ORATS's strikes), `dbn` (DBN versions 1 to 3, known answers from the reference implementation), `http` (the vendors' HTTP requests), and `mock` (the resolver's tests). `crates/abt-data/src/options.rs` answers the chain query (D-4.4). |
-| `crates/abt-kernel/src/cli.rs`, `crates/abt/src/main.rs` | The command line, and `abt`, the front binary that dispatches to it (the layers' own command lines join it as they land). |
-| `corpus-v2/catalog/` | The three classes a program is written against: `equity` (bars as traded at a daily base; `listed`, `ticker`, `split`, `dividend`, `delisted`, `member`, `classification`; the vocabularies of lists, reasons and schemes), `future` (bars per root at a minute base, `session`, `point_value`, `commission`, `member`, `usable`) and `series` (`value` by name, each on its native calendar). A program never names them; its `data` block names what it needs. |
-| `corpus-v2/lib/` | The standard library of section 7, one module a file: `calendar` (`bar`, `prev_row`, `first_row`, `row_number`), `catalog` (`split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `total_return`, `log_return`, `tr_index`), `stat` (`mean_rows[N, R]` and the other rolling and recursive moments), `bars` (`true_range`, `range`, `gap_points`, `gap`, `price_return`, `log_price_return`, `dollar_volume`, `adv[N]`, `liquid[Floor]`), `xsec` (`decile[R]`, `zscore_xs[R]`, `share_above[R, Th]`), `state` (`latch[enter, stay]`, `bars_held`, `entry_price`, `high_since_entry`), `book` (`held`, `short`, `in_book`, `flat`, `weight_now`, `exposure`, `nav_return`, `peak_nav`, `drawdown`, `nav_vol[N]`, `bought_within[W]`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
-| `corpus-v2/strategies/` | 24 strategies that must check clean, among them the four stylized-fact strategies, `dividend_capture`, `opening_gap` on a minute base, `resampled_momentum`, `total_return_momentum` over the catalog module and `scale_in`, whose rules aggregate their own past. |
-| `corpus-v2/company/` | MW14 (`mw14.dsl`, the weekly S&P 1500 momentum book) and R8L (`r8l.dsl`, the intraday futures opening-range book) as section 9 gives them. |
-| `corpus-v2/negative/` | 35 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `crates/abt-tests/tests/corpus_v2.rs`. |
-| `crates/abt-tests/tests/corpus_v2.rs` | The acceptance test: the library checks clean; every strategy and company program checks clean modulo its `# allow:` lines; every negative case yields exactly its code and no program; every program runs on synthetic data of its class and decides something. |
-| `crates/abt-tests/src/lib.rs`, `crates/abt-tests/tests/fixtures.rs` | The shared fixtures of the integration tests: the catalog and the library as the base workspace, strategies checked into programs, a strategy skeleton the tests fill in (`StrategyParts`, `strategy(name, params, rules, decides)`), crafted markets (`market`, `markets`, `market_from`); and the test that the skeleton checks and runs. |
-| `crates/abt-tests/tests/*.rs`, `crates/abt/tests/*.rs` | The integration suites (those that drive the `abt` binary are the front's): the checker and its messages, the kernel's hand-computed outcomes, the executor's contracts, costs, liquidity, margin and policies, orders, actions, as-of joins, the fold with its windows, checkpoints and availability, the state tables, the compiler stages, translation validation and verification, the study, the command line. They are being ported from the first formulation's programs to this one. |
-| `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies. |
-| `scripts/` | `parity/` holds the comparisons of the two books with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake read and their editor; `bench.sh` is the performance ladder; `synth/` writes the first formulation's layouts and is kept for the record. The lake and the vendors are read by the data layer's adapters (`abt data ingest --adapter norgate|databento|orats`). |
+| `docs/spec/00-architecture.md` | The three programs, the decisions record A-D1 to A-D34, the cross-layer invariants, the modes, the identifiers, the gates G1 to G10 and the targets of A-7.3 |
+| `docs/spec/01-data.md` | The data layer (D): the data model and its registries, the storage engine, the query interface, streams, aggregates, the resolver, the data-side checks |
+| `docs/spec/02-kernel.md` | The kernel (K): the program form, contracts derived from structure, the pipeline and the fold, market simulation for equities, futures and options with their margin and cost models, the executor modes, the state tables and the query service |
+| `docs/spec/03-query.md` | The query layer (Q): plans, metrics, the test framework and its starting set, claims, feed and activation statistics, reports |
+| `docs/spec/04-protocol.md` | The protocol (P): the shared crates, the transport, the services' requests, the Arrow schemas, ordering and determinism, canonical forms and hashing |
+| `docs/spec/05-migration.md` | The order of landing, M-0 to M-10, each step gated |
+| `docs/spec/06-performance.md` | The algorithms and structures of each layer and how the targets are reached (X), written after the six |
+| `docs/spec/ERRATA.md` | Where the implementation settles what the documents leave open, one entry per decision (E-1 onwards), and the changes the golden runs were blessed for |
 
-## The surface syntax in one page
+The design documents it builds on, cited by the letters in brackets:
+
+| Document | What it is |
+| --- | --- |
+| `docs/language-v2.md` (V) | The language: one store per instrument class with every resolution derived, programs as typed blocks, order-independent bodies with sound short-circuiting, the standard library, the query facility, MW14 and R8L rewritten, the checker's judgments |
+| `corpus-v2/README.md` | The grammar the corpus assumes: the nine blocks, the `data` block's needs, universes, calendars, signatures, the literal forms, decisions, the kernel relations, literals with units, the corpus headers and the diagnostic codes |
+| `docs/compiler-design.md` (C) | The compiler: Normalise, Analyse, Rewrite, Plan and Lower, the invariants that make translation validation exact, the verification tiers and the state tables (K-8 lists the deltas) |
+| `docs/formal-foundations.md` (F) | The language as stratified Datalog over the cross-section and synchronous dataflow over time, every guarantee derived from established results |
+| `docs/semantic-model.md` (S) | The first formulation's model; what V-10 retains of it (types, closedness, causality, total orders, stratification, the kernel's semantics) is specified there |
+| `docs/data-bundle.md` (B) | The data and validation program: closed data, the online fold, the catalog, the bias audit, the study API. A design record; its status notes say where each part lives now |
+| `docs/assessment.md` | Measurements: the budgets of D-9.1, the performance ladder, memory, the targets of A-7.3 as measured here |
+| `docs/parity-mw14.md`, `docs/parity-r8l.md`, `docs/parity-inputs.md` | G1: the two books' parity runs, their inputs and the comparisons |
+| `docs/handoff-data.md` | The real data as found: the Norgate lake's layout and the decisions the `norgate` adapter states on its versions |
+| `docs/llm-usability.md`, `docs/llm-observability.md` | The two studies of models writing programs, both on the first formulation; records, with their material under `experiments/` |
+
+## The data layer: `abt-data`
+
+The data layer holds every relation in a store directory and serves it
+(`abt data serve`); the kernel and the query layer reach it only through
+its service. A store holds:
+- the registry: schemas, the identity relations (`instrument`, `vendor_id`,
+  `ticker`, ...) and the labels (D-2);
+- every relation's versions: each is immutable, hashed and carries its
+  attributes (`reviewed`, `calendar`, the source's statements), and one per
+  relation and source is current (D-2.6);
+- the logs, the partitions and the content-addressed cache (D-3), with the
+  decoded row groups kept resident under a budget, half the machine's
+  memory or `ABT_RESIDENT_BUDGET` bytes (ERRATA E-74);
+- every other layer's artefacts, under `kernel.<run>.*` and
+  `query.<plan>.*`.
+
+`abt data query` answers the query forms of D-4 in their text form, `abt data
+stats` describes the versions, `abt data gc` keeps the store within its disk
+budget, sparing what `abt data pin` pins, and `abt data catalog --class C`
+renders a class's catalog from the registry (`corpus-v2/catalog/*.dsl` are
+its output).
+A run's stream (D-5) is every bound relation's tuples in receipt order, with
+the barriers of the program's calendars; the aggregate pass (D-6) answers
+the windowed aggregates the kernel pushes down.
+
+### The resolver
+
+The data layer resolves the demand (`docs/spec/01-data.md`, section 7). Each
+need's relations are bound at the store's versions that satisfy the need,
+chosen as before: the version a preference names, the finest calendar, else
+the first source by name. A catalog of sources (`abt data serve --config
+FILE`: each source's offers, its prices with A-8's placeholders given
+values, its quota) lets the resolver buy the parts of a need's span that
+the store does not hold. It buys the cheapest cover of the span (money
+first, then seconds, bytes and requests) through the source's adapter, and
+only within the program's `budget`, whose money is 0 by default: nothing is
+bought unless the program allows it. What it buys is ingested, versioned
+and the store's from then on. A plan over budget binds what the store holds
+and reports the cheapest plan that covers every span. `abt data resolve
+--demand FILE --dry-run --explain` prints a plan without buying, and `abt
+data catalog --sources` prints the catalog (ERRATA E-67).
+
+### Imports: bundles and Parquet directories
+
+A bundle (`docs/data-bundle.md`, sections 2 and 3) is the first formulation's
+data directory, and since M-9 an import format: `abt data ingest --adapter
+bundle_v2 --from DIR --class CLASS` reads it, or a directory of Parquet
+files, into a store, and a run reads the store. A bundle is `manifest.json`
+(the class, the version, the bundle date, every relation with its signature,
+resolution, availability convention, row count and partitions, and the
+bundle tests' report once they passed), `securities.parquet` (the security
+table: `id,ticker,from,to`, `to` null while the ticker is still carried, and
+optionally the contract columns `multiplier`, `asset_class` and
+`commission_per_contract`) and `log/<relation>/<YYYY-MM>.parquet`,
+append-only Parquet partitions of each primitive relation by the month of
+its temporal key. With a security table every equity field is a security
+id and the `ticker` relation is derived from the table. A directory of
+Parquet files is the same files without the log: one `<relation>.parquet`
+per primitive of the program's class, a relation being a function of its
+identity columns (two rows for one identity with different outputs are an
+error naming both rows; an identical row is dropped), a missing or empty
+file leaving the relation empty with a `note:`.
+
+```
+abt data ingest --store ./store --adapter bundle_v2 --from ./bundle --class equity corpus-v2/catalog corpus-v2/lib
+abt data ingest --store ./reviewed --adapter bundle_v2 --from ./bundle --class equity --attributes reviewed=complete corpus-v2/catalog corpus-v2/lib
+abt run --strategy sma_crossover --data ./store corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+```
+
+A bundle whose tests passed imports `reviewed = complete`; one that did not
+imports unreviewed, unless a reviewer says otherwise with `--attributes`. A
+program's `data` block says `require reviewed`, so a run on an unreviewed
+store is refused (exit 2, naming the version and what it lacks); `allow
+unreviewed` runs on it with a warning. The bundle tests' checks of market
+facts (action reconciliation, delisting coverage, membership) are the
+kernel's preconditions, run at every run's start (ERRATA E-50), and the
+query layer's `actions` feed statistic.
+
+### Vendors
+
+A vendor's data enters a store through the data layer's adapters (D-7.7,
+`crates/abt-data/src/adapters/`, ERRATA E-68), named by `abt data ingest
+--adapter` or by a catalog's source:
+
+- `norgate` reads the NDLake lake directly (`--from LAKE`): the equity class
+  of the members, ever, of its lists (`--lists 'S&P 500=SPX'`), keyed by
+  Norgate's `asset_id`, with index series (`--series '$SPXTR=SPXTR'`) and
+  the ten decisions of `docs/handoff-data.md` (section 4) stated on the
+  versions; `--exceptions FILE` adds the reviewed exceptions
+  (`scripts/reviewed/norgate-spx-2014.parquet`).
+- `databento` reads DBN files (`.dbn`, `.dbn.zst`), the bucket's Parquet
+  layout, or the historical API (`--from https://hist.databento.com` with
+  `--dataset --schema --symbols --stype-in`, the key from
+  `$DATABENTO_API_KEY`). Futures are contracts by `instrument_id`, rolled
+  per root into a back-adjusted continuous series (`ES.v.0`, by volume, or
+  `ES.c.0`, by expiry) with `continuous`, `future_spec`, sessions and point
+  values; equities are joined to the store's tickers by symbol. Bars are
+  keyed at their close and received at `ts_recv` or the close, plus
+  `--processing-delay S`. The venue's statistics give `settlement`
+  (back-adjusted as the bars) and `open_interest`, each keyed at the
+  session's last close and received when published.
+- `databento_live` is the live gateway's session (CRAM, the subscription,
+  DBN), every record stamped at acceptance.
+- `orats` reads ORATS's strikes, files or the Data API (`--from
+  https://api.orats.io --tickers SPY`, the token from `$ORATS_TOKEN`), as the
+  option class (ERRATA E-70): every contract an instrument keyed by its OCC
+  symbol, with its quotes, its greeks, its terms (`option_spec`, `--terms
+  'SPX=european:cash:am'`) and its day's chain (`chain_index`), the
+  underlying joined to the store's tickers. A demand's `need chain` is
+  resolved by a pre-pass that binds the quotes of the contracts the chain's
+  filters admit and buys a missing day's chain within the budget.
+
+### Live sessions
+
+A live session (D-5.4, `crates/abt-data/src/live.rs`, ERRATA E-69) records
+a feed into the store write-ahead, every row received at its acceptance.
+`abt run --mode live-sim --session S --data SOCKET` reads it as it arrives:
+the data service emits each barrier when its clock passes the label plus the
+calendar's grace, after the bars accepted before it, and records the
+instants. `abt run --replay-of RUN` replays that recorded stream (`--paced`
+at the clock's pace) and decides and fills as the live run did (G4,
+`crates/abt-tests/tests/replay.rs`). A bar evaluated past its deadline
+(`--deadline`, one bar by default) is late: the execution block's `late send`
+flags its decisions, `late reject` drops them. `abt data serve --record
+synthetic --clock-rate R` records a rehearsal session of the synthetic feed.
+
+## The kernel: `abt-kernel`
+
+The kernel owns the language, from the parser to the plan, and the run, from
+the binding to the outputs. It is a library, a binary (`abt-kernel`) and a
+service (`abt kernel serve`, P-3.4).
+
+### The language in one page
 
 A workspace is a set of `.dsl` files holding units: the classes of the
 catalog, libraries, execution presets and strategies. A strategy is nine
@@ -271,7 +430,7 @@ error [N] bad_negation_incomplete_derived at 29:49 in rule bad_negation_incomple
   that a missing bar means the instrument did not trade) (WF-5 completeness)
 ```
 
-## Reading the checker
+### Reading the checker
 
 | Code | Judgment | What the rule checks |
 | --- | --- | --- |
@@ -304,7 +463,7 @@ first error reported is the earliest offending relation, then by position;
 duplicates are dropped, so `abt check` on a workspace reports a library's
 warning once and not once per strategy that uses it.
 
-## Reading the kernel
+### A run: the fold over the stream
 
 The kernel reads its data through the data layer (`docs/spec`, M-2). Bind
 sends the program's demand, receives the binding, and subscribes to a stream
@@ -320,9 +479,9 @@ builtin looks back only, a time domain that grows as buckets open is
 observationally the up-front one. The fold's state is serialisable
 (`kernel::Checkpoint`, with the stream's seq as its cursor):
 `--checkpoint-every month|N` takes one at the end of every calendar month
-(or every N bars). Over `--data SOCKET` it is a cache object of the data
+(or every N bars). Over `--data SOCKET` or `--data STORE` it is a cache object of the data
 layer, keyed by the run's id and the seq and printed (`checkpoint KEY of
-DATE`), and the run writes its outputs so far before it; in process it is
+DATE`), and the run writes its outputs so far before it; under `--synthetic` it is
 `DIR/<bar>.json` under `--checkpoint-dir DIR`. `--resume KEY|FILE`
 continues from one. The checkpoint's program hash, binding, mode, run id
 and configuration must be the run's, and a resume that differs is refused
@@ -332,23 +491,8 @@ and the mode, 64 hex digits. The executor
 is a trait (`kernel::Executor`), so a live run attaches another executor to
 the same fold.
 
-The data layer resolves the demand (`docs/spec/01-data.md`, section 7). Each
-need's relations are bound at the store's versions that satisfy the need,
-chosen as before: the version a preference names, the finest calendar, else
-the first source by name. A catalog of sources (`abt data serve --config
-FILE`: each source's offers, its prices with A-8's placeholders given
-values, its quota) lets the resolver buy the parts of a need's span that
-the store does not hold. It buys the cheapest cover of the span (money
-first, then seconds, bytes and requests) through the source's adapter, and
-only within the program's `budget`, whose money is 0 by default: nothing is
-bought unless the program allows it. What it buys is ingested, versioned
-and the store's from then on. A plan over budget binds what the store holds
-and reports the cheapest plan that covers every span. `abt data resolve
---demand FILE --dry-run --explain` prints a plan without buying, and `abt
-data catalog --sources` prints the catalog (ERRATA E-67).
-
-A tuple carries its receipt time `r` (`Dataset::add_available`; an
-`available_at` column in a loose Parquet file or in a bundle's partitions):
+A tuple carries its receipt time `r` (an `available_at` column in an
+imported Parquet file or a bundle's partitions; a vendor's receipt stamp):
 a decision at a barrier sees the tuples received by the barrier's instant,
 so a tuple that arrived after its bar closed is late in the backtest too. A
 run truncated at a decision is the stream's `to_seq` at that barrier, and
@@ -375,6 +519,8 @@ when a decision demands it. A windowed aggregation keeps, per group, the
 rows of every bar it has solved and evicts bars that leave the window, so a
 rolling feature solves each bar once (`ExecConfig::window_cache` turns the
 cache off for the tests that prove it changes nothing).
+
+### The executor
 
 The executor is configured by the program's `execution` block and nothing
 else (`ExecConfig::from_program`; `docs/language-v2.md`, 4.3). Field by
@@ -415,33 +561,6 @@ price and not the position, and a delisted name would never be closed.
 The numbers of the semantic model's conservative defaults are the
 `equity_default` preset.
 
-Every program has a contract derived from its structure (K-3): the
-preconditions the binding must meet before the first barrier (a binding,
-positive prices, a derived state within `--memory-budget`, the reconciled
-actions, delistings and memberships the bundle tests used to check), the
-invariants the kernel checks on itself at every decision barrier (the NAV
-identity, one decision per instrument, no read past the barrier, keyed
-stored relations, the leverage field, the limits, the event log folding to
-the book, one working order per instrument), the postconditions computed at
-the end, and the limits of the `limits` field, which act on a bar's orders
-before they are sent. `abt contract --strategy NAME files...` prints it,
-each clause with its source, discharge and policy; with data it runs the
-program and prints each clause's status (`proven`, `checked`, `warned`,
-`not_applicable`); a refused precondition stops the run with exit 2, a
-failed invariant halts it naming the clause, the bar and the values.
-
-A run over a data service (`abt run --data SOCKET`) writes its outputs to
-the service's store under `kernel.<run>.*` and prints the run's id (K-7.1):
-`events` (the event log), `book` (the book at every decision barrier),
-`holdings`, `decisions` and `fills` (projections of the log), `coverage`,
-`contract` (the clauses with the run's statuses), `binding` (the versions
-read, the program's hash and normal form, the parameter point),
-`plans`, `late`, `report` (the status, `completed` or `halted(reason)`, the
-counters and the warnings), and `ledger.R` for each `observe R`. A halted
-run writes what it has. `abt data query --store DIR 'kernel.<run>.book'`
-prints one, and `--parquet FILE` writes it for pandas: the parity scripts
-read the books' runs that way (ERRATA E-52).
-
 The executor fills a bar's decisions at the next bar's close, at the price
 relation adjusted by the cost model, then writes `fill`, `position` and
 `cash` at that bar and `decided` at the decision bar. Within a bar, orders
@@ -473,7 +592,9 @@ then the primitives and executor relations with their counts; when
 `decide` derived nothing, the report says so and names the first empty
 relation on each path to it (W8). A plain run also warns of what counts it as
 a trial: over a data service its program's lineage does, in a temporary
-store nothing does (see Studies).
+store nothing does (see Plans and trials).
+
+### Options and futures
 
 An option program's contracts are instruments with terms (`spec`), named by
 their OCC symbols. They are marked at their quote: `option_mark mid` (half
@@ -529,6 +650,8 @@ the margin rules' are `crates/abt-kernel/tests/margin.rs`. K-9.3's 25 cases
 (G8) are in `tests/options.rs`, `tests/futures.rs` and `tests/limits.rs`;
 ERRATA E-73 lists each case's test.
 
+### Parameters and decisions
+
 Parameters are the only values a run may vary: `--param name=value`
 (repeatable; `unit::name` for a library's) replaces a default with a
 literal in the DSL's grammar (`30d`, `50 shares`, `0.02`, `"SPY"`). An
@@ -551,6 +674,39 @@ decide(T, trade(A, Q)) :- held(A, T, Q0), not bought_within[hold](A, T), Q = -Q0
 
 This sells at the first bar strictly later than `hold` after the entry,
 closes every entry, and fires again if a fill was dropped.
+
+### The contract
+
+Every program has a contract derived from its structure (K-3): the
+preconditions the binding must meet before the first barrier (a binding,
+positive prices, a derived state within `--memory-budget`, the reconciled
+actions, delistings and memberships the bundle tests used to check), the
+invariants the kernel checks on itself at every decision barrier (the NAV
+identity, one decision per instrument, no read past the barrier, keyed
+stored relations, the leverage field, the limits, the event log folding to
+the book, one working order per instrument), the postconditions computed at
+the end, and the limits of the `limits` field, which act on a bar's orders
+before they are sent. `abt contract --strategy NAME files...` prints it,
+each clause with its source, discharge and policy; with data it runs the
+program and prints each clause's status (`proven`, `checked`, `warned`,
+`not_applicable`); a refused precondition stops the run with exit 2, a
+failed invariant halts it naming the clause, the bar and the values.
+
+### What a run writes
+
+A run over a data service or a store (`abt run --data SOCKET|STORE`) writes
+its outputs to the store under `kernel.<run>.*` and prints the run's id (K-7.1):
+`events` (the event log), `book` (the book at every decision barrier),
+`holdings`, `decisions` and `fills` (projections of the log), `coverage`,
+`contract` (the clauses with the run's statuses), `binding` (the versions
+read, the program's hash and normal form, the parameter point),
+`plans`, `late`, `report` (the status, `completed` or `halted(reason)`, the
+counters and the warnings), and `ledger.R` for each `observe R`. A halted
+run writes what it has. `abt data query --store DIR 'kernel.<run>.book'`
+prints one, and `--parquet FILE` writes it for pandas: the parity scripts
+read the books' runs that way (ERRATA E-52).
+
+### The query language
 
 `abt query --text QUERY` runs the program and asks the query language of
 `docs/language-v2.md`, section 8, over it (repeat `--text` to ask several
@@ -577,6 +733,147 @@ of one run):
 
 A bar must be one of the queried relation's calendar.
 
+### Observing a run: K-7's commands
+
+A program that checks clean can still decide nothing, and a program that
+decides can do so for another reason than its author believes. The kernel
+therefore answers, for every relation, what it held at any bar and why, and
+every run reports what every relation derived (K-7; V-8 is the design).
+These commands were `docs/observability.md` until M-9 (ERRATA E-80).
+
+**The program before a run.** `abt show --strategy NAME <files...>` prints
+the program graph: every relation `decide` reaches, from `decide` upward.
+For each it gives:
+- its signature: `@T` the temporal key and every other argument with its
+  type; a library relation appears under its instance name, such as
+  `bought_within[cooldown]`;
+- its kind: primitive, executor, kernel, derived or output;
+- its calendar, and whether it is complete, so that `not R(...)` is
+  admissible;
+- its stratum, and whether it reads its own past (temporal recursion);
+- whether it is in the closed loop (it reads the book: `position`, `cash`,
+  `nav`, `fill`, `decided`) or the open loop;
+- its depth (the longest path from a primitive);
+- the relations it reads, each with its sign (`+` positive, `-` negated,
+  `~` inside an aggregation or reduction), and its rules.
+
+The primitives follow with their completeness, then the execution block
+expanded field by field (a preset's defaults included) and the report
+block. Read it to confirm that the relations you meant to connect are
+connected (a relation `decide` never reaches is not in the graph), that a
+feature you meant to be open-loop does not read the book, and that a
+relation you negate is complete.
+
+**Every run: the coverage report.** After the metrics, `abt run` prints one
+line per relation `decide` reaches:
+
+```
+coverage over 468 decision bars (calls: bars and inputs the relation was demanded at; tuples: what it derived):
+  decide            468 calls       229 with tuples        1057 tuples
+  tgt               468 calls       374 with tuples        4405 tuples
+  crowded           374 calls         0 with tuples           0 tuples   EMPTY: demanded, never derived
+  flat                0 calls         0 with tuples           0 tuples   never demanded
+  close                                                     27577 tuples in the data (primitive)
+```
+
+A derived relation's `calls` are the bars at which a rule or the decision
+asked for it, `with tuples` the calls that derived at least one tuple, and
+`tuples` all it derived. A primitive, executor or kernel relation shows what
+the data, the executor or the kernel holds.
+- **EMPTY: demanded, never derived** marks a relation that was asked for and
+  never held: a rule reading it positively never fires.
+- **never demanded** marks a relation no rule reached, because an earlier
+  literal of every rule that reads it excluded every instance first.
+
+When `decide` derived nothing, the report adds the root causes. It gives the
+path of empty relations from `decide` down to the first one whose own reads
+are not empty. For that relation's rules, it gives an explanation at a
+sample bar naming the first literal with no solution:
+
+```
+never fired: decide derived no tuple over 500 bars.
+  decide <- go <- rich: `rich` is the first empty relation on this path; what it reads is not empty: universe+ (1000 tuples), close+ (1000 tuples)
+  rule never::rich#1 did not fire at 2022-12-19: literal 3 `P > floor` has no solution (a sample bar; abt query --text 'why not rich(A, BAR)' for another)
+```
+
+**Any relation at any bar: the query language.** See `abt query` above. A
+query is checked as a rule of a stratum above the program, so asking it
+changes no decision.
+
+**Every bar of the run.** `observe R` in the program's `rules` block, or
+`abt run ... --ledger R1,R2,... --ledger-out DIR`, records the relation's
+extension at every bar of the run:
+- `observe` writes it to the store as `kernel.<run>.ledger.<R>`;
+- `--ledger` writes `DIR/<relation>.parquet`, with `bar` and one column per
+  argument of the signature, and the coverage counts as
+  `DIR/coverage.parquet`.
+
+A library relation is named by its instance name (`--ledger 'mean_window[fast,
+fast_min, close]'`). A feature the plan skipped at some bars (an earlier
+literal excluded the instance) is computed for the ledger, so the ledger is
+the relation's extension whatever the plan.
+
+**The compiler's view.**
+- `abt graph` is `show` with the compiler's facts (C-7.1): the keyedness
+  label of every temporally recursive relation, whether a relation is
+  demanded or elided, and the abstract value of each column; the last line
+  carries the program hash and the plan's totals.
+- `abt ir --stage S` prints a stage's result: the normalised form with its
+  hash and name map, the analysis with its warnings, the rewritten form, the
+  plan.
+- `abt rewrite-log` prints every rewrite applied, with its law.
+- `abt show plan` prints the literal order and cost of every rule, the
+  aggregate implementations, the stores and strata, and each aggregate's
+  pushdown; with `--observed` it adds the counts a run produced.
+- `abt verify` prints the verification report tier by tier, every
+  obligation with its verdict, budget use and replay file. Tiers 3 and 4
+  need a solver on the PATH (`--solver z3`); without one their obligations
+  are undecided, and `--replay-dir DIR` keeps the scripts to run by hand.
+
+**The state tables.** After a run the state tables of C-7.2 are queryable.
+`abt table --table NAME` prints one as text (the schema line, then the
+rows) or JSON; `--out FILE` writes it as Arrow IPC, or Parquet for a
+`.parquet` name. `abt run ... --tables DIR` writes them all under `DIR`:
+`extension/<R>` for every demanded derived relation, `carried/<R>` for the
+temporally recursive ones, and `derivation` and `failure` of `decide` at the
+sampled bars (the last bar and nine evenly spaced ones; `abt table --at BAR`
+answers for any other).
+
+| Table | Columns | What it holds |
+| --- | --- | --- |
+| `coverage` | relation, derived, calls, nonempty, tuples | the coverage counts of the run |
+| `plan` | rule, position, literal, kind, text, card_in, card_out, cost, selectivity, observed_in, observed_out, observed_emptied, infeasible, elided | every literal in its evaluation order, with the estimates and the observed counts |
+| `book` | bar, cash, gross, net, equity, leverage | the executor's ledger at every bar |
+| `binding` | relation, kind, rows, first_bar, last_bar, availability | the data the run was bound to |
+| `summary` | rule, literal, aggregate, group, bar, rows, path, shift_x, shift_y, sum_x, sum_y, sum_xx, sum_yy, sum_xy, value | the window state of every aggregation group at every bar it served: the rows a calendar window held, or the shifted moment sums of a `rows` window served by running sums (`mean = shift_x + sum_x / rows`) |
+| `extension` (`--rel R`) | the signature's columns | every tuple of R at every bar of its resolution, sorted by bar |
+| `carried` (`--rel R`) | identity, bar, carried_from, values | at every bar, the latest earlier tuple of each identity: what a rule reading R through `prev` sees |
+| `derivation` (`--rel R`, `--at T`) | tuple, bar, rule, body | one witness per derived tuple at the bar: the rule and its body tuples |
+| `failure` (`--rel R`, `--at T`, `--symbol`) | rule, identity, bar, literal, literal_text, bindings, absence_driven | for every rule and attempted instrument, the first excluding literal and the bindings at that point |
+
+**A way to work.**
+1. `abt check` until clean.
+2. `abt show`, and read the graph against what you meant to write.
+3. `abt run`, and read the coverage report. An EMPTY relation on the way to
+   `decide`, or a `never fired`, is the first thing to resolve.
+4. `--text 'trace R at BAR'` on the first empty relation. The literal named
+   is where the rule and the data disagree; `--text '? ...'` on that
+   literal's relation at the same bar shows what it holds.
+5. `observe R` or `--ledger R` for a feature's values over time, when one
+   bar is not enough (a window that never fills, a value off by a unit, a
+   latch that never sets). `abt table --table extension` or `carried` asks
+   the same through the state tables, and `summary` gives a window's state.
+6. `--text 'why not R(S, BAR)'` when a tuple you expected is absent: the
+   excluding literal and its bindings, and whether the data (absence-driven)
+   or a comparison decided.
+7. `--text 'why R(...)'` on a tuple you did not expect: the tree of tuples
+   that produced it.
+8. `abt graph`, `abt show plan` and `abt verify` before trusting a program:
+   the keyedness labels, the dead literals the analysis found, the plan the
+   run uses, and the verification report.
+
+### The kernel service
+
 The kernel is also a service (`docs/spec/04-protocol.md`, P-3.4):
 `abt kernel serve --data SOCKET` reaches a data service.
 `abt kernel run --strategy NAME <files...>` starts a run, which writes its
@@ -590,6 +887,16 @@ prints each key, `--resume KEY` runs from one, and `abt kernel control
 complete the commands (`--kernel SOCKET` names the service; ERRATA E-54,
 E-56).
 
+## The query layer: `abt-query`
+
+The query layer never evaluates a program. It asks the kernel for runs and
+reads their tables back from the store, through the data service like every
+other reader (A-D13, A-D17). Its commands are `abt plan`, `abt metrics`,
+`abt test`, `abt claim`, `abt feed`, `abt activation`, `abt lineage`,
+`abt dispute` and `abt briefs`.
+
+### Metrics
+
 The query layer reads a run back from the store (`docs/spec/03-query.md`).
 `abt metrics --run RUN --data SOCKET` (or `--store DIR`) computes the run's
 metrics from the tables it wrote. These are the return metrics of its NAV
@@ -602,6 +909,8 @@ metrics (ERRATA E-73): premium paid and collected; exercises, assignments
 and expiries; days to expiry at entry and exit; the book's net Greeks at
 every bar; each underlying's realised against implied volatility; and each
 bar's P&L attributed to Δ, Γ, Θ and V, with the residual.
+
+### Plans and trials
 
 Plans are studies written in the language's block syntax
 (`docs/spec/03-query.md`, section 2): a program, a parameter grid, a
@@ -618,211 +927,9 @@ report` prints the report, and `abt plan drop` unpins. `abt lineage`
 counts a lineage's trials, every run ever made of its members, and `abt
 dispute` records a dispute of an attachment (ERRATA E-59).
 
-A plan's claims are tests of the registry, 24 of them in the starting set
-(`docs/spec/03-query.md`, section 4), each checked against its known
-answers (ERRATA E-60 to E-62). Each claim is judged on its input with an
-expected outcome. Its p-value is adjusted by Benjamini–Hochberg among the
-claims of its phase, and its verdict is written as a row of
-`query.<hash>.verdicts`. A `before` claim that fails under `block` stops
-the runs that would follow it. A reveal judges every claim again over the
-embargoed bars. Feed statistics describe the binding's data, activation
-statistics a run's rules, and the report the whole execution, with the
-forty biases and the layer that owns each (ERRATA E-63). `abt test`, `abt
-claim`, `abt feed` and `abt activation` do the same outside a plan; a test
-or a claim made there is still counted as a trial.
-
-## The command line
-
-```
-abt check <files...>
-abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])
-        [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
-        [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
-abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
-abt hash --strategy NAME [--json | --show] <files...>
-abt show --strategy NAME <files...>
-abt graph --strategy NAME <files...>
-abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
-abt rewrite-log --strategy NAME [--json] <files...>
-abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>
-abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
-abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>
-abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>
-abt metrics --run RUN (--data SOCKET | --store DIR) [--json]
-abt plan check|run|report|drop PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
-abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
-abt lineage PROGRAM [SOURCES...] [--json] (--data SOCKET | --store DIR)
-abt dispute PROGRAM --reason TEXT [SOURCES...] (--data SOCKET | --store DIR)
-abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
-abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data SOCKET | --store DIR)
-abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
-abt activation --run RUN [--json] (--data SOCKET | --store DIR)
-abt data serve [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R] [--grace 'CAL=S;...'] [--record synthetic --session S --start T --end T ...]
-abt data ingest [--store DIR] --adapter norgate|databento|orats|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
-abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
-abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
-abt kernel serve [--socket PATH] --data SOCKET
-abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
-abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
-abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
-```
-
-The executor is the program's `execution` block and the reporting its
-`report` block: no option sets a cost, a policy, a price relation or the
-periods. `abt` with no arguments prints the usage with every option
-explained. `show`, `graph`, the coverage report every `run` prints,
-`query` (whose `why`, `why not` and `trace` replace the first formulation's
-`explain`, `why-not` and `materialise`), `--ledger`, the state tables and
-the compiler's `ir`, `rewrite-log`, `plan` and `verify`
-are described in `docs/observability.md`; the compiler itself in
-`docs/compiler-design.md`.
-
-`<files...>` are `.dsl` files or directories searched recursively; a run
-needs the catalog, the library modules the program uses and the program
-(`corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl`).
-The synthetic market is the one of the program's class and base, seeded
-(`--seed`, default 7) and deterministic, over 500 days (40 for a sub-daily
-base) and the symbols `AAA,BBB,CCC,DDD,SPY`; its equities are securities
-`E1`, `E2`, ... carrying those tickers, which is why a decision reads
-`trade(E3, 100)` and `--bind A=E3` names the instrument. The daily market
-changes its second name's ticker halfway and delists its last name at four
-fifths of the sample, so a strategy that names `"SPY"` runs with `--symbols
-AAA,XYZ,BBB,SPY,DDD`, as the acceptance test does. `--start DATE` and
-`--end DATE` bound the run as the report block's `window` does: the
-executor runs and the strategy decides only at bars within them, and
-earlier bars stay data. `--as-of DATE` is the bundle date a ticker literal
-or a command-line name resolves at (default: the data's last bar).
-`--nav FILE` writes the book at every bar as Parquet (`t, equity, cash,
-gross, net, leverage`), `--returns FILE` the returns per reporting period
-(`t, ret, pnl`), `--ledger R1,R2 --ledger-out DIR` the named relations'
-tuples at every bar, and `--tables DIR` every state table as Arrow IPC.
-A run over a store writes everything it did there (`kernel.<run>.*`), which
-is what the reference engine reads back. `--timing` prints one
-stderr line with the load, build and run times, the bar and tuple counts
-and the kernel's statistics, among them `pushed_answers`, the windows the
-data layer's aggregate pass answered. An aggregate over one stored relation
-in one of the pass's window forms is pushed down to the data layer, which
-computes it over the whole run in one request; `abt show plan` prints, under
-each aggregate, `pushdown: ...` or `local:` and the condition that keeps it
-in the kernel (`docs/spec/ERRATA.md`, E-47). `--no-pushdown` evaluates every
-aggregate in the kernel, a test switch: both give the same bits. A rule's
-body is solved over blocks of bindings, each row a slice of one buffer (the
-set evaluator of `docs/spec/06-performance.md`, ERRATA E-75); `--evaluator
-tuple` solves it one environment at a time, also a test switch.
-
-Every option value is validated: `--days abc`, `--symbols ""` or `--at
-yesterday` are errors naming the option, never a silent default, and an
-unknown `--option` prints the usage. Exit codes: 0 success; 1 the strategy
-does not check, the run was refused or halted, or the usage is wrong; 2 an
-input could not be read (a source file, a store, a data service's socket),
-or a store's data was refused (a binding without the attributes the
-program requires).
-
-## Bundles and Parquet directories, imported
-
-A bundle (`docs/data-bundle.md`, sections 2 and 3) is the first formulation's
-data directory, and since M-9 an import format: `abt data ingest --adapter
-bundle_v2 --from DIR --class CLASS` reads it, or a directory of Parquet
-files, into a store, and a run reads the store. A bundle is `manifest.json`
-(the class, the version, the bundle date, every relation with its signature,
-resolution, availability convention, row count and partitions, and the
-bundle tests' report once they passed), `securities.parquet` (the security
-table: `id,ticker,from,to`, `to` null while the ticker is still carried, and
-optionally the contract columns `multiplier`, `asset_class` and
-`commission_per_contract`) and `log/<relation>/<YYYY-MM>.parquet`,
-append-only Parquet partitions of each primitive relation by the month of
-its temporal key. With a security table every equity field is a security
-id and the `ticker` relation is derived from the table. A directory of
-Parquet files is the same files without the log: one `<relation>.parquet`
-per primitive of the program's class, a relation being a function of its
-identity columns (two rows for one identity with different outputs are an
-error naming both rows; an identical row is dropped), a missing or empty
-file leaving the relation empty with a `note:`.
-
-```
-abt data ingest --store ./store --adapter bundle_v2 --from ./bundle --class equity corpus-v2/catalog corpus-v2/lib
-abt data ingest --store ./reviewed --adapter bundle_v2 --from ./bundle --class equity --attributes reviewed=complete corpus-v2/catalog corpus-v2/lib
-abt run --strategy sma_crossover --data ./store corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
-```
-
-A bundle whose tests passed imports `reviewed = complete`; one that did not
-imports unreviewed, unless a reviewer says otherwise with `--attributes`. A
-program's `data` block says `require reviewed`, so a run on an unreviewed
-store is refused (exit 2, naming the version and what it lacks); `allow
-unreviewed` runs on it with a warning. The bundle tests' checks of market
-facts (action reconciliation, delisting coverage, membership) are the
-kernel's preconditions, run at every run's start (ERRATA E-50), and the
-query layer's `actions` feed statistic.
-
-A vendor's data enters a store through the data layer's adapters (D-7.7,
-`crates/abt-data/src/adapters/`, ERRATA E-68), named by `abt data ingest
---adapter` or by a catalog's source:
-
-- `norgate` reads the NDLake lake directly (`--from LAKE`): the equity class
-  of the members, ever, of its lists (`--lists 'S&P 500=SPX'`), keyed by
-  Norgate's `asset_id`, with index series (`--series '$SPXTR=SPXTR'`) and
-  the ten decisions of `docs/handoff-data.md` (section 4) stated on the
-  versions; `--exceptions FILE` adds the reviewed exceptions
-  (`scripts/reviewed/norgate-spx-2014.parquet`).
-- `databento` reads DBN files (`.dbn`, `.dbn.zst`), the bucket's Parquet
-  layout, or the historical API (`--from https://hist.databento.com` with
-  `--dataset --schema --symbols --stype-in`, the key from
-  `$DATABENTO_API_KEY`). Futures are contracts by `instrument_id`, rolled
-  per root into a back-adjusted continuous series (`ES.v.0`, by volume, or
-  `ES.c.0`, by expiry) with `continuous`, `future_spec`, sessions and point
-  values; equities are joined to the store's tickers by symbol. Bars are
-  keyed at their close and received at `ts_recv` or the close, plus
-  `--processing-delay S`. The venue's statistics give `settlement`
-  (back-adjusted as the bars) and `open_interest`, each keyed at the
-  session's last close and received when published.
-- `databento_live` is the live gateway's session (CRAM, the subscription,
-  DBN), every record stamped at acceptance.
-- `orats` reads ORATS's strikes, files or the Data API (`--from
-  https://api.orats.io --tickers SPY`, the token from `$ORATS_TOKEN`), as the
-  option class (ERRATA E-70): every contract an instrument keyed by its OCC
-  symbol, with its quotes, its greeks, its terms (`option_spec`, `--terms
-  'SPX=european:cash:am'`) and its day's chain (`chain_index`), the
-  underlying joined to the store's tickers. A demand's `need chain` is
-  resolved by a pre-pass that binds the quotes of the contracts the chain's
-  filters admit and buys a missing day's chain within the budget.
-
-A live session (D-5.4, `crates/abt-data/src/live.rs`, ERRATA E-69) records
-a feed into the store write-ahead, every row received at its acceptance.
-`abt run --mode live-sim --session S --data SOCKET` reads it as it arrives:
-the data service emits each barrier when its clock passes the label plus the
-calendar's grace, after the bars accepted before it, and records the
-instants. `abt run --replay-of RUN` replays that recorded stream (`--paced`
-at the clock's pace) and decides and fills as the live run did (G4,
-`crates/abt-tests/tests/replay.rs`). A bar evaluated past its deadline
-(`--deadline`, one bar by default) is late: the execution block's `late send`
-flags its decisions, `late reject` drops them. `abt data serve --record
-synthetic --clock-rate R` records a rehearsal session of the synthetic feed.
-
-## Company books
-
-The company's two production strategies are written in the language:
-`corpus-v2/company/mw14.dsl`, the weekly S&P 1500 momentum book (daily bars
-bucketed to `weeks(1)`, the `SPXTR` and `VIX` series, the `catalog`,
-`state` and `book` modules, `book_fixed_base` execution, a weekly report
-with its window), and `corpus-v2/company/r8l.dsl`, the intraday futures
-opening-range book (a minute base, `sessions` and `sessions of "ES"`
-calendars, `decide on base at session + 30min`, an `instruments` table of
-the 26 roots with their start years, allowed W9, and `futures_fixed_base`
-execution). `docs/language-v2.md` section 9 reads each file against the
-book's own rules and lists the known differences. `crates/abt-tests/tests/corpus_v2.rs`
-checks both and runs both on synthetic data of their class (R8L with its
-session windows shortened to the synthetic market's thirty days). The
-parity of the first formulation's versions with the books' reference
-results, the run commands and the comparisons are `docs/parity-mw14.md`,
-`docs/parity-r8l.md`, `docs/parity-inputs.md` and `scripts/parity/`;
-rerunning them on these files is step 7 of section 11.
-
-## Studies
-
 `docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial.
-The kernel's study directory is retired (ERRATA E-66): a study is a plan
-(see "Reading the kernel" above, and `docs/spec/03-query.md`), and its
-trials, lineages and disputes are rows of the store.
+The kernel's study directory is retired (ERRATA E-66): a study is a plan,
+and its trials, lineages and disputes are rows of the store.
 
 ```
 abt plan check  study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
@@ -858,36 +965,22 @@ claims and tests with their verdicts, the contract, every warning with its
 bias, and the forty biases with the layer that owns each, its status and its
 source.
 
-## The reference engine
+### Tests and claims
 
-`reference/` is a second implementation of the execution contract in plain
-Python over pandas, written from the semantic model's section 6 and sharing
-nothing with the kernel (`docs/data-bundle.md`, section 8). It reads a run
-back from the store it ran over: the store is the dump (M-9). `python3
-reference/diff.py STORE RUN` reads the run's configuration, data at the
-binding's versions, decisions, events and book through `abt data query`,
-replays the decisions through the reference executor, and compares fills,
-book, NAV and dropped count (`reference/README.md` gives the tolerances).
-`crates/abt/tests/reference.rs` (G6) runs the comparison over the daily
-corpus strategies, a set of policy and model variants and four action
-markets, each over a store of its own, and skips with a note where `python3`
-with pandas is absent. `.github/workflows/ci.yml` is the GitHub
-Actions workflow (format, clippy, tests with pandas installed so the
-comparison runs).
+A plan's claims are tests of the registry, 24 of them in the starting set
+(`docs/spec/03-query.md`, section 4), each checked against its known
+answers (ERRATA E-60 to E-62). Each claim is judged on its input with an
+expected outcome. Its p-value is adjusted by Benjamini–Hochberg among the
+claims of its phase, and its verdict is written as a row of
+`query.<hash>.verdicts`. A `before` claim that fails under `block` stops
+the runs that would follow it. A reveal judges every claim again over the
+embargoed bars. Feed statistics describe the binding's data, activation
+statistics a run's rules, and the report the whole execution, with the
+forty biases and the layer that owns each (ERRATA E-63). `abt test`, `abt
+claim`, `abt feed` and `abt activation` do the same outside a plan; a test
+or a claim made there is still counted as a trial.
 
-## Stylized facts
-
-`corpus-v2/strategies/` carries the four canonical strategies of
-`docs/data-bundle.md` section 8, each long-short at each month start over
-the index members, four tenths of the capital a leg: `momentum_12_1`,
-`low_volatility`, `short_term_reversal` and `size_proxy` (market
-capitalisation is not a catalog relation, so average dollar volume stands
-in). `crates/abt-tests/tests/corpus_v2.rs` checks them and runs them on the synthetic daily
-market; `crates/abt-tests/tests/stylized.rs` checks wide published ranges for each when
-`ABT_BUNDLE_DIR` names a bundle of the point-in-time universe, and skips
-the ranges with a note without one.
-
-## Briefs
+### Briefs
 
 `briefs/` holds plain-language briefs for the model-authored corpus
 (`docs/data-bundle.md`, section 8) and the procedure: a model writes the
@@ -910,6 +1003,192 @@ same books; every attempt, the scores and the root causes are in
 `experiments/llm-usability/` and `experiments/llm-observability/`.
 Section 11 of `docs/language-v2.md` asks for the usability experiment to be
 rerun on the second formulation.
+
+## The command line
+
+```
+abt check <files...>
+abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+        [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
+        [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
+abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
+abt run ... [--mode replay-sim|live-sim --session S] [--replay-of RUN [--paced]] [--deadline SECONDS|none] [--memory-budget BYTES]
+abt hash --strategy NAME [--json | --show] <files...>
+abt show --strategy NAME <files...>
+abt graph --strategy NAME <files...>
+abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
+abt rewrite-log --strategy NAME [--json] <files...>
+abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt contract --strategy NAME [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>
+abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>
+abt metrics --run RUN (--data SOCKET | --store DIR) [--json]
+abt plan check|run|report|drop PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt lineage PROGRAM [SOURCES...] [--json] (--data SOCKET | --store DIR)
+abt dispute PROGRAM --reason TEXT [SOURCES...] (--data SOCKET | --store DIR)
+abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
+abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data SOCKET | --store DIR)
+abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
+abt activation --run RUN [--json] (--data SOCKET | --store DIR)
+abt data serve [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R] [--grace 'CAL=S;...'] [--record synthetic --session S --start T --end T ...]
+abt data ingest [--store DIR] --adapter norgate|databento|orats|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
+abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
+abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
+abt data query [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
+abt data stats [--store DIR] [--relation R] [--json]
+abt data pin|unpin [--store DIR] VERSION | --binding B
+abt data gc [--store DIR] [--disk-budget BYTES]
+abt kernel serve [--socket PATH] --data SOCKET
+abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
+abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
+abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
+```
+
+The executor is the program's `execution` block and the reporting its
+`report` block: no option sets a cost, a policy, a price relation or the
+periods. `abt` with no arguments prints the usage with every option
+explained. `show`, `graph`, the coverage report every `run` prints,
+`query` (whose `why`, `why not` and `trace` replace the first formulation's
+`explain`, `why-not` and `materialise`), `--ledger`, the state tables and
+the compiler's `ir`, `rewrite-log`, `plan` and `verify` are described
+under "Observing a run" above; the compiler itself in
+`docs/compiler-design.md`.
+
+`<files...>` are `.dsl` files or directories searched recursively; a run
+needs the catalog, the library modules the program uses and the program
+(`corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl`).
+The synthetic market is the one of the program's class and base, seeded
+(`--seed`, default 7) and deterministic, over 500 days (40 for a sub-daily
+base) and the symbols `AAA,BBB,CCC,DDD,SPY`; its equities are securities
+`E1`, `E2`, ... carrying those tickers, which is why a decision reads
+`trade(E3, 100)` and a query names the instrument `for A = E3`. The daily market
+changes its second name's ticker halfway and delists its last name at four
+fifths of the sample, so a strategy that names `"SPY"` runs with `--symbols
+AAA,XYZ,BBB,SPY,DDD`, as the acceptance test does. `--start DATE` and
+`--end DATE` bound the run as the report block's `window` does: the
+executor runs and the strategy decides only at bars within them, and
+earlier bars stay data. `--as-of DATE` is the bundle date a ticker literal
+or a command-line name resolves at (default: the data's last bar).
+`--nav FILE` writes the book at every bar as Parquet (`t, equity, cash,
+gross, net, leverage`), `--returns FILE` the returns per reporting period
+(`t, ret, pnl`), `--ledger R1,R2 --ledger-out DIR` the named relations'
+tuples at every bar, and `--tables DIR` every state table as Arrow IPC.
+A run over a store writes everything it did there (`kernel.<run>.*`), which
+is what the reference engine reads back. `--timing` prints one
+stderr line with the load, build and run times, the bar and tuple counts
+and the kernel's statistics, among them `pushed_answers`, the windows the
+data layer's aggregate pass answered. An aggregate over one stored relation
+in one of the pass's window forms is pushed down to the data layer, which
+computes it over the whole run in one request; `abt show plan` prints, under
+each aggregate, `pushdown: ...` or `local:` and the condition that keeps it
+in the kernel (`docs/spec/ERRATA.md`, E-47). `--no-pushdown` evaluates every
+aggregate in the kernel, a test switch: both give the same bits. A rule's
+body is solved over blocks of bindings, each row a slice of one buffer (the
+set evaluator of `docs/spec/06-performance.md`, ERRATA E-75); `--evaluator
+tuple` solves it one environment at a time, also a test switch.
+
+Every option value is validated: `--days abc`, `--symbols ""` or `--at
+yesterday` are errors naming the option, never a silent default, and an
+unknown `--option` prints the usage. Exit codes: 0 success; 1 the strategy
+does not check, the run was refused or halted, or the usage is wrong; 2 an
+input could not be read (a source file, a store, a data service's socket),
+or a store's data was refused (a binding without the attributes the
+program requires).
+
+## Verification
+
+The gates of A-7.1, and where each is checked here:
+
+| Gate | Here |
+| --- | --- |
+| G1 parity | The owner's: `scripts/parity/` against the books' references (`docs/parity-inputs.md`). Its stand-in here is `crates/abt-tests/tests/tv_golden.rs`: every corpus-v2 strategy and both books held to their golden runs, which change only in a commit that names the change, recorded in the ERRATA. |
+| G2 corpus | `crates/abt-tests/tests/corpus_v2.rs` |
+| G3 determinism | `crates/abt-tests/tests/determinism.rs`: in process against a socket, 1 against 8 data threads, 1 against 4 kernels |
+| G4 replay | `crates/abt-tests/tests/replay.rs`, on a recorded synthetic feed; a recorded Databento session is the owner's |
+| G5 fold | `crates/abt-tests/tests/fold.rs` (truncation at every sampled barrier), `checkpoint.rs` and `fold_checkpoint.rs` (resume from every monthly checkpoint) |
+| G6 reference | `crates/abt/tests/reference.rs` (below) |
+| G7 contracts | `crates/abt-tests/tests/contracts.rs` |
+| G8 options | `crates/abt-tests/tests/options.rs`, `futures.rs` and `limits.rs`, K-9.3's 25 cases (ERRATA E-73 lists each case's test); the owner's options book when it is supplied |
+| G9 tests | `crates/abt-query/tests/known_answers_*.rs` |
+| G10 performance | `scripts/bench.sh`, measured here and recorded in `docs/assessment.md`; asserted on the reference machine by the owner |
+
+### Company books
+
+The company's two production strategies are written in the language:
+`corpus-v2/company/mw14.dsl`, the weekly S&P 1500 momentum book (daily bars
+bucketed to `weeks(1)`, the `SPXTR` and `VIX` series, the `catalog`,
+`state` and `book` modules, `book_fixed_base` execution, a weekly report
+with its window), and `corpus-v2/company/r8l.dsl`, the intraday futures
+opening-range book (a minute base, `sessions` and `sessions of "ES"`
+calendars, `decide on base at session + 30min`, an `instruments` table of
+the 26 roots with their start years, allowed W9, and `futures_fixed_base`
+execution). `docs/language-v2.md` section 9 reads each file against the
+book's own rules and lists the known differences. `crates/abt-tests/tests/corpus_v2.rs`
+checks both and runs both on synthetic data of their class (R8L with its
+session windows shortened to the synthetic market's thirty days). The
+parity of the first formulation's versions with the books' reference
+results, the run commands and the comparisons are `docs/parity-mw14.md`,
+`docs/parity-r8l.md`, `docs/parity-inputs.md` and `scripts/parity/`;
+rerunning them on these files is G1, the owner's (step 7 of
+`docs/language-v2.md` section 11).
+
+### The reference engine
+
+`reference/` is a second implementation of the execution contract in plain
+Python over pandas, written from the semantic model's section 6 and sharing
+nothing with the kernel (`docs/data-bundle.md`, section 8). It reads a run
+back from the store it ran over: the store is the dump (M-9). `python3
+reference/diff.py STORE RUN` reads the run's configuration, data at the
+binding's versions, decisions, events and book through `abt data query`,
+replays the decisions through the reference executor, and compares fills,
+book, NAV and dropped count (`reference/README.md` gives the tolerances).
+`crates/abt/tests/reference.rs` (G6) runs the comparison over the daily
+corpus strategies, a set of policy and model variants and four action
+markets, each over a store of its own, and skips with a note where `python3`
+with pandas is absent. `.github/workflows/ci.yml` is the GitHub
+Actions workflow (format, clippy, tests with pandas installed so the
+comparison runs).
+
+### Stylized facts
+
+`corpus-v2/strategies/` carries the four canonical strategies of
+`docs/data-bundle.md` section 8, each long-short at each month start over
+the index members, four tenths of the capital a leg: `momentum_12_1`,
+`low_volatility`, `short_term_reversal` and `size_proxy` (market
+capitalisation is not a catalog relation, so average dollar volume stands
+in). `crates/abt-tests/tests/corpus_v2.rs` checks them and runs them on the synthetic daily
+market; `crates/abt-tests/tests/stylized.rs` checks wide published ranges for each when
+`ABT_BUNDLE_DIR` names a bundle of the point-in-time universe, and skips
+the ranges with a note without one.
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `Cargo.toml`, `crates/` | The workspace of M-0: the three layers, the two shared crates, the front and the cross-layer suites. |
+| `crates/abt-wire/` | The protocol's types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, the transport (Unix socket, in-process channel), RFC 8785 canonical forms, BLAKE3 hashes. |
+| `crates/abt-agg/` | The aggregate kernels: windows, moments, order statistics, reductions. |
+| `crates/abt-data/src/` | The data layer: `registry.rs`, `store.rs` with `resident.rs`, `query.rs`, `stream.rs`, `agg.rs` (the aggregate pass), `service.rs`, `live.rs` (live sessions), `options.rs` (the chain query), `resolver/` (catalog, cost, cover, plan, fetch, bind, pre-pass), `adapter.rs` and `adapters/`: `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `orats` (option chains), `dbn` (DBN versions 1 to 3), `http`, and `mock` for the resolver's tests. |
+| `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
+| `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
+| `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call, and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` and `report` blocks (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
+| `crates/abt-kernel/src/compiler/`, `analysis/`, `rewrite/`, `plan/`, `lower/` | Normalise (the normal form and the program hash, `abt hash`) and the stage printing behind `abt ir`; Analyse (strata, the open-loop partition, keyedness, demand, window lengths, the abstract interpretation); the rewrites R1 to R6 with their log; the planner and the lowering the kernel executes (`abt show plan`). |
+| `crates/abt-kernel/src/verify/`, `contract/` | The verification tiers (`abt verify`) and the contract derived from a program (`abt contract`, K-3). |
+| `crates/abt-kernel/src/kernel/` | The kernel: `bind.rs` (Bind and the client of the data layer), `fold.rs` (the fold over the stream), `eval.rs` and `eval_set.rs` (rule bodies under Kleene's three-valued conjunction, over blocks of bindings), `rows.rs` (the stored tables' blocks), `pushdown.rs`, `events.rs` (the event log), `outputs.rs` (`kernel.<run>.*`), `checkpoints.rs`, `service.rs` (the kernel service), `mod.rs` (the kernel, `ExecConfig::from_program`, the causality check), `time.rs`, `value.rs`. |
+| `crates/abt-kernel/src/sim/`, `functions/` | The market simulation behind the `Executor` trait (`SimExecutor`): equities, futures, options, the margin models and the limits; the pricing functions (Black–Scholes–Merton, Black 1976, Bjerksund–Stensland 2002, implied volatility). |
+| `crates/abt-kernel/src/query/`, `state/`, `observe.rs` | The query language (parse, check, answer), the state tables and the provenance of a run, the program graph and the coverage report. |
+| `crates/abt-kernel/src/data.rs`, `bundle.rs`, `table.rs` | The Parquet loaders and the bundle format that `bundle_v2` imports with, the deterministic synthetic markets of the three classes (`synthetic_daily`, `synthetic_minute`, `synthetic_futures`), and Parquet tables. |
+| `crates/abt-kernel/src/cli.rs`, `kernel_cli.rs` | The kernel's command line and `abt kernel ...`. |
+| `crates/abt-query/src/` | The query layer: `plan/` (parse, normal form, the executor, claims, lineages, trials), `metrics/`, `tests/` (the framework, dependence, resampling, HAC, the starting set), `feed.rs`, `activation.rs`, `report.rs`, `briefs.rs`, and `kernel.rs` and `data.rs`, its clients of the other two. |
+| `crates/abt/src/` | The front: `main.rs` dispatches, `lib.rs` wires the layers in one process, `data_cli.rs` and `query_cli.rs` are the data and query layers' commands. |
+| `corpus-v2/catalog/` | The three classes a program is written against: `equity`, `future` and `series`. A program never names them; its `data` block names what it needs. |
+| `corpus-v2/lib/` | The standard library of V-7, one module a file (`calendar`, `catalog`, `stat`, `bars`, `xsec`, `state`, `book`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
+| `corpus-v2/strategies/`, `company/`, `negative/` | 24 strategies that must check clean; MW14 and R8L as V-9 gives them; 35 negative cases, one or more per judgment code, each file's `# expect:` header asserted by `crates/abt-tests/tests/corpus_v2.rs`. |
+| `crates/*/tests/`, `crates/abt-tests/` | Each crate's own suites, and the suites that span layers with the fixtures they share (`crates/abt-tests/src/lib.rs`: the catalog and the library as the base workspace, a strategy skeleton, crafted markets). Those that drive the `abt` binary are the front's, `crates/abt/tests/`. |
+| `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies (records). |
+| `scripts/` | `parity/` holds the books' comparisons with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake and their editor; `bench.sh` the performance ladder and A-7.3's table; `synth/` writes the first formulation's layouts and is kept for the record. |
 
 ## Development
 
@@ -943,19 +1222,23 @@ corpus program's run to its golden file (`docs/spec/ERRATA.md`, E-1);
 --all-targets -- -D warnings` and `cargo test` at the workspace's virtual
 root, which covers every member.
 
-## Program
+## Status
 
-The crate follows `docs/language-v2.md`, whose section 11 orders the
-implementation in seven steps: blocks and the closed configuration, with
-`corpus-v2/` as the acceptance corpus; the catalog and the resolver;
-calendars and bar views; sessions and the decision clock; universes, lists
-and vocabularies; order-independent bodies, explicit groups and case forms;
-queries and provenance; and the library and the books, whose parity scripts
-are rerun on `corpus-v2/company/`. The checker judges every code of section
-10, the kernel runs every program of the corpus on the synthetic market of
-its class, and the observability and compiler commands of
-`docs/observability.md` and `docs/compiler-design.md` run on the linked
-program. `docs/data-bundle.md` remains the program for the data side
-(bundles, the fold, the bias audit and the study API), all of it present
-in this crate; `docs/semantic-model.md` specifies what section 10 retains
-unchanged.
+The migration of `docs/spec/05-migration.md` has landed through M-9:
+- Step 0 merged the specification and set up the golden runs.
+- M-0 to M-8 built the workspace, `abt-agg`, the data layer, the second
+  formulation over it, contracts and the kernel's outputs, the query layer,
+  the resolver and the vendors, options and futures, and the performance
+  work.
+- M-9 retires the first formulation's commands.
+
+M-8's entity-parallel strata were not built (ERRATA E-77 says why). M-10,
+the live interface, is next.
+
+What this tree cannot run is the owner's:
+- G1's parity runs, against `~/data/ref`;
+- the vendors' real data and sessions: a recorded Databento session, the
+  lake rebuilt from Norgate, ORATS's chains;
+- G10 on the reference machine;
+- the usability and observability studies, rerun on the second formulation
+  (A-7.2).

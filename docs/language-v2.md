@@ -2,6 +2,36 @@
 
 Oct 8, 2026 · John Gonzalez
 
+> **Status in this repository (Oct 17, 2026, M-9).** The second formulation
+> is the language of this tree. `corpus-v2/` is the corpus, and
+> `crates/abt-tests/tests/corpus_v2.rs` is its acceptance test: section 10's
+> codes, the 24 strategies, the two books and the 35 negative cases. The
+> first formulation's corpus, parser paths and options are deleted.
+>
+> Section 11's steps were carried out through the three-layer split of
+> [`spec/`](spec/), which replaces the parts of sections 3 and 11 that
+> build on bundles:
+> - Step 1, the blocks and the closed configuration, is K-2.
+> - Step 1a is the data layer's registry and resolver (D-2, D-7), not the
+>   manifest's rows; a bundle is imported (`abt data ingest --adapter
+>   bundle_v2`).
+> - Steps 2 and 3 (calendars, bar views, sessions, the decision clock) run
+>   over the store; no bundle is rebuilt and `abt bundle env` does not
+>   exist.
+> - Steps 4 and 5 are implemented as written.
+> - Step 6 is section 8's facility as the kernel's query language (K-7.2,
+>   `docs/spec/ERRATA.md` E-53): Δ and F, `why`, the recursive `why not`,
+>   `trace`, `observe`, `show`, `abt ir` and `abt hash`, served by the
+>   kernel service (P-3.4). Section 15's prototype commands are retired
+>   into it, and their document is folded into the README's section on
+>   K-7's commands (E-80).
+> - Step 7: the books are `corpus-v2/company/`, held to their golden runs
+>   here (E-1). Their parity runs against the references (G1) and the rerun
+>   of the usability experiment (A-7.2) are the owner's.
+>
+> Sections 11 and 15 below record the plan and the prototype as they stood
+> when this document was written.
+
 This document reviews the changes that brought MW14 and R8L into abt (pull
 request 69, merged as `0d9bc2b`) against the standard set by
 [`formal-foundations.md`](formal-foundations.md), finds that the data, the
@@ -1463,7 +1493,8 @@ the coverage report on every run (`trace relations`, with the never-fired
 root causes and a sample-bar explanation), `abt query --explain` (the `?`
 form and a one-level `why not`, with the fired instance's bindings) and
 `--ledger` (the observation of a relation over a run). `docs/observability.md`
-describes them; `src/observe.rs` and `tests/observe.rs` hold them.
+described them (folded into the README at M-9); `src/observe.rs` and
+`tests/observe.rs` held them.
 
 Twelve Haiku agents then wrote the two company books on synthetic data in
 their environments' layouts and four briefs, six with the commands and six
