@@ -122,7 +122,9 @@ pub use abt_wire::scalar::parse_timestamp;
 
 pub fn format_timestamp(t: i64) -> String {
     let days = floor_div(t, DAY);
-    let clock = t - days * DAY;
+    // The time of day without `days * DAY`, which overflows at the ends of
+    // the range (an unbounded time is `i64::MIN` or `i64::MAX`).
+    let clock = t.rem_euclid(DAY);
     let (y, m, d) = civil_from_days(days);
     if clock == 0 {
         return format!("{:04}-{:02}-{:02}", y, m, d);

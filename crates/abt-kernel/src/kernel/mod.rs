@@ -4,6 +4,7 @@
 //! WF-4 and WF-8 guarantee that every such request terminates.
 
 pub mod eval;
+pub(crate) mod eval_set;
 pub mod time;
 pub mod value;
 
@@ -781,6 +782,12 @@ pub struct ExecConfig {
     /// configuration's identity: both give the same bits (D-6.1).
     #[serde(skip, default = "pushdown_on")]
     pub pushdown: bool,
+    /// Solve rule bodies over blocks of bindings (the set evaluator, M-8)
+    /// rather than one environment at a time; off only to compare the two
+    /// (`--evaluator tuple`, `tests/eval_set.rs`). Not part of the
+    /// configuration's identity: both give the same bits.
+    #[serde(skip, default = "pushdown_on")]
+    pub set_eval: bool,
     /// The pre-trade limits of the execution block (K-3.5).
     #[serde(default)]
     pub limits: Vec<crate::check::Limit>,
@@ -947,6 +954,7 @@ impl Default for ExecConfig {
             as_of: None,
             window_cache: true,
             pushdown: true,
+            set_eval: true,
             limits: Vec::new(),
             late_reject: false,
             memory_budget: None,
@@ -1868,6 +1876,8 @@ pub struct Kernel<'p> {
     /// environment order (see `eval::time_ordered`).
     pub(crate) time_ordered_memo: FxHashMap<(usize, usize), bool>,
     pub(crate) rows_plans: FxHashMap<(usize, usize), Rc<eval::RowsPlan>>,
+    /// Per (rule, literal): what an aggregation's calls share.
+    pub(crate) agg_plans: FxHashMap<(usize, usize), Rc<eval::AggPlan>>,
     pub(crate) rows_state: FxHashMap<eval::WindowKey, eval::RowsState>,
     /// Each calendar's time domain as a sorted vector, for the running
     /// sums' bar walk.
@@ -2698,6 +2708,7 @@ impl<'p> Kernel<'p> {
             rows_anchor: Default::default(),
             time_ordered_memo: Default::default(),
             rows_plans: Default::default(),
+            agg_plans: Default::default(),
             rows_state: Default::default(),
             domain_vecs: Default::default(),
             recording: false,

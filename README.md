@@ -634,7 +634,7 @@ or a claim made there is still counted as a trial.
 abt check <files...>
 abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
-        [--verify-causality] [--no-pushdown] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
+        [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
 abt hash --strategy NAME [--json | --show] <files...>
 abt show --strategy NAME <files...>
@@ -703,7 +703,10 @@ in one of the pass's window forms is pushed down to the data layer, which
 computes it over the whole run in one request; `abt show plan` prints, under
 each aggregate, `pushdown: ...` or `local:` and the condition that keeps it
 in the kernel (`docs/spec/ERRATA.md`, E-47). `--no-pushdown` evaluates every
-aggregate in the kernel, a test switch: both give the same bits.
+aggregate in the kernel, a test switch: both give the same bits. A rule's
+body is solved over blocks of bindings, each row a slice of one buffer (the
+set evaluator of `docs/spec/06-performance.md`, ERRATA E-75); `--evaluator
+tuple` solves it one environment at a time, also a test switch.
 
 Every option value is validated: `--days abc`, `--symbols ""` or `--at
 yesterday` are errors naming the option, never a silent default, and an

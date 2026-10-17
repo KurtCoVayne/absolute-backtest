@@ -743,6 +743,57 @@ batch driver agree on every corpus program. Each bless since:
       published. The last one received is kept; a deleted statistic is
       left out.
 
+- **E-75 (06-performance 3.2, K-4; the set-at-a-time evaluator).** The
+  kernel solves a rule's body in one of two ways.
+  - **The tuple evaluator** steps one environment at a time, as before:
+    every instance a `Vec` of its slots.
+  - **The set evaluator** solves over blocks: the bindings entering a
+    literal are one buffer of rows, a row a slice of the rule's slots, and
+    the literal writes the rows leaving it to the next block. The stored,
+    derived and as-of atoms, the tests, assignments, cases, builtins and
+    windows write their rows in place; no instance allocates.
+  - **The same tuples in the same order.** The set evaluator takes the
+    literals in the plan's order and the rows in the order the tuple
+    evaluator takes its environments, each row's solutions in the order it
+    yields them. An instance that meets a partial operation is stuck in
+    both (Kleene conjunction, V-5), and the rows it pushed before the
+    failure are withdrawn. So the two derive the same tuples in the same
+    order and halt alike. `tests/eval_set.rs` holds them equal on every
+    corpus program and both books: the digest of the run and the ledger of
+    every derived relation at every bar.
+  - **The set evaluator is the default.** `--evaluator tuple` (and
+    `ExecConfig.set_eval`) selects the other; it is a test switch, outside
+    the configuration's identity.
+  - **The window cache shares more.** A window's rows are cached a bar at a
+    time for each group of the outer bindings its conjunction reads (E-46).
+    A literal that also read the window's base time made every call's rows
+    its own, so the cache was skipped: `dividend_at`'s `Ex = T` (the
+    dividends going ex at the bar) solved its whole year at every call.
+    Such a literal is now a test, applied at each call to the cached rows,
+    when all of these hold:
+    - it is a comparison, or an assignment to a variable that the call or
+      an atom of the conjunction binds;
+    - its expressions are total: variables, parameters, literals, negation
+      and arithmetic other than division;
+    - everything it reads is bound by the call or by the rows.
+
+    The rest of the conjunction is solved and cached as before. A row stuck
+    in the cached part may be one the test excludes (Kleene conjunction,
+    V-5). So a solve that fails there, or a test that cannot be evaluated,
+    is left to the whole solve; `tests/fold_windows.rs` holds such a case.
+    The rows are read in E-46's order (the bars in the window's time order,
+    a bar's rows in the order of their own bindings) straight into the
+    aggregate's columns: no environment per row and no sort of the window.
+    What does not depend on the call (the group's variables, the cached
+    conjunction in its order, the tests) is worked out on the literal's
+    first call, not at every one. `momentum_12_1` at 100 names over 2,520
+    days solves 0.98M window bars instead of 62.7M.
+  - **What 3.2 has that this does not.** The rows hold `Value`s (16 B),
+    not typed columns. A generator binds by the stored block's index per
+    row, not by a merge join. Negation tests the atom per row, not a
+    bitmap. The nested solves of aggregates and cases stay one environment
+    at a time. The measured gain is in docs/assessment.md.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use abt_agg::{Function, ShiftedSums};
 
+use super::eval_set::{Block, Sink};
 use super::time;
 use super::value::{Ctor, Decision, Order, OrderKind, Tif, Value};
 use super::{CompiledRule, Env, Kernel, RunError, Sym, Tuple};
@@ -17,8 +18,96 @@ use crate::ir::*;
 /// The rows of one bar of a windowed group, each with the aggregate's
 /// arguments evaluated on it.
 pub type WindowRows = Vec<(Env, Vec<f64>)>;
-/// A group's cached bars.
-pub type WindowCache = BTreeMap<i64, WindowRows>;
+
+/// A group's cached bars in time order. A call usually adds the newest bar
+/// and forgets the oldest, and reads the rest in order: a deque, searched
+/// by bisection, rather than a tree.
+#[derive(Clone, Debug, Default)]
+pub struct WindowCache {
+    bars: std::collections::VecDeque<(i64, WindowRows)>,
+}
+
+impl WindowCache {
+    pub fn new() -> WindowCache {
+        WindowCache::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.bars.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
+
+    pub fn contains_key(&self, t: &i64) -> bool {
+        self.bars.binary_search_by_key(t, |(k, _)| *k).is_ok()
+    }
+
+    pub fn get(&self, t: &i64) -> Option<&WindowRows> {
+        self.bars.binary_search_by_key(t, |(k, _)| *k).ok().map(|i| &self.bars[i].1)
+    }
+
+    /// The bar's rows, replacing any held.
+    pub fn insert(&mut self, t: i64, rows: WindowRows) {
+        if self.bars.back().is_none_or(|(k, _)| *k < t) {
+            self.bars.push_back((t, rows));
+        } else if self.bars.front().is_some_and(|(k, _)| *k > t) {
+            self.bars.push_front((t, rows));
+        } else {
+            match self.bars.binary_search_by_key(&t, |(k, _)| *k) {
+                Ok(i) => self.bars[i].1 = rows,
+                Err(i) => self.bars.insert(i, (t, rows)),
+            }
+        }
+    }
+
+    /// The bars from `lo` to `hi`, both included, in time order.
+    pub fn range(&self, lo: i64, hi: i64) -> std::collections::vec_deque::Iter<'_, (i64, WindowRows)> {
+        let a = self.bars.partition_point(|(k, _)| *k < lo);
+        let b = self.bars.partition_point(|(k, _)| *k <= hi).max(a);
+        self.bars.range(a..b)
+    }
+
+    /// Forget the bars before `lo`.
+    pub fn forget_before(&mut self, lo: i64) {
+        let a = self.bars.partition_point(|(k, _)| *k < lo);
+        self.bars.drain(..a);
+    }
+
+    pub fn clear(&mut self) {
+        self.bars.clear();
+    }
+
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, (i64, WindowRows)> {
+        self.bars.iter()
+    }
+}
+
+impl std::ops::Index<&i64> for WindowCache {
+    type Output = WindowRows;
+    fn index(&self, t: &i64) -> &WindowRows {
+        self.get(t).expect("a cached bar")
+    }
+}
+
+impl FromIterator<(i64, WindowRows)> for WindowCache {
+    fn from_iter<I: IntoIterator<Item = (i64, WindowRows)>>(it: I) -> WindowCache {
+        let mut c = WindowCache::new();
+        for (t, rows) in it {
+            c.insert(t, rows);
+        }
+        c
+    }
+}
+
+impl IntoIterator for WindowCache {
+    type Item = (i64, WindowRows);
+    type IntoIter = std::collections::vec_deque::IntoIter<(i64, WindowRows)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.bars.into_iter()
+    }
+}
 
 /// The static shape of a rows window literal.
 #[derive(Debug)]
@@ -37,10 +126,44 @@ pub(crate) struct RowsPlan {
     conj_slots: Vec<usize>,
 }
 
-/// A window's rows as their count and the aggregate's argument columns.
+/// What an aggregation literal's calls share, computed once per (rule,
+/// literal): the slots of its group and, when a call can be served from the
+/// per-bar cache (`window_columns`), the cached window's shape.
+#[derive(Debug)]
+pub(crate) struct AggPlan {
+    /// The group's variables as slots, ascending: those of them a call
+    /// leaves unbound are the keys the aggregation binds.
+    group: Vec<usize>,
+    window: Option<WindowPlan>,
+}
+
+/// The static shape of a calendar window served from the per-bar cache.
+#[derive(Debug)]
+pub(crate) struct WindowPlan {
+    /// The window literal's position in the conjunction.
+    window: usize,
+    wslot: usize,
+    /// The literal as the cache's key names it (shared windows share it).
+    literal: usize,
+    /// The tests of the base time applied to the cached rows at each call
+    /// (`Ex = T`), each with the slots the call must bind for it: what
+    /// neither the base nor the cached rows give it, and an assignment's
+    /// variable unless an atom binds it (the assignment would bind it).
+    late: Vec<(Literal, Vec<usize>)>,
+    /// The outer bindings the cached conjunction reads, ascending: with the
+    /// literal, a group of the cache.
+    outer: Vec<usize>,
+    /// The cached conjunction, in its solve order.
+    order: Vec<Literal>,
+}
+
 /// A window's rows as their count and the aggregate's argument columns, or
 /// the aggregate itself when running sums answered it (no columns then).
 type Columns = (usize, Vec<Vec<f64>>, Option<f64>);
+
+/// A calendar window's rows as their count and the aggregate's argument
+/// columns.
+type WindowColumns = (usize, Vec<Vec<f64>>);
 
 /// The window of a rows group at bar `b`, as positions `lo..hi` in its row
 /// buffer: the rows among the last `n` anchored bars at or before `b` (all
@@ -277,6 +400,32 @@ pub struct WindowKey {
 /// Result sets larger than this are kept sorted by their first entity.
 const SORTED_MIN: usize = 16;
 
+/// `env` extended by the tuple `tu` at the atom's variable slots (`slots`,
+/// one per term), pushed to `out` unless a term conflicts. A slot bound in
+/// `env`, or by an earlier term of the atom (a variable written twice),
+/// must hold the tuple's value, as when the terms bind one after another.
+fn bind_row<S: Sink>(env: &[Option<Value>], slots: &[Option<usize>], tu: &[Value], out: &mut S) {
+    for (k, (slot, val)) in slots.iter().zip(tu.iter()).enumerate() {
+        let Some(slot) = *slot else { continue };
+        let bound = match &env[slot] {
+            Some(x) => Some(x),
+            None => slots[..k].iter().zip(tu.iter()).find(|(s, _)| **s == Some(slot)).map(|(_, v)| v),
+        };
+        if bound.is_some_and(|x| x != val) {
+            return;
+        }
+    }
+    out.push_env(env);
+    let row = out.last_row().expect("a row was pushed");
+    for (slot, val) in slots.iter().zip(tu.iter()) {
+        if let Some(slot) = *slot {
+            if row[slot].is_none() {
+                row[slot] = Some(val.clone());
+            }
+        }
+    }
+}
+
 impl<'p> Kernel<'p> {
     /// All tuples of `rel` matching `pattern` (`Some` at the key, at every
     /// input and at any output used as a filter), with the index of the rule
@@ -467,7 +616,15 @@ impl<'p> Kernel<'p> {
             // plan); an instance left stuck on a partial operation halts the
             // run here, where a decision demanded it (section 7).
             let order = self.plan_order(ri);
-            let (sols, stuck) = self.solve_kleene(&cr, &rule.body, &order, vec![env], Some(ri))?;
+            // The set evaluator solves the body over a block of bindings,
+            // the tuple evaluator one environment at a time; both yield the
+            // same rows in the same order (M-8, `tests/eval_set.rs`).
+            let (sols, stuck) = if self.cfg.set_eval {
+                self.solve_kleene_block(&cr, &rule.body, &order, Block::of(cr.nslots, vec![env]), Some(ri))?
+            } else {
+                let (sols, stuck) = self.solve_kleene(&cr, &rule.body, &order, vec![env], Some(ri))?;
+                (Block::of(cr.nslots, sols), stuck)
+            };
             for s in stuck {
                 let mut partial = Vec::with_capacity(rule.head.terms.len());
                 for term in &rule.head.terms {
@@ -479,10 +636,11 @@ impl<'p> Kernel<'p> {
                 }
                 stucks.push((partial, s.error));
             }
-            for sol in sols {
+            for i in 0..sols.len() {
+                let sol = sols.row(i);
                 let mut tu = Vec::with_capacity(rule.head.terms.len());
                 for term in &rule.head.terms {
-                    tu.push(self.term_value(&cr, term, &sol)?);
+                    tu.push(self.term_value(&cr, term, sol)?);
                 }
                 let fresh = match &mut seen {
                     Some(set) => set.insert(tu.clone()),
@@ -522,7 +680,7 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    fn term_value(&mut self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<Value, RunError> {
+    fn term_value(&mut self, cr: &CompiledRule, term: &Term, env: &[Option<Value>]) -> Result<Value, RunError> {
         match term {
             Term::Var(v, _) => env[cr.slots[v]].clone().ok_or_else(|| RunError::Internal(format!("variable `{}` unbound in rule {}", v, cr.label))),
             Term::Wild(_) => Err(RunError::Internal(format!("wildcard where a value is needed in rule {}", cr.label))),
@@ -573,7 +731,7 @@ impl<'p> Kernel<'p> {
     /// The order term of a decision (section 6, order types): `market`,
     /// `moo`, `moc`, or `limit(P[, TIF])` / `stop(P[, TIF])` with TIF one of
     /// `day`, `gtc`, `bars(N)`; the checker has judged its shape.
-    fn order_value(&mut self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<Order, RunError> {
+    fn order_value(&mut self, cr: &CompiledRule, term: &Term, env: &[Option<Value>]) -> Result<Order, RunError> {
         let bad = || RunError::Internal(format!("ill-formed order term in rule {}", cr.label));
         match term {
             Term::Param(p, _) => Ok(Order {
@@ -678,7 +836,7 @@ impl<'p> Kernel<'p> {
             let entering = live.len();
             let mut next = Vec::new();
             for env in &live {
-                let mut out = Vec::new();
+                let mut out: Vec<Env> = Vec::new();
                 match self.step(cr, lit, env, &mut out) {
                     Ok(()) => next.extend(out),
                     Err(error @ RunError::Arithmetic { .. }) => {
@@ -688,53 +846,8 @@ impl<'p> Kernel<'p> {
                     Err(e) => return Err(e),
                 }
             }
-            if !stuck.is_empty() {
-                let mentioned = Self::literal_slots(cr, lit);
-                let mut still = Vec::with_capacity(stuck.len());
-                for s in stuck.drain(..) {
-                    if mentioned.iter().any(|m| s.undefined.contains(m)) {
-                        still.push(s);
-                        continue;
-                    }
-                    let mut out = Vec::new();
-                    match self.step(cr, lit, &s.env, &mut out) {
-                        Ok(()) => {
-                            if out.is_empty() {
-                                self.stats.excluded_after_undefined += 1;
-                            }
-                            for e in out {
-                                still.push(Stuck {
-                                    env: e,
-                                    undefined: s.undefined.clone(),
-                                    error: s.error.clone(),
-                                });
-                            }
-                        }
-                        Err(RunError::Arithmetic { .. }) => {
-                            let mut undefined = s.undefined;
-                            undefined.extend(mentioned.iter().copied().filter(|&m| s.env[m].is_none()));
-                            still.push(Stuck {
-                                env: s.env,
-                                undefined,
-                                error: s.error,
-                            });
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                stuck = still;
-            }
-            if let Some(ri) = record {
-                if let Some(counts) = self.literal_counts.get_mut(ri) {
-                    if let Some(c) = counts.get_mut(li) {
-                        c.0 += entering as u64;
-                        c.1 += next.len() as u64;
-                        if entering > 0 && next.is_empty() && stuck.is_empty() {
-                            c.2 += 1;
-                        }
-                    }
-                }
-            }
+            stuck = self.advance_stuck(cr, lit, stuck)?;
+            self.count_literal(record, li, entering, next.len(), stuck.is_empty());
             live = next;
             if live.is_empty() && stuck.is_empty() {
                 break;
@@ -743,9 +856,104 @@ impl<'p> Kernel<'p> {
         Ok((live, stuck))
     }
 
+    /// `solve_kleene` over a block of bindings (M-8; the set evaluator,
+    /// `eval_set`): each literal maps the block entering it to the block
+    /// leaving it, the rows in the order the tuple evaluator takes its
+    /// environments and each row's solutions in the order it yields them.
+    /// An instance that meets a partial operation leaves no row (the rows it
+    /// pushed are withdrawn) and is stuck, as there.
+    pub(crate) fn solve_kleene_block(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], order: &[usize], start: Block, record: Option<usize>) -> Result<(Block, Vec<Stuck>), RunError> {
+        let mut live = start;
+        let mut stuck: Vec<Stuck> = Vec::new();
+        for &li in order {
+            let lit = &lits[li];
+            let entering = live.len();
+            let mut next = Block::with_capacity(live.stride(), entering);
+            for i in 0..live.len() {
+                let env = live.row(i);
+                let before = next.len();
+                match self.step(cr, lit, env, &mut next) {
+                    Ok(()) => {}
+                    Err(error @ RunError::Arithmetic { .. }) => {
+                        next.truncate(before);
+                        let undefined: Vec<usize> = Self::literal_slots(cr, lit).into_iter().filter(|&s| env[s].is_none()).collect();
+                        stuck.push(Stuck { env: env.to_vec(), undefined, error });
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            stuck = self.advance_stuck(cr, lit, stuck)?;
+            self.count_literal(record, li, entering, next.len(), stuck.is_empty());
+            live = next;
+            if live.is_empty() && stuck.is_empty() {
+                break;
+            }
+        }
+        Ok((live, stuck))
+    }
+
+    /// The stuck instances past one more literal (Kleene conjunction): one
+    /// that mentions an undefined slot is skipped, its value ⊥ too; any
+    /// other runs, and is excluded when it is false.
+    fn advance_stuck(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, stuck: Vec<Stuck>) -> Result<Vec<Stuck>, RunError> {
+        if stuck.is_empty() {
+            return Ok(stuck);
+        }
+        let mentioned = Self::literal_slots(cr, lit);
+        let mut still = Vec::with_capacity(stuck.len());
+        for s in stuck {
+            if mentioned.iter().any(|m| s.undefined.contains(m)) {
+                still.push(s);
+                continue;
+            }
+            let mut out: Vec<Env> = Vec::new();
+            match self.step(cr, lit, &s.env, &mut out) {
+                Ok(()) => {
+                    if out.is_empty() {
+                        self.stats.excluded_after_undefined += 1;
+                    }
+                    for e in out {
+                        still.push(Stuck {
+                            env: e,
+                            undefined: s.undefined.clone(),
+                            error: s.error.clone(),
+                        });
+                    }
+                }
+                Err(RunError::Arithmetic { .. }) => {
+                    let mut undefined = s.undefined;
+                    undefined.extend(mentioned.iter().copied().filter(|&m| s.env[m].is_none()));
+                    still.push(Stuck {
+                        env: s.env,
+                        undefined,
+                        error: s.error,
+                    });
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(still)
+    }
+
+    /// A rule's per-literal counters: the bindings entering and leaving
+    /// literal `li`, and whether the call lost its last binding there.
+    fn count_literal(&mut self, record: Option<usize>, li: usize, entering: usize, leaving: usize, no_stuck: bool) {
+        if let Some(ri) = record {
+            if let Some(counts) = self.literal_counts.get_mut(ri) {
+                if let Some(c) = counts.get_mut(li) {
+                    c.0 += entering as u64;
+                    c.1 += leaving as u64;
+                    if entering > 0 && leaving == 0 && no_stuck {
+                        c.2 += 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// The pattern an atom presents to `call`, and whether each term needs
     /// post-matching (constructor patterns and fresh variables).
-    fn atom_pattern(&mut self, cr: &CompiledRule, atom: &Atom, env: &Env) -> Result<Vec<Option<Value>>, RunError> {
+    fn atom_pattern(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>]) -> Result<Vec<Option<Value>>, RunError> {
         let mut pat = Vec::with_capacity(atom.terms.len());
         for term in &atom.terms {
             pat.push(match term {
@@ -759,7 +967,14 @@ impl<'p> Kernel<'p> {
     }
 
     /// Solutions of a positive atom from one binding.
-    fn atom_matches(&mut self, cr: &CompiledRule, atom: &Atom, env: &Env) -> Result<Vec<Env>, RunError> {
+    fn atom_matches(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>]) -> Result<Vec<Env>, RunError> {
+        let mut out = Vec::new();
+        self.atom_matches_into(cr, atom, env, &mut out)?;
+        Ok(out)
+    }
+
+    /// `atom_matches` into a sink, in the same order.
+    fn atom_matches_into<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
         let pat = self.atom_pattern(cr, atom, env)?;
         // A stored relation binds straight from its store's block: no result
@@ -774,30 +989,16 @@ impl<'p> Kernel<'p> {
             };
             let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
             let entity = entity_pos.and_then(|e| pat[e].clone());
-            let mut out = Vec::new();
-            'tuples: for tu in self.stores[rel].lookup(key, entity.as_ref()) {
+            for tu in self.stores[rel].lookup(key, entity.as_ref()) {
                 if !pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true)) {
                     continue;
                 }
-                let mut e = env.clone();
-                for (slot, val) in slots.iter().zip(tu.iter()) {
-                    if let Some(slot) = *slot {
-                        match &e[slot] {
-                            Some(x) => {
-                                if x != val {
-                                    continue 'tuples;
-                                }
-                            }
-                            None => e[slot] = Some(val.clone()),
-                        }
-                    }
-                }
-                out.push(e);
+                bind_row(env, &slots, tu, out);
             }
-            return Ok(out);
+            return Ok(());
         }
         let tuples = self.call(rel, &pat)?;
-        self.bind_tuples(cr, atom, env, &tuples)
+        self.bind_tuples_into(cr, atom, env, &tuples, out)
     }
 
     /// `R(...) asof T`: R's tuples at the latest key at or before T that
@@ -805,7 +1006,7 @@ impl<'p> Kernel<'p> {
     /// as-of join). A stored relation is answered from its index; a derived
     /// one by calling it at its own resolution's bars backwards from T,
     /// with the answer memoised for every bar walked.
-    fn asof_matches(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, within: Option<&Cal>, env: &Env) -> Result<Vec<Env>, RunError> {
+    fn asof_matches<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, within: Option<&Cal>, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
         let t = self.time_of(cr, at, env)?;
         let info = self.rels[rel].clone();
@@ -850,7 +1051,7 @@ impl<'p> Kernel<'p> {
                 pat[info.key_pos] = Some(Value::Time(k));
                 let first = self.call(rel, &pat)?;
                 if !first.is_empty() {
-                    return self.bind_tuples(cr, atom, env, &first);
+                    return self.bind_tuples_into(cr, atom, env, &first, out);
                 }
             }
             let mut walked: Vec<i64> = Vec::new();
@@ -878,13 +1079,22 @@ impl<'p> Kernel<'p> {
                 None => Rc::new(Vec::new()),
             }
         };
-        self.bind_tuples(cr, atom, env, &tuples)
+        self.bind_tuples_into(cr, atom, env, &tuples, out)
     }
 
-    fn bind_tuples(&mut self, cr: &CompiledRule, atom: &Atom, env: &Env, tuples: &super::Derived) -> Result<Vec<Env>, RunError> {
-        let mut out = Vec::new();
+    /// The bindings of `env` extended by each of `tuples` the atom's terms
+    /// match, into a sink, in the tuples' order.
+    fn bind_tuples_into<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>], tuples: &super::Derived, out: &mut S) -> Result<(), RunError> {
+        if !atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
+            let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
+            for (tu, _) in tuples.iter() {
+                bind_row(env, &slots, tu, out);
+            }
+            return Ok(());
+        }
+        // A constructor pattern binds its sub-terms as it matches.
         'tuples: for (tu, _) in tuples.iter() {
-            let mut e = env.clone();
+            let mut e = env.to_vec();
             for (term, val) in atom.terms.iter().zip(tu.iter()) {
                 match term {
                     Term::Var(v, _) => {
@@ -902,9 +1112,9 @@ impl<'p> Kernel<'p> {
                     _ => {}
                 }
             }
-            out.push(e);
+            out.push_owned(e);
         }
-        Ok(out)
+        Ok(())
     }
 
     fn match_ctor(&mut self, cr: &CompiledRule, name: &str, subs: &[Term], val: &Value, env: &mut Env) -> Result<bool, RunError> {
@@ -938,7 +1148,7 @@ impl<'p> Kernel<'p> {
         Ok(true)
     }
 
-    fn time_of(&self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<i64, RunError> {
+    fn time_of(&self, cr: &CompiledRule, term: &Term, env: &[Option<Value>]) -> Result<i64, RunError> {
         match term {
             Term::Var(v, _) => env[cr.slots[v]]
                 .as_ref()
@@ -950,21 +1160,17 @@ impl<'p> Kernel<'p> {
 
     /// Bind a builtin's output position to `t`: a variable takes the value
     /// (or must already equal it); `_` accepts it without binding anything.
-    fn bind_time(&self, cr: &CompiledRule, term: &Term, env: &Env, t: i64, out: &mut Vec<Env>) {
+    fn bind_time<S: Sink>(&self, cr: &CompiledRule, term: &Term, env: &[Option<Value>], t: i64, out: &mut S) {
         match term {
             Term::Var(v, _) => {
                 let slot = cr.slots[v];
                 match &env[slot] {
-                    Some(Value::Time(x)) if *x == t => out.push(env.clone()),
+                    Some(Value::Time(x)) if *x == t => out.push_env(env),
                     Some(_) => {}
-                    None => {
-                        let mut e = env.clone();
-                        e[slot] = Some(Value::Time(t));
-                        out.push(e);
-                    }
+                    None => out.push_with(env, slot, Some(Value::Time(t))),
                 }
             }
-            Term::Wild(_) => out.push(env.clone()),
+            Term::Wild(_) => out.push_env(env),
             _ => {}
         }
     }
@@ -984,7 +1190,7 @@ impl<'p> Kernel<'p> {
     /// its argument's calendar, per instrument on the sessions calendar
     /// (`prev(S, S1)` on a session label is the instrument's previous
     /// session, whether or not the label coincides with a base bar).
-    fn domain_of_term(&self, cr: &CompiledRule, term: &Term, env: &Env) -> Result<&std::collections::BTreeSet<i64>, RunError> {
+    fn domain_of_term(&self, cr: &CompiledRule, term: &Term, env: &[Option<Value>]) -> Result<&std::collections::BTreeSet<i64>, RunError> {
         let cal = self.term_cal(cr, term);
         let entity = cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
         self.domain_for(&cal, entity)
@@ -992,7 +1198,7 @@ impl<'p> Kernel<'p> {
 
     /// The time domain of a rule: its calendar's, and for the per-instrument
     /// sessions calendar the sessions of the head's instrument.
-    fn domain(&self, cr: &CompiledRule, env: &Env) -> Result<&std::collections::BTreeSet<i64>, RunError> {
+    fn domain(&self, cr: &CompiledRule, env: &[Option<Value>]) -> Result<&std::collections::BTreeSet<i64>, RunError> {
         let cal = &self.prog.infos[cr.idx].cal;
         let entity = cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
         self.domain_for(cal, entity)
@@ -1012,7 +1218,7 @@ impl<'p> Kernel<'p> {
     /// (3.3, 3.5): the bars of `t`'s bucket on the calendar; the bars of the
     /// instrument's session holding `t` (or labelled `t`) with offset in
     /// [lo, hi), at or before `t`.
-    fn window_times(&mut self, cr: &CompiledRule, kind: &WindowKind, base: &Term, dur: &Expr, lo: Option<&Expr>, env: &Env) -> Result<Vec<i64>, RunError> {
+    fn window_times(&mut self, cr: &CompiledRule, kind: &WindowKind, base: &Term, dur: &Expr, lo: Option<&Expr>, env: &[Option<Value>]) -> Result<Vec<i64>, RunError> {
         let t = self.time_of(cr, base, env)?;
         match kind {
             WindowKind::Window | WindowKind::Prior => {
@@ -1098,10 +1304,10 @@ impl<'p> Kernel<'p> {
     /// The value of a case form on one binding: the first branch whose
     /// guard holds binds the variable to its value (Definition 5.9); with
     /// no branch and no `else` the instance is excluded.
-    fn case_value(&mut self, cr: &Rc<CompiledRule>, branches: &[Branch], otherwise: Option<&Expr>, env: &Env) -> Result<Option<Value>, RunError> {
+    fn case_value(&mut self, cr: &Rc<CompiledRule>, branches: &[Branch], otherwise: Option<&Expr>, env: &[Option<Value>]) -> Result<Option<Value>, RunError> {
         for b in branches {
             let order: Vec<usize> = (0..b.guard.len()).collect();
-            let (sols, stuck) = self.solve_kleene(cr, &b.guard, &order, vec![env.clone()], None)?;
+            let (sols, stuck) = self.solve_kleene(cr, &b.guard, &order, vec![env.to_vec()], None)?;
             if let Some(sol) = sols.into_iter().next() {
                 return Ok(Some(self.eval_expr(cr, &b.value, &sol)?));
             }
@@ -1118,7 +1324,7 @@ impl<'p> Kernel<'p> {
     /// The rule's time domain as a sorted vector (cached per calendar, and
     /// per instrument on the sessions calendar): the bars the running sums
     /// walk, with their indices.
-    fn domain_bars(&mut self, cr: &CompiledRule, env: &Env) -> Result<Rc<Vec<i64>>, RunError> {
+    fn domain_bars(&mut self, cr: &CompiledRule, env: &[Option<Value>]) -> Result<Rc<Vec<i64>>, RunError> {
         let cal = self.prog.infos[cr.idx].cal.clone();
         let entity = if cal.per_entity() {
             cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity())
@@ -1134,13 +1340,13 @@ impl<'p> Kernel<'p> {
         Ok(v)
     }
 
-    pub(crate) fn step(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &Env, out: &mut Vec<Env>) -> Result<(), RunError> {
+    pub(crate) fn step<S: Sink>(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         match lit {
-            Literal::Atom(a) => out.extend(self.atom_matches(cr, a, env)?),
-            Literal::AsOf { atom, at, within_bucket, .. } => out.extend(self.asof_matches(cr, atom, at, within_bucket.as_ref(), env)?),
+            Literal::Atom(a) => self.atom_matches_into(cr, a, env, out)?,
+            Literal::AsOf { atom, at, within_bucket, .. } => self.asof_matches(cr, atom, at, within_bucket.as_ref(), env, out)?,
             Literal::Neg(a) => {
                 if self.atom_matches(cr, a, env)?.is_empty() {
-                    out.push(env.clone());
+                    out.push_env(env);
                 }
             }
             Literal::Builtin(b, _) => match b {
@@ -1167,14 +1373,14 @@ impl<'p> Kernel<'p> {
                     let at = self.time_of(cr, t, env)?;
                     let prev = self.domain_of_term(cr, t, env)?.range(..at).next_back().copied();
                     if prev.map(|p| time::month_key(p) != time::month_key(at)).unwrap_or(true) {
-                        out.push(env.clone());
+                        out.push_env(env);
                     }
                 }
                 Builtin::DayStart { t } => {
                     let at = self.time_of(cr, t, env)?;
                     let prev = self.domain_of_term(cr, t, env)?.range(..at).next_back().copied();
                     if prev.map(|p| time::day_key(p) != time::day_key(at)).unwrap_or(true) {
-                        out.push(env.clone());
+                        out.push_env(env);
                     }
                 }
                 Builtin::SessionOf { a, t, s } => {
@@ -1213,7 +1419,7 @@ impl<'p> Kernel<'p> {
                             .collect();
                         syms.sort_unstable();
                         for sym in syms {
-                            let mut e = env.clone();
+                            let mut e = env.to_vec();
                             e[slot] = Some(Value::Equity(sym));
                             let times = self.window_times(cr, kind, base, dur, lo.as_ref(), &e)?;
                             for t1 in times {
@@ -1234,14 +1440,10 @@ impl<'p> Kernel<'p> {
                     match &env[slot] {
                         Some(x) => {
                             if values_equal(x, &v) {
-                                out.push(env.clone());
+                                out.push_env(env);
                             }
                         }
-                        None => {
-                            let mut e = env.clone();
-                            e[slot] = Some(v);
-                            out.push(e);
-                        }
+                        None => out.push_with(env, slot, Some(v)),
                     }
                 }
             }
@@ -1249,7 +1451,7 @@ impl<'p> Kernel<'p> {
                 let a = self.eval_expr(cr, lhs, env)?;
                 let b = self.eval_expr(cr, rhs, env)?;
                 if compare(*op, &a, &b) {
-                    out.push(env.clone());
+                    out.push_env(env);
                 }
             }
             Literal::Assign { var, expr, .. } => {
@@ -1258,14 +1460,10 @@ impl<'p> Kernel<'p> {
                 match &env[slot] {
                     Some(x) => {
                         if values_equal(x, &v) {
-                            out.push(env.clone());
+                            out.push_env(env);
                         }
                     }
-                    None => {
-                        let mut e = env.clone();
-                        e[slot] = Some(v);
-                        out.push(e);
-                    }
+                    None => out.push_with(env, slot, Some(v)),
                 }
             }
             Literal::Agg { var, agg, args, conj, within, .. } => {
@@ -1280,40 +1478,8 @@ impl<'p> Kernel<'p> {
                     }
                 }
                 self.stats.window_calls += 1;
-                // The group (language-v2, 4.2; semantic model, 5.1): with
-                // `within`, exactly its variables; otherwise the variables
-                // the conjunction shares with the rest of the rule (the head
-                // or another literal). A variable of the conjunction alone
-                // is local to it, neither a key nor bound by the aggregation.
-                // A group variable bound outside is an input of the group; an
-                // unbound one is a key the aggregation binds, with one result
-                // per distinct binding (`close@C(A, T, P) :- P = last(P1)
-                // over (...)` groups by A).
-                let group_vars: Vec<String> = match within {
-                    Some(w) => w.clone(),
-                    None => {
-                        let mut aggregated: Vec<String> = Vec::new();
-                        for l in conj {
-                            if let Literal::Window { var: Term::Var(v, _), .. } = l {
-                                aggregated.push(v.clone());
-                            }
-                        }
-                        for a in args {
-                            let mut vs = Vec::new();
-                            a.vars(&mut vs);
-                            aggregated.extend(vs.into_iter().map(|(v, _)| v));
-                        }
-                        let outer = outer_vars(&self.prog.rules[cr.idx], lit);
-                        let mut mentioned: Vec<String> = Vec::new();
-                        for l in conj {
-                            literal_vars(l, &mut mentioned);
-                        }
-                        mentioned.into_iter().filter(|v| !aggregated.contains(v) && outer.contains(v)).collect()
-                    }
-                };
-                let mut group_slots: Vec<usize> = group_vars.iter().filter_map(|v| cr.slots.get(v).copied()).filter(|&s| env[s].is_none()).collect();
-                group_slots.sort_unstable();
-                group_slots.dedup();
+                let plan = self.agg_plan(cr, lit, conj, args, within.as_deref());
+                let group_slots: Vec<usize> = plan.group.iter().copied().filter(|&s| env[s].is_none()).collect();
                 let grouped = !group_slots.is_empty();
                 // The rows of the group with the aggregate's arguments evaluated
                 // on each: a `rows` window walks back over the group's own
@@ -1352,9 +1518,30 @@ impl<'p> Kernel<'p> {
                                 }
                             }
                         };
-                        let mut e = env.clone();
-                        e[cr.slots[var]] = Some(value);
-                        out.push(e);
+                        out.push_with(env, cr.slots[var], Some(value));
+                        return Ok(());
+                    }
+                }
+                // A calendar window over the per-bar cache: its count and its
+                // arguments' columns, in the order the rows sort to.
+                if let Some(wp) = plan.window.as_ref().filter(|_| !grouped && !has_rows && self.cfg.window_cache) {
+                    if let Some((count, cols)) = self.window_columns(cr, wp, conj, agg, args, env)? {
+                        if (count as i64) < min_count {
+                            return Ok(());
+                        }
+                        let value = if agg == "count" {
+                            Value::Count(count as i64)
+                        } else {
+                            match aggregate(agg, &cols) {
+                                Ok(Some(v)) => v,
+                                Ok(None) => return Ok(()),
+                                Err(m) => {
+                                    let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+                                    return Err(self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), &m));
+                                }
+                            }
+                        };
+                        out.push_with(env, cr.slots[var], Some(value));
                         return Ok(());
                     }
                 }
@@ -1365,8 +1552,6 @@ impl<'p> Kernel<'p> {
                     let (rows, sorted) = self.rows_window(cr, lit, conj, agg, args, env, !ordered)?;
                     in_order = sorted;
                     Some(rows)
-                } else if self.cfg.window_cache {
-                    self.window_rows(cr, lit, conj, agg, args, env)?
                 } else {
                     None
                 };
@@ -1389,7 +1574,7 @@ impl<'p> Kernel<'p> {
                             }
                         }
                         let order = conj_order(conj);
-                        let sols = self.solve(cr, &order, vec![env.clone()])?;
+                        let sols = self.solve(cr, &order, vec![env.to_vec()])?;
                         let mut rows = Vec::with_capacity(sols.len());
                         for row in sols {
                             let vals = if agg == "count" { Vec::new() } else { self.agg_args(cr, args, &row)? };
@@ -1443,19 +1628,17 @@ impl<'p> Kernel<'p> {
                                 }
                             }
                         };
-                        let mut e = env.clone();
+                        out.push_env(env);
+                        let e = out.last_row().expect("a row was pushed");
                         for (s, v) in group_slots.iter().zip(key) {
                             e[*s] = v;
                         }
                         e[cr.slots[var]] = Some(value);
-                        out.push(e);
                     }
                     return Ok(());
                 }
                 if agg == "count" {
-                    let mut e = env.clone();
-                    e[cr.slots[var]] = Some(Value::Count(rows.len() as i64));
-                    out.push(e);
+                    out.push_with(env, cr.slots[var], Some(Value::Count(rows.len() as i64)));
                     return Ok(());
                 }
                 let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(rows.len()); args.len()];
@@ -1472,9 +1655,7 @@ impl<'p> Kernel<'p> {
                         return Err(self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), &m));
                     }
                 };
-                let mut e = env.clone();
-                e[cr.slots[var]] = Some(value);
-                out.push(e);
+                out.push_with(env, cr.slots[var], Some(value));
             }
             Literal::Top { n, atom, by, rank, .. } => {
                 let mut rows = self.atom_matches(cr, atom, env)?;
@@ -1513,7 +1694,9 @@ impl<'p> Kernel<'p> {
                         i = j;
                     }
                 }
-                out.extend(rows);
+                for row in rows {
+                    out.push_owned(row);
+                }
             }
         }
         Ok(())
@@ -1525,7 +1708,7 @@ impl<'p> Kernel<'p> {
     /// instrument's at that time, in the instrument order the local grouping
     /// gives; only when every row they read was received by the barrier
     /// being evaluated (ERRATA E-47). False when the window is evaluated here.
-    fn pushed_answers(&mut self, cr: &CompiledRule, lit: &Literal, var: &str, env: &Env, out: &mut Vec<Env>) -> bool {
+    fn pushed_answers<S: Sink>(&mut self, cr: &CompiledRule, lit: &Literal, var: &str, env: &[Option<Value>], out: &mut S) -> bool {
         if self.pushed.is_empty() {
             return false;
         }
@@ -1542,9 +1725,7 @@ impl<'p> Kernel<'p> {
                 let ans = &section[i].1;
                 let (Some(x), false, true) = (ans.value, ans.error, ans.r <= self.now) else { return false };
                 self.pushed_read_r = self.pushed_read_r.max(ans.r);
-                let mut e = env.clone();
-                e[vslot] = Some(Value::Num(x));
-                out.push(e);
+                out.push_with(env, vslot, Some(Value::Num(x)));
             }
             Some(None) => {
                 if section.iter().any(|(_, a)| a.value.is_none() || a.error || a.r > self.now) {
@@ -1552,10 +1733,10 @@ impl<'p> Kernel<'p> {
                 }
                 for (s, a) in section {
                     self.pushed_read_r = self.pushed_read_r.max(a.r);
-                    let mut e = env.clone();
+                    out.push_env(env);
+                    let e = out.last_row().expect("a row was pushed");
                     e[p.entity_slot] = Some(Value::Equity(*s));
                     e[vslot] = a.value.map(Value::Num);
-                    out.push(e);
                 }
             }
             _ => return false,
@@ -1573,7 +1754,7 @@ impl<'p> Kernel<'p> {
     }
 
     /// The aggregate's arguments on one row of its group, as numbers.
-    fn agg_args(&mut self, cr: &CompiledRule, args: &[Expr], row: &Env) -> Result<Vec<f64>, RunError> {
+    fn agg_args(&mut self, cr: &CompiledRule, args: &[Expr], row: &[Option<Value>]) -> Result<Vec<f64>, RunError> {
         let mut vals = Vec::with_capacity(args.len());
         for a in args {
             let v = self.eval_expr(cr, a, row)?;
@@ -1582,35 +1763,187 @@ impl<'p> Kernel<'p> {
         Ok(vals)
     }
 
+    /// The aggregation literal's plan, computed on its first call: by its
+    /// position in the rule's body (one nested in a case is planned at
+    /// each call).
+    fn agg_plan(&mut self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Rc<AggPlan> {
+        let pos = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit));
+        if let Some(p) = pos.and_then(|p| self.agg_plans.get(&(cr.idx, p))) {
+            return p.clone();
+        }
+        // The group (language-v2, 4.2; semantic model, 5.1): with `within`,
+        // exactly its variables; otherwise the variables the conjunction
+        // shares with the rest of the rule (the head or another literal). A
+        // variable of the conjunction alone is local to it, neither a key
+        // nor bound by the aggregation. A group variable bound outside is an
+        // input of the group; an unbound one is a key the aggregation binds,
+        // with one result per distinct binding (`close@C(A, T, P) :- P =
+        // last(P1) over (...)` groups by A).
+        let group_vars: Vec<String> = match within {
+            Some(w) => w.to_vec(),
+            None => {
+                let mut aggregated: Vec<String> = Vec::new();
+                for l in conj {
+                    if let Literal::Window { var: Term::Var(v, _), .. } = l {
+                        aggregated.push(v.clone());
+                    }
+                }
+                for a in args {
+                    let mut vs = Vec::new();
+                    a.vars(&mut vs);
+                    aggregated.extend(vs.into_iter().map(|(v, _)| v));
+                }
+                let outer = outer_vars(&self.prog.rules[cr.idx], lit);
+                let mut mentioned: Vec<String> = Vec::new();
+                for l in conj {
+                    literal_vars(l, &mut mentioned);
+                }
+                mentioned.into_iter().filter(|v| !aggregated.contains(v) && outer.contains(v)).collect()
+            }
+        };
+        let mut group: Vec<usize> = group_vars.iter().filter_map(|v| cr.slots.get(v).copied()).collect();
+        group.sort_unstable();
+        group.dedup();
+        let plan = Rc::new(AggPlan {
+            group,
+            window: self.window_plan(cr, lit, conj, args),
+        });
+        if let Some(p) = pos {
+            self.agg_plans.insert((cr.idx, p), plan.clone());
+        }
+        plan
+    }
+
+    /// The shape of a calendar window served from the per-bar cache, or
+    /// `None` when no call can be: more than one window, a `rows` window, or
+    /// the base time read otherwise than by a test the cache can apply.
+    fn window_plan(&self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Option<WindowPlan> {
+        let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
+        if windows.len() != 1 {
+            return None;
+        }
+        let Literal::Window {
+            var: Term::Var(wvar, _),
+            kind,
+            base: Term::Var(bvar, _),
+            dur,
+            min,
+            ..
+        } = &conj[windows[0]]
+        else {
+            return None;
+        };
+        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) {
+            return None;
+        }
+        // A test of the base time (`Ex = T`: the dividend going ex at the
+        // bar) is applied to the rows each call assembles; the rest of the
+        // conjunction is solved once a bar and cached. The tests bind
+        // nothing, fail on no value, and the rows are sorted after, so the
+        // aggregate reads what a whole solve gives it.
+        let reads_base = |l: &Literal| {
+            let mut vs = Vec::new();
+            literal_vars(l, &mut vs);
+            vs.iter().any(|v| v == bvar)
+        };
+        // A variable an atom of the cached conjunction binds (a match binds
+        // all of an atom's variables).
+        let atom_binds = |v: &String| {
+            conj.iter().any(|l| match l {
+                Literal::Atom(a) | Literal::AsOf { atom: a, .. } => !reads_base(l) && a.terms.iter().any(|t| matches!(t, Term::Var(x, _) if x == v)),
+                _ => false,
+            })
+        };
+        let mut late: Vec<&Literal> = Vec::new();
+        // The outer bindings the cached conjunction reads (not the window
+        // variable): the rows of a bar are a function of them and the bar.
+        let mut refs: Vec<String> = Vec::new();
+        for (i, l) in conj.iter().enumerate() {
+            if i == windows[0] {
+                continue;
+            }
+            if reads_base(l) {
+                match l {
+                    Literal::Cmp { lhs, rhs, .. } if total_expr(lhs) && total_expr(rhs) => late.push(l),
+                    Literal::Assign { expr, .. } if total_expr(expr) => late.push(l),
+                    // Any other reading of the base time makes rows that
+                    // change with every call: nothing to share, so solve it
+                    // whole.
+                    _ => return None,
+                }
+                continue;
+            }
+            literal_vars(l, &mut refs);
+        }
+        for a in args {
+            let mut vs = Vec::new();
+            a.vars(&mut vs);
+            refs.extend(vs.into_iter().map(|(v, _)| v));
+        }
+        if refs.iter().any(|v| v == bvar) {
+            return None;
+        }
+        // A test reads only what the call or the cached rows bind; an
+        // assignment is a test of a variable an atom or the call binds.
+        let mut tests = Vec::with_capacity(late.len());
+        for l in late {
+            let mut vs = Vec::new();
+            literal_vars(l, &mut vs);
+            let mut need = Vec::new();
+            for v in vs.iter().filter(|v| *v != bvar && !refs.contains(v)) {
+                need.push(*cr.slots.get(v)?);
+            }
+            if let Literal::Assign { var, .. } = l {
+                if !atom_binds(var) {
+                    need.push(*cr.slots.get(var)?);
+                }
+            }
+            need.sort_unstable();
+            need.dedup();
+            tests.push((l.clone(), need));
+        }
+        // The window's own length and minimum tell groups of different
+        // windows over one conjunction apart.
+        for e in [dur, min] {
+            let mut vs = Vec::new();
+            e.vars(&mut vs);
+            refs.extend(vs.into_iter().map(|(v, _)| v));
+        }
+        let wslot = *cr.slots.get(wvar)?;
+        let mut outer = Vec::with_capacity(refs.len());
+        for v in &refs {
+            let s = *cr.slots.get(v)?;
+            if s != wslot {
+                outer.push(s);
+            }
+        }
+        outer.sort_unstable();
+        outer.dedup();
+        Some(WindowPlan {
+            window: windows[0],
+            wslot,
+            // The literal by its position in the rule's body (aggregations
+            // do not nest), so that the key survives a checkpoint.
+            literal: self.literal_index(cr, lit),
+            late: tests,
+            outer,
+            order: conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. }) && !reads_base(l)).collect(),
+        })
+    }
+
     /// The rows of a windowed group from the per-bar cache (data-bundle doc,
     /// section 2, "State"): the group is the rule, the aggregation literal
     /// and the outer bindings its conjunction reads apart from the window's
     /// base time; each bar of the window is solved once, with the window
     /// variable bound to it and the rest of the conjunction in evaluation
-    /// order, and kept until it leaves the window. `None` when the group is
-    /// not a single-window one (solved whole instead).
-    fn window_rows(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<WindowRows>, RunError> {
-        let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
-        if windows.len() != 1 {
-            return Ok(None);
-        }
-        let Literal::Window {
-            var: Term::Var(wvar, _),
-            kind,
-            base: base @ Term::Var(bvar, _),
-            dur,
-            min,
-            lo: lo_off,
-            ..
-        } = &conj[windows[0]]
-        else {
+    /// order, and kept until it leaves the window. `None` when this call
+    /// cannot be served so (solved whole instead).
+    fn window_columns(&mut self, cr: &Rc<CompiledRule>, plan: &WindowPlan, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<WindowColumns>, RunError> {
+        let Literal::Window { kind, base, dur, lo: lo_off, .. } = &conj[plan.window] else {
             return Ok(None);
         };
-        let wslot = cr.slots[wvar];
+        let wslot = plan.wslot;
         if env[wslot].is_some() {
-            return Ok(None);
-        }
-        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) {
             return Ok(None);
         }
         // A per-instrument constraint with the instrument unbound enumerates
@@ -1621,55 +1954,43 @@ impl<'p> Kernel<'p> {
         let t = self.time_of(cr, base, env)?;
         let times: Vec<i64> = self.window_times(cr, kind, base, dur, lo_off.as_ref(), env)?;
         let lo = times.first().copied().unwrap_or(t);
-        // The outer bindings the conjunction reads (not the window variable):
-        // the rows of a bar are a function of them and the bar.
-        let mut refs: Vec<String> = Vec::new();
-        for (i, l) in conj.iter().enumerate() {
-            if i != windows[0] {
-                literal_vars(l, &mut refs);
-            }
-        }
-        for a in args {
-            let mut vs = Vec::new();
-            a.vars(&mut vs);
-            refs.extend(vs.into_iter().map(|(v, _)| v));
-        }
-        // A conjunction that reads the base time itself has rows that change
-        // with every call: nothing to share, so solve it whole.
-        if refs.iter().any(|v| v == bvar) {
+        if plan.late.iter().any(|(_, need)| need.iter().any(|&s| env[s].is_none())) {
             return Ok(None);
         }
-        // The window's own length and minimum tell groups of different
-        // windows over one conjunction apart.
-        for e in [dur, min] {
-            let mut vs = Vec::new();
-            e.vars(&mut vs);
-            refs.extend(vs.into_iter().map(|(v, _)| v));
-        }
-        let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
-        outer.sort_unstable();
-        outer.dedup();
-        // The literal by its position in the rule's body (aggregations do not
-        // nest), so that the key survives a checkpoint.
-        let literal = self.literal_index(cr, lit);
+        let late = &plan.late;
         let key = WindowKey {
             rule: cr.idx,
-            literal,
-            outer: outer.into_iter().map(|s| env[s].clone()).collect(),
+            literal: plan.literal,
+            outer: plan.outer.iter().map(|&s| env[s].clone()).collect(),
         };
-        let order: Vec<Literal> = conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect();
+        let order = &plan.order;
         let mut cache = self.windows.remove(&key).unwrap_or_default();
-        for &t1 in &times {
-            if cache.contains_key(&t1) {
-                continue;
+        // The window's bars the cache does not hold yet (usually the newest):
+        // the bars and the cache's keys are both in order, so one merge.
+        let mut missing = Vec::new();
+        {
+            let mut have = cache.range(lo, t).map(|(k, _)| *k).peekable();
+            for &t1 in &times {
+                while have.peek().is_some_and(|&k| k < t1) {
+                    have.next();
+                }
+                if have.peek() == Some(&t1) {
+                    have.next();
+                } else {
+                    missing.push(t1);
+                }
             }
-            let mut e = env.clone();
+        }
+        for t1 in missing {
+            let mut e = env.to_vec();
             e[wslot] = Some(Value::Time(t1));
-            let sols = match self.solve(cr, &order, vec![e]) {
+            // A row stuck or failing here may be one a deferred test
+            // excludes (Kleene conjunction, V-5): the whole solve decides.
+            let sols = match self.solve(cr, order, vec![e]) {
                 Ok(s) => s,
                 Err(err) => {
                     self.windows.insert(key, cache);
-                    return Err(err);
+                    return if late.is_empty() { Err(err) } else { Ok(None) };
                 }
             };
             self.stats.window_bars_solved += 1;
@@ -1682,7 +2003,7 @@ impl<'p> Kernel<'p> {
                         Ok(v) => v,
                         Err(err) => {
                             self.windows.insert(key, cache);
-                            return Err(err);
+                            return if late.is_empty() { Err(err) } else { Ok(None) };
                         }
                     }
                 };
@@ -1692,22 +2013,63 @@ impl<'p> Kernel<'p> {
         }
         // A cached row carries the outer bindings of the call that solved it;
         // what the aggregate sees is this call's outer bindings plus the
-        // conjunction's own (the slots unbound here), exactly as a whole
-        // solve would produce, so that the rows sort the same way.
-        let mut rows = Vec::new();
-        for t1 in &times {
-            if let Some(r) = cache.get(t1) {
-                for (row, vals) in r {
-                    let mut e = env.clone();
-                    for (i, v) in row.iter().enumerate() {
-                        if env[i].is_none() {
-                            e[i] = v.clone();
+        // conjunction's own (the slots unbound here), as a whole solve would
+        // produce. Its rows are read in the window's time order, those of one
+        // bar in the order of their own bindings (ERRATA E-46), which is the
+        // order a sort of the whole rows gives: the bound slots are equal.
+        let unbound: Vec<usize> = (0..env.len()).filter(|&i| env[i].is_none()).collect();
+        let assembled: Result<WindowColumns, RunError> = 'assemble: {
+            let mut count = 0usize;
+            let mut cols: Vec<Vec<f64>> = vec![Vec::new(); if agg == "count" { 0 } else { args.len() }];
+            let mut held = cache.range(lo, t).peekable();
+            for &t1 in &times {
+                while held.peek().is_some_and(|(k, _)| *k < t1) {
+                    held.next();
+                }
+                let Some((_, bar)) = held.next_if(|(k, _)| *k == t1) else { continue };
+                let mut order: Vec<usize> = (0..bar.len()).collect();
+                if bar.len() > 1 {
+                    order.sort_by(|&a, &b| unbound.iter().map(|&s| bar[a].0[s].cmp(&bar[b].0[s])).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+                }
+                'rows: for i in order {
+                    let (row, vals) = &bar[i];
+                    if !late.is_empty() {
+                        let mut e = env.to_vec();
+                        for &s in &unbound {
+                            e[s] = row[s].clone();
+                        }
+                        for (l, _) in late {
+                            let holds = match l {
+                                Literal::Cmp { op, lhs, rhs, .. } => match (self.eval_expr(cr, lhs, &e), self.eval_expr(cr, rhs, &e)) {
+                                    (Ok(a), Ok(b)) => compare(*op, &a, &b),
+                                    (Err(err), _) | (_, Err(err)) => break 'assemble Err(err),
+                                },
+                                // As `step` takes an assignment to a bound variable.
+                                Literal::Assign { var, expr, .. } => match self.eval_expr(cr, expr, &e) {
+                                    Ok(v) => e[cr.slots[var]].as_ref().is_some_and(|x| values_equal(x, &v)),
+                                    Err(err) => break 'assemble Err(err),
+                                },
+                                _ => true,
+                            };
+                            if !holds {
+                                continue 'rows;
+                            }
                         }
                     }
-                    rows.push((e, vals.clone()));
+                    count += 1;
+                    for (c, v) in cols.iter_mut().zip(vals) {
+                        c.push(*v);
+                    }
                 }
             }
-        }
+            Ok((count, cols))
+        };
+        // A deferred test that cannot be evaluated is the whole solve's to
+        // decide, as are its rows.
+        let Ok((count, cols)) = assembled else {
+            self.windows.insert(key, cache);
+            return Ok(None);
+        };
         if self.recording {
             self.summary_rows.push(super::SummaryRow {
                 rule: key.rule,
@@ -1715,7 +2077,7 @@ impl<'p> Kernel<'p> {
                 outer: key.outer.clone(),
                 bar: t,
                 agg: agg.to_string(),
-                rows: rows.len(),
+                rows: count,
                 path: "cached rows",
                 shift: None,
                 sums: None,
@@ -1725,9 +2087,9 @@ impl<'p> Kernel<'p> {
         // Bars before the window's start will not be asked for again by a
         // later bar of the same group; a request for an earlier base time
         // simply solves them again.
-        cache = cache.split_off(&lo);
+        cache.forget_before(lo);
         self.windows.insert(key, cache);
-        Ok(Some(rows))
+        Ok(Some((count, cols)))
     }
 
     /// The rows of a `rows` window group: walking back from the base bar,
@@ -1809,7 +2171,7 @@ impl<'p> Kernel<'p> {
     /// anchored bars and their rows. `None` when the window cannot be served
     /// so (a bar with more than one row, a base time read by the rows, or a
     /// call earlier than the group's last): the general path answers then.
-    fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env) -> Result<Option<Columns>, RunError> {
+    fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<Columns>, RunError> {
         let plan = self.rows_plan(cr, lit, conj, args)?;
         if !plan.shareable || plan.prior || env[plan.wslot].is_some() {
             return Ok(None);
@@ -1850,7 +2212,7 @@ impl<'p> Kernel<'p> {
                     break;
                 }
                 for &t1 in &chunk {
-                    let mut e = env.clone();
+                    let mut e = env.to_vec();
                     e[plan.wslot] = Some(Value::Time(t1));
                     if plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e])?.is_empty() {
                         anchors += 1;
@@ -1874,7 +2236,7 @@ impl<'p> Kernel<'p> {
             Vec::new()
         };
         for t1 in fresh {
-            let mut e = env.clone();
+            let mut e = env.to_vec();
             e[plan.wslot] = Some(Value::Time(t1));
             let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
             let sols = self.solve(cr, &plan.order, vec![e])?;
@@ -1996,7 +2358,7 @@ impl<'p> Kernel<'p> {
     /// Whether a rows window's time variable is the lowest slot among the
     /// variables its conjunction binds (then rows in time order are rows in
     /// environment order). Judged once per rule and literal.
-    fn time_ordered(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], env: &Env) -> bool {
+    fn time_ordered(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], env: &[Option<Value>]) -> bool {
         let literal = self.literal_index(cr, lit);
         if let Some(&known) = self.time_ordered_memo.get(&(cr.idx, literal)) {
             return known;
@@ -2018,7 +2380,7 @@ impl<'p> Kernel<'p> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &Env, want_env: bool) -> Result<(WindowRows, bool), RunError> {
+    fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>], want_env: bool) -> Result<(WindowRows, bool), RunError> {
         let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
         let Some(Literal::Window {
             var: Term::Var(wvar, _),
@@ -2082,7 +2444,7 @@ impl<'p> Kernel<'p> {
                     break 'walk;
                 }
                 if !cache.contains_key(&t1) {
-                    let mut e = env.clone();
+                    let mut e = env.to_vec();
                     e[wslot] = Some(Value::Time(t1));
                     let is_row = anchor.is_empty() || !self.solve(cr, &anchor, vec![e.clone()]).map(|s| s.is_empty()).unwrap_or(true);
                     if is_row {
@@ -2146,7 +2508,7 @@ impl<'p> Kernel<'p> {
                     rows.push((Vec::new(), vals.clone()));
                     continue;
                 }
-                let mut e = env.clone();
+                let mut e = env.to_vec();
                 for (i, v) in row.iter().enumerate() {
                     if env[i].is_none() {
                         e[i] = v.clone();
@@ -2163,7 +2525,7 @@ impl<'p> Kernel<'p> {
             }
             match found.last() {
                 Some(&oldest) => {
-                    cache = cache.split_off(&oldest);
+                    cache.forget_before(oldest);
                     anchored = anchored.split_off(&oldest);
                 }
                 None => {
@@ -2177,13 +2539,13 @@ impl<'p> Kernel<'p> {
         Ok((rows, bare))
     }
 
-    fn arith(&self, cr: &CompiledRule, env: &Env, expr: &Expr, message: &str) -> RunError {
+    fn arith(&self, cr: &CompiledRule, env: &[Option<Value>], expr: &Expr, message: &str) -> RunError {
         self.arith_text(cr, env, expr.to_string(), message)
     }
 
     /// The partial-arithmetic halt of section 7, with the offending
     /// expression given as text (an aggregate names the whole aggregate).
-    fn arith_text(&self, cr: &CompiledRule, env: &Env, expr: String, message: &str) -> RunError {
+    fn arith_text(&self, cr: &CompiledRule, env: &[Option<Value>], expr: String, message: &str) -> RunError {
         let mut names: Vec<(&String, &usize)> = cr.slots.iter().collect();
         names.sort_by_key(|(_, s)| **s);
         let bindings: Vec<String> = names.iter().filter_map(|(n, s)| env[**s].as_ref().map(|v| format!("{}={}", n, self.show(v)))).collect();
@@ -2208,7 +2570,7 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    pub(crate) fn eval_expr(&mut self, cr: &CompiledRule, e: &Expr, env: &Env) -> Result<Value, RunError> {
+    pub(crate) fn eval_expr(&mut self, cr: &CompiledRule, e: &Expr, env: &[Option<Value>]) -> Result<Value, RunError> {
         match e {
             Expr::Var(v, _) => env[cr.slots[v]].clone().ok_or_else(|| RunError::Internal(format!("variable `{}` unbound in rule {}", v, cr.label))),
             Expr::Param(p, _) => self.param_value(cr, p),
@@ -2348,7 +2710,7 @@ impl<'p> Kernel<'p> {
     /// value outside it (a non-positive price, a negative volatility, a
     /// price outside the no-arbitrage bounds for `implied_vol`) leaves the
     /// instance stuck (⊥, V-5.1).
-    fn pricing(&self, cr: &CompiledRule, env: &Env, e: &Expr, f: &str, vals: &[Value]) -> Result<Value, RunError> {
+    fn pricing(&self, cr: &CompiledRule, env: &[Option<Value>], e: &Expr, f: &str, vals: &[Value]) -> Result<Value, RunError> {
         use crate::functions::{american, b76, bsm, iv, Right, Style};
         let num = |i: usize| {
             vals.get(i)
@@ -2553,6 +2915,17 @@ pub(crate) fn conj_order(conj: &[Literal]) -> Vec<Literal> {
         placed[i] = true;
     }
     out
+}
+
+/// An expression that evaluates on every binding of well-typed values: no
+/// division, no partial function (a test of it fails or holds, never sticks).
+fn total_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Var(..) | Expr::Param(..) | Expr::Lit(..) => true,
+        Expr::Neg(x, _) => total_expr(x),
+        Expr::Bin(op, a, b, _) => !matches!(op, BinOp::Div) && total_expr(a) && total_expr(b),
+        Expr::Call(..) => false,
+    }
 }
 
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {

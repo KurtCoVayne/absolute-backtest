@@ -8,8 +8,9 @@
 use abt_tests as common;
 
 use abt_kernel::check::Program;
-use abt_kernel::data::{synthetic_daily, synthetic_minute};
-use abt_kernel::kernel::{Dataset, ExecConfig, RunResult};
+use abt_kernel::data::{business_days, synthetic_daily, synthetic_minute};
+use abt_kernel::kernel::time::DAY;
+use abt_kernel::kernel::{Dataset, ExecConfig, RunResult, Value};
 use abt_tests::{run, run_socket};
 
 /// The names of the synthetic markets, in the order the acceptance test
@@ -197,4 +198,47 @@ fn a_group_is_keyed_by_the_outer_bindings_the_conjunction_reads() {
     // Two groups per name: fast and slow; each bar solved once per group.
     assert!(cached.stats.window_bars_solved <= 2 * 5 * 200, "{:?}", cached.stats);
     assert!(cached.stats.window_groups == 10, "{:?}", cached.stats);
+}
+
+#[test]
+fn a_test_of_the_base_time_excludes_cached_rows_as_the_whole_solve_does() {
+    // `Ex = T` (the dividends going ex at the bar, as the catalog's
+    // `dividend_at`) reads the window's base time: the rest of the
+    // conjunction is solved a bar at a time and cached, and the test is
+    // applied to the cached rows at each call. A row the test excludes can
+    // be stuck in the cached part (a division by zero); the whole solve
+    // excludes it (Kleene conjunction), and so does the cache.
+    let src = common::StrategyParts {
+        name: "ex_dates".into(),
+        needs: "need bars @1d   need actions, listing".into(),
+        params: "    unit : Quantity<Shares> = 1 shares\n    half : Price<USD> = 0.5 USD/share".into(),
+        rules:
+            "    rel paid(A: Equity, @T, N: Scalar)\n    paid(A, T, N) :- universe(A, T), N = sum(R) over (T0 in window[30d] min 1, dividend(A, T0, Ex, _, X), Ex = T, R = (X - half) / (X - half))."
+                .into(),
+        decides: "    decide(T, trade(A, Q)) :- paid(A, T, N), Q = N * unit.".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "ex_dates");
+    let days = business_days((2024, 1, 8), 5);
+    let mut ds = Dataset::new();
+    let x = ds.add_security("X", "X", days[0], None);
+    for t in &days {
+        common::add_bar(&mut ds, x, *t, 10.0, 1000.0);
+    }
+    ds.derive_tickers();
+    // Announced on the first day, 0.25 going ex on the third; on the
+    // second, 0.50 (the row stuck) going ex on the Saturday after the last,
+    // which is no bar.
+    let saturday = days[4] + DAY;
+    ds.add("dividend", vec![Value::Equity(x), Value::Time(days[0]), Value::Time(days[2]), Value::Time(days[4]), Value::Num(0.25)]);
+    ds.add("dividend", vec![Value::Equity(x), Value::Time(days[1]), Value::Time(saturday), Value::Time(saturday), Value::Num(0.5)]);
+    let cfg = ExecConfig {
+        pushdown: false,
+        ..ExecConfig::from_program(&p)
+    };
+    let cached = run(&p, &ds, cfg.clone()).unwrap();
+    let uncached = run(&p, &ds, ExecConfig { window_cache: false, ..cfg }).unwrap();
+    assert_eq!(digest(&cached), digest(&uncached));
+    assert_eq!(cached.decisions.iter().map(|d| d.t).collect::<Vec<_>>(), vec![days[2]]);
 }

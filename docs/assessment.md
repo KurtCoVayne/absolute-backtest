@@ -164,6 +164,36 @@ threads now takes 4.7 s (`running`), from 5.6 s, and 5.3 s (`two_pass`),
 from 6.1 s. Of that, 1.3 s is the answer's log segment, written at this
 VM's 190 MB/s for fresh pages, and about 1 s is the Parquet encoding.
 
+**At M-8 (Oct 17): the kernel's evaluator.** `momentum_12_1` over 100
+synthetic names and 2,520 days, in release on the same machine. The table
+gives the kernel's run time (`--timing`'s `run_s`) and the window bars it
+solves:
+
+| Kernel | Set evaluator | Tuple evaluator | Window bars solved |
+| --- | ---: | ---: | ---: |
+| M-8a | 43.2 s | 43.7 s | 62.7M |
+| `dividend_at`'s rows served from the window cache (ERRATA E-75) | 19.1 s | | 0.98M |
+| the cache read in order into the aggregate's columns, the literal analysed once | 15.0 s | 15.1 s | 0.98M |
+
+The cache was the gain. `dividend_at` tests `Ex = T` inside a year's
+window, which made every call's rows its own: each call solved its whole
+window again.
+
+The set evaluator itself gains little here. The time is in two places:
+
+- **The window's per-bar solves.** They are nested in the aggregation and
+  still one environment at a time (E-75).
+- **The stream's insertion into the stored tables.** Each tuple is checked
+  against its bar's whole block for a revision. That is 12% of the kernel's
+  time at 200 names, and it grows with the square of the names. The
+  columnar tables of M-8b remove it.
+
+The whole corpus was also timed: the 24 programs and the two books, each on
+its seeded market, the faster of three runs (`tests/eval_set.rs`). It
+takes 11.4 s with the tuple evaluator and 11.2 s with the set evaluator.
+Those runs are short, 0.26 s to 1.2 s each, and mostly data setup. The
+longest, `r8l`, takes 1.23 s against 1.05 s.
+
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:
 
