@@ -78,7 +78,7 @@ pub struct Library {
     pub rules: RulesBlock,
 }
 
-/// A class catalog, as `abt bundle env` generates it: the base resolution,
+/// A class catalog, as `abt data catalog --class C` renders it: the base resolution,
 /// the unit, the primitive signatures and the vocabularies.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Class {

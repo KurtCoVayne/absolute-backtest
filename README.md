@@ -14,21 +14,25 @@ bundle format needs.
 ```
 abt check corpus-v2/catalog corpus-v2/lib corpus-v2/strategies      # every strategy, against the catalog and the library
 abt run --strategy sma_crossover --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
-abt run --strategy sma_crossover --data ./market --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt data ingest --store ./store --adapter synthetic --class equity --days 500 corpus-v2/catalog corpus-v2/lib   # a synthetic market in a store
+abt run --strategy sma_crossover --data ./store --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt run --strategy sma_crossover --synthetic --all --fills corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt run --strategy sma_crossover --synthetic --param fast=30d --start 2022-06-01 --end 2022-09-30 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt query --strategy sma_crossover --text 'trace decide at 2022-04-07' --text 'why not above(E3, 2022-04-07)' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 abt query --strategy sma_crossover --text '? above(A, T), close(A, T, P), P > 50 USD/share at T = 2022-04-07' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
-abt synth --class equity --out ./market corpus-v2/catalog corpus-v2/lib   # write a synthetic market as Parquet
 ```
 
-Data is one Parquet file per primitive relation (`close.parquet`,
-`listed.parquet`, ...), with columns named after the signature's arguments,
-in a loose directory (`--data DIR`) or in a bundle (`--bundle DIR`, below).
-Timestamps are bar close instants: a 09:30 to 09:31 minute bar is labelled
-`09:31`, the last bar of a session `16:00`, and a daily bar by its date.
-`abt synth` writes this convention; minute data labelled by open time
-silently misaligns every bucket.
+A run reads its data from a store: `--data STORE` serves a store directory
+in the process (the run's outputs are written to it), `--data SOCKET` reads a
+running `abt data serve`, and `--synthetic` generates a market in memory.
+Data enters a store through `abt data ingest`: a synthetic market, an
+imported bundle or directory of Parquet files (one file per primitive
+relation, `close.parquet`, `listed.parquet`, ..., with columns named after
+the signature's arguments; below), or a vendor's files. Timestamps are bar
+close instants: a 09:30 to 09:31 minute bar is labelled `09:31`, the last bar
+of a session `16:00`, and a daily bar by its date. The synthetic adapter
+writes this convention; minute data labelled by open time silently
+misaligns every bucket.
 
 ## Layout
 
@@ -632,7 +636,7 @@ or a claim made there is still counted as a trial.
 
 ```
 abt check <files...>
-abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
         [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
@@ -641,10 +645,10 @@ abt show --strategy NAME <files...>
 abt graph --strategy NAME <files...>
 abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
 abt rewrite-log --strategy NAME [--json] <files...>
-abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
-abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
-abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
-abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>
+abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>
+abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>
 abt metrics --run RUN (--data SOCKET | --store DIR) [--json]
 abt plan check|run|report|drop PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
 abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
@@ -661,9 +665,6 @@ abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]
-abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
-abt bundle build (--from DIR | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>
-abt bundle test DIR <files...>
 abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
 ```
 
@@ -671,8 +672,9 @@ The executor is the program's `execution` block and the reporting its
 `report` block: no option sets a cost, a policy, a price relation or the
 periods. `abt` with no arguments prints the usage with every option
 explained. `show`, `graph`, the coverage report every `run` prints,
-`query`, `--ledger`, the state tables, `why-not`, `materialise`, `explain
---derivation` and the compiler's `ir`, `rewrite-log`, `plan` and `verify`
+`query` (whose `why`, `why not` and `trace` replace the first formulation's
+`explain`, `why-not` and `materialise`), `--ledger`, the state tables and
+the compiler's `ir`, `rewrite-log`, `plan` and `verify`
 are described in `docs/observability.md`; the compiler itself in
 `docs/compiler-design.md`.
 
@@ -712,50 +714,45 @@ Every option value is validated: `--days abc`, `--symbols ""` or `--at
 yesterday` are errors naming the option, never a silent default, and an
 unknown `--option` prints the usage. Exit codes: 0 success; 1 the strategy
 does not check, the run was refused or halted, or the usage is wrong; 2 an
-input could not be read (a source file, a data directory, a bundle that
-has not passed its tests).
+input could not be read (a source file, a store, a data service's socket),
+or a store's data was refused (a binding without the attributes the
+program requires).
 
-## Bundles
+## Bundles and Parquet directories, imported
 
-`docs/data-bundle.md` (sections 2 and 3) makes data a versioned bundle the
-system ships. A bundle is a directory: `manifest.json` (the class, the
-version, the bundle date, every relation with its signature, resolution,
-availability convention, row count and partitions, and the bundle tests'
-report once they pass), `securities.parquet` (the security table:
-`id,ticker,from,to`, `to` null while the ticker is still carried, and
+A bundle (`docs/data-bundle.md`, sections 2 and 3) is the first formulation's
+data directory, and since M-9 an import format: `abt data ingest --adapter
+bundle_v2 --from DIR --class CLASS` reads it, or a directory of Parquet
+files, into a store, and a run reads the store. A bundle is `manifest.json`
+(the class, the version, the bundle date, every relation with its signature,
+resolution, availability convention, row count and partitions, and the
+bundle tests' report once they passed), `securities.parquet` (the security
+table: `id,ticker,from,to`, `to` null while the ticker is still carried, and
 optionally the contract columns `multiplier`, `asset_class` and
 `commission_per_contract`) and `log/<relation>/<YYYY-MM>.parquet`,
 append-only Parquet partitions of each primitive relation by the month of
 its temporal key. With a security table every equity field is a security
-id and the `ticker` relation is derived from the table; a ticker literal in
-a program or on the command line resolves through it to the security
-carrying that ticker at the bundle date. A loose directory (`--data DIR`)
-is the same files without the log: one `<relation>.parquet` per primitive
-of the program's class, a relation being a function of its identity
-columns (two rows for one identity with different outputs are an error
-naming both rows; an identical row is dropped), a missing or empty file
-leaving the relation empty with a `note:`.
+id and the `ticker` relation is derived from the table. A directory of
+Parquet files is the same files without the log: one `<relation>.parquet`
+per primitive of the program's class, a relation being a function of its
+identity columns (two rows for one identity with different outputs are an
+error naming both rows; an identical row is dropped), a missing or empty
+file leaving the relation empty with a `note:`.
 
 ```
-abt bundle build --synthetic --class equity --version 2026.10 --out ./bundle corpus-v2/catalog corpus-v2/lib
-abt bundle build --from ./market --class equity --version 2026.10 --out ./bundle corpus-v2/catalog corpus-v2/lib
-abt bundle test ./bundle corpus-v2/catalog corpus-v2/lib
-abt run --strategy sma_crossover --bundle ./bundle corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt data ingest --store ./store --adapter bundle_v2 --from ./bundle --class equity corpus-v2/catalog corpus-v2/lib
+abt data ingest --store ./reviewed --adapter bundle_v2 --from ./bundle --class equity --attributes reviewed=complete corpus-v2/catalog corpus-v2/lib
+abt run --strategy sma_crossover --data ./store corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 ```
 
-`abt bundle test` runs the six bundle tests the data can answer (identity;
-every temporal key a bar label; positive prices; action reconciliation,
-where a close ratio outside [0.6, 1.67] between consecutive bars must be a
-split that day and every split must show one; delisting coverage, where a
-name that leaves the universe before the last bar has a `delisted` record;
-membership, where a member is in the universe that bar) and records a pass
-in the manifest; a bundle that passed is `reviewed = complete` in the data
-layer. A program's `data` block says `require reviewed`, so `abt run
---bundle` refuses a bundle that has not passed (exit 2, naming the version
-and what it lacks); `allow unreviewed` runs on it with a warning. `abt synth`,
-`abt bundle build` and `abt bundle test` need no strategy: they work from a
-program whose demand covers the class whole (`check::class_program`). The
-crate depends on `serde`, `serde_json`, `arrow` and `parquet` for all this.
+A bundle whose tests passed imports `reviewed = complete`; one that did not
+imports unreviewed, unless a reviewer says otherwise with `--attributes`. A
+program's `data` block says `require reviewed`, so a run on an unreviewed
+store is refused (exit 2, naming the version and what it lacks); `allow
+unreviewed` runs on it with a warning. The bundle tests' checks of market
+facts (action reconciliation, delisting coverage, membership) are the
+kernel's preconditions, run at every run's start (ERRATA E-50), and the
+query layer's `actions` feed statistic.
 
 A vendor's data enters a store through the data layer's adapters (D-7.7,
 `crates/abt-data/src/adapters/`, ERRATA E-68), named by `abt data ingest

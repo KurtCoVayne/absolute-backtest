@@ -577,10 +577,11 @@ pub fn check_workspace(ws: &Workspace) -> Vec<Diagnostic> {
 
 /// Check one strategy; returns the resolved program when it has no errors.
 /// A program whose demand covers a class whole: every relation the class
-/// declares, every list, and the series catalog, for what writes or tests
-/// a bundle of the class rather than one strategy's slice of it (`abt
-/// synth`, `abt bundle build`, `abt bundle test`). The program decides
-/// nothing of consequence (`hold(A, 0)` over the universe).
+/// declares, every list, and the series catalog, for what generates,
+/// imports or tests a class's data rather than one strategy's slice of it
+/// (`abt data ingest --adapter synthetic|bundle_v2`, the bundle module).
+/// The program decides nothing of consequence (`hold(A, 0)` over the
+/// universe).
 pub fn class_program(ws: &Workspace, class: &str) -> Result<Program, Vec<Diagnostic>> {
     class_program_at(ws, class, None)
 }

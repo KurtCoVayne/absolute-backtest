@@ -71,11 +71,20 @@ pub fn provider(ds: &Dataset, prog: &Program) -> Result<Connector, String> {
     Ok(Arc::new(move || Ok(inproc(&svc))))
 }
 
-/// Registers with the kernel the provider of in-process data services, and
-/// the query layer's metrics as what `abt run` prints a run's returns with
-/// (E-66); idempotent.
+/// The provider the kernel reaches a store directory through: a service in
+/// this process over it, its runs' outputs written to it.
+pub fn store_provider(dir: &std::path::Path) -> Result<Connector, String> {
+    let store = Store::open(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    let svc = DataService::new(store);
+    Ok(Arc::new(move || Ok(inproc(&svc))))
+}
+
+/// Registers with the kernel the providers of in-process data services
+/// (over a dataset, over a store directory), and the query layer's metrics
+/// as what `abt run` prints a run's returns with (E-66); idempotent.
 pub fn install() {
     abt_kernel::kernel::install_provider(Box::new(provider));
+    abt_kernel::kernel::install_store_provider(Box::new(store_provider));
     abt_kernel::cli::install_reporter(Box::new(|conn, run, calendar| abt_query::cli::run_lines(conn, run, calendar).map(|r| (r.lines, r.returns))));
 }
 

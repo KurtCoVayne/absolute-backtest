@@ -140,10 +140,11 @@ pub fn classes() -> Vec<ClassDef> {
         ClassDef {
             name: "equity",
             header: vec![
-                "The equity class, as `abt bundle env` generates it from a bundle's manifest",
-                "(docs/language-v2.md, 3.2 and 3.6): the primitives at the base calendar,",
-                "the catalog relations, and the vocabularies. A program never names this",
-                "file; its `data` block names what it needs and the kernel resolves it.",
+                "The equity class, as `abt data catalog --class equity` renders it from the",
+                "registry (docs/language-v2.md, 3.2 and 3.6): the primitives at the base",
+                "calendar, the catalog relations, and the vocabularies. A program never",
+                "names this file; its `data` block names what it needs and the kernel",
+                "resolves it.",
             ],
             base: Some(("1d", Some("the finest resolution this bundle holds; a @1m bundle derives @1d by the bar views"))),
             unit: Some("shares"),

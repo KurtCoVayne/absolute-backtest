@@ -114,11 +114,6 @@ fn a_trace_names_a_library_relations_rules_by_their_labels() {
     let out = query_trailing_stop("trace nope at 2022-04-14", &[]);
     let (_, stderr) = text(&out);
     assert!(!out.status.success() && stderr.contains("`nope`"), "stderr: {}", stderr);
-
-    let out = abt(&["explain", "--strategy", "trailing_stop"]);
-    let (_, stderr) = text(&out);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(stderr.contains("abt query") && stderr.contains("why not"), "stderr: {}", stderr);
 }
 
 /// trend-04: `for A = KEY` binds a variable of the query to one instrument;
@@ -168,6 +163,31 @@ fn delisted_market(tag: &str) -> PathBuf {
     dir
 }
 
+/// A directory of Parquet files imported into a store beside it, as a run
+/// reads its data (`abt data ingest --adapter bundle_v2`); the store.
+fn imported(dir: &std::path::Path, extra: &[&str]) -> PathBuf {
+    let store = dir.join("store");
+    let _ = std::fs::remove_dir_all(&store);
+    let (catalog, lib) = (corpus("catalog"), corpus("lib"));
+    let mut args = vec![
+        "data",
+        "ingest",
+        "--store",
+        store.to_str().unwrap(),
+        "--adapter",
+        "bundle_v2",
+        "--from",
+        dir.to_str().unwrap(),
+        "--class",
+        "equity",
+    ];
+    args.extend_from_slice(extra);
+    args.extend([catalog.to_str().unwrap(), lib.to_str().unwrap()]);
+    let out = abt(&args);
+    assert!(out.status.success(), "{}\n{}", text(&out).0, text(&out).1);
+    store
+}
+
 /// portfolio-04, adv-09, trend-14: `abt run` lists every dropped decision
 /// with the kernel's reason, including a last-bar decision that has no next
 /// bar, so that decisions = fills + dropped is visible; `--quiet` keeps the
@@ -175,6 +195,7 @@ fn delisted_market(tag: &str) -> PathBuf {
 #[test]
 fn run_lists_dropped_decisions_with_their_reasons() {
     let dir = delisted_market("dropped");
+    let store = imported(&dir, &[]);
     let (catalog, lib) = (corpus("catalog"), corpus("lib"));
     let strategy = dir.join("up_down.dsl");
     let args = [
@@ -182,7 +203,7 @@ fn run_lists_dropped_decisions_with_their_reasons() {
         "--strategy",
         "up_down",
         "--data",
-        dir.to_str().unwrap(),
+        store.to_str().unwrap(),
         catalog.to_str().unwrap(),
         lib.to_str().unwrap(),
         strategy.to_str().unwrap(),
@@ -417,24 +438,32 @@ fn nav_writes_the_book_per_bar_and_reg_t_is_a_leverage_value() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Data-bundle doc, sections 2 and 3: build a bundle of the equity class
-/// from a synthetic catalog market, run its tests, and run a strategy on it;
-/// an untested bundle is unreviewed (K-2.1), refused under `require
-/// reviewed` and admitted, warned, under `allow unreviewed`.
+/// A bundle is an import (M-9): `abt data ingest --adapter bundle_v2` reads
+/// it into a store, and a run reads the store. A bundle whose tests have not
+/// passed imports unreviewed (K-2.1): refused under `require reviewed`,
+/// admitted and warned under `allow unreviewed`, and reviewed when a
+/// reviewer says so (`--attributes reviewed=complete`).
 #[test]
-fn bundle_build_test_and_run() {
+fn an_imported_bundle_runs_under_its_review() {
     let dir = scratch("bundle");
     let _ = std::fs::remove_dir_all(&dir);
-    let out = dir.to_string_lossy().to_string();
+    let class = abt_kernel::check::class_program(&common::base_workspace(), "equity").unwrap_or_else(|d| panic!("{}", common::text(&d)));
+    let ds = abt_kernel::data::synthetic_daily(&["AAA", "XYZ", "BBB", "SPY", "DDD"], (2022, 1, 3), 150, 7);
+    let bundle = dir.join("bundle");
+    abt_kernel::bundle::write_bundle(&class, &ds, &bundle, "equity", "2026.10").unwrap();
     let files = strategy_files("total_return_momentum");
-    let mut args = vec!["bundle", "build", "--synthetic", "--days", "150", "--class", "equity", "--version", "2026.10", "--out", &out];
-    args.extend(files.iter().map(|s| s.as_str()));
-    let built = abt(&args);
-    assert_eq!(built.status.code(), Some(0), "{}\n{}", text(&built).0, text(&built).1);
-    assert!(text(&built).0.contains("wrote bundle `equity@2026.10`"), "{}", text(&built).0);
-    assert!(dir.join("manifest.json").exists() && dir.join("log").join("close").exists());
+    let import = |tag: &str, extra: &[&str]| -> String {
+        let store = dir.join(tag).to_string_lossy().to_string();
+        let mut args = vec!["data", "ingest", "--store", &store, "--adapter", "bundle_v2", "--from", bundle.to_str().unwrap(), "--class", "equity"];
+        args.extend_from_slice(extra);
+        args.extend(files[..2].iter().map(|s| s.as_str()));
+        let out = abt(&args);
+        assert!(out.status.success(), "{}\n{}", text(&out).0, text(&out).1);
+        store
+    };
+    let untested = import("untested", &[]);
     // Untested: refused under `require reviewed`, naming what is missing.
-    let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet"];
+    let mut args = vec!["run", "--strategy", "total_return_momentum", "--data", &untested, "--quiet"];
     args.extend(files.iter().map(|s| s.as_str()));
     let refused = abt(&args);
     assert_eq!(refused.status.code(), Some(2));
@@ -445,20 +474,22 @@ fn bundle_build_test_and_run() {
     let unreviewed = dir.join("unreviewed.dsl");
     std::fs::write(&unreviewed, src).unwrap();
     let unreviewed = unreviewed.to_string_lossy().to_string();
-    let ran = abt(&["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet", &files[0], &files[1], &unreviewed]);
+    let ran = abt(&["run", "--strategy", "total_return_momentum", "--data", &untested, "--quiet", &files[0], &files[1], &unreviewed]);
     assert_eq!(ran.status.code(), Some(0), "{}", text(&ran).1);
     assert!(text(&ran).0.contains("warning (unreviewed data)"), "{}", text(&ran).0);
-    // Tested: recorded, then runs without the flag.
-    let mut args = vec!["bundle", "test", &out];
-    args.extend(files.iter().map(|s| s.as_str()));
-    let tested = abt(&args);
-    assert_eq!(tested.status.code(), Some(0), "{}\n{}", text(&tested).0, text(&tested).1);
-    assert!(text(&tested).0.contains("recorded in the manifest"), "{}", text(&tested).0);
-    let mut args = vec!["run", "--strategy", "total_return_momentum", "--bundle", &out, "--quiet"];
+    // A reviewer's statement: the run needs no flag.
+    let reviewed = import("reviewed", &["--attributes", "reviewed=complete"]);
+    let mut args = vec!["run", "--strategy", "total_return_momentum", "--data", &reviewed, "--quiet"];
     args.extend(files.iter().map(|s| s.as_str()));
     let ran = abt(&args);
     assert_eq!(ran.status.code(), Some(0), "{}", text(&ran).1);
     assert!(text(&ran).0.contains("decisions:"), "{}", text(&ran).0);
+    // A bundle is not read by a run itself.
+    let mut args = vec!["run", "--strategy", "total_return_momentum", "--data", bundle.to_str().unwrap(), "--quiet"];
+    args.extend(files.iter().map(|s| s.as_str()));
+    let refused = abt(&args);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(text(&refused).1.contains("not a store") && text(&refused).1.contains("abt data ingest"), "{}", text(&refused).1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -493,12 +524,13 @@ fn checkpoints_are_written_and_a_resumed_run_matches() {
     let final_line = |o: &Output| text(o).0.lines().find(|l| l.starts_with("final cash")).unwrap_or_default().to_string();
     assert!(final_line(&full).contains("positions: E"), "{}", final_line(&full));
     assert_eq!(final_line(&full), final_line(&resumed));
-    // The batch kernel is gone: every run is the fold over the stream.
+    // The batch kernel is gone (M-2), and so is the option that chose it
+    // (M-9): every run is the fold over the stream.
     let mut args = vec!["run", "--strategy", "sma_crossover", "--synthetic", "--days", "130", "--quiet", "--kernel", "batch"];
     args.extend(files.iter().map(|s| s.as_str()));
     let gone = abt(&args);
-    assert_eq!(gone.status.code(), Some(2));
-    assert!(text(&gone).1.contains("the batch kernel is gone"), "{}", text(&gone).1);
+    assert_eq!(gone.status.code(), Some(1));
+    assert!(text(&gone).1.contains("unknown option") && text(&gone).1.contains("--kernel"), "{}", text(&gone).1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

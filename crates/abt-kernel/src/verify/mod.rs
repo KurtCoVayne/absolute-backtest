@@ -331,8 +331,7 @@ pub fn verify(inputs: &VerifyInputs, compiled: &mut Compiled) -> Report {
         }
         None => {
             let mut t5 = TierReport::new(5);
-            t5.notes
-                .push("no binding: name --data DIR, --bundle DIR or --synthetic to run the written and the optimised plan".into());
+            t5.notes.push("no binding: name --data STORE|SOCKET or --synthetic to run the written and the optimised plan".into());
             report.tiers.push(t5);
             if inputs.max_tier >= 6 {
                 let mut t6 = TierReport::new(6);

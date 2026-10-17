@@ -5,7 +5,7 @@ defines it, in five parts.
 
 | Directory | Contents |
 | --- | --- |
-| `catalog/` | The classes a program is written against, as `abt bundle env` would generate them from a bundle's manifest: `equity`, `future`, `series`. A program never names them; its `data` block names what it needs. |
+| `catalog/` | The classes a program is written against, as `abt data catalog --class C` renders them from the registry: `equity`, `future`, `series`. A program never names them; its `data` block names what it needs. |
 | `lib/` | The standard library of section 7, one module a file: `calendar`, `catalog`, `stat`, `bars`, `xsec`, `state`, `book`, and the execution presets `equity_default`, `book_fixed_base`, `futures_fixed_base`. |
 | `strategies/` | The 23 strategies of `corpus/` rewritten, and `scale_in`, whose rules aggregate their own past. |
 | `company/` | MW14 and R8L, the programs of section 9, which reproduces them verbatim. |

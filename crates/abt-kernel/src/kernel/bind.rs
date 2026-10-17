@@ -287,6 +287,25 @@ pub fn connect_dataset(ds: &Dataset, prog: &Program) -> Result<DataClient, RunEr
     DataClient::connect_with(p(ds, prog).map_err(RunError::Config)?)
 }
 
+/// Who serves a store directory in this process (`abt run --data DIR`):
+/// the front, which links the data layer.
+pub type StoreProvider = dyn Fn(&std::path::Path) -> Result<Connector, String> + Send + Sync;
+
+static STORE_PROVIDER: OnceLock<Box<StoreProvider>> = OnceLock::new();
+
+/// Registers the store provider; the first registration wins.
+pub fn install_store_provider(p: Box<StoreProvider>) -> bool {
+    STORE_PROVIDER.set(p).is_ok()
+}
+
+/// A client of a data service over the store at `dir`, in this process.
+pub fn connect_store(dir: &std::path::Path) -> Result<DataClient, RunError> {
+    let p = STORE_PROVIDER
+        .get()
+        .ok_or_else(|| RunError::Config("no data service: no in-process service over a store is registered (abt::install, or --data SOCKET)".into()))?;
+    DataClient::connect_with(p(dir).map_err(RunError::Config)?)
+}
+
 /// The short name of a stored relation (`equity.close` is `close`).
 fn short(stored: &str) -> &str {
     stored.rsplit_once('.').map(|(_, s)| s).unwrap_or(stored)

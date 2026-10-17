@@ -4,8 +4,12 @@
 //! with its availability convention and partitions; `securities.parquet` is the
 //! security table; `log/<relation>/<YYYY-MM>.parquet` are append-only
 //! partitions of the primitive facts by the month of their temporal key;
-//! `snapshots/` is reserved for the fold kernel's checkpoints. A bundle whose
-//! tests have not passed is not run.
+//! `snapshots/` is reserved for the fold kernel's checkpoints.
+//!
+//! A bundle is an import format since M-9: `abt data ingest --adapter
+//! bundle_v2` reads one into a store, reviewed when its tests passed
+//! (`test_bundle`) or a reviewer says so, and a run reads the store. The
+//! bundle tests themselves are the kernel's preconditions (ERRATA E-50).
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -288,7 +292,7 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
 fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, String> {
     if m.format < FORMAT {
         return Err(format!(
-            "bundle {} is layout version {} (text security table); this abt reads version {}: rebuild it with `abt bundle build`",
+            "bundle {} is layout version {} (text security table); this abt reads version {}: an older abt reads it",
             dir.display(),
             m.format,
             FORMAT

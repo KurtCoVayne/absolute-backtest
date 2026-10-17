@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A synthetic market in the first formulation's `equities_1w` layout (kept for
-the record; `abt synth --class equity` writes the catalog's layout; one bar per
+the record; `abt data ingest --adapter synthetic --class equity` makes a market
+of the catalog's layout in a store; one bar per
 week keyed at the week's Friday), for running the MW14 book and the usability
 experiment without the company's data. Nothing here is real; the shapes are:
 

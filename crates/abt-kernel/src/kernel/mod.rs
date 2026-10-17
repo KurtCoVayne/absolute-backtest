@@ -29,7 +29,7 @@ pub mod outputs;
 pub mod pushdown;
 pub mod service;
 pub use crate::sim::{Executor, SimExecutor};
-pub use bind::{bind, connect_dataset, install_provider, Bound, Connector, DataClient};
+pub use bind::{bind, connect_dataset, connect_store, install_provider, install_store_provider, Bound, Connector, DataClient};
 pub use events::{Book, EventKind, OrderId, RunEvent};
 pub use fold::{Checkpoint, CheckpointEvery, Event, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};

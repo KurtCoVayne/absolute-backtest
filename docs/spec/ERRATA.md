@@ -838,6 +838,27 @@ batch driver agree on every corpus program. Each bless since:
   - **Typed columns (3.1, E-76),** bump arenas per barrier, and
     copy-on-write checkpoints.
 
+- **E-78 (M-9; the first formulation's commands retired).**
+  - **Gone:**
+    - `abt synth`, now `abt data ingest --adapter synthetic`;
+    - `abt bundle build` and `abt bundle test`, the bundle now an import
+      format, `abt data ingest --adapter bundle_v2`;
+    - the `explain`, `why-not` and `materialise` stubs, the query language
+      having replaced them at M-4;
+    - `--kernel`.
+  - **A run reads a store.** `--data STORE` serves a store directory in the
+    process, writing the run's outputs there, and `--data SOCKET` reads a
+    data service. A bundle or a directory of Parquet files given to
+    `--data` is refused, naming the import that reads it; `--bundle` is
+    gone. `--verify-causality` re-runs the program over the run's own data
+    service, its stream truncated at each sampled bar.
+  - **Kept as libraries.** The bundle module and the Parquet loaders are
+    what `bundle_v2` imports with. `test_bundle` remains the review of a
+    legacy bundle: one that passed imports `reviewed = complete`.
+  - **Not deleted.** `ExecConfig` is the kernel's form of the resolved
+    `execution` block. No option sets it, which is what M-9 asks; deleting
+    the type would rename it, not retire anything.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

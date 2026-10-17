@@ -3,10 +3,9 @@
 //! `execution` and `report` blocks (no option sets a cost, a policy or the
 //! periods); `query` (the query language, V-8), `show`, `graph` and `table`
 //! read the model; `ir`, `plan`, `rewrite-log` and `verify`
-//! print the compiler's stages; `synth` and `bundle` manage data and
-//! bundles. A run's metrics, plans and the briefs harness are the query
-//! layer's commands, which the front serves. `usage()` holds the exact
-//! grammar of every command.
+//! print the compiler's stages. The data layer's commands (`abt data`) and
+//! the query layer's (a run's metrics, plans, the briefs harness) are the
+//! front's. `usage()` holds the exact grammar of every command.
 // `RunError` carries the rule, the decision and the message of a halt; the
 // library allows the same lint for the same reason.
 #![allow(clippy::result_large_err)]
@@ -39,7 +38,7 @@ const MULTI: [&str; 2] = ["text", "param"];
 /// `report` block (language-v2, 4.3 and 4.5); what remains here is what
 /// describes the run itself (its data, its window, the bundle date), the
 /// compiler's choices that keep the result, and the commands' arguments.
-const OPTIONS: [&str; 41] = [
+const OPTIONS: [&str; 35] = [
     "strategy",
     "evaluator",
     "mode",
@@ -66,17 +65,11 @@ const OPTIONS: [&str; 41] = [
     "checkpoint-every",
     "checkpoint-dir",
     "resume",
-    "kernel",
-    "bundle",
-    "from",
-    "version",
     "as-of",
     "param",
     "data",
     "text",
     "at",
-    "class",
-    "base",
     "out",
     "days",
     "symbols",
@@ -129,9 +122,17 @@ fn is_socket(p: &Path) -> bool {
     std::fs::metadata(p).map(|m| m.file_type().is_socket()).unwrap_or(false)
 }
 
-/// The data service a run reads: the one at `--data SOCKET`, else one in
-/// this process holding the dataset the options loaded (E-36).
+/// The data service a run reads: the one at `--data SOCKET`, one in this
+/// process over the store at `--data DIR`, else one in this process holding
+/// the dataset the options loaded (E-36).
 static DATA_SOCKET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static DATA_STORE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Whether the run's data service keeps what it writes: a service at a
+/// socket or over a store directory, not one over a dataset in memory.
+fn lasting_store() -> bool {
+    DATA_SOCKET.get().is_some() || DATA_STORE.get().is_some()
+}
 
 fn data_client(prog: &crate::check::Program, dataset: &crate::kernel::Dataset) -> Result<crate::kernel::DataClient, RunError> {
     match DATA_SOCKET.get() {
@@ -141,7 +142,10 @@ fn data_client(prog: &crate::check::Program, dataset: &crate::kernel::Dataset) -
                 abt_wire::transport::Connection::connect(&path).map_err(|e| format!("--data {}: {}", path.display(), e))
             }))
         }
-        None => crate::kernel::connect_dataset(dataset, prog),
+        None => match DATA_STORE.get() {
+            Some(dir) => crate::kernel::connect_store(dir),
+            None => crate::kernel::connect_dataset(dataset, prog),
+        },
     }
 }
 
@@ -196,21 +200,6 @@ fn run_keeping(
             ));
         }
         Ok(notes)
-    })
-}
-
-/// The program that covers a class whole (every relation, list and series
-/// the catalog declares), for the bundle and synthetic-market commands.
-fn class_program_or_exit(ws: &Workspace, class: &str, base: Option<crate::Resolution>) -> crate::check::Program {
-    crate::check::class_program_at(ws, class, base).unwrap_or_else(|diags| {
-        for d in &diags {
-            eprintln!("{}", d);
-        }
-        eprintln!(
-            "the catalog's class `{}` does not check as a program; pass the class file (and the standard library) among the files",
-            class
-        );
-        exit(1)
     })
 }
 
@@ -442,7 +431,7 @@ pub fn install_reporter(r: Box<Reporter>) -> bool {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data DIR|SOCKET | --bundle DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--mode replay-sim|live-sim --session S] [--replay-of RUN [--paced]] [--deadline SECONDS|none]\n          [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--memory-budget BYTES] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt hash --strategy NAME [--json | --show] <files...>   (H(P): BLAKE3 over the program's normal form without its report block, the program's identity; --json adds the normal form as source, --show prints the bytes hashed: the RFC 8785 form of the normal form's hash view)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the compiler's plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt contract --strategy NAME [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the contract derived from the program, K-3: preconditions, invariants, postconditions and limits with their source, discharge and policy; with data, the run's status of each)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data DIR|SOCKET | --bundle DIR | --synthetic ...) <files...>\n          (the query language over the run, V-8: `? BODY at T = DATE | at T | over D1 .. D2 [for A = KEY]` (a rule body checked with the program, its solutions at the bars), `why R(...)` (the derivation down to supplied tuples), `why not R(A, T) [in written order]`, `trace R at DATE` (every instance attempted, fired or the literal that excluded it), `coverage [over D1 .. D2]`, `show program|plan [R]|schedule|calendars|contract`, `ledger R into NAME` (written through --data SOCKET as kernel.<run>.NAME))\n  abt synth --class CLASS --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>   (a synthetic market of the class, as Parquet; the catalog's class file suffices)\n  abt bundle build (--from DIR | --synthetic ...) --class CLASS [--base @1m] --version V --out DIR <files...>   (a vendor's data is ingested into a store by `abt data ingest --adapter norgate|databento`)\n  abt bundle test DIR <files...>\n  abt plan|metrics|test|claim|feed|activation|lineage|dispute|briefs ...   (the query layer's commands: plans and their trials, a run's metrics, statistical tests and claims, feed and activation statistics, lineages, the briefs harness; each prints its usage)\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --memory-budget B     the memory the derived state may take (K-4.6; default half the machine's): a program whose state bound exceeds it is refused before its first barrier\n  --no-pushdown         evaluate every aggregate in the kernel rather than having the data layer answer the eligible ones (K-4.5); a test switch: both give the same bits\n  --evaluator E         set (the default: a rule's body solved over blocks of bindings) or tuple (one environment at a time, M-8); a test switch: both give the same bits\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --mode MODE           replay-sim (the default: the data layer's replay of what it holds) or live-sim (--session S: a live session the data service at --data SOCKET records, its barriers emitted as its clock passes them, K-6.2)\n  --replay-of RUN       replay a live-sim run's recorded stream (its session's rows and the barriers its stream emitted, D-5.5); --paced at the data layer's clock's pace\n  --deadline S          how long after its barrier a live decision bar may be evaluated before its decisions are late (K-6.3; default one bar of the decision calendar; `none` measures nothing): the execution block's `late send|reject` decides what they become\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars: over --data SOCKET as a cache object of the data layer, its key printed; in process into --checkpoint-dir DIR as <bar>.json\n  --resume KEY|FILE     continue from a checkpoint (a cache key over --data SOCKET, else a file) of the same program, binding and window (the stream resumes at its cursor)\n  --bundle DIR          run on a bundle (manifest.json, securities.parquet, log/<relation>/<YYYY-MM>.parquet); one whose tests have not passed is unreviewed, refused under `require reviewed` and warned under `allow unreviewed`\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --rel RELATION        the relation `table` reads; --symbol SYM keeps one instrument's tuples\n  --text QUERY          a query of `abt query` (repeatable: one run answers them all)\n  --base RES            the bars a built bundle holds (default: the class's base)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics (pushed_answers: the aggregates the data layer answered)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--mode replay-sim|live-sim --session S] [--replay-of RUN [--paced]] [--deadline SECONDS|none]\n          [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--memory-budget BYTES] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt hash --strategy NAME [--json | --show] <files...>   (H(P): BLAKE3 over the program's normal form without its report block, the program's identity; --json adds the normal form as source, --show prints the bytes hashed: the RFC 8785 form of the normal form's hash view)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the compiler's plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt contract --strategy NAME [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the contract derived from the program, K-3: preconditions, invariants, postconditions and limits with their source, discharge and policy; with data, the run's status of each)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>\n          (the query language over the run, V-8: `? BODY at T = DATE | at T | over D1 .. D2 [for A = KEY]` (a rule body checked with the program, its solutions at the bars), `why R(...)` (the derivation down to supplied tuples), `why not R(A, T) [in written order]`, `trace R at DATE` (every instance attempted, fired or the literal that excluded it), `coverage [over D1 .. D2]`, `show program|plan [R]|schedule|calendars|contract`, `ledger R into NAME` (written through --data SOCKET as kernel.<run>.NAME))\n  abt data ...   (the data layer's commands: serve, ingest (a synthetic market, an imported bundle, a vendor's files), catalog, resolve, query, stats, pin, gc; each prints its usage)\n  abt plan|metrics|test|claim|feed|activation|lineage|dispute|briefs ...   (the query layer's commands: plans and their trials, a run's metrics, statistical tests and claims, feed and activation statistics, lineages, the briefs harness; each prints its usage)\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --memory-budget B     the memory the derived state may take (K-4.6; default half the machine's): a program whose state bound exceeds it is refused before its first barrier\n  --no-pushdown         evaluate every aggregate in the kernel rather than having the data layer answer the eligible ones (K-4.5); a test switch: both give the same bits\n  --evaluator E         set (the default: a rule's body solved over blocks of bindings) or tuple (one environment at a time, M-8); a test switch: both give the same bits\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --mode MODE           replay-sim (the default: the data layer's replay of what it holds) or live-sim (--session S: a live session the data service at --data SOCKET records, its barriers emitted as its clock passes them, K-6.2)\n  --replay-of RUN       replay a live-sim run's recorded stream (its session's rows and the barriers its stream emitted, D-5.5); --paced at the data layer's clock's pace\n  --deadline S          how long after its barrier a live decision bar may be evaluated before its decisions are late (K-6.3; default one bar of the decision calendar; `none` measures nothing): the execution block's `late send|reject` decides what they become\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars: over --data SOCKET as a cache object of the data layer, its key printed; in process into --checkpoint-dir DIR as <bar>.json\n  --resume KEY|FILE     continue from a checkpoint (a cache key over --data SOCKET, else a file) of the same program, binding and window (the stream resumes at its cursor)\n  --data STORE|SOCKET   the data: a store directory, served in this process (the run's outputs written to it), or a data service's socket (abt data serve); a bundle or a directory of Parquet files is imported first (abt data ingest --adapter bundle_v2)\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --dump DIR            write the data, configuration, decisions, fills, dropped decisions, actions, book and final state to DIR (what reference/ replays)\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --rel RELATION        the relation `table` reads; --symbol SYM keeps one instrument's tuples\n  --text QUERY          a query of `abt query` (repeatable: one run answers them all)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics (pushed_answers: the aggregates the data layer answered)"
     );
     exit(code)
 }
@@ -519,35 +508,38 @@ fn synthetic_for(prog: &crate::check::Program, opts: &HashMap<String, String>) -
     data::synthetic_for_program(prog, &syms, start, days, seed)
 }
 
-/// The dataset a run uses: synthetic, a bundle or a loose Parquet directory, as the options say.
+/// The data a run reads, as the options say: a synthetic market (held in
+/// memory, served in this process), a store directory or a data service's
+/// socket (an empty dataset: the service holds the data). The label is
+/// always `None` now that no bundle is read: the statistics' label is
+/// `synthetic` or `data`.
 fn load_dataset(args: &Args, prog: &crate::check::Program) -> (crate::kernel::Dataset, Option<String>) {
-    let mut bundle_label: Option<String> = None;
     let dataset = if args.flags.contains("synthetic") {
         synthetic_for(prog, &args.opts)
-    } else if let Some(dir) = args.opts.get("bundle") {
-        let (ds, m) = crate::bundle::load_bundle(prog, Path::new(dir)).unwrap_or_else(|e| {
-            eprintln!("{}", e);
-            exit(2)
-        });
-        bundle_label = Some(format!("{}@{}", m.name, m.version));
-        ds
     } else if let Some(dir) = args.opts.get("data").filter(|d| is_socket(Path::new(d))) {
         // A data service already holds the data: the run reads it there.
         let _ = DATA_SOCKET.set(PathBuf::from(dir));
         crate::kernel::Dataset::new()
     } else if let Some(dir) = args.opts.get("data") {
-        let (ds, notes) = data::load_parquet_dir(prog, Path::new(dir)).unwrap_or_else(|e| {
-            eprintln!("{}", e);
+        // A store: served in this process, the run's outputs written to it.
+        let path = Path::new(dir);
+        if !path.is_dir() {
+            eprintln!("--data {}: directory not found", dir);
             exit(2)
-        });
-        for n in notes {
-            eprintln!("note: {}", n);
         }
-        ds
+        if !path.join("registry").is_dir() {
+            eprintln!(
+                "--data {}: not a store (a directory with a registry) or a data service's socket; import a bundle or a directory of Parquet files first: abt data ingest --store STORE --adapter bundle_v2 --from {} --class CLASS <files...>",
+                dir, dir
+            );
+            exit(2)
+        }
+        let _ = DATA_STORE.set(path.to_path_buf());
+        crate::kernel::Dataset::new()
     } else {
         usage(1)
     };
-    (dataset, bundle_label)
+    (dataset, None)
 }
 
 /// The executor configuration of a run: the program's `execution` block
@@ -662,10 +654,6 @@ fn run_mode(args: &Args) -> (crate::kernel::RunMode, Option<String>, bool, Optio
 /// stream is the only driver (M-2); `--checkpoint-every` writes its
 /// checkpoints and `--resume` continues one.
 fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<Runner> {
-    if let Some(k) = args.opts.get("kernel") {
-        eprintln!("--kernel {}: the batch kernel is gone; every run is the fold over the data layer's stream", k);
-        exit(2)
-    }
     let checkpoint_every = args.opts.get("checkpoint-every").map(|s| match s.as_str() {
         "month" => crate::kernel::CheckpointEvery::Month,
         n => crate::kernel::CheckpointEvery::Bars(n.parse().unwrap_or_else(|_| {
@@ -693,7 +681,7 @@ fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<
             // Over a data service, a checkpoint is a cache object named by its
             // key (K-4.7); in process, a file.
             let key = path.to_string_lossy().to_string();
-            let cp: crate::kernel::Checkpoint = if DATA_SOCKET.get().is_some() && key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+            let cp: crate::kernel::Checkpoint = if lasting_store() && key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
                 crate::kernel::checkpoints::read(client, &key)?
             } else {
                 let text = std::fs::read_to_string(path).map_err(|e| RunError::Request(format!("{}: {}", path.display(), e)))?;
@@ -707,7 +695,7 @@ fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<
             let mut written: Result<(), RunError> = Ok(());
             let mut save = |cp: crate::kernel::Checkpoint| {
                 // Over a data service the checkpoint is a cache object (K-4.7).
-                if DATA_SOCKET.get().is_some() {
+                if lasting_store() {
                     match crate::kernel::checkpoints::write(client, &cp) {
                         Ok(key) => eprintln!("checkpoint {} of {} (seq {})", key, format_timestamp(cp.last_bar), cp.cursor),
                         Err(e) => {
@@ -844,7 +832,7 @@ pub fn main_with(raw: Vec<String>) {
             }
         }
         "plan" => {
-            // abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            // abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
             let (prog, diags) = check_program(&ws, &name);
@@ -855,10 +843,10 @@ pub fn main_with(raw: Vec<String>) {
                 eprintln!("strategy `{}` does not check; fix the errors above", name);
                 exit(1)
             };
-            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data");
             let observed = args.flags.contains("observed");
             if observed && !has_data {
-                eprintln!("--observed runs the strategy: name --data DIR, --bundle DIR or --synthetic");
+                eprintln!("--observed runs the strategy: name --data STORE|SOCKET or --synthetic");
                 exit(2)
             }
             let loaded = if has_data { Some(load_dataset(&args, &prog)) } else { None };
@@ -910,7 +898,7 @@ pub fn main_with(raw: Vec<String>) {
             }
         }
         "contract" => {
-            // abt contract --strategy NAME [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            // abt contract --strategy NAME [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
             let (prog, diags) = check_program(&ws, &name);
@@ -923,7 +911,7 @@ pub fn main_with(raw: Vec<String>) {
             };
             // Without data, the contract of the program (K-3.7): its static
             // clauses proven, the others open; with data, a run's statuses.
-            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data");
             let contract = if has_data {
                 let (ds, _) = load_dataset(&args, &prog);
                 let cfg = exec_config(&args, &prog);
@@ -947,7 +935,7 @@ pub fn main_with(raw: Vec<String>) {
             }
         }
         "verify" => {
-            // abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            // abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
             let (prog, diags) = check_program(&ws, &name);
@@ -963,7 +951,7 @@ pub fn main_with(raw: Vec<String>) {
                 eprintln!("--tier: `{}` is not a tier from 0 to 6", max_tier);
                 exit(2)
             }
-            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+            let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data");
             let loaded = if has_data { Some(load_dataset(&args, &prog)) } else { None };
             let opts = match &loaded {
                 Some((ds, label)) => compile_options_with(
@@ -994,14 +982,14 @@ pub fn main_with(raw: Vec<String>) {
             }
         }
         "graph" => {
-            // abt graph --strategy NAME [(--data DIR | --bundle DIR | --synthetic ...)] <files...>
+            // abt graph --strategy NAME [(--data STORE|SOCKET | --synthetic ...)] <files...>
             let (prog, _) = checked_program(&args);
             let opts = compile_options(&args, &prog);
             let compiled = crate::compiler::compile(&prog, &opts);
             print!("{}", observe::show_graph(&prog, &compiled));
         }
         "table" => {
-            // abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data DIR | --bundle DIR | --synthetic ...) <files...>
+            // abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>
             let (prog, _) = checked_program(&args);
             let which = args.opts.get("table").cloned().unwrap_or_else(|| {
                 eprintln!("table needs --table NAME (coverage, plan, book, binding, summary, extension, carried, derivation, failure)");
@@ -1071,13 +1059,6 @@ pub fn main_with(raw: Vec<String>) {
                 }
             }
         }
-        "explain" | "why-not" | "materialise" | "materialize" => {
-            eprintln!(
-                "`abt {}` is retired into the query language: abt query --strategy NAME (--data ...) --text 'why R(...)' | 'why not R(...)' | 'trace decide at T' | '? R(...) at T' <files...>",
-                args.cmd
-            );
-            exit(2)
-        }
         "show" => {
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
@@ -1092,7 +1073,7 @@ pub fn main_with(raw: Vec<String>) {
             print!("{}", observe::show_program(&prog));
         }
         "query" => {
-            // abt query --strategy NAME (--data ... | --bundle DIR | --synthetic ...) --text QUERY [--text QUERY]... [--json] [--out FILE] <files...>
+            // abt query --strategy NAME (--data STORE|SOCKET | --synthetic ...) --text QUERY [--text QUERY]... [--json] [--out FILE] <files...>
             let ws = workspace(&args.files);
             let name = args.opts.get("strategy").cloned().unwrap_or_else(|| usage(1));
             let (prog, diags) = check_program(&ws, &name);
@@ -1250,12 +1231,8 @@ pub fn main_with(raw: Vec<String>) {
             });
             // The data service holds the data now: the dataset is kept only
             // for what reads it after the run.
-            let dataset = (args.opts.contains_key("dump") || verify).then_some(dataset);
+            let dataset = args.opts.contains_key("dump").then_some(dataset);
             let outcome = if keeps {
-                if let Some(k) = args.opts.get("kernel") {
-                    eprintln!("--kernel {}: the batch kernel is gone; every run is the fold over the data layer's stream", k);
-                    exit(2)
-                }
                 run_keeping(
                     &prog,
                     Some(&lowered),
@@ -1400,7 +1377,7 @@ pub fn main_with(raw: Vec<String>) {
             if let Some(dir) = &ledger_out {
                 println!("ledger written to {}", dir.display());
             }
-            if DATA_SOCKET.get().is_some() {
+            if lasting_store() {
                 let mut names: Vec<String> = crate::kernel::outputs::RELATIONS.iter().map(|r| r.to_string()).collect();
                 names.extend(prog.observes.iter().map(|o| format!("ledger.{}", o.rel)));
                 println!(
@@ -1469,7 +1446,7 @@ pub fn main_with(raw: Vec<String>) {
             }
             // A run outside a plan is a trial of its program's lineage once its
             // outputs are in a store that lasts (Proposition Q-2.2).
-            if DATA_SOCKET.get().is_some() {
+            if lasting_store() {
                 println!("warning (data-snooping): this run is a trial its program's lineage counts (abt lineage); a plan counts its own (abt plan run)");
             } else {
                 println!("warning (data-snooping): this run's store is temporary, so nothing counts it; run it over a data service (--data SOCKET) for its lineage to, or in a plan (abt plan run)");
@@ -1477,7 +1454,9 @@ pub fn main_with(raw: Vec<String>) {
             if verify {
                 let n = result.bars.len();
                 let samples: Vec<i64> = (1..=5).map(|i| result.bars[(n * i / 6).min(n - 1)]).collect();
-                match crate::kernel::verify_causality(&prog, dataset.as_ref().expect("kept for --verify-causality"), cfg, &samples) {
+                // Over the run's own data service: the stream truncated at
+                // each sampled bar (G5).
+                match crate::kernel::verify_causality_on(&prog, &client, cfg, &samples) {
                     Ok(m) if m.is_empty() => println!("causality verified at {} sampled bars", samples.len()),
                     Ok(m) => {
                         for x in m {
@@ -1491,97 +1470,6 @@ pub fn main_with(raw: Vec<String>) {
                     }
                 }
             }
-        }
-        "bundle" => {
-            // abt bundle build (--from DIR | --synthetic ...) --class CLASS --version V --out DIR <files...>
-            // abt bundle test DIR <files...>
-            let sub = args.files.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            let rest: Vec<PathBuf> = args.files.iter().skip(1).cloned().collect();
-            match sub.as_str() {
-                "build" => {
-                    let ws = workspace(&rest);
-                    let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
-                    let version = args.opts.get("version").cloned().unwrap_or_else(|| usage(1));
-                    let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
-                    // The bars the bundle holds: --base, else the class's own.
-                    let base = args.opts.get("base").map(|b| {
-                        crate::Resolution::parse(b.trim_start_matches('@')).unwrap_or_else(|| {
-                            eprintln!("--base: `{}` is not a resolution (@1m, @5m, @15m, @30m, @1h, @1d, @1w)", b);
-                            exit(2)
-                        })
-                    });
-                    let prog = class_program_or_exit(&ws, &env, base);
-                    let ds = if args.flags.contains("synthetic") {
-                        synthetic_for(&prog, &args.opts)
-                    } else if let Some(from) = args.opts.get("from") {
-                        let (ds, notes) = data::load_parquet_dir(&prog, Path::new(from)).unwrap_or_else(|e| {
-                            eprintln!("{}", e);
-                            exit(2)
-                        });
-                        for n in notes {
-                            eprintln!("note: {}", n);
-                        }
-                        ds
-                    } else {
-                        usage(1)
-                    };
-                    let m = crate::bundle::write_bundle(&prog, &ds, Path::new(&out), &env, &version).unwrap_or_else(|e| {
-                        eprintln!("{}", e);
-                        exit(2)
-                    });
-                    println!(
-                        "wrote bundle `{}@{}` to {}: {} relations, untested (run `abt bundle test {}`)",
-                        m.name,
-                        m.version,
-                        out,
-                        m.relations.len(),
-                        out
-                    );
-                }
-                "test" => {
-                    let dir = rest.first().cloned().unwrap_or_else(|| usage(1));
-                    let files: Vec<PathBuf> = rest.iter().skip(1).cloned().collect();
-                    let ws = workspace(&files);
-                    let m = crate::bundle::read_manifest(&dir).unwrap_or_else(|e| {
-                        eprintln!("{}", e);
-                        exit(2)
-                    });
-                    let prog = class_program_or_exit(&ws, &m.name, None);
-                    let (m, results) = crate::bundle::test_bundle(&prog, &dir).unwrap_or_else(|e| {
-                        eprintln!("{}", e);
-                        exit(2)
-                    });
-                    for r in &results {
-                        println!("{} {}: {}", if r.passed { "pass" } else { "FAIL" }, r.name, r.detail);
-                    }
-                    let failed = results.iter().filter(|r| !r.passed).count();
-                    println!(
-                        "bundle `{}@{}`: {} tests, {} failed{}",
-                        m.name,
-                        m.version,
-                        results.len(),
-                        failed,
-                        if failed == 0 { "; recorded in the manifest" } else { "; not marked tested" }
-                    );
-                    if failed > 0 {
-                        exit(1)
-                    }
-                }
-                _ => usage(1),
-            }
-        }
-        "synth" => {
-            let ws = workspace(&args.files);
-            let env = args.opts.get("class").cloned().unwrap_or_else(|| usage(1));
-            let out = args.opts.get("out").cloned().unwrap_or_else(|| usage(1));
-            // The writer needs a program whose demand covers the class whole.
-            let prog = class_program_or_exit(&ws, &env, None);
-            let ds = synthetic_for(&prog, &args.opts);
-            data::write_parquet_dir(&prog, &ds, Path::new(&out)).unwrap_or_else(|e| {
-                eprintln!("{}", e);
-                exit(2)
-            });
-            println!("wrote {} relations to {}", ds.facts.len(), out);
         }
         _ => usage(1),
     }
@@ -1652,7 +1540,7 @@ fn compile_options_with(args: &Args, prog: &crate::check::Program, loaded: Optio
             exit(2)
         }
     };
-    let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data") || args.opts.contains_key("bundle");
+    let has_data = args.flags.contains("synthetic") || args.opts.contains_key("data");
     let stats = match loaded {
         Some((ds, label)) => Some(crate::plan::cost::Statistics::from_dataset(prog, ds, label).with_start(prog, ds, exec_config(args, prog).start)),
         None if has_data => {

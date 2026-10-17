@@ -129,14 +129,10 @@ fn usage_documents_every_option() {
         "--timing",
         "--text",
         "--at",
-        "--bundle",
         "--checkpoint-every",
         "--checkpoint-dir",
         "--resume",
-        "--class",
-        "--version",
         "--out",
-        "--from",
     ] {
         assert!(stderr.contains(opt), "usage lacks {}:\n{}", opt, stderr);
     }

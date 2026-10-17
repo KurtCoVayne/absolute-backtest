@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """A synthetic market in the first formulation's `futures_sessions` layout (kept
-for the record; `abt synth --class future` writes the catalog's layout), for
+for the record; `abt data ingest --adapter synthetic --class future` makes a
+market of the catalog's layout in a store), for
 running the R8L book and the usability experiment without the company's
 TradeStation data. Nothing here is real; the shapes follow
 `scripts/ingest/tradestation_sessions.py` (retired at M-6, in the history):
