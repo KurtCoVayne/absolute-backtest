@@ -39,7 +39,7 @@ use arrow::array::{ArrayRef, Float64Array, RecordBatch, StringArray, TimestampNa
 use arrow::datatypes::{Field, Schema};
 
 use super::{Adapter, FetchRequest, Fetched, Keys};
-use crate::adapter::Terms;
+use crate::adapter::{Security, Terms};
 use crate::error::DataError;
 use crate::options::occ_symbol;
 use crate::resolver::catalog::Offer;
@@ -396,9 +396,21 @@ pub fn strikes(rows: &[Row], opts: &Options) -> Result<(Fetched, Report), DataEr
         .or_default()
         .insert("greeks_units".into(), "theta per year, vega and rho per unit, from orats per day and per point".into());
     per.entry("option.quote".into()).or_default().insert("last".into(), "absent".into());
+    // A contract's ticker is its OCC symbol from its first row on (D-2.4):
+    // what a program's literal names it by. The symbol carries the expiry,
+    // so it names no other contract after this one expires.
+    let securities: Vec<Security> = spec
+        .iter()
+        .map(|(occ, (t, ..))| Security {
+            key: occ.clone(),
+            ticker: occ.clone(),
+            from: *t,
+            to: None,
+        })
+        .collect();
     Ok((
         Fetched {
-            securities: vec![],
+            securities,
             terms,
             relations,
             attributes,

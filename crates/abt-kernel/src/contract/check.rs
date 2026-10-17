@@ -12,9 +12,9 @@ use crate::check::{LimitKind, LimitPolicy, Program};
 use crate::ir::{Kind as RelKind, Lit, Term, WindowKind};
 use crate::kernel::bind::{Bound, DataClient};
 use crate::kernel::events::{Book, EventKind, Fate, OrderId};
-use crate::kernel::executor::Expected;
 use crate::kernel::time::format_timestamp;
 use crate::kernel::{ExecConfig, Kernel, RunError, RunResult, RunWarning, Sym, Value};
+use crate::sim::Expected;
 
 // ---------------------------------------------------------------------------
 // The data checks the bundle tests were (B-3), now preconditions that warn.
@@ -529,12 +529,15 @@ impl Invariants {
                 for r in &b.receivables {
                     n += r.cash;
                 }
-                // The record precedes the bar's margin-call fills only when
-                // there were none; after them, it is the book's.
-                let liquidated = result.events[self.applied..]
-                    .iter()
-                    .any(|e| matches!(&e.kind, EventKind::MarginCall { policy, .. } if policy == "liquidate"));
-                (!liquidated).then_some((x.equity, n))
+                // The record precedes the bar's margin-call fills, and an
+                // exercise the program decided at the bar's close (K-5.5.4):
+                // it is the book's only when there were none.
+                let after = result.events[self.applied..].iter().any(|e| match &e.kind {
+                    EventKind::MarginCall { policy, .. } => policy == "liquidate",
+                    EventKind::Exercise { cause, .. } => cause == "decision",
+                    _ => false,
+                });
+                (!after).then_some((x.equity, n))
             }
             _ => None,
         };

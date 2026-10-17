@@ -46,6 +46,13 @@ const EXEC_FIELDS: &[&str] = &[
     "numerics",
     "limits",
     "late",
+    "option_mark",
+    "option_fill",
+    "greeks",
+    "margin",
+    "settlement",
+    "exercise",
+    "margin_call",
 ];
 
 pub fn parse_units(src: &str) -> PResult<Vec<Unit>> {
@@ -1570,6 +1577,104 @@ impl Parser {
             "ruin" => word(self, &["halt", "continue"])?,
             "numerics" => word(self, &["two_pass", "running"])?,
             "late" => word(self, &["send", "reject"])?,
+            "option_mark" => word(self, &["mid", "last", "model"])?,
+            "greeks" => word(self, &["data", "model"])?,
+            "settlement" => word(self, &["daily", "none"])?,
+            "margin_call" => word(self, &["halt", "liquidate", "allow"])?,
+            "option_fill" => {
+                let (base, bsp) = self.ident()?;
+                if !["touch", "mid", "last"].contains(&base.as_str()) {
+                    return Err(ParseError {
+                        span: bsp,
+                        message: format!("`{}` is not an option fill (touch [+ F spread] | mid [+ F spread] | last)", base),
+                    });
+                }
+                let spread = if base != "last" && self.eat(&Tok::Plus) {
+                    let (f, _) = self.number()?;
+                    self.expect_kw("spread")?;
+                    f
+                } else {
+                    0.0
+                };
+                ExecValue::OptionFill { base, spread }
+            }
+            "margin" => {
+                let mut models = Vec::new();
+                loop {
+                    let (m, msp) = self.ident()?;
+                    match m.as_str() {
+                        "published" | "reg_t" | "portfolio" | "span" => models.push((m, None)),
+                        "approx" => {
+                            let (f, _) = self.number()?;
+                            models.push((m, Some(f)));
+                        }
+                        _ => {
+                            return Err(ParseError {
+                                span: msp,
+                                message: format!("`{}` is not a margin model (published | reg_t | portfolio | span | approx FRACTION)", m),
+                            })
+                        }
+                    }
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                ExecValue::Margin(models)
+            }
+            "exercise" => {
+                self.expect(Tok::LBrace)?;
+                let mut rule = crate::syntax::ast::ExerciseRule {
+                    itm_at_expiry: false,
+                    early_short: crate::syntax::ast::EarlyShort::Never,
+                    early_long_decide: false,
+                    atm_tolerance: 0.0,
+                };
+                while !self.at(&Tok::RBrace) {
+                    let (item, isp) = self.ident()?;
+                    match item.as_str() {
+                        "itm_at_expiry" => rule.itm_at_expiry = true,
+                        "early_short" => {
+                            if self.eat_kw("never") {
+                                rule.early_short = crate::syntax::ast::EarlyShort::Never;
+                            } else {
+                                self.expect_kw("when")?;
+                                self.expect_kw("extrinsic")?;
+                                self.expect(Tok::Lt)?;
+                                rule.early_short = if self.eat_kw("DIVIDEND") || self.eat_kw("dividend") {
+                                    crate::syntax::ast::EarlyShort::Dividend
+                                } else {
+                                    crate::syntax::ast::EarlyShort::Threshold(self.number()?.0)
+                                };
+                            }
+                        }
+                        "early_long" => {
+                            let (w, wsp) = self.ident()?;
+                            rule.early_long_decide = match w.as_str() {
+                                "decide" => true,
+                                "never" => false,
+                                _ => {
+                                    return Err(ParseError {
+                                        span: wsp,
+                                        message: format!("`early_long` is `never` or `decide`, not `{}`", w),
+                                    })
+                                }
+                            };
+                        }
+                        "atm_tolerance" => rule.atm_tolerance = self.number()?.0,
+                        _ => {
+                            return Err(ParseError {
+                                span: isp,
+                                message: format!("`{}` is not an item of `exercise` (itm_at_expiry; early_short ...; early_long ...; atm_tolerance X)", item),
+                            })
+                        }
+                    }
+                    if !self.eat(&Tok::Semi) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                ExecValue::Exercise(rule)
+            }
             "capital" => {
                 let (amount, _) = self.number()?;
                 let (cur, csp) = self.ident()?;
@@ -1599,9 +1704,14 @@ impl Parser {
                     self.ident()?;
                     ExecValue::CommissionPerShare { per_share, min }
                 } else if self.eat_kw("per_contract") {
-                    self.expect_kw("from")?;
-                    self.expect_kw("catalog")?;
-                    ExecValue::CommissionPerContract
+                    if self.eat_kw("from") {
+                        self.expect_kw("catalog")?;
+                        ExecValue::CommissionPerContract
+                    } else {
+                        let (x, _) = self.number()?;
+                        self.ident()?;
+                        ExecValue::CommissionPerContractFixed(x)
+                    }
                 } else if self.eat_kw("bps") {
                     let (x, _) = self.number()?;
                     ExecValue::CommissionBps(x)

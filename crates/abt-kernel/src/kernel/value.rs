@@ -9,13 +9,20 @@ use crate::ir::Duration;
 
 pub type Sym = u32;
 
-/// The one decision algebra (language-v2, 4.4): a target weight of
-/// capital, a target quantity, or a signed delta.
+/// The one decision algebra (language-v2, 4.4; K-2.3): a target weight of
+/// capital, a target quantity, a signed delta, an all-or-none multi-leg
+/// delta, or an option exercised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Ctor {
     HoldWeight,
     HoldQuantity,
     Trade,
+    /// `combo([leg(A1, Q1), ...])`: the decision's `legs`, filled all or
+    /// none at one barrier (K-5.5.3).
+    Combo,
+    /// `exercise(A, Q)`: Q long contracts of the option A exercised at the
+    /// bar's close (K-5.5.4).
+    Exercise,
 }
 
 impl Ctor {
@@ -24,6 +31,8 @@ impl Ctor {
             "hold_weight" => Ctor::HoldWeight,
             "hold_quantity" => Ctor::HoldQuantity,
             "trade" => Ctor::Trade,
+            "combo" => Ctor::Combo,
+            "exercise" => Ctor::Exercise,
             _ => return None,
         })
     }
@@ -32,6 +41,8 @@ impl Ctor {
         match self {
             Ctor::HoldWeight | Ctor::HoldQuantity => "hold",
             Ctor::Trade => "trade",
+            Ctor::Combo => "combo",
+            Ctor::Exercise => "exercise",
         }
     }
     /// The resolved name, distinguishing the two `hold` forms.
@@ -40,6 +51,8 @@ impl Ctor {
             Ctor::HoldWeight => "hold_weight",
             Ctor::HoldQuantity => "hold_quantity",
             Ctor::Trade => "trade",
+            Ctor::Combo => "combo",
+            Ctor::Exercise => "exercise",
         }
     }
     /// A target (the book is driven to it) rather than a delta.
@@ -52,6 +65,8 @@ impl Ctor {
         match name {
             "hold" => self.is_target(),
             "trade" => self == Ctor::Trade,
+            "combo" => self == Ctor::Combo,
+            "exercise" => self == Ctor::Exercise,
             other => Ctor::parse(other) == Some(self),
         }
     }
@@ -138,10 +153,42 @@ impl std::fmt::Display for Order {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Decision {
     pub ctor: Ctor,
+    /// The instrument; a combo's first leg's.
     pub equity: Sym,
+    /// The amount; a combo's is its number of legs.
     pub amount: f64,
     #[serde(default)]
     pub order: Order,
+    /// A combo's legs: each instrument with its signed delta (K-2.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legs: Vec<(Sym, f64)>,
+}
+
+impl Decision {
+    /// A decision of one instrument (every constructor but `combo`).
+    pub fn single(ctor: Ctor, equity: Sym, amount: f64, order: Order) -> Decision {
+        Decision {
+            ctor,
+            equity,
+            amount,
+            order,
+            legs: Vec::new(),
+        }
+    }
+
+    /// The instruments the decision acts on: a combo's legs, else its own.
+    pub fn instruments(&self) -> Vec<Sym> {
+        if self.ctor == Ctor::Combo {
+            self.legs.iter().map(|(s, _)| *s).collect()
+        } else {
+            vec![self.equity]
+        }
+    }
+
+    /// A total key of the legs for equality, hashing and ordering.
+    fn legs_key(&self) -> Vec<(Sym, u64)> {
+        self.legs.iter().map(|(s, q)| (*s, bits(*q))).collect()
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -180,7 +227,7 @@ impl PartialEq for Value {
             (Value::Num(a), Value::Num(b)) => bits(*a) == bits(*b),
             (Value::Count(a), Value::Count(b)) => a == b,
             (Value::Dur(a), Value::Dur(b)) => a == b,
-            (Value::Decision(a), Value::Decision(b)) => a.ctor == b.ctor && a.equity == b.equity && bits(a.amount) == bits(b.amount) && a.order.key() == b.order.key(),
+            (Value::Decision(a), Value::Decision(b)) => a.ctor == b.ctor && a.equity == b.equity && bits(a.amount) == bits(b.amount) && a.order.key() == b.order.key() && a.legs_key() == b.legs_key(),
             (Value::Label(a), Value::Label(b)) => a == b,
             _ => false,
         }
@@ -216,7 +263,8 @@ impl Hash for Value {
                 d.ctor.hash(h);
                 d.equity.hash(h);
                 bits(d.amount).hash(h);
-                d.order.key().hash(h)
+                d.order.key().hash(h);
+                d.legs_key().hash(h)
             }
             Value::Label(a) => {
                 6u8.hash(h);
@@ -251,7 +299,8 @@ impl Ord for Value {
                 .cmp(&b.ctor)
                 .then(a.equity.cmp(&b.equity))
                 .then(a.amount.total_cmp(&b.amount))
-                .then(a.order.key().cmp(&b.order.key())),
+                .then(a.order.key().cmp(&b.order.key()))
+                .then(a.legs_key().cmp(&b.legs_key())),
             (Value::Label(a), Value::Label(b)) => a.cmp(b),
             _ => rank(self).cmp(&rank(o)),
         }

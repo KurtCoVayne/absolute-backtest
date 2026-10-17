@@ -504,6 +504,7 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
                 multiplier: 50.0 - 10.0 * (i % 4) as f64,
                 future: true,
                 commission_per_contract: Some(2.0 + 0.5 * i as f64),
+                ..Default::default()
             },
         );
         let mut price = if i + 1 == roots.len() && roots.len() > 1 { 2.0 } else { 100.0 + 25.0 * i as f64 };

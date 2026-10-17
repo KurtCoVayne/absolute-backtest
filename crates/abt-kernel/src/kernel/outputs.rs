@@ -129,6 +129,18 @@ impl Table {
     }
 }
 
+/// An option's terms in an `adjustment` event's detail.
+fn terms_json(o: &super::OptionTerms) -> serde_json::Value {
+    serde_json::json!({
+        "right": o.right,
+        "strike": o.strike,
+        "expiry": super::time::format_timestamp(o.expiry),
+        "style": o.style,
+        "settlement": if o.cash { "cash" } else { "physical" },
+        "multiplier": o.multiplier,
+    })
+}
+
 /// How far a run's writes have put the relations that grow with it: the
 /// rows of its event log, book, holdings and late tuples (K-7.1, written
 /// incrementally at every checkpoint).
@@ -168,6 +180,7 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
         let mut fee = vec![None; n];
         let mut slippage = vec![None; n];
         let mut impact = vec![None; n];
+        let mut spread = vec![None; n];
         let mut participation = vec![None; n];
         let mut partial = vec![None; n];
         let mut forced = vec![None; n];
@@ -184,6 +197,7 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
                     fee[i] = Some(fill.fee);
                     slippage[i] = Some(fill.slippage);
                     impact[i] = Some(fill.impact);
+                    spread[i] = Some(fill.spread);
                     participation[i] = Some(fill.participation);
                     partial[i] = Some(fill.partial);
                     forced[i] = Some(fill.forced);
@@ -231,6 +245,49 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
                     reason[i] = Some(format!("limit `{}`: {}", limit, d));
                     detail[i] = Some(serde_json::json!({"limit": limit, "policy": policy, "orders": orders}).to_string());
                 }
+                EventKind::Exercise {
+                    quantity: q,
+                    position,
+                    underlying,
+                    intrinsic,
+                    cash_settled,
+                    cause,
+                }
+                | EventKind::Assignment {
+                    quantity: q,
+                    position,
+                    underlying,
+                    intrinsic,
+                    cash_settled,
+                    cause,
+                } => {
+                    quantity[i] = Some(*q);
+                    price[i] = Some(*underlying);
+                    reason[i] = Some(cause.clone());
+                    let settlement = if *cash_settled { "cash" } else { "physical" };
+                    detail[i] = Some(serde_json::json!({"position": position, "intrinsic": intrinsic, "settlement": settlement}).to_string());
+                }
+                EventKind::OptionExpiry {
+                    quantity: q,
+                    underlying,
+                    intrinsic,
+                    cause,
+                } => {
+                    quantity[i] = Some(*q);
+                    price[i] = Some(*underlying);
+                    reason[i] = Some(cause.clone());
+                    detail[i] = Some(serde_json::json!({"intrinsic": intrinsic}).to_string());
+                }
+                EventKind::Adjustment {
+                    before,
+                    after,
+                    position,
+                    price_divisor,
+                    cause,
+                } => {
+                    reason[i] = Some(cause.clone());
+                    detail[i] = Some(serde_json::json!({"before": terms_json(before), "after": terms_json(after), "position": position, "price_divisor": price_divisor}).to_string());
+                }
             }
         }
         out.push(
@@ -248,7 +305,7 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
                 .col("fee", Role::Value, Col::Num(fee))
                 .col("slippage", Role::Value, Col::Num(slippage))
                 .col("impact", Role::Value, Col::Num(impact))
-                .col("spread", Role::Value, Col::Num(vec![None; n]))
+                .col("spread", Role::Value, Col::Num(spread))
                 .col("participation", Role::Value, Col::Num(participation))
                 .col("partial", Role::Value, Col::Bool(partial))
                 .col("forced", Role::Value, Col::Bool(forced))

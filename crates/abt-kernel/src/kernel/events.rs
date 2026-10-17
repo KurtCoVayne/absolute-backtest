@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Action, Decision, FillRecord, Sym};
+use super::{Action, Decision, FillRecord, OptionTerms, Sym};
 
 /// An order's identity within a run: one per decision the executor accepts
 /// as an order, kept by its re-issues.
@@ -121,6 +121,44 @@ pub enum EventKind {
     /// A limit the bar's orders would pass, its policy, the orders it
     /// acted on (rejected, scaled, or let through with a warning).
     LimitTriggered { limit: String, policy: String, orders: Vec<OrderId>, detail: String },
+    /// Long contracts of an option exercised (K-5.5.4), or short ones
+    /// assigned: `quantity` contracts leave the book, `position` is what
+    /// remains. `underlying` is the underlying's price at the settlement
+    /// instant and `intrinsic` a unit's value there. A cash-settled option
+    /// moves `intrinsic × multiplier × quantity` (the event's cash flow); a
+    /// physical one delivers the underlying at the strike, a fill of its
+    /// own. `cause`: `expiry`, `early` (an early assignment), `decision`
+    /// (the program's `exercise`) or `delisted` (its underlying delisted).
+    Exercise {
+        quantity: f64,
+        position: f64,
+        underlying: f64,
+        intrinsic: f64,
+        cash_settled: bool,
+        cause: String,
+    },
+    Assignment {
+        quantity: f64,
+        position: f64,
+        underlying: f64,
+        intrinsic: f64,
+        cash_settled: bool,
+        cause: String,
+    },
+    /// Contracts of an option that expired out of the money, or within the
+    /// tolerance of it: they leave the book with no cash.
+    OptionExpiry { quantity: f64, underlying: f64, intrinsic: f64, cause: String },
+    /// An option's terms adjusted for its underlying's corporate action
+    /// (K-5.5.5, OCC's conventions), from the bar on: the terms before and
+    /// after, the position after, the divisor of a unit's price (the
+    /// average cost's), and the cause (`split`, `special_dividend`).
+    Adjustment {
+        before: Box<OptionTerms>,
+        after: Box<OptionTerms>,
+        position: f64,
+        price_divisor: f64,
+        cause: String,
+    },
 }
 
 impl EventKind {
@@ -146,6 +184,10 @@ impl EventKind {
             EventKind::MarginCall { .. } => "margin_call",
             EventKind::Rejected { .. } => "rejected",
             EventKind::LimitTriggered { .. } => "limit_triggered",
+            EventKind::Exercise { .. } => "exercise",
+            EventKind::Assignment { .. } => "assignment",
+            EventKind::OptionExpiry { .. } => "option_expiry",
+            EventKind::Adjustment { .. } => "adjustment",
         }
     }
 }
@@ -264,6 +306,24 @@ impl Book {
                         }
                     }
                     Action::Delisting { .. } => {}
+                }
+            }
+            EventKind::Exercise { position, .. } | EventKind::Assignment { position, .. } => {
+                if let Some(sym) = e.instrument {
+                    self.set_position(sym, *position);
+                }
+            }
+            EventKind::OptionExpiry { .. } => {
+                if let Some(sym) = e.instrument {
+                    self.set_position(sym, 0.0);
+                }
+            }
+            EventKind::Adjustment { position, price_divisor, .. } => {
+                if let Some(sym) = e.instrument {
+                    if let Some(c) = self.avg_cost.get_mut(&sym) {
+                        *c /= price_divisor;
+                    }
+                    self.set_position(sym, *position);
                 }
             }
             _ => {}

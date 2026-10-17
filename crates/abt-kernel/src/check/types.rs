@@ -100,6 +100,64 @@ pub fn neg_type(t: &Ty) -> Result<Ty, String> {
     }
 }
 
+/// The option pricing functions of K-2.5: `bs_*` and `am_price` take (S, K,
+/// τ, r, q, σ, right), `b76_*` (F, K, τ, r, σ, right), `implied_vol` (P, S,
+/// K, τ, r, q, right, style). S, K, F and P are prices of one dimension; τ a
+/// Duration or a Scalar in years; r, q and σ Scalars; right and style labels.
+/// A price, vega, theta and rho are in the price's dimension, delta and the
+/// volatility Scalars, gamma per unit of the price.
+fn pricing_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
+    let scalar_arg = |t: &Ty| -> bool { matches!(t, Ty::IntLit) || matches!(t, Ty::Quantity(d) if d.is_scalar()) };
+    let (shape, prices, tau, scalars, labels): (&str, &[usize], usize, &[usize], &[usize]) = if name == "implied_vol" {
+        ("(P, S, K, τ, r, q, right, style)", &[0, 1, 2], 3, &[4, 5], &[6, 7])
+    } else if name.starts_with("b76_") {
+        ("(F, K, τ, r, σ, right)", &[0, 1], 2, &[3, 4], &[5])
+    } else {
+        ("(S, K, τ, r, q, σ, right)", &[0, 1], 2, &[3, 4, 5], &[6])
+    };
+    if args.len() != prices.len() + 1 + scalars.len() + labels.len() {
+        return Err(format!("{} takes {}", name, shape));
+    }
+    let mut dim: Option<Ty> = None;
+    for &i in prices {
+        match &args[i] {
+            Ty::IntLit => {}
+            Ty::Quantity(_) => match &dim {
+                Some(d) if !compat(d, &args[i]) => return Err(format!("{}'s prices are of one dimension, found {} and {}", name, d, args[i])),
+                _ => dim = Some(args[i].clone()),
+            },
+            t => return Err(format!("{}'s argument {} is a price, found {}", name, i + 1, t)),
+        }
+    }
+    if !(args[tau] == Ty::Duration || scalar_arg(&args[tau])) {
+        return Err(format!("{}'s τ is a Duration or a Scalar in years, found {}", name, args[tau]));
+    }
+    for &i in scalars {
+        if !scalar_arg(&args[i]) {
+            return Err(format!("{}'s argument {} is a Scalar (a rate, a yield or a volatility), found {}", name, i + 1, args[i]));
+        }
+    }
+    for &i in labels {
+        if !matches!(args[i], Ty::Label | Ty::StrLit) {
+            return Err(format!(
+                "{}'s argument {} is a label (`\"call\"`, `\"put\"`, `\"american\"`, `\"european\"`), found {}",
+                name,
+                i + 1,
+                args[i]
+            ));
+        }
+    }
+    let price = dim.unwrap_or_else(Ty::scalar);
+    Ok(match name {
+        "implied_vol" | "bs_delta" | "b76_delta" => Ty::scalar(),
+        "bs_gamma" | "b76_gamma" => match &price {
+            Ty::Quantity(d) => Ty::Quantity(Dim::scalar().div(d).ok_or("currency mismatch")?),
+            _ => Ty::scalar(),
+        },
+        _ => price,
+    })
+}
+
 pub fn call_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
     let scalar_arg = |t: &Ty| -> bool { matches!(t, Ty::IntLit) || matches!(t, Ty::Quantity(d) if d.is_scalar()) };
     match name {
@@ -197,6 +255,7 @@ pub fn call_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
                 t => Err(format!("{} requires quantities, found {}", name, t)),
             }
         }
+        n if crate::ir::PRICING_FUNCTIONS.contains(&n) => pricing_type(n, args),
         _ => Err(format!("unknown scalar function `{}`", name)),
     }
 }

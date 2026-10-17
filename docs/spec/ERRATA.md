@@ -532,6 +532,145 @@ batch driver agree on every corpus program. Each bless since:
   the checker refused `observe R` for such a relation, as naming no
   relation.
 
+- **E-71 (K-2.3, K-2.4, K-2.5, K-5.2, K-5.5, K-5.7, K-5.8; the option
+  model and the functions of F).**
+  - **Decisions.** A `combo` is a decision on its first leg's instrument
+    that carries all of its legs. F-5 counts it as a decision on each leg,
+    and so does `silence flat`. `exercise(A, Q)` is sent as an order and
+    carried out at the decision bar's close. That is after the bar's NAV
+    record, so `inv.nav` skips such a bar, as it skips a bar with a margin
+    call's fills. It is dropped, naming why, under `early_long never`, for a
+    European option, or for more contracts than the book holds long.
+  - **The functions of F (K-2.5)** are `bs_*`, `b76_*`, `am_price` and
+    `implied_vol`.
+    - τ is a Duration in years (ACT/365, a month a twelfth of 365 days) or a
+      Scalar already in years; the right and the style are labels.
+    - A value outside a function's domain leaves the instance stuck (⊥),
+      with `implied_vol` outside the no-arbitrage bounds among them.
+    - Black-76 is BSM with S = F and q = r, which is exact.
+    - Bjerksund–Stensland 2002: the paper's trigger is capped at h ≤ 0 with
+      x ≤ X. Where b < 0 and |b|√τ > 2σ it would otherwise fall below the
+      strike. American Greeks are finite differences: a five-point stencil
+      in S, with σ, τ and r bumped by 1e-4.
+    - The European implied volatility is Jäckel's 2015 algorithm: the
+      four-branch rational guess, then Householder(3). It stops at 1e-13
+      relative error in price and refuses above 1e-12. The American one is
+      Newton on the log price, falling back to bisection.
+  - **Known answers** (`crates/abt-kernel/tests/pricing.rs`, fixtures
+    written by the scripts beside them):
+    - Haug's worked examples to their printed decimals. His vega of 18.9358
+      for the delta example exceeds the bound S·e^{−qT}·√T·φ(0) = 18.5028,
+      so the test checks QuantLib's 18.5027 and asserts the bound.
+    - QuantLib 1.44: the European engine's prices and Greeks to 1e-12. Its
+      theta loses about ε/τ, so the theta comparison is widened by that
+      amount.
+    - QuantLib's QdFp American engine, 1764 cases. BS2002 is a lower bound
+      on it (never above by more than 8.5e-14) and falls short by at most
+      1.18 % at σ√T ≤ 0.75, rising to 5.97 % above 1.5.
+    - TF Quant Finance's documented BS2002 example.
+    - mpmath at 40 digits: the normal and bivariate normal, and BS2002's own
+      formula.
+    - py_lets_be_rational, to 1e-12.
+    - Implied-volatility round trips to 1e-10 on dense grids.
+  - **Marks (K-5.5.2)** are taken from the quote keyed at the bar.
+    - `mid` is (bid + ask)/2; a quote without a positive bid marks at half
+      its ask, `one_sided`.
+    - A bar without a quote marks at the last mark, `stale`; an earlier
+      bar's quote is not the bar's.
+    - `model` is the model's price at the IV of the latest `greeks` row
+      (`greeks data`), else at the IV that the contract's latest quoted mid
+      implies.
+  - **Fills (K-5.5.3).**
+    - `touch`: a buy needs a positive ask and a sell a positive bid.
+    - `mid`: needs both.
+    - No price is below zero. `spread` is (price − mid) × quantity ×
+      multiplier, so a fill better than the mid is a negative cost.
+    - `commission per_contract P` is charged on contracts (options,
+      futures) where the catalog states none.
+    - An option has no slippage, impact or borrow (K-5.7).
+    - Its limit order fills against its quote: a buy when its fill price is
+      at or below the level, a sell at or above.
+  - **Combos (K-5.5.3, K-5.8).**
+    - The net is Σ qᵢ·pᵢ over the greatest common divisor of the whole
+      |qᵢ| (the smallest |qᵢ| when one is fractional): the price per unit of
+      the combo, a debit positive and a credit negative. `limit(P)` fills
+      when the net is at or below P.
+    - A combo is all or none against the participation cap and the
+      leverage rule, as well as the quotes.
+    - A working combo is keyed by its first leg; a decision on any leg
+      replaces it.
+    - The limits (K-3.5) size a combo leg by leg and reject it whole. A
+      `clamp` rejects it, since it cannot be scaled.
+  - **Expiry (K-5.5.4).**
+    - An option is settled at its expiry day's first decision bar (AM,
+      against the underlying's open there) or its last (PM, against the
+      underlying's last price by the day's end). A day without a bar moves
+      it to the next bar.
+    - In the money means beyond `atm_tolerance · K`. A physical delivery is
+      a fill of the underlying at the strike, with no commission and with
+      the decided exercise's order id when there is one.
+    - An option without an underlying price at expiry expires worthless,
+      warned.
+    - τ runs from the end of the bar's day to the expiry instant: the end
+      of the expiry day for PM, its start for AM. At its expiry close a PM
+      option has none left, an AM option none from the close before.
+  - **Early assignment.** Only an American short in the money beyond the
+    tolerance is assigned early.
+    - `early_short when extrinsic < DIVIDEND`: a call on the decision bar
+      before an ex-date (a dividend announced by the bar, going ex after it
+      and by the next decision bar) when its extrinsic value is below the
+      dividend; a put on any bar when its extrinsic value is below
+      K·(1 − e^{−rτ}), with r the financing block's cash rate.
+    - `when extrinsic < X`: the call on the same bar against X, the put on
+      any bar against X.
+  - **Adjustments (K-5.5.5)** apply at the underlying's ex-date to the
+    options the book holds. A contract not held keeps the registry's terms.
+    - A whole split n:1 (an integer n ≥ 2) multiplies the contracts by n and
+      divides the strike by n.
+    - Any other ratio r, a reverse split included, takes the multiplier to
+      multiplier · r and the strike to strike / r.
+    - A special dividend lowers the strike by its amount.
+    - The average cost and the last mark are divided by the unit price's
+      divisor (n or r). The adjusted terms are the executor's state,
+      restored with it.
+  - **A delisted underlying** forces its options' expiry in cash at
+    intrinsic against its last price (`cause delisted`), warned.
+  - **Greeks (K-5.5.6).** `greeks data` reads the binding's row keyed at the
+    bar, as received by the barrier. `greeks model` is the model's at the
+    IV the mark implies: BSM's closed forms for a European, BS2002's
+    differences for an American. Where the IV is ⊥ the relation has no
+    tuple for the contract, so a rule reading it does not fire there rather
+    than halting the run.
+  - **The class's kernel relations (K-2.4).** At each decision bar the
+    executor writes `chain(U, T, A)`, by the chain need's filters
+    (`abt_wire::chain::admits` with the bar's open interest), and `spec`
+    and `greeks` for every contract in a chain or held. `spec` names the
+    right, style and settlement by the class's words.
+  - **Events (K-5.2).** `exercise` and `assignment` carry the contracts, the
+    position left, the underlying's price, the intrinsic value, cash or
+    physical, and the cause (`expiry`, `early`, `decision`, `delisted`).
+    `option_expiry` carries the contracts and the intrinsic value.
+    `adjustment` carries the terms before and after, the position and the
+    price divisor. A fill's `spread` is the events table's column of that
+    name.
+  - **Nulls.** A null number in a stored relation reads as NaN: ORATS's
+    last trade, and a put's theta and rho. The executor reads a quote's NaN
+    as absent. A comparison over NaN is false, and a decision whose amount
+    NaN reaches halts as before. A null of any other type (an entity, a
+    label, a time) still refuses the tuple.
+  - **The data side.**
+    - An ORATS contract's ticker is its OCC symbol, from its first row and
+      open-ended (the symbol carries the expiry, so it names no later
+      contract). A program names a contract by it.
+    - The option class's `quote` is admitted by a chain need, and
+      `special_dividend` by `need actions` in an option program only (an
+      equity program's relations, and so its hash, are unchanged).
+  - **The golden hashes.** E-8 requires `settlement` of a futures program,
+    so the preset `futures_fixed_base` states `settlement none`: the fully
+    paid book R8L has always had. R8L's program hash changes, blessed in
+    `crates/abt-tests/tests/golden/program_hashes.tsv`; its golden runs do
+    not. A library's probe program states its class's own fields.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

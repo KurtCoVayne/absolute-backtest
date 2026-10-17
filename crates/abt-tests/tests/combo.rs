@@ -1,11 +1,11 @@
 //! The decision algebra's multi-leg and exercise decisions (K-2.3):
 //! `combo([leg(A1, Q1), ..., leg(An, Qn)])` with an optional order, at least
 //! two legs on distinct instruments; `exercise(A, Q)` admitted only in the
-//! option class (T). Both parse, print and check; the kernel refuses to run
-//! them until the options model executes them (M-7).
+//! option class (T). Both parse, print and check; a combo of equities fills
+//! all or none (K-5.5.3), and a decision on one of its legs is a decision on
+//! each (F-5). The option cases are tests/options.rs's.
 
 use abt_kernel::check::Code;
-use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::{ExecConfig, RunError};
 use abt_tests as common;
 use abt_tests::StrategyParts;
@@ -17,6 +17,11 @@ fn program_with(decides: &str) -> String {
         ..Default::default()
     }
     .render()
+}
+
+/// AAA and BBB over ten weekdays, at 10 and 20.
+fn two_names() -> abt_kernel::kernel::Dataset {
+    common::markets((2022, 1, 3), &[("AAA", &[10.0; 10]), ("BBB", &[20.0; 10])])
 }
 
 fn t_errors(src: &str) -> Vec<String> {
@@ -67,12 +72,27 @@ fn exercise_is_the_option_classs() {
 }
 
 #[test]
-fn the_kernel_refuses_to_run_a_combo_until_it_executes_one() {
-    let src = program_with("    decide(T, combo([leg(\"AAA\", qty), leg(\"BBB\", Q)])) :- bar(T), Q = -qty.");
+fn a_combo_of_equities_fills_both_legs_at_the_next_bar_under_one_order() {
+    let src = program_with("    decide(T, combo([leg(\"AAA\", qty), leg(\"BBB\", Q)])) :- bar(T), first_row(\"AAA\", T), Q = -qty.");
     let p = common::program(&src, "s");
-    let ds = synthetic_daily(&["AAA", "BBB"], (2022, 1, 3), 30, 3);
+    let ds = two_names();
+    let r = common::run(&p, &ds, ExecConfig::from_program(&p)).unwrap_or_else(|e| panic!("{}", e));
+    let fills: Vec<_> = r.events.iter().filter(|e| e.kind.name() == "fill").collect();
+    assert_eq!(fills.len(), 2, "{:#?}", r.events);
+    assert_eq!(fills[0].t, fills[1].t);
+    assert_eq!(fills[0].order_id, fills[1].order_id);
+    let qty: Vec<f64> = r.fills.iter().map(|f| f.quantity).collect();
+    assert_eq!(qty, vec![10.0, -10.0]);
+}
+
+#[test]
+fn a_decision_on_a_combos_leg_is_a_second_decision_on_it() {
+    let src =
+        program_with("    decide(T, combo([leg(\"AAA\", qty), leg(\"BBB\", Q)])) :- bar(T), first_row(\"AAA\", T), Q = -qty.\n    decide(T, trade(\"BBB\", qty)) :- bar(T), first_row(\"BBB\", T).");
+    let p = common::program(&src, "s");
+    let ds = two_names();
     match common::run(&p, &ds, ExecConfig::from_program(&p)) {
-        Err(RunError::Config(m)) => assert!(m.contains("combo") && m.contains("does not execute"), "{}", m),
+        Err(RunError::Conflict { equity, .. }) => assert_eq!(equity, "BBB"),
         other => panic!("{:?}", other.map(|r| r.decisions.len())),
     }
 }

@@ -528,6 +528,32 @@ impl<'p> Kernel<'p> {
             Term::Wild(_) => Err(RunError::Internal(format!("wildcard where a value is needed in rule {}", cr.label))),
             Term::Param(p, _) => self.param_value(cr, p),
             Term::Lit(l, _) => Ok(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
+            Term::Ctor(c, subs, _) if c == "combo" => {
+                // `combo([leg(A1, Q1), ...][, ORDER])` (K-2.3): the legs in
+                // the order written; the decision's instrument is the first.
+                let ill = || RunError::Internal(format!("ill-typed combo in rule {}", cr.label));
+                let Some(Term::Ctor(_, legs, _)) = subs.first() else { return Err(ill()) };
+                let mut out = Vec::with_capacity(legs.len());
+                for leg in legs {
+                    let Term::Ctor(_, args, _) = leg else { return Err(ill()) };
+                    let (Value::Equity(s), Some(q)) = (self.term_value(cr, &args[0], env)?, self.term_value(cr, &args[1], env)?.as_f64()) else {
+                        return Err(ill());
+                    };
+                    out.push((s, q));
+                }
+                let order = match subs.get(1) {
+                    Some(o) => self.order_value(cr, o, env)?,
+                    None => Order::default(),
+                };
+                let first = out.first().map(|(s, _)| *s).ok_or_else(ill)?;
+                Ok(Value::Decision(Box::new(Decision {
+                    ctor: Ctor::Combo,
+                    equity: first,
+                    amount: out.len() as f64,
+                    order,
+                    legs: out,
+                })))
+            }
             Term::Ctor(c, subs, _) => {
                 let ctor = Ctor::parse(c).ok_or_else(|| RunError::Internal(format!("unknown constructor `{}`", c)))?;
                 let e = self.term_value(cr, &subs[0], env)?;
@@ -537,7 +563,7 @@ impl<'p> Kernel<'p> {
                     None => Order::default(),
                 };
                 match (e, a.as_f64()) {
-                    (Value::Equity(s), Some(x)) => Ok(Value::Decision(Box::new(Decision { ctor, equity: s, amount: x, order }))),
+                    (Value::Equity(s), Some(x)) => Ok(Value::Decision(Box::new(Decision::single(ctor, s, x, order)))),
                     _ => Err(RunError::Internal(format!("ill-typed decision in rule {}", cr.label))),
                 }
             }
@@ -2311,10 +2337,75 @@ impl<'p> Kernel<'p> {
                         }
                         Ok(best)
                     }
+                    n if PRICING_FUNCTIONS.contains(&n) => self.pricing(cr, env, e, n, &vals),
                     _ => Err(RunError::Internal(format!("unknown function `{}`", f))),
                 }
             }
         }
+    }
+
+    /// The option pricing functions of K-2.5, total on their domain: a
+    /// value outside it (a non-positive price, a negative volatility, a
+    /// price outside the no-arbitrage bounds for `implied_vol`) leaves the
+    /// instance stuck (⊥, V-5.1).
+    fn pricing(&self, cr: &CompiledRule, env: &Env, e: &Expr, f: &str, vals: &[Value]) -> Result<Value, RunError> {
+        use crate::functions::{american, b76, bsm, iv, Right, Style};
+        let num = |i: usize| {
+            vals.get(i)
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| self.arith(cr, env, e, &format!("{}'s argument {} is not a number", f, i + 1)))
+        };
+        // τ: a Duration in years (ACT/365, a month as a twelfth of 365
+        // days), or a Scalar already in years.
+        let years = |i: usize| match vals.get(i) {
+            Some(Value::Dur(d)) => Ok((d.months as f64 * 365.0 / 12.0 + d.days as f64) / 365.0 + crate::functions::years(d.nanos)),
+            _ => num(i),
+        };
+        let word = |i: usize| -> Option<String> {
+            match vals.get(i)? {
+                Value::Label(l) => Some(self.labels.name(*l).to_string()),
+                // A string literal the checker left as written.
+                Value::Equity(s) => Some(self.symbols.name(*s).to_string()),
+                _ => None,
+            }
+        };
+        let right = |i: usize| {
+            word(i)
+                .and_then(|w| Right::parse(&w))
+                .ok_or_else(|| self.arith(cr, env, e, &format!("{}'s right is `call` or `put`", f)))
+        };
+        let v = if f == "implied_vol" {
+            let style = word(7)
+                .and_then(|w| Style::parse(&w))
+                .ok_or_else(|| self.arith(cr, env, e, "implied_vol's style is `american` or `european`"))?;
+            let v = iv::implied_vol(num(0)?, num(1)?, num(2)?, years(3)?, num(4)?, num(5)?, right(6)?, style);
+            v.ok_or_else(|| self.arith(cr, env, e, "implied_vol: the price is outside the no-arbitrage bounds"))?
+        } else if let Some(g) = f.strip_prefix("b76_") {
+            let (fwd, k, tau, r, sigma, w) = (num(0)?, num(1)?, years(2)?, num(3)?, num(4)?, right(5)?);
+            match g {
+                "price" => b76::price(fwd, k, tau, r, sigma, w),
+                "delta" => b76::delta(fwd, k, tau, r, sigma, w),
+                "gamma" => b76::gamma(fwd, k, tau, r, sigma, w),
+                "vega" => b76::vega(fwd, k, tau, r, sigma, w),
+                "theta" => b76::theta(fwd, k, tau, r, sigma, w),
+                _ => b76::rho(fwd, k, tau, r, sigma, w),
+            }
+        } else {
+            let (s, k, tau, r, q, sigma, w) = (num(0)?, num(1)?, years(2)?, num(3)?, num(4)?, num(5)?, right(6)?);
+            match f {
+                "am_price" => american::price(s, k, tau, r, q, sigma, w),
+                "bs_price" => bsm::price(s, k, tau, r, q, sigma, w),
+                "bs_delta" => bsm::delta(s, k, tau, r, q, sigma, w),
+                "bs_gamma" => bsm::gamma(s, k, tau, r, q, sigma, w),
+                "bs_vega" => bsm::vega(s, k, tau, r, q, sigma, w),
+                "bs_theta" => bsm::theta(s, k, tau, r, q, sigma, w),
+                _ => bsm::rho(s, k, tau, r, q, sigma, w),
+            }
+        };
+        if !v.is_finite() {
+            return Err(self.arith(cr, env, e, &format!("{} is undefined at these arguments", f)));
+        }
+        Ok(Value::Num(v))
     }
 }
 

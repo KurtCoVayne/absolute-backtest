@@ -1018,7 +1018,51 @@ pub const AGGREGATES: &[&str] = &[
     "last",
 ];
 /// Scalar functions (section 7.3).
-pub const SCALAR_FUNCTIONS: &[&str] = &["log", "exp", "sqrt", "abs", "least", "greatest", "sign", "floor", "ceil", "clamp", "decile"];
+pub const SCALAR_FUNCTIONS: &[&str] = &[
+    "log",
+    "exp",
+    "sqrt",
+    "abs",
+    "least",
+    "greatest",
+    "sign",
+    "floor",
+    "ceil",
+    "clamp",
+    "decile",
+    "bs_price",
+    "bs_delta",
+    "bs_gamma",
+    "bs_vega",
+    "bs_theta",
+    "bs_rho",
+    "b76_price",
+    "b76_delta",
+    "b76_gamma",
+    "b76_vega",
+    "b76_theta",
+    "b76_rho",
+    "am_price",
+    "implied_vol",
+];
+
+/// The option pricing functions of K-2.5 (a subset of `SCALAR_FUNCTIONS`).
+pub const PRICING_FUNCTIONS: &[&str] = &[
+    "bs_price",
+    "bs_delta",
+    "bs_gamma",
+    "bs_vega",
+    "bs_theta",
+    "bs_rho",
+    "b76_price",
+    "b76_delta",
+    "b76_gamma",
+    "b76_vega",
+    "b76_theta",
+    "b76_rho",
+    "am_price",
+    "implied_vol",
+];
 /// The order kinds a decision term may end with.
 pub const ORDER_KINDS: &[&str] = &["market", "moo", "moc", "moo_moc"];
 
@@ -1053,6 +1097,9 @@ pub const RESERVED_NAMES: &[&str] = &[
     "mark",
     "fill",
     "clock",
+    "spec",
+    "chain",
+    "greeks",
     "universe",
     "instruments",
     "not",
@@ -1118,7 +1165,7 @@ pub const RESERVED_NAMES: &[&str] = &[
 ];
 
 pub fn is_reserved(name: &str) -> bool {
-    RESERVED_NAMES.contains(&name)
+    RESERVED_NAMES.contains(&name) || PRICING_FUNCTIONS.contains(&name)
 }
 
 /// Names a relation may not take. A function's name is admissible for a
@@ -1138,6 +1185,58 @@ pub fn is_reserved_param(name: &str) -> bool {
         return true;
     }
     is_reserved(name) && !(name == "hold" || name == "trade" || name == "limit" || name == "stop" || ORDER_KINDS.contains(&name) || AGGREGATES.contains(&name) || SCALAR_FUNCTIONS.contains(&name))
+}
+
+/// The option class's kernel relations (K-2.4) at the decision calendar,
+/// written by the executor at every decision barrier: a contract's terms as
+/// of the bar (`spec`, adjusted by corporate actions), the contracts of an
+/// underlying's chain the program's dynamic need admits (`chain`), and the
+/// greeks, from the binding's rows (`greeks data`) or the model's.
+pub fn option_relations(cal: &Cal) -> Vec<Signature> {
+    let arg = |name: &str, ty: Ty| Arg {
+        name: name.to_string(),
+        mode: if name == "T" { Mode::Key } else { Mode::Out },
+        ty,
+    };
+    let sig = |name: &str, args: Vec<Arg>| Signature {
+        name: name.to_string(),
+        args,
+        cal: cal.clone(),
+        complete: true,
+        kind: Kind::Executor,
+        span: Span::default(),
+        native: None,
+    };
+    vec![
+        sig(
+            "spec",
+            vec![
+                arg("A", Ty::Entity),
+                arg("T", Ty::Timestamp),
+                arg("Underlying", Ty::Entity),
+                arg("Right", Ty::Label),
+                arg("Strike", Ty::Quantity(Dim::price("USD"))),
+                arg("Expiry", Ty::Timestamp),
+                arg("Style", Ty::Label),
+                arg("Settlement", Ty::Label),
+                arg("Multiplier", Ty::scalar()),
+            ],
+        ),
+        sig("chain", vec![arg("U", Ty::Entity), arg("T", Ty::Timestamp), arg("A", Ty::Entity)]),
+        sig(
+            "greeks",
+            vec![
+                arg("A", Ty::Entity),
+                arg("T", Ty::Timestamp),
+                arg("IV", Ty::scalar()),
+                arg("Delta", Ty::scalar()),
+                arg("Gamma", Ty::scalar()),
+                arg("Theta", Ty::scalar()),
+                arg("Vega", Ty::scalar()),
+                arg("Rho", Ty::scalar()),
+            ],
+        ),
+    ]
 }
 
 /// The executor and kernel-state relations every strategy sees at its

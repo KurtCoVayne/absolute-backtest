@@ -127,6 +127,7 @@ fn a_future_pays_its_multiplier_on_every_point_and_its_commission_per_contract()
             multiplier: 50.0,
             future: true,
             commission_per_contract: Some(2.5),
+            ..Default::default()
         }),
     );
     let r = run(&common::program(&future_round_trip(), "contracts_round_trip"), &ds, cfg()).unwrap();
@@ -152,6 +153,7 @@ fn a_target_weight_of_a_future_is_sized_by_its_notional() {
             multiplier: 50.0,
             future: true,
             commission_per_contract: None,
+            ..Default::default()
         }),
     );
     let r = run(&common::program(&src, "future_weight"), &ds, cfg()).unwrap();
@@ -269,6 +271,7 @@ fn a_future_is_shorted_without_a_borrow_fee_or_a_locate() {
             multiplier: 50.0,
             future: true,
             commission_per_contract: None,
+            ..Default::default()
         }),
     );
     // Default borrow buckets and margin: a share would pay a fee (or be refused).

@@ -18,10 +18,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::eval::{WindowKey, WindowRows};
-use super::executor::Executor;
 use super::time;
 use super::{Kernel, KernelStats, RunError, RunResult, Store, Sym, Tuple};
 use crate::ir::Cal;
+use crate::sim::Executor;
 
 /// When the fold takes a checkpoint (data-bundle doc, section 2): at the end
 /// of every calendar month of the decision bars, or every n decision bars.

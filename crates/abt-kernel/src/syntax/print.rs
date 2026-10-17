@@ -351,6 +351,23 @@ pub fn render_exec_field(f: &ExecField) -> String {
         ExecValue::Capital { amount: a, compounding } => format!("{} USD {}", amount(*a), if *compounding { "compounding" } else { "fixed" }),
         ExecValue::CommissionPerShare { per_share, min } => format!("per_share {} USD min {} USD", amount(*per_share), amount(*min)),
         ExecValue::CommissionPerContract => "per_contract from catalog".into(),
+        ExecValue::CommissionPerContractFixed(x) => format!("per_contract {} USD", amount(*x)),
+        ExecValue::OptionFill { base, spread } => {
+            if *spread == 0.0 {
+                base.clone()
+            } else {
+                format!("{} + {} spread", base, amount(*spread))
+            }
+        }
+        ExecValue::Margin(models) => models
+            .iter()
+            .map(|(m, f)| match f {
+                Some(f) => format!("{} {}", m, amount(*f)),
+                None => m.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        ExecValue::Exercise(r) => crate::check::exercise_text(r),
         ExecValue::CommissionBps(x) => format!("{} bps per side", amount(*x)),
         ExecValue::SlippageFixed(x) => format!("fixed {} bps", amount(*x)),
         ExecValue::SlippageVol { mult, bars } => format!("vol {} over {} bars", amount(*mult), bars),

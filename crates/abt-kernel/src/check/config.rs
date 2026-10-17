@@ -216,6 +216,8 @@ pub enum Commission {
     },
     /// `per_contract from catalog`.
     PerContract,
+    /// `per_contract P USD`.
+    PerContractFixed(f64),
     /// `X bps per side`.
     Bps(f64),
 }
@@ -244,6 +246,56 @@ pub enum Leverage {
 pub enum Delisting {
     LastPrice,
     Haircut(Vec<(String, f64)>),
+}
+
+/// An option order's fill against its quote (K-5.5.3): at the touch or the
+/// mid, moved by a fraction of the spread against the order, or at the last
+/// trade.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OptionFill {
+    /// `touch`, `mid` or `last`.
+    pub base: String,
+    pub spread: f64,
+}
+
+/// A margin model of K-5.6, in the order the block lists them.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarginModel {
+    Published,
+    RegT,
+    Portfolio,
+    Span,
+    Approx(f64),
+}
+
+impl MarginModel {
+    pub fn name(&self) -> String {
+        match self {
+            MarginModel::Published => "published".into(),
+            MarginModel::RegT => "reg_t".into(),
+            MarginModel::Portfolio => "portfolio".into(),
+            MarginModel::Span => "span".into(),
+            MarginModel::Approx(f) => format!("approx {}", f),
+        }
+    }
+}
+
+/// The `exercise` field as the block writes it.
+pub fn exercise_text(r: &crate::syntax::ast::ExerciseRule) -> String {
+    use crate::syntax::ast::EarlyShort;
+    let mut parts = Vec::new();
+    if r.itm_at_expiry {
+        parts.push("itm_at_expiry".to_string());
+    }
+    parts.push(match r.early_short {
+        EarlyShort::Dividend => "early_short when extrinsic < DIVIDEND".to_string(),
+        EarlyShort::Threshold(x) => format!("early_short when extrinsic < {}", x),
+        EarlyShort::Never => "early_short never".to_string(),
+    });
+    parts.push(format!("early_long {}", if r.early_long_decide { "decide" } else { "never" }));
+    parts.push(format!("atm_tolerance {}", r.atm_tolerance));
+    format!("{{ {} }}", parts.join("; "))
 }
 
 /// The expanded execution block.
@@ -279,6 +331,29 @@ pub struct ExecBlock {
     /// (K-6.3): `send` (the default, flagged late) or `reject`.
     #[serde(default = "late_send", skip_serializing_if = "is_late_send")]
     pub late: String,
+    /// The option class's fields (K-2.2; required of an option program,
+    /// ERRATA E-8): the mark, the fill, where the greeks come from, and the
+    /// exercise rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_mark: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_fill: Option<OptionFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub greeks: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exercise: Option<crate::syntax::ast::ExerciseRule>,
+    /// The margin models in order of preference (K-5.6); the leverage
+    /// model's margin when none is listed (ERRATA E-71).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub margin: Vec<MarginModel>,
+    /// A future's daily settlement (K-5.4; required of a futures program,
+    /// E-8): `daily` or `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement: Option<String>,
+    /// What a margin call does (E-5): `halt`, `liquidate` or `allow`; the
+    /// leverage field's policy when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_call: Option<String>,
 }
 
 fn late_send() -> String {
@@ -337,6 +412,7 @@ impl fmt::Display for ExecBlock {
             Commission::None => "none".to_string(),
             Commission::PerShare { per_share, min } => format!("per_share {} USD min {} USD", per_share, min),
             Commission::PerContract => "per_contract from catalog".to_string(),
+            Commission::PerContractFixed(x) => format!("per_contract {} USD", x),
             Commission::Bps(x) => format!("{} bps per side", x),
         };
         writeln!(f, "  commission    {}", commission)?;
@@ -381,6 +457,27 @@ impl fmt::Display for ExecBlock {
         }
         if self.late != "send" {
             writeln!(f, "  late          {}", self.late)?;
+        }
+        if let Some(m) = &self.option_mark {
+            writeln!(f, "  option_mark   {}", m)?;
+        }
+        if let Some(o) = &self.option_fill {
+            writeln!(f, "  option_fill   {}", if o.spread == 0.0 { o.base.clone() } else { format!("{} + {} spread", o.base, o.spread) })?;
+        }
+        if let Some(g) = &self.greeks {
+            writeln!(f, "  greeks        {}", g)?;
+        }
+        if let Some(e) = &self.exercise {
+            writeln!(f, "  exercise      {}", exercise_text(e))?;
+        }
+        if !self.margin.is_empty() {
+            writeln!(f, "  margin        {}", self.margin.iter().map(|m| m.name()).collect::<Vec<_>>().join(", "))?;
+        }
+        if let Some(s) = &self.settlement {
+            writeln!(f, "  settlement    {}", s)?;
+        }
+        if let Some(m) = &self.margin_call {
+            writeln!(f, "  margin_call   {}", m)?;
         }
         write!(f, "}}")
     }
@@ -485,6 +582,7 @@ pub fn expand_execution(block: &ExecutionBlock, presets: &[(String, Vec<ExecFiel
         ExecValue::None => Commission::None,
         ExecValue::CommissionPerShare { per_share, min } => Commission::PerShare { per_share: *per_share, min: *min },
         ExecValue::CommissionPerContract => Commission::PerContract,
+        ExecValue::CommissionPerContractFixed(x) => Commission::PerContractFixed(*x),
         ExecValue::CommissionBps(x) => Commission::Bps(*x),
         _ => Commission::None,
     };
@@ -535,6 +633,31 @@ pub fn expand_execution(block: &ExecutionBlock, presets: &[(String, Vec<ExecFiel
         numerics: word("numerics"),
         limits,
         late: if seen.contains(&"late") { word("late") } else { late_send() },
+        option_mark: seen.contains(&"option_mark").then(|| word("option_mark")),
+        option_fill: match fields.iter().find(|f| f.name == "option_fill").map(|f| &f.value) {
+            Some(ExecValue::OptionFill { base, spread }) => Some(OptionFill { base: base.clone(), spread: *spread }),
+            _ => None,
+        },
+        greeks: seen.contains(&"greeks").then(|| word("greeks")),
+        exercise: match fields.iter().find(|f| f.name == "exercise").map(|f| &f.value) {
+            Some(ExecValue::Exercise(r)) => Some(*r),
+            _ => None,
+        },
+        margin: match fields.iter().find(|f| f.name == "margin").map(|f| &f.value) {
+            Some(ExecValue::Margin(ms)) => ms
+                .iter()
+                .map(|(m, f)| match (m.as_str(), f) {
+                    ("published", _) => MarginModel::Published,
+                    ("reg_t", _) => MarginModel::RegT,
+                    ("portfolio", _) => MarginModel::Portfolio,
+                    ("span", _) => MarginModel::Span,
+                    (_, f) => MarginModel::Approx(f.unwrap_or(0.0)),
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        settlement: seen.contains(&"settlement").then(|| word("settlement")),
+        margin_call: seen.contains(&"margin_call").then(|| word("margin_call")),
     })
 }
 

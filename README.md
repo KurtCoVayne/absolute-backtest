@@ -194,7 +194,12 @@ library stat {
   T)`, or `T1 in session(X, [a, b))`. The group of a reduction, and of an
   aggregation that names one, is `within (vars)`; every variable of the
   reduced atom outside it must be fresh (G). Functions: abs, least,
-  greatest, log, exp, sqrt, sign, floor, ceil, clamp, decile. `observe R
+  greatest, log, exp, sqrt, sign, floor, ceil, clamp, decile, and the
+  option pricing functions of K-2.5: `bs_price(S, K, τ, r, q, σ, right)`
+  with `bs_delta` … `bs_rho` (Black–Scholes–Merton), `b76_price(F, K, τ,
+  r, σ, right)` with its Greeks (Black 1976), `am_price` (Bjerksund and
+  Stensland 2002) and `implied_vol(P, S, K, τ, r, q, right, style)`, τ a
+  Duration (`46d`) or years. `observe R
   [where ...] [trace relations | instances]` in the `rules` block adds a
   relation to every bar's demand without changing a decision.
 - **Literals** carry units: `100 shares`, `2 contracts`, `0 units` (the
@@ -207,8 +212,9 @@ library stat {
   target weight of the capital the execution block names; `hold(A, Q)`
   with Q a quantity is a target quantity; `trade(A, Q)` is a signed delta;
   `combo([leg(A1, Q1), leg(A2, Q2), ...])` is an all-or-none multi-leg
-  delta and `exercise(A, Q)` an option exercised (both checked; executed
-  from the options model on). Each takes an optional trailing order (`market`, `moo`, `moc`,
+  delta, filled at one bar under one order id, and `exercise(A, Q)`
+  exercises Q long contracts of an option at the decision bar's close. Each
+  takes an optional trailing order (`market`, `moo`, `moc`,
   `moo_moc`, `limit(P[, TIF])`, `stop(P[, TIF])`), the block's `orders`
   when omitted. `silence hold` keeps an instrument with no decision;
   `silence flat` closes it. A sale of a held quantity is a negative delta
@@ -218,7 +224,11 @@ library stat {
   `cash(@T, C)`, `nav(@T, N)`, `capital(@T, C)` (the base the execution
   block's `capital` names), `mark(A, @T, P)` (the price it names, as the
   book is marked), `fill(A, @T, Q, P)` and `decided(@T0, D)`; the `book`
-  module's views of them are closed, so `not held(A, T, _)` is legal.
+  module's views of them are closed, so `not held(A, T, _)` is legal. An
+  option program also has `chain(U, @T, A)` (the contracts its `need
+  chain` admits at the bar), `spec(A, @T, Underlying, Right, Strike,
+  Expiry, Style, Settlement, Multiplier)` (as adjusted by corporate
+  actions) and `greeks(A, @T, IV, Delta, Gamma, Theta, Vega, Rho)`.
 - **`execution`** is a preset name (`equity_default`), a preset with
   overrides (`book_fixed_base with { commission 10 bps per side }`) or the
   fifteen fields written out: `price`, `orders`, `lot`, `capital`,
@@ -461,6 +471,36 @@ then the primitives and executor relations with their counts; when
 relation on each path to it (W8). A plain run also warns of what counts it as
 a trial: over a data service its program's lineage does, in a temporary
 store nothing does (see Studies).
+
+An option program's contracts are instruments with terms (`spec`), named by
+their OCC symbols. They are marked at their quote: `option_mark mid` (half
+the ask without a bid, the last mark `stale` without a quote), `last`, or
+`model` (the model's price at the contract's implied volatility). They are
+filled against it, `option_fill touch + F spread`, `mid + F spread` or
+`last`, at `commission per_contract P` with no slippage or impact; a fill's
+`spread` is its cost against the mid.
+
+- **Combos.** A combo fills every leg at one bar under one order id, or is
+  dropped naming the leg without a quote. Its `limit(P)` is the net price
+  per unit of the combo.
+- **Expiry.** At its expiry day's close (its open, for AM settlement) an
+  option in the money beyond `atm_tolerance` is exercised (long) or
+  assigned (short). A physical one delivers the underlying at the strike,
+  as a fill; a cash-settled one pays its intrinsic value; any other
+  expires.
+- **Early exercise.** The `exercise` field's `early_short` assigns an
+  American short early (a call before an ex-dividend date whose extrinsic
+  value is below the dividend), and `early_long decide` carries out the
+  program's `exercise(A, Q)`.
+- **Corporate actions.** A split or special dividend of the underlying
+  adjusts the terms the book holds by OCC's conventions (`adjustment`), and
+  a delisted underlying forces its options to expire at intrinsic.
+- **Greeks.** `greeks data` serves the binding's rows; `greeks model`
+  computes them at the mark's implied volatility.
+
+The hand-computed cases are `crates/abt-tests/tests/options.rs` (ERRATA
+E-71). The pricing functions' known answers are
+`crates/abt-kernel/tests/pricing.rs`.
 
 Parameters are the only values a run may vary: `--param name=value`
 (repeatable; `unit::name` for a library's) replaces a default with a

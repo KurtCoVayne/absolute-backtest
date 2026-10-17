@@ -327,6 +327,27 @@ pub struct Bound {
     /// reviewer vouched for under `allow unreviewed`, a span that starts
     /// after the need's `from`.
     pub warnings: Vec<RunWarning>,
+    /// Each underlying's chain snapshots (D-2.4 `chain_index`): the
+    /// contracts known at each instant, with the instant each row was
+    /// received.
+    pub chains: BTreeMap<Sym, BTreeMap<i64, Vec<(Sym, i64)>>>,
+    /// Each futures root's contracts (D-2.4 `continuous`): from each bar
+    /// on, the contract its series holds and the series' additive
+    /// adjustment, with the bar's receipt.
+    pub rolls: BTreeMap<Sym, Vec<Roll>>,
+    /// Under `greeks data`, the binding's `greeks` rows by contract: `(t,
+    /// r, [iv, delta, gamma, theta, vega, rho])`, admitted at a barrier by
+    /// their receipt as the stream admits its rows (ERRATA E-71).
+    pub greeks: BTreeMap<Sym, Vec<(i64, i64, [f64; 6])>>,
+}
+
+/// A bar of a futures root's continuous series and the contract it holds.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Roll {
+    pub t: i64,
+    pub r: i64,
+    pub contract: Sym,
+    pub adjustment: f64,
 }
 
 impl Bound {
@@ -570,6 +591,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Res
                             multiplier: mult.value(i),
                             future: class.as_deref() == Some("future"),
                             commission_per_contract: (!comm.is_null(i)).then(|| comm.value(i)),
+                            ..Contract::default()
                         },
                     );
                 }
@@ -712,6 +734,135 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Res
             }
         }
     }
+    // The registry's contract terms (D-2.4): an option's from
+    // `option_spec`, its underlying's chains from `chain_index`, a futures
+    // contract's from `future_spec`, a root's contracts from `continuous`.
+    let catalog = |relation: &str| -> Result<Vec<RecordBatch>, RunError> {
+        if !pairs.contains_key(relation) {
+            return Ok(Vec::new());
+        }
+        client.query(
+            &view,
+            QueryForm::Catalog(Box::new(Catalog {
+                relation: relation.into(),
+                predicate: None,
+            })),
+        )
+    };
+    let ids_of = |b: &RecordBatch, name: &str| -> Result<Vec<Option<Sym>>, RunError> {
+        let a = col(b, name)?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+        Ok((0..a.len()).map(|i| (!a.is_null(i)).then(|| by_id.get(&a.value(i)).copied()).flatten()).collect())
+    };
+    let floats = |b: &RecordBatch, name: &str| -> Result<Vec<Option<f64>>, RunError> {
+        let a = arrow::compute::cast(col(b, name)?, &DataType::Float64).map_err(|e| RunError::Internal(e.to_string()))?;
+        let a = a.as_primitive::<arrow::datatypes::Float64Type>();
+        Ok((0..a.len()).map(|i| (!a.is_null(i)).then(|| a.value(i))).collect())
+    };
+    for b in catalog("option_spec")? {
+        let (syms, unds) = (ids_of(&b, "id")?, ids_of(&b, "underlying")?);
+        let (listed, expiry) = (times(col(&b, "listed")?), times(col(&b, "expiry")?));
+        let (strike, mult) = (floats(&b, "strike")?, floats(&b, "multiplier")?);
+        let (right, style, settlement, occ, stime) = (
+            strings(col(&b, "right")?)?,
+            strings(col(&b, "style")?)?,
+            strings(col(&b, "settlement")?)?,
+            strings(col(&b, "occ")?)?,
+            strings(col(&b, "settlement_time")?)?,
+        );
+        for i in 0..b.num_rows() {
+            let (Some(sym), Some(underlying), Some(expiry), Some(strike)) = (syms[i], unds[i], expiry[i], strike[i]) else {
+                continue;
+            };
+            let Some(right) = right[i].as_deref().and_then(crate::functions::Right::parse) else { continue };
+            let multiplier = mult[i].unwrap_or(100.0);
+            let terms = super::OptionTerms {
+                underlying,
+                right,
+                strike,
+                expiry,
+                style: style[i].as_deref().and_then(crate::functions::Style::parse).unwrap_or(crate::functions::Style::American),
+                cash: settlement[i].as_deref() == Some("cash"),
+                am: stime[i].as_deref() == Some("am"),
+                multiplier,
+                occ: occ[i].clone().unwrap_or_default(),
+                listed: listed[i].unwrap_or(i64::MIN),
+            };
+            let c = contracts.entry(sym).or_insert_with(|| Contract { multiplier, ..Contract::default() });
+            c.multiplier = multiplier;
+            c.option = Some(terms);
+        }
+    }
+    let mut chains: BTreeMap<Sym, BTreeMap<i64, Vec<(Sym, i64)>>> = BTreeMap::new();
+    for b in catalog("chain_index")? {
+        let (unds, syms) = (ids_of(&b, "underlying")?, ids_of(&b, "id")?);
+        let (ts, rs) = (times(col(&b, "t")?), times(col(&b, "r")?));
+        for i in 0..b.num_rows() {
+            if let (Some(u), Some(sym), Some(t)) = (unds[i], syms[i], ts[i]) {
+                chains.entry(u).or_default().entry(t).or_default().push((sym, rs[i].unwrap_or(t)));
+            }
+        }
+    }
+    for b in catalog("future_spec")? {
+        let syms = ids_of(&b, "id")?;
+        let (expiry, last_trade) = (times(col(&b, "expiry")?), times(col(&b, "last_trade")?));
+        let pv = floats(&b, "point_value")?;
+        let (root, settlement) = (strings(col(&b, "root")?)?, strings(col(&b, "settlement")?)?);
+        for i in 0..b.num_rows() {
+            let (Some(sym), Some(expiry)) = (syms[i], expiry[i]) else { continue };
+            let point_value = pv[i].filter(|x| x.is_finite()).unwrap_or(1.0);
+            let c = contracts.entry(sym).or_insert_with(|| Contract {
+                multiplier: point_value,
+                future: true,
+                ..Contract::default()
+            });
+            c.future_spec = Some(super::FutureSpec {
+                root: root[i].clone().unwrap_or_default(),
+                expiry,
+                last_trade: last_trade[i],
+                point_value,
+                cash: settlement[i].as_deref() == Some("cash"),
+            });
+        }
+    }
+    let mut rolls: BTreeMap<Sym, Vec<Roll>> = BTreeMap::new();
+    for b in catalog("continuous")? {
+        let (roots, cons) = (ids_of(&b, "root_id")?, ids_of(&b, "contract_id")?);
+        let (ts, rs) = (times(col(&b, "t")?), times(col(&b, "r")?));
+        let adj = floats(&b, "adjustment")?;
+        for i in 0..b.num_rows() {
+            if let (Some(root), Some(contract), Some(t)) = (roots[i], cons[i], ts[i]) {
+                rolls.entry(root).or_default().push(Roll {
+                    t,
+                    r: rs[i].unwrap_or(t),
+                    contract,
+                    adjustment: adj[i].unwrap_or(0.0),
+                });
+            }
+        }
+    }
+    for v in rolls.values_mut() {
+        v.sort_by_key(|r| r.t);
+    }
+    // `greeks data` (K-5.5.6): the binding's rows, read whole.
+    let mut greeks: BTreeMap<Sym, Vec<(i64, i64, [f64; 6])>> = BTreeMap::new();
+    if prog.exec.greeks.as_deref() == Some("data") {
+        if let Some(stored_rel) = pairs.keys().find(|r| r.as_str() == "option.greeks").cloned() {
+            for b in scan(&stored_rel)? {
+                let syms = ids_of(&b, "A")?;
+                let (ts, rs) = (times(col(&b, "T")?), times(col(&b, "r")?));
+                let cols: Vec<Vec<Option<f64>>> = ["IV", "Delta", "Gamma", "Theta", "Vega", "Rho"].iter().map(|c| floats(&b, c)).collect::<Result<_, _>>()?;
+                for i in 0..b.num_rows() {
+                    let (Some(sym), Some(t)) = (syms[i], ts[i]) else { continue };
+                    // A value the source does not carry reads as NaN (E-71).
+                    let v: Vec<f64> = cols.iter().map(|c| c[i].unwrap_or(f64::NAN)).collect();
+                    greeks.entry(sym).or_default().push((t, rs[i].unwrap_or(t), [v[0], v[1], v[2], v[3], v[4], v[5]]));
+                }
+            }
+        }
+        for v in greeks.values_mut() {
+            v.sort_by_key(|x| (x.0, x.1));
+        }
+    }
     Ok(Bound {
         binding,
         view,
@@ -728,6 +879,9 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Res
         sessions,
         prints,
         warnings,
+        chains,
+        rolls,
+        greeks,
     })
 }
 
@@ -890,7 +1044,7 @@ pub fn borrowed(class: &str, name: &str) -> Option<String> {
 fn need_relations(word: &str) -> &'static [&'static str] {
     match word {
         "bars" => &["open", "high", "low", "close", "volume"],
-        "actions" => &["split", "dividend", "delisted"],
+        "actions" => &["split", "dividend", "special_dividend", "delisted"],
         "listing" => &["listed", "ticker", "usable"],
         "lists" => &["member", "classification"],
         "series" => &["value"],
@@ -983,24 +1137,20 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
             version: None,
         },
     };
+    // A chain's quotes, and its greeks under `greeks data` (K-5.5.6).
+    let mut chain_relations = vec!["quote"];
+    if prog.exec.greeks.as_deref() == Some("data") {
+        chain_relations.push("greeks");
+    }
     let dynamic: Vec<DynamicNeed> = d
         .chains
         .iter()
-        .map(|c| DynamicNeed {
-            relation: stored_name("quote").unwrap_or_else(|| "option.quote".into()),
+        .flat_map(|c| chain_relations.iter().map(move |r| (c, *r)))
+        .map(|(c, r)| DynamicNeed {
+            relation: stored_name(r).unwrap_or_else(|| format!("option.{}", r)),
             underlying: 0,
             underlying_symbol: Some(c.underlying.clone()),
-            filters: Some(Box::new(ChainFilters {
-                expiry_from: Some(Box::new(wire_duration(&c.expiry.0))),
-                expiry_to: Some(Box::new(wire_duration(&c.expiry.1))),
-                moneyness_lo: Some(c.moneyness.0),
-                moneyness_hi: Some(c.moneyness.1),
-                right: c.right.clone(),
-                style: None,
-                strike_lo: None,
-                strike_hi: None,
-                min_open_interest: None,
-            })),
+            filters: Some(Box::new(chain_filters(c))),
             spot_relation: Some(stored_name(&c.spot).unwrap_or_else(|| c.spot.clone())),
             // The spot is the relation's price: its first value argument.
             spot_column: prog
@@ -1028,6 +1178,21 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
         })),
         dynamic: (!dynamic.is_empty()).then_some(dynamic),
         point: None,
+    }
+}
+
+/// A chain need's filters as the data layer's chain query takes them.
+pub fn chain_filters(c: &crate::check::ChainSpec) -> ChainFilters {
+    ChainFilters {
+        expiry_from: Some(Box::new(wire_duration(&c.expiry.0))),
+        expiry_to: Some(Box::new(wire_duration(&c.expiry.1))),
+        moneyness_lo: Some(c.moneyness.0),
+        moneyness_hi: Some(c.moneyness.1),
+        right: c.right.clone(),
+        style: None,
+        strike_lo: None,
+        strike_hi: None,
+        min_open_interest: None,
     }
 }
 
@@ -1372,7 +1537,12 @@ impl Decoder {
     fn value(&mut self, k: &mut Kernel, c: &ArrayRef, i: usize, ty: &Ty) -> Result<Value, RunError> {
         let null = || RunError::Internal("a null in a stored relation's column the kernel reads".into());
         if c.is_null(i) {
-            return Err(null());
+            // A number the source does not carry reads as NaN (an ORATS
+            // quote's last trade, a put's theta): ERRATA E-71.
+            return match ty {
+                Ty::Quantity(_) | Ty::IntLit => Ok(Value::Num(f64::NAN)),
+                _ => Err(null()),
+            };
         }
         Ok(match ty {
             Ty::Entity => {

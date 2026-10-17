@@ -12,7 +12,7 @@ pub mod link;
 pub mod rule;
 pub mod types;
 
-pub use config::{Clock, Commission, Delisting, ExecBlock, Impact, Leverage, Limit, LimitKind, LimitPolicy, ReportConfig, Slippage};
+pub use config::{exercise_text, Clock, Commission, Delisting, ExecBlock, Impact, Leverage, Limit, LimitKind, LimitPolicy, MarginModel, OptionFill, ReportConfig, Slippage};
 pub use dof::DegreesOfFreedom;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -371,7 +371,8 @@ impl Demand {
     pub fn need_for(name: &str) -> &'static str {
         match name {
             "open" | "high" | "low" | "close" | "volume" => "bars",
-            "split" | "dividend" | "delisted" => "actions",
+            "split" | "dividend" | "special_dividend" | "delisted" => "actions",
+            "quote" => "chain",
             "listed" | "ticker" => "listing",
             "member" => "lists",
             "value" => "series",
@@ -395,6 +396,7 @@ impl Demand {
             "commission" => self.commission,
             "classification" => self.classification,
             "usable" => self.usable,
+            "chain" => !self.chains.is_empty(),
             _ => false,
         }
     }
@@ -685,8 +687,14 @@ fn class_strategy_source(ws: &Workspace, cls: &ast::Class, base: Option<Resoluti
     } else {
         "traded@base(A, T)"
     };
+    // The fields only one class's program states (ERRATA E-8).
+    let class_fields = match class.as_str() {
+        "future" => "\n    settlement none",
+        "option" => "\n    option_mark mid\n    option_fill touch\n    greeks model\n    exercise { itm_at_expiry; early_short never; early_long never; atm_tolerance 0 }",
+        _ => "",
+    };
     format!(
-        "strategy {name} {{\n  data {{ class {class}\n    {needs}\n    require reviewed\n    prefer latest }}\n  uses {uses}\n  clock {{ decide on base }}\n  universe {{ universe(A, T) :- {universe}. }}\n  params {{\n{params}  }}\n  rules {{\n{rules}  }}\n  decisions {{ silence hold   orders market\n    {decides}\n  }}\n  execution {{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission per_share 0.005 USD min 1 USD\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }}\n  report {{ calendar base   periods 252 per year }}\n}}\n",
+        "strategy {name} {{\n  data {{ class {class}\n    {needs}\n    require reviewed\n    prefer latest }}\n  uses {uses}\n  clock {{ decide on base }}\n  universe {{ universe(A, T) :- {universe}. }}\n  params {{\n{params}  }}\n  rules {{\n{rules}  }}\n  decisions {{ silence hold   orders market\n    {decides}\n  }}\n  execution {{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission per_share 0.005 USD min 1 USD\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running{class_fields}\n  }}\n  report {{ calendar base   periods 252 per year }}\n}}\n",
         name = parts.name,
         class = class,
         needs = needs.join("\n    "),
@@ -695,6 +703,7 @@ fn class_strategy_source(ws: &Workspace, cls: &ast::Class, base: Option<Resoluti
         params = parts.params,
         rules = parts.rules,
         decides = parts.decides,
+        class_fields = class_fields,
     )
 }
 
@@ -1399,6 +1408,32 @@ impl<'a> Checker<'a> {
             if exec.commission == Commission::PerContract && !self.demand.commission && self.demand.needs > 0 {
                 self.unit_diag(Code::P, root.span, "`commission per_contract from catalog` needs the catalog's commission: add `need commission`");
             }
+            // ERRATA E-8: the option fields are required of an option
+            // program, `settlement` of a futures program, and neither of
+            // any other.
+            let class = self.class_name.clone();
+            let option_fields = [
+                ("option_mark", exec.option_mark.is_some()),
+                ("option_fill", exec.option_fill.is_some()),
+                ("greeks", exec.greeks.is_some()),
+                ("exercise", exec.exercise.is_some()),
+            ];
+            for (field, set) in option_fields {
+                if class == "option" && !set {
+                    self.unit_diag(
+                        Code::P,
+                        root.span,
+                        format!("the execution block of an option program sets no `{}`; every field of the option model is required (K-2.2)", field),
+                    );
+                } else if class != "option" && set {
+                    self.unit_diag(Code::P, root.span, format!("`{}` is an option program's field, and this program's class is `{}`", field, class));
+                }
+            }
+            if class == "future" && exec.settlement.is_none() {
+                self.unit_diag(Code::P, root.span, "the execution block of a futures program sets no `settlement` (`daily` or `none`, K-5.4)");
+            } else if class != "future" && exec.settlement.is_some() {
+                self.unit_diag(Code::P, root.span, format!("`settlement` is a futures program's field, and this program's class is `{}`", class));
+            }
         }
         if let Some(rb) = &root.report {
             match config::expand_report(rb) {
@@ -1636,7 +1671,9 @@ impl<'a> Checker<'a> {
         let series_native = d.series.iter().filter_map(|(n, r)| r.or_else(|| self.series.get(n).copied())).min();
         let catalog_native = if self.base.is_sub_daily() { Some(Resolution::D1) } else { None };
         for decl in &class_rels {
-            if !d.admits(&decl.name) {
+            // A special dividend is what OCC adjusts an option's strike for
+            // (K-5.5.5): only an option program reads it.
+            if !d.admits(&decl.name) || (decl.name == "special_dividend" && self.class_name != "option") {
                 continue;
             }
             let Some(mut sig) = self.signature_of(decl, &self.class_name.clone(), Cal::Base) else { continue };

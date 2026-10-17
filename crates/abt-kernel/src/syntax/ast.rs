@@ -313,6 +313,9 @@ pub enum ExecValue {
         min: f64,
     },
     CommissionPerContract,
+    /// `per_contract P USD`: a fixed commission per contract per side (an
+    /// option's, and its exercise fee, K-5.5.4).
+    CommissionPerContractFixed(f64),
     CommissionBps(f64),
     SlippageFixed(f64),
     SlippageVol {
@@ -337,7 +340,47 @@ pub enum ExecValue {
     /// `limits { gross <= 1.5 reject; weight <= 0.1 per name clamp; ... }`
     /// (K-3.5).
     Limits(Vec<LimitItem>),
+    /// `option_fill touch [+ F spread] | mid [+ F spread] | last` (K-5.5.3).
+    OptionFill {
+        base: String,
+        spread: f64,
+    },
+    /// `margin published, reg_t, approx 0.2` (K-5.6): the models in order of
+    /// preference, `approx` with its fraction.
+    Margin(Vec<(String, Option<f64>)>),
+    /// `exercise { itm_at_expiry; early_short ...; early_long ...;
+    /// atm_tolerance X }` (K-5.5.4).
+    Exercise(ExerciseRule),
     None,
+}
+
+/// When a short American option is assigned before its expiry (K-5.5.4,
+/// ERRATA E-6).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EarlyShort {
+    /// `when extrinsic < DIVIDEND`: a call on the bar before an ex-date when
+    /// its extrinsic value is below the dividend; a put when its extrinsic
+    /// value is below the financing of its strike to expiry.
+    Dividend,
+    /// `when extrinsic < X`: either right, against a fixed threshold.
+    Threshold(f64),
+    Never,
+}
+
+/// The `exercise` field (K-5.5.4).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExerciseRule {
+    /// In-the-money options are exercised (long) or assigned (short) at
+    /// expiry; otherwise every option expires.
+    pub itm_at_expiry: bool,
+    pub early_short: EarlyShort,
+    /// `early_long decide`: the program's `exercise(A, Q)` is executed;
+    /// `never`: it is dropped.
+    pub early_long_decide: bool,
+    /// A fraction of the strike within which an option is at the money and
+    /// expires.
+    pub atm_tolerance: f64,
 }
 
 /// One pre-trade limit as written: `KIND <= BOUND [per WORD] [POLICY]`.

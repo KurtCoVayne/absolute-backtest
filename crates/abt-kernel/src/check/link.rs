@@ -97,7 +97,7 @@ struct Resolved {
     read: Read,
 }
 
-const KERNEL_RELS: &[&str] = &["position", "cash", "nav", "capital", "mark", "fill", "decided", "decide", "clock"];
+const KERNEL_RELS: &[&str] = &["position", "cash", "nav", "capital", "mark", "fill", "decided", "decide", "clock", "spec", "chain", "greeks"];
 const BAR_PRIMS: &[&str] = &["open", "high", "low", "close", "volume"];
 
 fn is_var(name: &str) -> bool {
@@ -122,6 +122,11 @@ impl<'a> Checker<'a> {
         let root_name = root.name.clone();
         for sig in kernel_relations(&self.decision_cal) {
             self.relations.insert(sig.name.clone(), sig);
+        }
+        if self.class_name == "option" {
+            for sig in crate::ir::option_relations(&self.decision_cal) {
+                self.relations.insert(sig.name.clone(), sig);
+            }
         }
         if self.clock_offset.is_some() {
             self.relations.insert(
@@ -396,6 +401,22 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // What the option model reads whether or not a rule does (K-5.5):
+        // the quotes it marks and fills at, and each chain's spot.
+        if self.class_name == "option" {
+            let mut read = vec!["quote".to_string()];
+            read.extend(self.demand.chains.iter().map(|c| c.spot.clone()));
+            for name in read {
+                let rrel = RRel {
+                    name,
+                    args: vec![],
+                    cal: None,
+                    instance: false,
+                };
+                let dc = self.decision_cal.clone();
+                let _ = self.resolve_rrel(&rrel, &dc, root.span, &root_name, None);
+            }
+        }
         self.run_jobs();
     }
 
@@ -451,7 +472,8 @@ impl<'a> Checker<'a> {
                 return None;
             }
             if !self.relations.contains_key(name) {
-                err(self, Code::U, format!("`{}` is not a relation of this program (the clock has no session offset)", name));
+                let why = if name == "clock" { "the clock has no session offset" } else { "it is the option class's (K-2.4)" };
+                err(self, Code::U, format!("`{}` is not a relation of this program ({})", name, why));
                 return None;
             }
             if cal != decision {
@@ -1522,7 +1544,7 @@ impl<'a> Checker<'a> {
     fn key_term_of(&self, a: &ast::Atom, name: &str, unit: &str) -> Option<Term> {
         let pos = if KERNEL_RELS.contains(&name) {
             match name {
-                "position" | "mark" | "fill" | "clock" => 1,
+                "position" | "mark" | "fill" | "clock" | "spec" | "chain" | "greeks" => 1,
                 _ => 0,
             }
         } else if name == "universe" {

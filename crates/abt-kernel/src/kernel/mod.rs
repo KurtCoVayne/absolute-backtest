@@ -18,15 +18,15 @@ use crate::ir::*;
 pub mod bind;
 pub mod checkpoints;
 pub mod events;
-pub mod executor;
+
 pub mod fold;
 pub mod hash;
 pub mod outputs;
 pub mod pushdown;
 pub mod service;
+pub use crate::sim::{Executor, SimExecutor};
 pub use bind::{bind, connect_dataset, install_provider, Bound, Connector, DataClient};
 pub use events::{Book, EventKind, OrderId, RunEvent};
-pub use executor::{Executor, SimExecutor};
 pub use fold::{Checkpoint, CheckpointEvery, Event, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 
@@ -172,6 +172,62 @@ pub struct Contract {
     pub future: bool,
     /// Commission per contract per side, replacing the per-share schedule.
     pub commission_per_contract: Option<f64>,
+    /// An option's terms (D-2.4 `option_spec`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option: Option<OptionTerms>,
+    /// A futures contract's terms (D-2.4 `future_spec`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub future_spec: Option<FutureSpec>,
+}
+
+/// An option's terms (D-2.4 `option_spec`, the kernel's `spec` of K-2.4),
+/// adjusted by its underlying's corporate actions from their ex-dates
+/// (K-5.5.5) once the book holds it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OptionTerms {
+    pub underlying: Sym,
+    pub right: crate::functions::Right,
+    pub strike: f64,
+    /// The expiry date, at midnight UTC of its day.
+    pub expiry: i64,
+    pub style: crate::functions::Style,
+    /// Settled in cash (an index option) rather than by delivery.
+    pub cash: bool,
+    /// Settled on the expiry day's opening prints rather than its close.
+    pub am: bool,
+    /// Units of the underlying a contract delivers.
+    pub multiplier: f64,
+    pub occ: String,
+    /// When the terms were first known.
+    pub listed: i64,
+}
+
+impl OptionTerms {
+    /// The intrinsic value of a unit at the underlying's price `s`.
+    pub fn intrinsic(&self, s: f64) -> f64 {
+        (self.right.sign() * (s - self.strike)).max(0.0)
+    }
+
+    /// The instant the option expires at, which its time to expiry runs to:
+    /// the expiry day's open (AM) or its end (PM), ERRATA E-71.
+    pub fn expires_at(&self) -> i64 {
+        if self.am {
+            self.expiry
+        } else {
+            self.expiry + time::DAY
+        }
+    }
+}
+
+/// A futures contract's terms (D-2.4 `future_spec`).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FutureSpec {
+    pub root: String,
+    pub expiry: i64,
+    pub last_trade: Option<i64>,
+    pub point_value: f64,
+    /// Settled in cash at expiry rather than by delivery.
+    pub cash: bool,
 }
 
 impl Default for Contract {
@@ -180,6 +236,8 @@ impl Default for Contract {
             multiplier: 1.0,
             future: false,
             commission_per_contract: None,
+            option: None,
+            future_spec: None,
         }
     }
 }
@@ -772,6 +830,44 @@ pub struct ExecConfig {
     /// configuration's (the run crosses the blocks the same way).
     #[serde(skip)]
     pub embargo_mask: Vec<(i64, i64)>,
+    /// The option model of an option program (K-5.5), from the execution
+    /// block's option fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<OptionConfig>,
+    /// `commission per_contract P USD`: a fixed commission per contract per
+    /// side, an option's or a future's, where the catalog states none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_contract: Option<f64>,
+    /// The margin models in order of preference (K-5.6); the leverage
+    /// model's margin when none is listed (ERRATA E-71).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub margin_models: Vec<crate::check::MarginModel>,
+    /// A future's daily settlement through cash (K-5.4, `settlement daily`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub settlement_daily: bool,
+}
+
+/// How an option is marked (K-5.5.2): at the mid of its quote, at its last
+/// trade, or at the model's price at its implied volatility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionMark {
+    Mid,
+    Last,
+    Model,
+}
+
+/// The option model's configuration (K-2.2, K-5.5).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OptionConfig {
+    pub mark: OptionMark,
+    /// The fill (K-5.5.3): `touch`, `mid` or `last`, moved against the order
+    /// by `spread` times the quoted spread (the half-spread from the mid).
+    pub fill: String,
+    pub spread: f64,
+    /// `greeks data`: the binding's `greeks` rows; the model's otherwise.
+    pub greeks_data: bool,
+    pub exercise: crate::syntax::ast::ExerciseRule,
 }
 
 impl Default for ExecConfig {
@@ -841,6 +937,10 @@ impl Default for ExecConfig {
             start: None,
             end: None,
             silence_flat: false,
+            options: None,
+            per_contract: None,
+            margin_models: Vec::new(),
+            settlement_daily: false,
             embargo_mask: Vec::new(),
         }
     }
@@ -872,6 +972,12 @@ impl ExecConfig {
                 cfg.commission_per_share = 0.0;
                 cfg.commission_min_per_order = 0.0;
                 cfg.commission_bps = 0.0;
+            }
+            Commission::PerContractFixed(c) => {
+                cfg.commission_per_share = 0.0;
+                cfg.commission_min_per_order = 0.0;
+                cfg.commission_bps = 0.0;
+                cfg.per_contract = Some(*c);
             }
             Commission::PerShare { per_share, min } => {
                 cfg.commission_per_share = *per_share;
@@ -958,6 +1064,28 @@ impl ExecConfig {
         cfg.on_ruin = if x.ruin == "continue" { OnRuin::Continue } else { OnRuin::Halt };
         cfg.limits = x.limits.clone();
         cfg.late_reject = x.late == "reject";
+        if let (Some(mark), Some(fill), Some(greeks), Some(exercise)) = (&x.option_mark, &x.option_fill, &x.greeks, &x.exercise) {
+            cfg.options = Some(OptionConfig {
+                mark: match mark.as_str() {
+                    "last" => OptionMark::Last,
+                    "model" => OptionMark::Model,
+                    _ => OptionMark::Mid,
+                },
+                fill: fill.base.clone(),
+                spread: fill.spread,
+                greeks_data: greeks == "data",
+                exercise: *exercise,
+            });
+        }
+        cfg.margin_models = x.margin.clone();
+        cfg.settlement_daily = x.settlement.as_deref() == Some("daily");
+        if let Some(m) = &x.margin_call {
+            cfg.on_margin_call = match m.as_str() {
+                "liquidate" => OnMarginCall::Liquidate,
+                "allow" => OnMarginCall::Allow,
+                _ => OnMarginCall::Halt,
+            };
+        }
         cfg
     }
 
@@ -1235,6 +1363,14 @@ pub struct FillRecord {
     pub partial: bool,
     /// A forced liquidation by a margin call, not a decision of the strategy.
     pub forced: bool,
+    /// An option's cost against its quote's mid (K-5.5.3): (price − mid) ×
+    /// quantity × multiplier; 0 for every other fill.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spread: f64,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -1454,6 +1590,14 @@ impl RunResult {
         self.decisions.iter().filter(|d| d.t == t).map(|d| &d.decision).collect()
     }
     pub fn describe_decision(&self, d: &Decision) -> String {
+        if d.ctor == Ctor::Combo {
+            let legs: Vec<String> = d.legs.iter().map(|(s, q)| format!("leg({}, {})", self.symbols[*s as usize], q)).collect();
+            return if d.order.is_market() {
+                format!("combo([{}])", legs.join(", "))
+            } else {
+                format!("combo([{}], {})", legs.join(", "), d.order)
+            };
+        }
         if d.order.is_market() {
             format!("{}({}, {})", d.ctor.name(), self.symbols[d.equity as usize], d.amount)
         } else {
@@ -1720,10 +1864,27 @@ pub struct Kernel<'p> {
     pub(crate) split_rel: Option<usize>,
     pub(crate) dividend_rel: Option<usize>,
     pub(crate) delisted_rel: Option<usize>,
+    /// The equity class's `special_dividend`, what OCC adjusts strikes for.
+    pub(crate) special_dividend_rel: Option<usize>,
+    /// The option class's `quote` columns, when the program reads it.
+    pub(crate) quote_cols: Option<crate::sim::option::QuoteCols>,
+    /// Some instrument is an option: marks and volumes are its quote's.
+    pub(crate) has_options: bool,
     /// What each equity literal of the program (a ticker) resolved to.
     pub(crate) literal_equities: HashMap<String, Sym>,
     /// Contract terms by kernel symbol (futures); a symbol absent is a share.
     pub(crate) contracts: FxHashMap<Sym, Contract>,
+    /// Each underlying's chain snapshots: the contracts known at an
+    /// instant, each with its receipt (D-2.4 `chain_index`).
+    pub(crate) chains: FxHashMap<Sym, BTreeMap<i64, Vec<(Sym, i64)>>>,
+    /// Each futures root's contracts by bar (D-2.4 `continuous`), which the
+    /// futures model reads (M-7d).
+    #[allow(dead_code)]
+    pub(crate) rolls: FxHashMap<Sym, Vec<bind::Roll>>,
+    /// Under `greeks data`, each contract's rows `(t, r, values)`.
+    pub(crate) greeks_rows: FxHashMap<Sym, Vec<(i64, i64, [f64; 6])>>,
+    /// The program's chains (D-7.2): what its `chain` relation holds.
+    pub(crate) chain_needs: Vec<ChainNeed>,
     /// Per relation: calls computed (memo misses), calls that derived a
     /// tuple, tuples derived; the coverage report of a run.
     pub(crate) coverage: Vec<(usize, usize, usize)>,
@@ -1735,6 +1896,16 @@ pub struct Kernel<'p> {
     /// design, section 7.2); off by default.
     pub(crate) recording: bool,
     pub(crate) summary_rows: Vec<SummaryRow>,
+}
+
+/// A dynamic need as the kernel's `chain` evaluates it (K-2.4, D-4.4): the
+/// underlying resolved, the filters of the data layer's chain query, and the
+/// program's relation the spot is read from.
+#[derive(Clone, Debug)]
+pub(crate) struct ChainNeed {
+    pub underlying: Sym,
+    pub filters: abt_wire::generated::abt::wire::ChainFilters,
+    pub spot: String,
 }
 
 /// One row of the `summary` state table: a windowed aggregation group
@@ -1816,19 +1987,6 @@ impl<'p> Kernel<'p> {
     }
 
     fn build(prog: &'p Program, dataset: &bind::Bound, cfg: ExecConfig) -> Result<Kernel<'p>, RunError> {
-        // Combos and exercise are checked (K-2.3); the executor that fills
-        // them all or none and exercises options is the options model's.
-        for r in &prog.rules {
-            if let (true, Some(Term::Ctor(c, _, _))) = (r.head.name == "decide", r.head.terms.get(1)) {
-                if c == "combo" || c == "exercise" {
-                    return Err(RunError::Config(format!(
-                        "rule {} decides `{}`, which this kernel does not execute yet: combos (all or none) and exercise arrive with the options model (docs/spec/05-migration.md, M-7)",
-                        prog.rule_label(prog.rules.iter().position(|x| std::ptr::eq(x, r)).unwrap_or(0)),
-                        c
-                    )));
-                }
-            }
-        }
         // Resolve string overrides by their parameter's type, as the checker
         // did for the program's own literals.
         let mut cfg = cfg;
@@ -1893,6 +2051,10 @@ impl<'p> Kernel<'p> {
         for rule in &prog.rules {
             for_each_lit(rule, &mut intern);
         }
+        // A chain's underlying is named by its ticker, as a literal is.
+        for c in &prog.demand.chains {
+            intern(&Lit::Entity(c.underlying.clone()));
+        }
         if let Some(m) = unresolved.first() {
             return Err(RunError::Config(m.clone()));
         }
@@ -1944,6 +2106,12 @@ impl<'p> Kernel<'p> {
                 ),
             });
         }
+        // The vocabularies the executor writes `spec` in (K-2.4).
+        if prog.class == "option" {
+            for w in ["call", "put", "american", "european", "physical", "cash"] {
+                labels.intern(w);
+            }
+        }
         let (symbols, remap) = symbols.sorted();
         let (labels, _) = labels.sorted();
         let literal_equities: HashMap<String, Sym> = literal_equities.into_iter().map(|(k, s)| (k, remap[s as usize])).collect();
@@ -1955,7 +2123,51 @@ impl<'p> Kernel<'p> {
                 ..s.clone()
             })
             .collect();
-        let contracts: FxHashMap<Sym, Contract> = dataset.contracts.iter().map(|(s, c)| (remap[*s as usize], c.clone())).collect();
+        let contracts: FxHashMap<Sym, Contract> = dataset
+            .contracts
+            .iter()
+            .map(|(s, c)| {
+                let mut c = c.clone();
+                if let Some(o) = c.option.as_mut() {
+                    o.underlying = remap[o.underlying as usize];
+                }
+                (remap[*s as usize], c)
+            })
+            .collect();
+        let chains: FxHashMap<Sym, BTreeMap<i64, Vec<(Sym, i64)>>> = dataset
+            .chains
+            .iter()
+            .map(|(u, snaps)| (remap[*u as usize], snaps.iter().map(|(t, v)| (*t, v.iter().map(|(s, r)| (remap[*s as usize], *r)).collect())).collect()))
+            .collect();
+        let rolls: FxHashMap<Sym, Vec<bind::Roll>> = dataset
+            .rolls
+            .iter()
+            .map(|(root, v)| {
+                (
+                    remap[*root as usize],
+                    v.iter()
+                        .map(|r| bind::Roll {
+                            contract: remap[r.contract as usize],
+                            ..r.clone()
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let greeks_rows: FxHashMap<Sym, Vec<(i64, i64, [f64; 6])>> = dataset.greeks.iter().map(|(s, v)| (remap[*s as usize], v.clone())).collect();
+        let chain_needs: Vec<ChainNeed> = prog
+            .demand
+            .chains
+            .iter()
+            .filter_map(|c| {
+                let underlying = *literal_equities.get(&c.underlying)?;
+                Some(ChainNeed {
+                    underlying,
+                    filters: bind::chain_filters(c),
+                    spot: c.spot.clone(),
+                })
+            })
+            .collect();
         // Relation table.
         let mut rels = Vec::new();
         let mut rel_ids = HashMap::new();
@@ -2284,6 +2496,9 @@ impl<'p> Kernel<'p> {
         let split_rel = primitive("split");
         let dividend_rel = primitive("dividend");
         let delisted_rel = primitive("delisted");
+        let special_dividend_rel = primitive("special_dividend");
+        let quote_cols = crate::sim::option::QuoteCols::of(prog, &rel_ids);
+        let has_options = contracts.values().any(|c| c.option.is_some());
         // What the memo must keep: the relations read through `asof`, and the
         // longest calendar lookback (windows and lags) of any rule.
         let mut asof_read: FxHashSet<usize> = FxHashSet::default();
@@ -2428,8 +2643,15 @@ impl<'p> Kernel<'p> {
             split_rel,
             dividend_rel,
             delisted_rel,
+            special_dividend_rel,
+            quote_cols,
+            has_options,
             literal_equities,
             contracts,
+            chains,
+            rolls,
+            greeks_rows,
+            chain_needs,
             last_price: Default::default(),
             params,
             remap_syms: remap,
@@ -2785,6 +3007,17 @@ impl<'p> Kernel<'p> {
         self.contracts.get(&sym).map(|c| c.future).unwrap_or(false)
     }
 
+    /// An option: an instrument with terms (K-5.5.1).
+    pub fn is_option(&self, sym: Sym) -> bool {
+        self.contracts.get(&sym).is_some_and(|c| c.option.is_some())
+    }
+
+    /// A contract (a future or an option): sold short without a borrow,
+    /// charged `commission per_contract`.
+    pub fn is_contract(&self, sym: Sym) -> bool {
+        self.contracts.get(&sym).is_some_and(|c| c.future || c.option.is_some())
+    }
+
     /// A future's commission per contract per side, when it has one.
     pub fn commission_per_contract(&self, sym: Sym) -> Option<f64> {
         self.contracts.get(&sym).and_then(|c| c.commission_per_contract)
@@ -2793,6 +3026,10 @@ impl<'p> Kernel<'p> {
     /// Volume of `sym` over decision bar `t` from the configured volume
     /// relation: the tuple at `t`, or the sum of the fine tuples in its bucket.
     pub fn bar_volume(&self, sym: Sym, t: i64) -> Option<f64> {
+        // An option's volume is its quote's (K-5.5.3).
+        if self.has_options && self.is_option(sym) {
+            return self.quote_scan(sym, t).and_then(|q| q.volume);
+        }
         let id = self.volume_rel?;
         let info = &self.rels[id];
         let entity_pos = *info.entity_positions.first()?;
@@ -2896,6 +3133,20 @@ impl<'p> Kernel<'p> {
     /// the tuple at `t`, or the last fine tuple in its bucket; `None` when the
     /// bar has no price, so that the executor drops rather than fills.
     pub fn bar_price(&mut self, sym: Sym, t: i64) -> Option<f64> {
+        // An option is marked at its quote (K-5.5.2).
+        let found = if self.has_options && self.is_option(sym) {
+            self.option_mark(sym, t).map(|(p, _)| p)
+        } else {
+            self.bar_price_quiet(sym, t)
+        };
+        if let Some(p) = found {
+            self.last_price.insert(sym, p);
+        }
+        found
+    }
+
+    /// `bar_price` without remembering the price as the last one seen.
+    pub(crate) fn bar_price_quiet(&mut self, sym: Sym, t: i64) -> Option<f64> {
         let id = self.price_rel?;
         let info = self.rels[id].clone();
         let entity_pos = *info.entity_positions.first()?;
@@ -2922,9 +3173,6 @@ impl<'p> Kernel<'p> {
                 .rev()
                 .find_map(|(_, tus)| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)).and_then(|tu| tu[col].as_f64()))
         };
-        if let Some(p) = found {
-            self.last_price.insert(sym, p);
-        }
         found
     }
 
