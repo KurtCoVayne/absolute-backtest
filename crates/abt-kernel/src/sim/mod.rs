@@ -1123,6 +1123,8 @@ impl Executor for SimExecutor {
             capital: base,
             margin_initial: by_models.as_ref().map(|(m, _)| m.initial).unwrap_or(gross / self.cfg.max_gross.max(1.0)),
             margin_maintenance: by_models.as_ref().map(|(m, _)| m.maintenance).unwrap_or(self.cfg.maintenance_margin * gross),
+            variation: if self.cfg.settlement_daily { self.variation(k, t) } else { 0.0 },
+            margin_source: self.margin_source(by_models.as_ref().map(|(m, _)| m)),
         });
         let (initial, maintenance) = match &by_models {
             Some((m, _)) => (m.initial, m.maintenance),
@@ -1152,10 +1154,23 @@ impl Executor for SimExecutor {
                 avg_cost: self.book.avg_cost.get(&sym).copied().unwrap_or(0.0),
                 mark,
                 mark_source: source.into(),
+                option: None,
             });
         }
         if k.quote_cols.is_some() {
-            self.write_option_relations(k, t);
+            let greeks = self.write_option_relations(k, t);
+            // The holdings of options carry their underlying and Greeks
+            // (E-73).
+            for h in result.holdings.iter_mut().rev().take_while(|h| h.t == t) {
+                let Some(o) = k.option_terms(h.instrument).cloned() else { continue };
+                h.option = Some(crate::kernel::OptionHolding {
+                    underlying: o.underlying,
+                    spot: k.bar_price_quiet(o.underlying, t),
+                    expiry: o.expiry,
+                    multiplier: o.multiplier,
+                    greeks: greeks.get(&h.instrument).copied(),
+                });
+            }
         }
         self.write_contract_relation(k, t);
         Ok(())

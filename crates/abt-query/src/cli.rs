@@ -23,6 +23,9 @@ pub struct RunMetrics {
     /// paid impact.
     pub capacity: Option<f64>,
     pub subperiods: Vec<(i64, f64)>,
+    pub book: metrics::BookMetrics,
+    /// Present when the run held an option (E-73).
+    pub options: Option<metrics::OptionsMetrics>,
     pub versions: BTreeMap<String, String>,
 }
 
@@ -39,6 +42,8 @@ pub fn run_metrics(data: &Data, run: &str) -> Result<RunMetrics, crate::data::Er
         convention: metrics::convention_metrics_on(&r, ppy, by_day, days.as_ref()),
         capacity: metrics::capacity(&r, ppy, 0.05),
         subperiods: metrics::subperiod_sharpes(&r.metric_curve(), ppy, 20),
+        book: metrics::book_metrics(&r),
+        options: metrics::options_metrics(&r, ppy),
         versions: data.versions(&format!("kernel.{}.", run))?,
     })
 }
@@ -149,6 +154,51 @@ pub fn metrics_main(args: &[String], conn: Connection) -> i32 {
     }
     for (y, s) in &m.subperiods {
         println!("sharpe {}: {:.4}", y, s);
+    }
+    let b = &m.book;
+    println!(
+        "book: margin_utilisation {:.4} (max {:.4}, maintenance max {:.4})   max_weight {:.4}   effective_names {:.2}   funding_paid {:.2}",
+        b.margin_utilisation, b.max_margin_utilisation, b.max_maintenance_utilisation, b.max_weight, b.effective_names, b.funding_paid
+    );
+    if let Some(o) = &m.options {
+        let days = |d: Option<f64>| d.map(|d| format!("{:.1}", d)).unwrap_or_else(|| "-".into());
+        println!(
+            "options: premium paid {:.2} collected {:.2}   exercises {}   assignments {}   expiries {}   days to expiry at entry {} at exit {}",
+            o.premium_paid,
+            o.premium_collected,
+            o.exercises,
+            o.assignments,
+            o.expiries,
+            days(o.days_to_expiry_entry),
+            days(o.days_to_expiry_exit)
+        );
+        let range = |f: &dyn Fn(&metrics::options::NetGreeks) -> f64| {
+            let v: Vec<f64> = o.greeks.iter().map(f).collect();
+            let mean = if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
+            (mean, v.iter().map(|x| x.abs()).fold(0.0, f64::max))
+        };
+        let (d, g, v, t) = (range(&|x| x.delta_money), range(&|x| x.gamma), range(&|x| x.vega), range(&|x| x.theta));
+        println!(
+            "options greeks over {} bars (mean, max |.|): delta·S {:.2}, {:.2}   gamma {:.4}, {:.4}   vega {:.2}, {:.2}   theta {:.2}, {:.2}",
+            o.greeks.len(),
+            d.0,
+            d.1,
+            g.0,
+            g.1,
+            v.0,
+            v.1,
+            t.0,
+            t.1
+        );
+        let a = &o.attribution;
+        println!(
+            "options attribution over {} bars: pnl {:.2} = delta {:.2} + gamma {:.2} + theta {:.2} + vega {:.2} + residual {:.2}   unattributed {} bars, {:.2}",
+            a.bars, a.pnl, a.delta, a.gamma, a.theta, a.vega, a.residual, a.unattributed, a.unattributed_pnl
+        );
+        for u in &o.volatility {
+            let v = |x: Option<f64>| x.map(|x| format!("{:.4}", x)).unwrap_or_else(|| "-".into());
+            println!("volatility of {}: realised {} over {} returns, implied {}", u.underlying, v(u.realised), u.returns, v(u.implied));
+        }
     }
     for (rel, v) in &m.versions {
         println!("read {} at {}", rel, v);

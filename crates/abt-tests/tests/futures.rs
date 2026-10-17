@@ -298,6 +298,13 @@ fn daily_settlement_moves_the_variation_to_cash_and_leaves_the_nav_unchanged() {
     }
     // The cash is the variation only.
     assert!(close(r.final_cash, 100_000.0 + 2.0 * 50.0 * (5025.25 - 5010.0)), "{}", r.final_cash);
+    // The variation account at each bar: the move from the session's
+    // settlement to the close, 2 × 50 × −0.25, which the NAV counts.
+    let held: Vec<&abt_kernel::kernel::ExposureRecord> = r.exposure.iter().filter(|x| x.t >= d(1)).collect();
+    assert_eq!(held.len(), 3);
+    for x in held {
+        assert!(close(x.variation, -25.0) && close(x.equity, x.cash + x.variation), "{:?}", x);
+    }
     // Without settlement prices the close stands in, warned.
     let m2 = Market { settlement: vec![], ..m };
     let r = run(&program(&buy_at_d0("ES"), &[]), &serve(&m2));
@@ -433,4 +440,6 @@ fn a_futures_margin_call_liquidates_the_largest_requirement_first() {
     assert_eq!(req.1.map(|x| x.1), Some(54_000.0));
     assert_eq!(r.final_positions.get(&sym(&r, "NQ.v.0")), Some(&1.0));
     assert_eq!(r.final_positions.get(&sym(&r, "ES.v.0")), Some(&3.0));
+    // The book's requirement is the published margins'.
+    assert!(r.exposure.iter().filter(|x| x.gross > 0.0).all(|x| x.margin_source == "published"), "{:?}", r.exposure);
 }

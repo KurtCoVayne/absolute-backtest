@@ -918,10 +918,11 @@ impl SimExecutor {
 
     /// The class's kernel relations at decision bar `t` (K-2.4): `chain`
     /// for each of the program's chains, then `spec` and `greeks` for every
-    /// contract in one or held.
-    pub(super) fn write_option_relations(&mut self, k: &mut Kernel, t: i64) {
+    /// contract in one or held. The Greeks it wrote, by contract.
+    pub(super) fn write_option_relations(&mut self, k: &mut Kernel, t: i64) -> BTreeMap<Sym, [f64; 6]> {
+        let mut written = BTreeMap::new();
         let (Some(&spec_rel), Some(&chain_rel), Some(&greeks_rel)) = (k.rel_ids.get("spec"), k.rel_ids.get("chain"), k.rel_ids.get("greeks")) else {
-            return;
+            return written;
         };
         let mut contracts: BTreeSet<Sym> = BTreeSet::new();
         for need in k.chain_needs.clone() {
@@ -955,8 +956,10 @@ impl SimExecutor {
                 let mut tu = vec![Value::Equity(a), Value::Time(t)];
                 tu.extend(g.iter().map(|x| Value::Num(*x)));
                 k.stores[greeks_rel].insert(t, tu);
+                written.insert(a, g);
             }
         }
+        written
     }
 }
 

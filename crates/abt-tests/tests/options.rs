@@ -881,3 +881,152 @@ fn approx_alone_is_a_fraction_of_the_underlyings_notional_warned_at_every_bar() 
     let w: Vec<&str> = r.warnings.iter().filter(|w| w.bias == "margin").map(|w| w.message.as_str()).collect();
     assert!(w.iter().any(|m| m.contains("approx") && m.contains("of 10 bars")), "{:?}", r.warnings);
 }
+
+// ---- the options and book metrics of Q-3.1, read back from the store (E-73) ----
+
+/// A run writing its outputs to the data service, and its metrics read back
+/// from the store by the query layer.
+fn run_metrics(prog: &abt_kernel::check::Program, svc: &Arc<DataService>) -> (RunResult, abt_query::cli::RunMetrics) {
+    let client = DataClient::connect(inproc(svc)).unwrap();
+    let opts = Replay {
+        write_outputs: true,
+        ..Default::default()
+    };
+    let r = abt_kernel::kernel::run_on(prog, None, &client, ExecConfig::from_program(prog), &opts).unwrap_or_else(|e| panic!("{}", e));
+    let data = abt_query::data::Data::connect(inproc(svc)).unwrap();
+    let m = abt_query::cli::run_metrics(&data, &r.run_id).unwrap_or_else(|e| panic!("{}", e));
+    (r, m)
+}
+
+#[test]
+fn the_options_metrics_count_the_premium_the_exercises_the_expiries_and_the_days_to_expiry() {
+    // 2 calls of 100 bought and 1 put of 100 sold at d0, both expiring
+    // Friday 2024-03-08 (d4), filled at d1 (Tuesday 2024-03-05): XYZ closes
+    // at 104 there, the calls are exercised and the put expires.
+    let mut bars = flat(100.0);
+    bars[4] = (103.0, 104.0);
+    let m = market(&[(XYZ, bars)]);
+    let rows: Vec<Row> = (0..5).map(|i| row(i, "2024-03-08", 100.0, bars[i].1, Some((2.0, 2.2)), Some((1.5, 1.7)))).collect();
+    let svc = serve(&m, &rows, "");
+    let (call, put) = (occ("2024-03-08", 'C', 100.0), occ("2024-03-08", 'P', 100.0));
+    let decides = format!("{}\n{}", trade_at_d0(&call, 2), trade_at_d0(&put, -1));
+    let (r, metrics) = run_metrics(&program(&decides, &[]), &svc);
+    assert_eq!(events(&r, "exercise").len(), 1, "{:#?}", r.events);
+    let o = metrics.options.expect("the run held options");
+    // Paid: 2 × 2.25 (the ask and a quarter spread) × 100; collected: 1 ×
+    // 1.45 (the bid less a quarter spread) × 100.
+    assert!(close(o.premium_paid, 450.0) && close(o.premium_collected, 145.0), "{:?}", o);
+    assert_eq!((o.exercises, o.assignments, o.expiries), (1, 0, 1));
+    // Both opened 3 days before their expiry and closed on its day.
+    assert_eq!((o.days_to_expiry_entry, o.days_to_expiry_exit), (Some(3.0), Some(0.0)));
+    // The book: the two options at d1 to d3 (marked at the mids, 2.10 and
+    // 1.60), then the 200 shares the exercise bought.
+    let (calls, puts) = (2.0 * 100.0 * 2.1, 100.0 * 1.6);
+    let options_names = (calls + puts) * (calls + puts) / (calls * calls + puts * puts);
+    let b = &metrics.book;
+    assert!(close(b.effective_names, (3.0 * options_names + 6.0) / 9.0), "{:?}", b);
+    // The largest weight is the shares at 104 on the expiry day.
+    let nav_d4 = r.exposure.iter().find(|x| x.t == d(4)).unwrap().equity;
+    assert!(close(b.max_weight, 200.0 * 104.0 / nav_d4), "{:?} against {}", b, 200.0 * 104.0 / nav_d4);
+    assert!(close(b.funding_paid, 0.0));
+}
+
+#[test]
+fn the_options_metrics_attribute_the_pnl_to_the_greeks_and_compare_realised_with_implied_volatility() {
+    use abt_kernel::functions::{bsm, Right};
+    // XYZ closes at 100 and 101 on alternate days; the chain of 2024-04-19
+    // is quoted every day at the model's prices at 25 % (a nickel either
+    // side). 2 calls of 100 bought at d0 are held from d1 to d9.
+    let closes: Vec<f64> = (0..10).map(|i| if i % 2 == 0 { 100.0 } else { 101.0 }).collect();
+    let mut bars = flat(100.0);
+    for (i, c) in closes.iter().enumerate() {
+        bars[i] = (*c, *c);
+    }
+    let m = market(&[(XYZ, bars)]);
+    let tau = |i: usize| ((day("2024-04-19") - d(i)) / abt_kernel::kernel::time::DAY) as f64 / 365.0;
+    let mut rows = Vec::new();
+    for (i, s) in closes.iter().enumerate() {
+        for k in [95.0, 100.0, 105.0] {
+            let c = bsm::price(*s, k, tau(i), 0.0, 0.0, 0.25, Right::Call);
+            let p = bsm::price(*s, k, tau(i), 0.0, 0.0, 0.25, Right::Put);
+            rows.push(row(i, "2024-04-19", k, *s, Some((c - 0.05, c + 0.05)), Some((p - 0.05, p + 0.05))));
+        }
+    }
+    let svc = serve(&m, &rows, "XYZ=european:physical:pm");
+    let prog = program_on(XYZ, "    qty : Quantity<Contracts> = 2 contracts", &leg_at_d0('C', 100.0, "qty"), &[]);
+    let (_, metrics) = run_metrics(&prog, &svc);
+    let o = metrics.options.expect("the run held options");
+    let rel = |a: f64, b: f64| (a - b).abs() <= 1e-7 * (1.0 + b.abs());
+    let g = |i: usize| bsm::greeks(closes[i], 100.0, tau(i), 0.0, 0.0, 0.25, Right::Call);
+    // The net Greeks at each barrier from d1: 2 × 100 × the model's at 25 %.
+    assert_eq!(o.greeks.len(), 9);
+    for (n, x) in o.greeks.iter().enumerate() {
+        let i = n + 1;
+        assert_eq!(x.t, d(i));
+        assert!(rel(x.delta_money, 200.0 * g(i).delta * closes[i]) && rel(x.gamma, 200.0 * g(i).gamma), "{:?}", x);
+        assert!(rel(x.vega, 200.0 * g(i).vega) && rel(x.theta, 200.0 * g(i).theta), "{:?}", x);
+    }
+    // The P&L carried over d1..d9 and its expansion at each bar's first
+    // barrier: Δ·dS, ½Γ·dS², Θ·dt; the volatility does not move.
+    let (mut delta, mut gamma, mut theta) = (0.0, 0.0, 0.0);
+    for i in 1..9 {
+        let ds = closes[i + 1] - closes[i];
+        let dt = (d(i + 1) - d(i)) as f64 / (365.0 * abt_kernel::kernel::time::DAY as f64);
+        delta += 200.0 * g(i).delta * ds;
+        gamma += 200.0 * 0.5 * g(i).gamma * ds * ds;
+        theta += 200.0 * g(i).theta * dt;
+    }
+    let price = |i: usize| bsm::price(closes[i], 100.0, tau(i), 0.0, 0.0, 0.25, Right::Call);
+    let a = &o.attribution;
+    assert_eq!((a.bars, a.unattributed), (8, 0));
+    assert!(rel(a.pnl, 200.0 * (price(9) - price(1))), "{:?}", a);
+    assert!(rel(a.delta, delta) && rel(a.gamma, gamma) && rel(a.theta, theta), "{:?} against {} {} {}", a, delta, gamma, theta);
+    assert!(a.vega.abs() < 1e-6, "{:?}", a);
+    assert!(close(a.residual, a.pnl - (a.delta + a.gamma + a.theta + a.vega)), "{:?}", a);
+    // What the expansion leaves is of the third order.
+    assert!(a.residual.abs() < 0.02 * (a.delta.abs() + a.gamma.abs() + a.theta.abs()), "{:?}", a);
+    // XYZ's log returns over the barriers held, ±ln(1.01), against 25 %.
+    let v = &o.volatility;
+    assert_eq!((v.len(), v[0].returns), (1, 8));
+    let x: Vec<f64> = (1..9).map(|i| (closes[i + 1] / closes[i]).ln()).collect();
+    let mean = x.iter().sum::<f64>() / 8.0;
+    let realised = (x.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / 7.0 * metrics.periods_per_year).sqrt();
+    assert!(rel(v[0].realised.unwrap(), realised), "{:?} against {}", v[0], realised);
+    assert!(rel(v[0].implied.unwrap(), 0.25), "{:?}", v[0]);
+}
+
+#[test]
+fn the_book_metrics_read_the_margin_models_requirement_and_its_source() {
+    // A naked put of 100 sold at d0 under reg_t: the book's margin over its
+    // NAV, and the book's margin source, `reg_t`.
+    use abt_kernel::functions::{bsm, Right};
+    let m = market(&[(XYZ, flat(100.0))]);
+    let mut rows = Vec::new();
+    for i in 0..10 {
+        let tau = ((day("2024-04-19") - d(i)) / abt_kernel::kernel::time::DAY) as f64 / 365.0;
+        let p = bsm::price(100.0, 100.0, tau, 0.0, 0.0, 0.25, Right::Put);
+        rows.push(row(i, "2024-04-19", 100.0, 100.0, Some((1.0, 1.2)), Some((p - 0.05, p + 0.05))));
+    }
+    let svc = serve(&m, &rows, "XYZ=european:physical:pm");
+    let prog = program_on(
+        XYZ,
+        "    qty : Quantity<Contracts> = 1 contracts",
+        &leg_at_d0('P', 100.0, "-qty"),
+        &[("margin", "reg_t"), ("margin_call", "allow")],
+    );
+    let (r, metrics) = run_metrics(&prog, &svc);
+    let u: Vec<f64> = r.exposure.iter().filter(|x| x.equity > 0.0).map(|x| x.margin_initial / x.equity).collect();
+    let b = &metrics.book;
+    assert!(close(b.margin_utilisation, u.iter().sum::<f64>() / u.len() as f64), "{:?} against {:?}", b, u);
+    assert!(close(b.max_margin_utilisation, u.iter().copied().fold(0.0, f64::max)) && b.max_margin_utilisation > 0.0, "{:?}", b);
+    // The book's rows name the model from the first holding on.
+    assert!(
+        r.exposure.iter().all(|x| x.margin_source == "reg_t"),
+        "{:?}",
+        r.exposure.iter().map(|x| &x.margin_source).collect::<Vec<_>>()
+    );
+    let data = abt_query::data::Data::connect(inproc(&svc)).unwrap();
+    let book = abt_query::relation::read(&data, &format!("kernel.{}.book", r.run_id)).unwrap().unwrap();
+    let sources = abt_query::relation::texts(&book, "margin_source").unwrap();
+    assert!(sources.iter().all(|s| s.as_deref() == Some("reg_t")), "{:?}", sources);
+}

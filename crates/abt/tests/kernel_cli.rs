@@ -129,9 +129,12 @@ fn a_kernel_service_runs_and_answers_over_a_data_service() {
         "{}",
         m
     );
+    // The book's metrics; an equity run has no options group (E-73).
+    assert!(m.contains("book: margin_utilisation ") && !m.contains("options:"), "{}", m);
     let o = abt(&["metrics", "--run", &run, "--data", &d, "--json"]);
     let j: serde_json::Value = serde_json::from_str(&text(&o).0).unwrap();
     assert_eq!(j["run"], serde_json::json!(run));
+    assert!(j["book"]["effective_names"].is_number() && j["options"].is_null(), "{}", j);
     assert!(j["versions"].as_object().is_some_and(|v| v.keys().any(|k| k.ends_with(".book"))), "{}", j);
     let o = abt(&["metrics", "--run", &"0".repeat(64), "--data", &d]);
     assert_eq!(o.status.code(), Some(1), "{:?}", text(&o));

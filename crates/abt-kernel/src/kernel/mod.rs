@@ -650,6 +650,16 @@ pub struct ExposureRecord {
     pub margin_initial: f64,
     #[serde(default)]
     pub margin_maintenance: f64,
+    /// K-5.1's variation account: the variation of the futures margined
+    /// daily since their last settlement, Σ Q · (mark − reference) · point
+    /// value, which the NAV counts (ERRATA E-73).
+    #[serde(default)]
+    pub variation: f64,
+    /// The margin model the requirement is from: the one every holding's
+    /// came from, `mixed` when they differ, `approx` for the leverage
+    /// model's (E-73).
+    #[serde(default)]
+    pub margin_source: String,
 }
 
 /// One holding of the book at a bar's mark (K-5.1, an instrument's row of
@@ -665,6 +675,24 @@ pub struct HoldingRecord {
     /// instrument has had no price yet.
     pub mark: Option<f64>,
     pub mark_source: String,
+    /// An option's underlying and Greeks at the mark (E-73); `None` for any
+    /// other instrument.
+    #[serde(default)]
+    pub option: Option<OptionHolding>,
+}
+
+/// What a holding of an option adds to its row (Q-3.1, ERRATA E-73): its
+/// underlying and the underlying's price at the bar, its expiry date and
+/// multiplier, and its Greeks as the `greeks` relation holds them at the
+/// bar, `[IV, Delta, Gamma, Theta, Vega, Rho]` with theta per year and vega
+/// per unit of volatility (`None` where the model has none).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OptionHolding {
+    pub underlying: Sym,
+    pub spot: Option<f64>,
+    pub expiry: i64,
+    pub multiplier: f64,
+    pub greeks: Option<[f64; 6]>,
 }
 
 fn pushdown_on() -> bool {

@@ -522,7 +522,9 @@ Maintenance)` is written for every program and `margin_by` per instrument
 where models are listed; a margin call below the maintenance halts, is
 allowed, or liquidates whole units, the largest maintenance per unit first
 (`forced_liquidation`). The cases are `crates/abt-tests/tests/futures.rs` and
-the margin rules' are `crates/abt-kernel/tests/margin.rs`.
+the margin rules' are `crates/abt-kernel/tests/margin.rs`. K-9.3's 25 cases
+(G8) are in `tests/options.rs`, `tests/futures.rs` and `tests/limits.rs`;
+ERRATA E-73 lists each case's test.
 
 Parameters are the only values a run may vary: `--param name=value`
 (repeatable; `unit::name` for a library's) replaces a default with a
@@ -590,7 +592,13 @@ The query layer reads a run back from the store (`docs/spec/03-query.md`).
 metrics from the tables it wrote. These are the return metrics of its NAV
 curve, its trading metrics, its capacity, the metrics per period of its
 report block, and the Sharpe ratio of each calendar year, each printed
-with the versions of the tables it read (ERRATA E-58).
+with the versions of the tables it read (ERRATA E-58). Its book metrics
+are the margin's share of the NAV, the largest weight, the effective number
+of names and the funding paid. A run that held options adds the options
+metrics (ERRATA E-73): premium paid and collected; exercises, assignments
+and expiries; days to expiry at entry and exit; the book's net Greeks at
+every bar; each underlying's realised against implied volatility; and each
+bar's P&L attributed to Δ, Γ, Θ and V, with the residual.
 
 Plans are studies written in the language's block syntax
 (`docs/spec/03-query.md`, section 2): a program, a parameter grid, a

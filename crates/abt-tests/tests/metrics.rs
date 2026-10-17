@@ -236,6 +236,9 @@ fn a_fixed_base_book_reports_compounded_and_additive_conventions() {
                 leverage: 0.0,
                 receivables: 0.0,
                 capital: 100.0,
+                margin_initial: 0.0,
+                margin_maintenance: 0.0,
+                variation: 0.0,
             })
             .collect(),
         // Two round trips: +1 x 2 - 1 and -3 x 2 - 1.
@@ -243,6 +246,7 @@ fn a_fixed_base_book_reports_compounded_and_additive_conventions() {
         decisions: 4,
         dropped: 0,
         report: [("base_capital".to_string(), serde_json::json!(100.0))].into_iter().collect(),
+        ..Run::default()
     };
     let x: Vec<f64> = period_returns(&r, false).iter().map(|(_, x, _)| *x).collect();
     assert_eq!(x, vec![0.1, -0.2, 0.05, 0.05]);

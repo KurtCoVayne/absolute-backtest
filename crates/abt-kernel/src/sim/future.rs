@@ -67,6 +67,19 @@ impl SimExecutor {
         self.value_at(k, sym, q, p, self.book.reference.get(&sym).copied())
     }
 
+    /// The variation account at `t` (K-5.1, ERRATA E-73): what the futures
+    /// margined daily have moved since their reference, at the bar's marks.
+    pub(super) fn variation(&self, k: &mut Kernel, t: i64) -> f64 {
+        let held: Vec<(Sym, f64, f64)> = self
+            .book
+            .positions
+            .iter()
+            .filter(|(s, _)| self.settled_daily(k, **s))
+            .filter_map(|(s, q)| self.book.reference.get(s).map(|r| (*s, *q, *r)))
+            .collect();
+        held.into_iter().filter_map(|(sym, q, r)| k.price_at(sym, t).map(|p| q * (p - r) * k.multiplier(sym))).sum()
+    }
+
     /// The reference a future margined daily is valued against after a
     /// fill at `price`: the position's, or the fill's when it opens one.
     pub(super) fn fill_reference(&self, k: &Kernel, sym: Sym, price: f64) -> Option<f64> {

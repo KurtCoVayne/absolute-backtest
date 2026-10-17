@@ -1768,6 +1768,108 @@ batch driver agree on every corpus program. Each bless since:
     - The rest (the old command line, `lineages.json`, `trials.jsonl`)
       goes with what it tested. `plan_exec`, `claims_exec`, `plan_cli` and
       `normalise` cover the plans' equivalents.
+- **E-73 (Q-3.1, K-5.1, K-9.3, P-4; the options and book metrics, G8's
+  cases).**
+  - **The tables they read.** Two of the kernel's outputs gain what the
+    metrics need:
+    - An option program's `holdings` gains, for each option held, its
+      `underlying`, the underlying's price at the bar (`spot`), its
+      `expiry` date (as `spec`), its `multiplier`, and its `iv`, `delta`,
+      `gamma`, `theta` and `vega`. These are the `greeks` relation's at the
+      bar: theta per year, vega per unit of volatility. They are null where
+      the model has none, and for any other instrument. This is Q-3.1's
+      "`greeks` relation times positions", joined in the kernel, which has
+      both. Other programs' holdings are unchanged.
+    - `book.variation_account` (E-52 left it 0) is the variation of the
+      futures margined daily since their last settlement, Σ Q · (mark −
+      reference) · point value, which the NAV counts (E-72).
+    - `book.margin_source` names the model the requirement came from:
+      - the one every holding's came from, or `mixed` when they differ;
+      - the first listed while nothing is held;
+      - `approx` for the leverage model's, as before.
+  - **The options metrics** are those of a run that held an option.
+    - The premium paid and collected: Σ |q| · price · multiplier over the
+      option fills that buy, and over those that sell.
+    - The exercises, assignments and expiries: the events' counts.
+    - The days to expiry at entry and at exit: the mean calendar days from
+      a fill's day to the expiry date. Entry is over the fills that open a
+      position. Exit is over the fills and events that close one.
+    - The net Greeks at every barrier an option is held:
+      - Σ q · m · Δ · S (the delta in money);
+      - Σ q · m · Γ;
+      - Σ q · m · V, per unit of volatility;
+      - Σ q · m · Θ, per year.
+    - Realised against implied volatility, per underlying of the options
+      held.
+      - Realised is the annualised sample standard deviation of its log
+        returns between consecutive barriers at which an option on it was
+        held, at the report block's periods per year.
+      - Implied is the mean implied volatility of those holdings.
+    - The P&L attribution covers each bar an option is held at both
+      barriers with its multiplier unchanged.
+      - The P&L is q · m · (V₁ − V₀) between the marks.
+      - Its terms are Δ · dS, ½ · Γ · dS², Θ · dt and V · dσ, all at the
+        first barrier's Greeks. dt is in years of 365 days, as τ.
+      - The residual is the P&L less the four.
+      - A bar without the Greeks or the underlying's prices is
+        unattributed; its P&L is reported.
+    - An option opened and closed between two barriers is never held at
+      one, so these metrics do not count it.
+  - **The book metrics** are those of every run.
+    - The margin utilisation is margin_initial over NAV: its mean and
+      maximum over the barriers with a positive NAV, and the maximum of
+      the maintenance over NAV.
+    - The concentration of the holdings' marked notional values v:
+      - the largest |v| over NAV;
+      - the effective number of names, (Σ |v|)² / Σ v², averaged over the
+        barriers that hold anything.
+    - The funding paid: margin interest and borrow fees, less cash
+      interest and the short rebate.
+  - **Output.** `abt metrics` prints a `book` line, and the `options` lines
+    for a run that held one. `--json` carries both groups as `book` and
+    `options`.
+  - **G8.** K-9.3's 25 cases are in three files, each by a test named for
+    its case:
+    - Options, all in `tests/options.rs`:
+      - expiry: `a_long_call_in_the_money_at_expiry_is_exercised_physically`,
+        `a_short_put_in_the_money_at_expiry_is_assigned_the_underlying`,
+        `a_long_put_on_a_cash_settled_index_is_exercised_at_the_am_print`,
+        `an_option_out_of_the_money_at_expiry_expires_worthless_on_either_side`,
+        `an_option_at_the_money_within_the_tolerance_expires`;
+      - early exercise:
+        `a_short_call_is_assigned_early_before_the_ex_date_when_its_extrinsic_value_is_below_the_dividend`,
+        `with_early_short_never_the_call_is_assigned_at_expiry_only`,
+        `an_exercise_decision_on_a_long_exercises_at_that_bars_close`;
+      - combos:
+        `a_combo_fills_every_leg_at_one_barrier_under_one_order_id`,
+        `a_combo_limit_fills_at_or_better_than_its_net_and_otherwise_works_until_its_time_in_force`,
+        `a_combo_with_a_leg_unquoted_is_dropped_naming_the_leg`;
+      - adjustments:
+        `a_two_for_one_split_doubles_the_contracts_and_halves_the_strike`,
+        `a_three_for_two_split_takes_the_multiplier_to_150_and_the_strike_to_two_thirds`,
+        `a_special_dividend_lowers_the_strike_by_its_amount`;
+      - margin:
+        `a_naked_short_put_under_reg_t_needs_twenty_percent_of_the_underlying_less_otm_plus_the_premium`,
+        `a_vertical_spread_under_reg_t_needs_its_maximum_loss`,
+        `a_straddle_under_portfolio_needs_its_worst_loss_over_the_grid_at_its_volatility`,
+        `published_margins_price_the_contracts_they_cover_and_reg_t_the_rest`,
+        `approx_alone_is_a_fraction_of_the_underlyings_notional_warned_at_every_bar`;
+      - Greeks:
+        `the_models_greeks_reproduce_the_datas_iv_and_are_absent_outside_the_bounds`.
+    - Futures, in `tests/futures.rs`:
+      `daily_settlement_moves_the_variation_to_cash_and_leaves_the_nav_unchanged`,
+      `a_roll_records_two_fills_and_two_commissions_and_carries_the_position`,
+      `a_cash_settled_contract_held_at_its_last_trade_expires_at_its_final_settlement`,
+      `a_futures_margin_call_liquidates_the_largest_requirement_first`.
+    - Limits, in `tests/limits.rs`:
+      `a_weight_limit_of_a_tenth_against_a_hold_of_a_fifth_rejects_clamps_or_warns`,
+      `a_drawdown_limit_of_a_tenth_after_a_twelve_percent_fall_rejects_increases_and_passes_reductions`.
+    - Their known answers are hand-computed in the tests. The pricing
+      functions' are Haug's tables and the other references of E-71
+      (`crates/abt-kernel/tests/pricing.rs`).
+    - K-9.3 puts every case in `tests/options.rs`. The futures and the
+      limits have their own files, as the migration's plan lists them
+      (M-7).
 
 ## Layout
 

@@ -20,6 +20,45 @@ pub struct BookRow {
     pub leverage: f64,
     pub receivables: f64,
     pub capital: f64,
+    /// The requirement of the margin models, or of the leverage model.
+    pub margin_initial: f64,
+    pub margin_maintenance: f64,
+    /// The futures' variation since their last settlement (E-73).
+    pub variation: f64,
+}
+
+/// A holding of the book at a decision barrier (K-5.1), with what an
+/// option's row adds (E-73).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoldingRow {
+    pub t: i64,
+    pub instrument: u64,
+    pub position: f64,
+    pub mark: Option<f64>,
+    pub option: Option<OptionRow>,
+}
+
+/// An option holding's underlying, the underlying's price at the bar, its
+/// expiry date and multiplier, and `[IV, Delta, Gamma, Theta, Vega]` at the
+/// mark (theta per year, vega per unit of volatility) where the kernel had
+/// them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionRow {
+    pub underlying: Option<u64>,
+    pub spot: Option<f64>,
+    pub expiry: i64,
+    pub multiplier: f64,
+    pub greeks: Option<[f64; 5]>,
+}
+
+/// An event of the log that ends or changes an option position (K-5.2):
+/// `exercise`, `assignment`, `option_expiry`, `adjustment`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionEvent {
+    pub seq: u64,
+    pub t: i64,
+    pub kind: String,
+    pub instrument: Option<u64>,
 }
 
 /// A fill of the event log (K-5.2).
@@ -44,6 +83,8 @@ pub struct Run {
     pub id: String,
     pub book: Vec<BookRow>,
     pub fills: Vec<Fill>,
+    pub holdings: Vec<HoldingRow>,
+    pub option_events: Vec<OptionEvent>,
     pub decisions: usize,
     pub dropped: usize,
     /// The report's rows, their JSON values parsed.
@@ -71,6 +112,14 @@ fn times(b: &RecordBatch, rel: &str, name: &str) -> Result<Vec<i64>, Error> {
         .as_primitive_opt::<TimestampNanosecondType>()
         .ok_or_else(|| Error::Malformed(format!("{}.{} is not a time", rel, name)))?;
     Ok((0..a.len()).map(|i| a.value(i)).collect())
+}
+
+fn times_opt(b: &RecordBatch, rel: &str, name: &str) -> Result<Vec<Option<i64>>, Error> {
+    let c = column(b, rel, name)?;
+    let a = c
+        .as_primitive_opt::<TimestampNanosecondType>()
+        .ok_or_else(|| Error::Malformed(format!("{}.{} is not a time", rel, name)))?;
+    Ok((0..a.len()).map(|i| (!a.is_null(i)).then(|| a.value(i))).collect())
 }
 
 fn ids(b: &RecordBatch, rel: &str, name: &str) -> Result<Vec<Option<u64>>, Error> {
@@ -131,6 +180,7 @@ impl Run {
                 nums(&b, &r, "receivables")?,
                 nums(&b, &r, "capital")?,
             );
+            let (initial, maintenance, variation) = (nums(&b, &r, "margin_initial")?, nums(&b, &r, "margin_maintenance")?, nums(&b, &r, "variation_account")?);
             for i in 0..t.len() {
                 out.book.push(BookRow {
                     t: t[i],
@@ -141,8 +191,49 @@ impl Run {
                     leverage: leverage[i].unwrap_or(0.0),
                     receivables: receivables[i].unwrap_or(0.0),
                     capital: capital[i].unwrap_or(0.0),
+                    margin_initial: initial[i].unwrap_or(0.0),
+                    margin_maintenance: maintenance[i].unwrap_or(0.0),
+                    variation: variation[i].unwrap_or(0.0),
                 });
             }
+        }
+        if let Some(b) = concat(data.scan(&rel("holdings"))?)? {
+            let r = rel("holdings");
+            let (t, ins, q, mark) = (times(&b, &r, "t")?, ids(&b, &r, "instrument")?, nums(&b, &r, "position")?, nums(&b, &r, "mark")?);
+            // An option program's columns (E-73).
+            let options = b.column_by_name("expiry").is_some();
+            let col = |name: &str| if options { nums(&b, &r, name).map(Some) } else { Ok(None) };
+            let (spot, mult, iv, delta, gamma, theta, vega) = (col("spot")?, col("multiplier")?, col("iv")?, col("delta")?, col("gamma")?, col("theta")?, col("vega")?);
+            let underlying = if options { Some(ids(&b, &r, "underlying")?) } else { None };
+            let expiry = if options { Some(times_opt(&b, &r, "expiry")?) } else { None };
+            for i in 0..t.len() {
+                let Some(instrument) = ins[i] else { continue };
+                let option = match (&expiry, &mult) {
+                    (Some(e), Some(m)) => e[i].map(|expiry| {
+                        let at = |c: &Option<Vec<Option<f64>>>| c.as_ref().and_then(|c| c[i]);
+                        let greeks = match (at(&iv), at(&delta), at(&gamma), at(&theta), at(&vega)) {
+                            (Some(a), Some(b), Some(c), Some(d), Some(e)) => Some([a, b, c, d, e]),
+                            _ => None,
+                        };
+                        OptionRow {
+                            underlying: underlying.as_ref().and_then(|u| u[i]),
+                            spot: at(&spot),
+                            expiry,
+                            multiplier: m[i].unwrap_or(1.0),
+                            greeks,
+                        }
+                    }),
+                    _ => None,
+                };
+                out.holdings.push(HoldingRow {
+                    t: t[i],
+                    instrument,
+                    position: q[i].unwrap_or(0.0),
+                    mark: mark[i],
+                    option,
+                });
+            }
+            out.holdings.sort_by_key(|h| (h.instrument, h.t));
         }
         if let Some(b) = concat(data.scan(&rel("fills"))?)? {
             let r = rel("fills");
@@ -178,7 +269,21 @@ impl Run {
         }
         out.decisions = concat(data.scan(&rel("decisions"))?)?.map(|b| b.num_rows()).unwrap_or(0);
         if let Some(b) = concat(data.scan(&rel("events"))?)? {
-            out.dropped = texts(&b, &rel("events"), "kind")?.iter().filter(|k| k.as_deref() == Some("dropped")).count();
+            let r = rel("events");
+            let kinds = texts(&b, &r, "kind")?;
+            out.dropped = kinds.iter().filter(|k| k.as_deref() == Some("dropped")).count();
+            let (seq, t, ins) = (ids(&b, &r, "seq")?, times(&b, &r, "t")?, ids(&b, &r, "instrument")?);
+            for (i, kind) in kinds.into_iter().enumerate() {
+                if let Some(kind) = kind.filter(|k| ["exercise", "assignment", "option_expiry", "adjustment"].contains(&k.as_str())) {
+                    out.option_events.push(OptionEvent {
+                        seq: seq[i].unwrap_or(0),
+                        t: t[i],
+                        kind,
+                        instrument: ins[i],
+                    });
+                }
+            }
+            out.option_events.sort_by_key(|e| e.seq);
         }
         Ok(out)
     }

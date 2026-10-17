@@ -355,7 +355,7 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
             .col("cash", Role::Value, Col::Num(x.iter().map(|r| Some(r.cash)).collect()))
             .col("debit", Role::Value, Col::Num(x.iter().map(|r| Some((-r.cash).max(0.0))).collect()))
             .col("receivables", Role::Value, Col::Num(x.iter().map(|r| Some(r.receivables)).collect()))
-            .col("variation_account", Role::Value, Col::Num(x.iter().map(|_| Some(0.0)).collect()))
+            .col("variation_account", Role::Value, Col::Num(x.iter().map(|r| Some(r.variation)).collect()))
             .col("nav", Role::Value, Col::Num(x.iter().map(|r| Some(r.equity)).collect()))
             .col("capital", Role::Value, Col::Num(x.iter().map(|r| Some(r.capital)).collect()))
             .col("gross", Role::Value, Col::Num(x.iter().map(|r| Some(r.gross)).collect()))
@@ -363,23 +363,45 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
             .col("leverage", Role::Value, Col::Num(x.iter().map(|r| Some(r.leverage)).collect()))
             .col("margin_initial", Role::Value, Col::Num(x.iter().map(|r| Some(r.margin_initial)).collect()))
             .col("margin_maintenance", Role::Value, Col::Num(x.iter().map(|r| Some(r.margin_maintenance)).collect()))
-            .col("margin_source", Role::Value, Col::Label(x.iter().map(|_| Some("approx".to_string())).collect()))
+            .col(
+                "margin_source",
+                Role::Value,
+                Col::Label(
+                    x.iter()
+                        .map(|r| Some(if r.margin_source.is_empty() { "approx".to_string() } else { r.margin_source.clone() }))
+                        .collect(),
+                ),
+            )
             .col("excess_liquidity", Role::Value, Col::Num(x.iter().map(|r| Some(r.equity - r.margin_maintenance)).collect()))
             .finish()?,
     );
     // A holding is of an instrument the data layer has (it was filled at
     // its price).
     let h: Vec<&super::HoldingRecord> = result.holdings.get(from.holdings..).unwrap_or_default().iter().filter(|r| id_of(r.instrument).is_some()).collect();
-    out.push(
-        Table::new(run, "holdings")
-            .col("instrument", Role::Entity, Col::Entity(h.iter().map(|r| id_of(r.instrument)).collect()))
-            .col("t", Role::EventTime, Col::Time(h.iter().map(|r| Some(r.t)).collect()))
-            .col("position", Role::Value, Col::Num(h.iter().map(|r| Some(r.position)).collect()))
-            .col("avg_cost", Role::Value, Col::Num(h.iter().map(|r| Some(r.avg_cost)).collect()))
-            .col("mark", Role::Value, Col::Num(h.iter().map(|r| r.mark).collect()))
-            .col("mark_source", Role::Value, Col::Label(h.iter().map(|r| Some(r.mark_source.clone())).collect()))
-            .finish()?,
-    );
+    let mut holdings = Table::new(run, "holdings")
+        .col("instrument", Role::Entity, Col::Entity(h.iter().map(|r| id_of(r.instrument)).collect()))
+        .col("t", Role::EventTime, Col::Time(h.iter().map(|r| Some(r.t)).collect()))
+        .col("position", Role::Value, Col::Num(h.iter().map(|r| Some(r.position)).collect()))
+        .col("avg_cost", Role::Value, Col::Num(h.iter().map(|r| Some(r.avg_cost)).collect()))
+        .col("mark", Role::Value, Col::Num(h.iter().map(|r| r.mark).collect()))
+        .col("mark_source", Role::Value, Col::Label(h.iter().map(|r| Some(r.mark_source.clone())).collect()));
+    // An option program's holdings carry an option's underlying and its
+    // Greeks at the mark, null for any other instrument (E-73).
+    if prog.class == "option" {
+        let o = |f: &dyn Fn(&super::OptionHolding) -> Option<f64>| Col::Num(h.iter().map(|r| r.option.as_ref().and_then(f)).collect());
+        let g = |i: usize| Col::Num(h.iter().map(|r| r.option.and_then(|o| o.greeks).map(|g| g[i]).filter(|x| x.is_finite())).collect());
+        holdings = holdings
+            .col("underlying", Role::Value, Col::Entity(h.iter().map(|r| r.option.and_then(|o| id_of(o.underlying))).collect()))
+            .col("spot", Role::Value, o(&|o| o.spot))
+            .col("expiry", Role::Value, Col::Time(h.iter().map(|r| r.option.map(|o| o.expiry)).collect()))
+            .col("multiplier", Role::Value, o(&|o| Some(o.multiplier)))
+            .col("iv", Role::Value, g(0))
+            .col("delta", Role::Value, g(1))
+            .col("gamma", Role::Value, g(2))
+            .col("theta", Role::Value, g(3))
+            .col("vega", Role::Value, g(4));
+    }
+    out.push(holdings.finish()?);
     // The decisions and fills: projections of the log, keyed by the
     // event's place in it (E-52).
     let d: Vec<(&super::RunEvent, &super::Decision)> = ev

@@ -38,8 +38,10 @@ use std::collections::BTreeMap;
 use crate::run::Run;
 use crate::time;
 
+pub mod options;
 pub mod validate;
 
+pub use options::{options_metrics, OptionsMetrics};
 pub use validate::{subperiod_sharpes, surface, Surface};
 
 /// Autocorrelations beyond this lag are taken as zero in Lo's adjustment.
@@ -649,6 +651,61 @@ pub fn trading_metrics(r: &Run, periods_per_year: f64) -> TradingMetrics {
         fills: r.fills.len(),
         decisions: r.decisions,
         dropped: r.dropped,
+    }
+}
+
+// ---- book metrics ----
+
+/// The book group of Q-3.1 (ERRATA E-73): the margin's share of the NAV
+/// (`margin_req` over NAV: the initial requirement's mean and maximum over
+/// the barriers with a positive NAV, the maintenance's maximum), the
+/// concentration of the holdings' marked values (the largest weight of the
+/// NAV, and the effective number of names, (Σ |v|)² / Σ v², averaged over
+/// the barriers that hold anything), and the funding paid.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BookMetrics {
+    pub margin_utilisation: f64,
+    pub max_margin_utilisation: f64,
+    pub max_maintenance_utilisation: f64,
+    pub max_weight: f64,
+    pub effective_names: f64,
+    /// Margin interest and borrow fees, less cash interest and the short
+    /// rebate.
+    pub funding_paid: f64,
+}
+
+pub fn book_metrics(r: &Run) -> BookMetrics {
+    let positive: Vec<&crate::run::BookRow> = r.book.iter().filter(|b| b.nav > 0.0).collect();
+    let utilisation: Vec<f64> = positive.iter().map(|b| b.margin_initial / b.nav).collect();
+    // A holding's value is its notional: an option's multiplier from its
+    // row, any other instrument's from its fills.
+    let multipliers: BTreeMap<u64, f64> = r.fills.iter().filter_map(|f| f.instrument.map(|i| (i, f.multiplier))).collect();
+    let nav: BTreeMap<i64, f64> = r.book.iter().map(|b| (b.t, b.nav)).collect();
+    let mut values: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+    for h in &r.holdings {
+        let Some(p) = h.mark else { continue };
+        let m = h.option.as_ref().map(|o| o.multiplier).or_else(|| multipliers.get(&h.instrument).copied()).unwrap_or(1.0);
+        values.entry(h.t).or_default().push(h.position * p * m);
+    }
+    let (mut max_weight, mut effective) = (0.0f64, Vec::new());
+    for (t, v) in &values {
+        let gross: f64 = v.iter().map(|x| x.abs()).sum();
+        let squares: f64 = v.iter().map(|x| x * x).sum();
+        if let Some(n) = nav.get(t).filter(|n| **n > 0.0) {
+            max_weight = v.iter().map(|x| x.abs() / n).fold(max_weight, f64::max);
+        }
+        if squares > 0.0 {
+            effective.push(gross * gross / squares);
+        }
+    }
+    let funding_of = |k: &str| r.figure("funding", k);
+    BookMetrics {
+        margin_utilisation: mean(&utilisation),
+        max_margin_utilisation: utilisation.iter().copied().fold(0.0, f64::max),
+        max_maintenance_utilisation: positive.iter().map(|b| b.margin_maintenance / b.nav).fold(0.0, f64::max),
+        max_weight,
+        effective_names: mean(&effective),
+        funding_paid: funding_of("margin_interest") + funding_of("borrow_fees") - funding_of("cash_interest") - funding_of("short_rebate"),
     }
 }
 

@@ -121,6 +121,19 @@ impl SimExecutor {
         (m::requirement(&models, &holdings, &ctx), holdings)
     }
 
+    /// The book's margin source (E-73): the model every holding's
+    /// requirement is from, `mixed` when they differ, the first listed with
+    /// nothing held, and `approx` for the leverage model's.
+    pub(super) fn margin_source(&self, margin: Option<&Margin>) -> String {
+        let Some(margin) = margin else { return "approx".into() };
+        let sources: BTreeSet<&str> = margin.rows.iter().map(|r| r.source.name()).collect();
+        match (sources.len(), sources.first()) {
+            (1, Some(s)) => s.to_string(),
+            (0, _) => self.margin_models().first().map(|m| m.source().name().to_string()).unwrap_or_else(|| "approx".into()),
+            _ => "mixed".into(),
+        }
+    }
+
     /// `margin_req` and `margin_by` at `t` (K-2.4, E-4), and what the run's
     /// warnings count: the bars `approx` priced, the models passed over.
     pub(super) fn write_requirement(&mut self, k: &mut Kernel, t: i64, initial: f64, maintenance: f64, margin: Option<&Margin>) {
