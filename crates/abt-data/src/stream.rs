@@ -38,6 +38,10 @@ pub fn is_clock(relation: &str) -> bool {
 /// Rows per event batch (D-5.6's channel holds batches of this size).
 pub const BATCH_EVENTS: usize = 65_536;
 
+/// A subscription's channel (D-5.6): the events sent and not yet
+/// acknowledged; the producer waits for an `ack` past it (ERRATA E-64).
+pub const SUBSCRIPTION_WINDOW: usize = 65_536;
+
 /// The event kinds, as the `kind` column's dictionary holds them (P-4).
 pub const KINDS: [&str; 3] = ["tuple", "barrier", "mark"];
 

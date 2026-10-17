@@ -747,6 +747,30 @@ batch driver agree on every corpus program. Each bless since:
   holds that write's rows only, and the earlier versions stay readable by
   their ids. This is how a writer's outputs change shape between versions
   of the writer.
+- **E-64 (P-2.3, P-2.4, D-5.6; flow control on a shared connection).**
+  P-2.3 lets answers interleave on one connection. P-2.4 has the service
+  block on a full channel, and the spec does not say where that channel's
+  bound is kept.
+  - **The bug.** Before this entry, the bound was kept at the client:
+    - The client's reader blocked once one reply held 64 unread frames.
+    - Every other answer on the connection then waited behind that reply.
+    - A client that read one answer while another streamed hung. Examples:
+      a run's progress held unread while its run was halted; a kernel
+      writing its outputs at a checkpoint while its own stream ran ahead.
+  - **The fix.**
+    - The reader never waits: each frame goes to its request at once.
+    - The bound is kept at the service, for the one answer whose size
+      grows with the data, a subscription. Its channel is the events sent
+      and not yet acknowledged: `SUBSCRIPTION_WINDOW`, 65,536 by default,
+      which `DataService::with_window` configures.
+    - The producer waits for an `ack` before sending past the window. A
+      cancel, or the connection closing, ends the wait.
+    - The wire client acknowledges each batch of events as it hands the
+      batch over. "May ack" (D-5.6) is therefore "does": a subscriber that
+      never acknowledged would receive one window.
+    - A reply dropped before its end sends `cancel`.
+  - **Unchanged.** Other answers (tables, a run's frames) are bounded by
+    their request, so the client holds them as they come.
 
 ## Aggregates
 

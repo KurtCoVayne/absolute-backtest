@@ -1,8 +1,9 @@
 //! G3 (A-D11, Proposition P-5.1): a run's result is a function of its
 //! program, binding and configuration only. The same run in process and
 //! over a Unix socket, the data layer's aggregate pass on one thread and on
-//! eight, and several kernels reading one data service at once all give the
-//! same bits.
+//! eight, several kernels reading one data service at once, and a
+//! subscription's window of a few events or of the default (D-5.6) all give
+//! the same bits.
 
 use abt_tests as common;
 
@@ -72,6 +73,31 @@ fn in_process_socket_and_concurrent_kernels_agree() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
     assert_eq!(sequential, concurrent);
+}
+
+/// D-5.6 over the wire: a data service whose subscriptions may hold only
+/// seven events unacknowledged streams batches of seven, each sent once the
+/// kernel has taken the one before it, and the run is the run of the
+/// default window, bit for bit (a kernel that did not acknowledge would
+/// stop at the first window: the watchdog fails the test then).
+#[test]
+fn the_subscription_window_does_not_change_a_run() {
+    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 300, 13);
+    for n in ["momentum_top_n", "sma_crossover"] {
+        let p = common::corpus_program(n);
+        let wide = digest(&common::run(&p, &ds, ExecConfig::from_program(&p)).unwrap());
+        let mut store = Store::temporary("window").unwrap();
+        let attributes = abt::dataset_attributes(&ds, &p.base.to_string(), &BTreeMap::new());
+        abt::ingest_dataset(&mut store, &ds, &p.class, &attributes).unwrap();
+        let svc = abt_data::service::DataService::with_window(store, 7);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let client = abt_kernel::kernel::DataClient::connect(abt_data::service::inproc(&svc)).unwrap();
+            let _ = tx.send(run_on(&p, None, &client, ExecConfig::from_program(&p), &Replay::default()).map(|r| digest(&r)));
+        });
+        let narrow = rx.recv_timeout(std::time::Duration::from_secs(300)).expect("the run under a window of seven ended").unwrap();
+        assert_eq!(wide, narrow, "{}", n);
+    }
 }
 
 fn close_rows(n_entities: u64, days: i64) -> RecordBatch {

@@ -23,13 +23,15 @@ use crate::agg;
 use crate::error::DataError;
 use crate::query::{self, ResolvedView};
 use crate::store::Store;
-use crate::stream::{self, Stream, BATCH_EVENTS};
+use crate::stream::{self, Stream, BATCH_EVENTS, SUBSCRIPTION_WINDOW};
 
 /// Frames in flight per direction of an in-process connection.
 const INPROC_BOUND: usize = 64;
 
 pub struct DataService {
     store: RwLock<Store>,
+    /// A subscription's window of unacknowledged events (D-5.6).
+    window: usize,
 }
 
 fn wire(e: WireError) -> ErrorMessage {
@@ -42,7 +44,16 @@ fn data(e: DataError) -> ErrorMessage {
 
 impl DataService {
     pub fn new(store: Store) -> Arc<DataService> {
-        Arc::new(DataService { store: RwLock::new(store) })
+        DataService::with_window(store, SUBSCRIPTION_WINDOW)
+    }
+
+    /// A service whose subscriptions hold `window` events unacknowledged
+    /// (D-5.6's configuration), at least one.
+    pub fn with_window(store: Store, window: usize) -> Arc<DataService> {
+        Arc::new(DataService {
+            store: RwLock::new(store),
+            window: window.max(1),
+        })
     }
 
     /// The store, for the process that owns the service (an adapter run in
@@ -103,15 +114,33 @@ impl DataService {
         }
         let mut sink = out.begin_table(&s.schema(), None).map_err(wire)?;
         let from = r.from_seq.max(1);
-        loop {
+        // The batches sent and not yet acknowledged: their last seq and size.
+        let mut unacked: std::collections::VecDeque<(u64, usize)> = Default::default();
+        let mut held = 0;
+        'stream: loop {
             if out.cancelled() {
                 break;
             }
-            let b = s.next_batch(&self.store(), from, r.to_seq, BATCH_EVENTS).map_err(data)?;
-            match b {
-                Some(b) => sink.batch(&b).map_err(wire)?,
-                None => break,
+            let b = s.next_batch(&self.store(), from, r.to_seq, BATCH_EVENTS.min(self.window)).map_err(data)?;
+            let Some(b) = b else { break };
+            // The channel is full: wait for the client to take the oldest
+            // batch (D-5.6). A cancel, or the connection closing, ends it.
+            while held > 0 && held + b.num_rows() > self.window {
+                let acked = out.acked();
+                while unacked.front().is_some_and(|(last, _)| *last <= acked) {
+                    held -= unacked.pop_front().map_or(0, |(_, n)| n);
+                }
+                if held > 0 && held + b.num_rows() > self.window {
+                    let oldest = unacked.front().map_or(0, |(last, _)| *last);
+                    if !out.wait_acked(oldest) {
+                        break 'stream;
+                    }
+                }
             }
+            sink.batch(&b).map_err(wire)?;
+            let last = b.column(0).as_any().downcast_ref::<UInt64Array>().map_or(s.seq(), |q| q.value(q.len() - 1));
+            unacked.push_back((last, b.num_rows()));
+            held += b.num_rows();
         }
         sink.end().map_err(wire)
     }

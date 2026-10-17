@@ -6,12 +6,18 @@
 //! `cancel` stops a streaming response, which then ends; `ping` is answered
 //! with `pong`. What a request does is the service's (each layer's
 //! dispatch); this module only moves it.
+//!
+//! A client's reader never waits on one answer: every frame goes to its
+//! request at once, so answers interleave (P-2.3) whatever the client reads
+//! first, and an answer held unread never holds back another. A
+//! subscription's events are flow-controlled at the service instead, by the
+//! client's `ack`s (P-2.4, D-5.6; ERRATA E-64).
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -22,9 +28,6 @@ use crate::frame::{Frame, FrameError, FrameKind};
 use crate::table::{TableDecoder, TableEncoder};
 use crate::transport::{Connection, FrameTx};
 use crate::{ErrorCode, ErrorMessage, Hello, Layer, Message, PROTOCOL};
-
-/// Frames a reply holds before the reader blocks (backpressure, P-2.4).
-const REPLY_BOUND: usize = 64;
 
 #[derive(Debug)]
 pub enum WireError {
@@ -123,11 +126,37 @@ fn read_hello(f: Option<Frame>) -> Result<Hello, WireError> {
     }
 }
 
+/// What the client has said of one request's answer: whether it cancelled
+/// it, and the greatest seq it acknowledged.
+#[derive(Default)]
+struct Flow {
+    cancelled: AtomicBool,
+    acked: Mutex<u64>,
+    moved: Condvar,
+}
+
+impl Flow {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        // Under the lock, so that a waiter between its check and its wait
+        // still sees the change.
+        let _held = self.acked.lock();
+        self.moved.notify_all();
+    }
+
+    fn ack(&self, seq: u64) {
+        if let Ok(mut a) = self.acked.lock() {
+            *a = (*a).max(seq);
+        }
+        self.moved.notify_all();
+    }
+}
+
 /// What a service's handler answers through.
 pub struct Responder {
     w: Writer,
     correlation: u64,
-    cancelled: Arc<AtomicBool>,
+    flow: Arc<Flow>,
 }
 
 impl Responder {
@@ -136,9 +165,32 @@ impl Responder {
     }
 
     /// Whether the client cancelled this request (a streaming answer then
-    /// ends at its next batch).
+    /// ends at its next batch). A closed connection cancels every request.
     pub fn cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.flow.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// The greatest seq the client acknowledged (D-5.6), 0 before any.
+    pub fn acked(&self) -> u64 {
+        self.flow.acked.lock().map(|a| *a).unwrap_or(0)
+    }
+
+    /// Waits until the client acknowledges `seq`: `true` once it has,
+    /// `false` if the request is cancelled first.
+    pub fn wait_acked(&self, seq: u64) -> bool {
+        let Ok(mut a) = self.flow.acked.lock() else { return false };
+        loop {
+            if *a >= seq {
+                return true;
+            }
+            if self.cancelled() {
+                return false;
+            }
+            a = match self.flow.moved.wait(a) {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
+        }
     }
 
     /// A control response.
@@ -215,28 +267,37 @@ pub fn serve(conn: Connection, service: Arc<dyn Service>) -> Result<(), WireErro
         w.send(Frame::new(FrameKind::Error, 0, encode(Message::Error(Box::new(e)))))?;
         return Ok(());
     }
-    let cancels: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>> = Arc::default();
+    let flows: Arc<Mutex<HashMap<u64, Arc<Flow>>>> = Arc::default();
     let mut tables: HashMap<u64, (Message, TableDecoder, Vec<RecordBatch>)> = HashMap::new();
     let mut handlers = Vec::new();
     let spawn = |correlation: u64, request: Request, handlers: &mut Vec<std::thread::JoinHandle<()>>| {
-        let flag = Arc::new(AtomicBool::new(false));
-        cancels.lock().expect("the cancel table").insert(correlation, flag.clone());
-        let (w, service, cancels) = (w.clone(), service.clone(), cancels.clone());
+        let flow = Arc::new(Flow::default());
+        flows.lock().expect("the flow table").insert(correlation, flow.clone());
+        let (w, service, flows) = (w.clone(), service.clone(), flows.clone());
         handlers.push(std::thread::spawn(move || {
-            let out = Responder { w, correlation, cancelled: flag };
+            let out = Responder { w, correlation, flow };
             if let Err(e) = service.handle(request, &out) {
                 let _ = out.error(e);
             }
-            cancels.lock().expect("the cancel table").remove(&correlation);
+            flows.lock().expect("the flow table").remove(&correlation);
         }));
     };
+    let flow_of = |correlation: u64| flows.lock().expect("the flow table").get(&correlation).cloned();
     while let Some(f) = rx.recv()? {
         match f.kind {
             FrameKind::Ping => w.send(Frame::new(FrameKind::Pong, f.correlation, Vec::new()))?,
-            FrameKind::Pong | FrameKind::Ack => {}
+            FrameKind::Pong => {}
+            FrameKind::Ack => match decode(&f.payload) {
+                Ok(Message::AckMessage(a)) => {
+                    if let Some(flow) = flow_of(f.correlation) {
+                        flow.ack(a.seq);
+                    }
+                }
+                _ => return Err(WireError::Protocol(format!("an ack for correlation {} without its seq", f.correlation))),
+            },
             FrameKind::Cancel => {
-                if let Some(flag) = cancels.lock().expect("the cancel table").get(&f.correlation) {
-                    flag.store(true, Ordering::SeqCst);
+                if let Some(flow) = flow_of(f.correlation) {
+                    flow.cancel();
                 }
             }
             FrameKind::Request => {
@@ -274,9 +335,10 @@ pub fn serve(conn: Connection, service: Arc<dyn Service>) -> Result<(), WireErro
             other => return Err(WireError::Protocol(format!("a service does not take {:?} frames", other))),
         }
     }
-    // The peer closed: stop what is still streaming and let it finish.
-    for flag in cancels.lock().expect("the cancel table").values() {
-        flag.store(true, Ordering::SeqCst);
+    // The peer closed: stop what is still streaming, or waiting for an ack,
+    // and let it finish.
+    for flow in flows.lock().expect("the flow table").values() {
+        flow.cancel();
     }
     for h in handlers {
         let _ = h.join();
@@ -284,17 +346,21 @@ pub fn serve(conn: Connection, service: Arc<dyn Service>) -> Result<(), WireErro
     Ok(())
 }
 
+/// Where the reader puts each request's frames.
+type Routes = Arc<Mutex<HashMap<u64, Sender<Frame>>>>;
+
 /// A client of one service over one connection.
 pub struct Client {
     w: Writer,
-    pending: Arc<Mutex<HashMap<u64, SyncSender<Frame>>>>,
+    pending: Routes,
     next: AtomicU64,
     peer: Hello,
 }
 
 impl Client {
     /// Opens a session: our hello, the service's hello (P-2.3), and a reader
-    /// that routes every answer to its request.
+    /// that routes every answer to its request. The reader never waits on
+    /// a request's reply, so no answer waits behind another's unread frames.
     pub fn connect(conn: Connection, layer: Layer, name: &str) -> Result<Client, WireError> {
         let Connection { tx, mut rx } = conn;
         let w = Writer(Arc::new(Mutex::new(tx)));
@@ -303,7 +369,7 @@ impl Client {
         if major(&peer.protocol) != major(PROTOCOL) {
             return Err(WireError::Remote(error(ErrorCode::Version, format!("the service speaks {}, this client {}", peer.protocol, PROTOCOL))));
         }
-        let pending: Arc<Mutex<HashMap<u64, SyncSender<Frame>>>> = Arc::default();
+        let pending: Routes = Arc::default();
         let routes = pending.clone();
         std::thread::spawn(move || {
             while let Ok(Some(f)) = rx.recv() {
@@ -333,29 +399,39 @@ impl Client {
         &self.peer
     }
 
-    fn register(&self) -> (u64, Receiver<Frame>) {
+    fn register(&self, m: &Message) -> Reply {
         let correlation = self.next.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = sync_channel(REPLY_BOUND);
+        let (tx, rx) = channel();
         self.pending.lock().expect("the pending table").insert(correlation, tx);
-        (correlation, rx)
-    }
-
-    /// Sends a request; its answer arrives on the reply.
-    pub fn call(&self, m: Message) -> Result<Reply, WireError> {
-        let (correlation, rx) = self.register();
-        self.w.send(Frame::new(FrameKind::Request, correlation, encode(m)))?;
-        Ok(Reply {
+        // A subscription owes its index when asked for, then its events.
+        let owed = match m {
+            Message::SubscribeRequest(s) => 1 + usize::from(s.with_index),
+            _ => 0,
+        };
+        Reply {
             rx,
             correlation,
             w: self.w.clone(),
             pending: self.pending.clone(),
             decoder: None,
-        })
+            subscription: owed > 0,
+            owed,
+            in_table: false,
+            failed: false,
+        }
+    }
+
+    /// Sends a request; its answer arrives on the reply.
+    pub fn call(&self, m: Message) -> Result<Reply, WireError> {
+        let reply = self.register(&m);
+        self.w.send(Frame::new(FrameKind::Request, reply.correlation, encode(m)))?;
+        Ok(reply)
     }
 
     /// Sends a request with a table after it (`put`).
     pub fn call_with_table(&self, m: Message, schema: &SchemaRef, batches: &[RecordBatch]) -> Result<Reply, WireError> {
-        let (correlation, rx) = self.register();
+        let reply = self.register(&m);
+        let correlation = reply.correlation;
         self.w.send(Frame::new(FrameKind::Request, correlation, encode(m)))?;
         let (mut enc, head) = TableEncoder::new(schema)?;
         self.w.send(Frame::new(FrameKind::Schema, correlation, head))?;
@@ -365,13 +441,7 @@ impl Client {
             }
         }
         self.w.send(Frame::new(FrameKind::End, correlation, Vec::new()))?;
-        Ok(Reply {
-            rx,
-            correlation,
-            w: self.w.clone(),
-            pending: self.pending.clone(),
-            decoder: None,
-        })
+        Ok(reply)
     }
 
     /// A request whose answer is one control message.
@@ -398,20 +468,39 @@ pub struct Reply {
     rx: Receiver<Frame>,
     correlation: u64,
     w: Writer,
-    pending: Arc<Mutex<HashMap<u64, SyncSender<Frame>>>>,
+    pending: Routes,
     decoder: Option<TableDecoder>,
+    /// A subscription: its events are acknowledged as they are taken.
+    subscription: bool,
+    /// The tables a subscription still owes: its index when asked for, then
+    /// its events.
+    owed: usize,
+    /// Between a table's `TableFollows` and its `end`.
+    in_table: bool,
+    /// The answer ended in an error.
+    failed: bool,
 }
 
 impl Reply {
     fn next(&mut self) -> Result<Frame, WireError> {
-        self.rx.recv().map_err(|_| WireError::Closed)
+        let f = self.rx.recv().map_err(|_| WireError::Closed)?;
+        if f.kind == FrameKind::Error {
+            self.failed = true;
+        }
+        Ok(f)
     }
 
     /// The next control message of the answer; an error frame is an `Err`.
     pub fn message(&mut self) -> Result<Message, WireError> {
         let f = self.next()?;
         match f.kind {
-            FrameKind::Response => Ok(decode(&f.payload)?),
+            FrameKind::Response => {
+                let m = decode(&f.payload)?;
+                if matches!(m, Message::TableFollows(_)) {
+                    self.in_table = true;
+                }
+                Ok(m)
+            }
             FrameKind::Error => match decode(&f.payload)? {
                 Message::Error(e) => Err(WireError::Remote(*e)),
                 _ => Err(WireError::Protocol("an error frame without an error".into())),
@@ -420,7 +509,9 @@ impl Reply {
         }
     }
 
-    /// The next batch of a table being received; `None` at its end.
+    /// The next batch of a table being received; `None` at its end. A
+    /// subscription's batch of events is acknowledged as it is taken, which
+    /// lets the service send the next (D-5.6).
     pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, WireError> {
         loop {
             let f = self.next()?;
@@ -435,11 +526,24 @@ impl Reply {
                     let mut got = dec.feed(&f.payload)?;
                     match got.len() {
                         0 => {}
-                        1 => return Ok(got.pop()),
+                        1 => {
+                            let b = got.pop();
+                            if self.subscription {
+                                if let Some(seq) = b.as_ref().and_then(last_seq) {
+                                    // A closed connection shows at the next frame.
+                                    let _ = self.ack(seq);
+                                }
+                            }
+                            return Ok(b);
+                        }
                         _ => return Err(WireError::Protocol("a batch frame held several batches".into())),
                     }
                 }
-                FrameKind::End => return Ok(None),
+                FrameKind::End => {
+                    self.in_table = false;
+                    self.owed = self.owed.saturating_sub(1);
+                    return Ok(None);
+                }
                 FrameKind::Error => match decode(&f.payload)? {
                     Message::Error(e) => return Err(WireError::Remote(*e)),
                     _ => return Err(WireError::Protocol("an error frame without an error".into())),
@@ -474,10 +578,31 @@ impl Reply {
         let m = Message::AckMessage(Box::new(crate::generated::abt::wire::AckMessage { seq }));
         self.w.send(Frame::new(FrameKind::Ack, self.correlation, encode(m)))
     }
+
+    /// Whether the service may still be sending: a table not ended, or a
+    /// subscription's tables still owed.
+    fn open(&self) -> bool {
+        !self.failed && (self.in_table || self.owed > 0)
+    }
+}
+
+/// The seq of a batch's last event, when the batch is a stream's (its
+/// first column is `seq`, P-4).
+fn last_seq(b: &RecordBatch) -> Option<u64> {
+    if b.num_rows() == 0 || b.schema().fields().first().map(|f| f.name().as_str()) != Some("seq") {
+        return None;
+    }
+    let seq = b.column(0).as_any().downcast_ref::<arrow::array::UInt64Array>()?;
+    Some(seq.value(seq.len() - 1))
 }
 
 impl Drop for Reply {
     fn drop(&mut self) {
+        // An answer left before its end is cancelled: a subscription waiting
+        // for acks that will not come then ends.
+        if self.open() {
+            let _ = self.cancel();
+        }
         if let Ok(mut p) = self.pending.lock() {
             p.remove(&self.correlation);
         }
