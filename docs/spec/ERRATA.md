@@ -1308,6 +1308,53 @@ batch driver agree on every corpus program. Each bless since:
     - the share of contract-days quoted both ways (a positive bid below
       the ask);
     - the mean open interest.
+- **E-74 (D-3.2, D-3.4, X-2.1; the resident cache).** A store keeps
+  decoded row groups resident under `resident_budget` bytes.
+  - **The budget** defaults to half of physical memory: `/proc/meminfo`
+    where there is one, else 4 GiB. `ABT_RESIDENT_BUDGET` (bytes) sets it,
+    and 0 turns the cache off.
+  - **The key** is a row group's file and the group's index. A partition
+    file is named by its content's hash and never written again (D-2.6),
+    so a resident group is the group on disk.
+  - **Eviction** is the clock (second chance) over a slab. A group's
+    reference bit is set when it is hit and cleared as the hand passes; the
+    hand evicts the first group it finds cleared. A group read once (a
+    scan) is not referenced, so it is the first to go.
+  - **A read through the cache** decodes a partition by row group on first
+    touch. An entity read gathers its rows from the resident group by the
+    entity offset index, in the file's order, so it returns the rows a read
+    from the file does.
+  - **The index** is memory-mapped and kept with the partition's footer
+    (its row groups' row counts). Both are read once per file.
+  - **The counters** (hits, misses, evictions, resident bytes and groups)
+    are the store's `resident_stats`.
+  - **Manifests** are read once per version, a version being immutable;
+    the registry is still asked first, so a collected version is unknown.
+  - **Measured** by `crates/abt-data/tests/budgets.rs` (2,000 names ×
+    2,520 days):
+
+    | Read | From disk | Resident |
+    | --- | ---: | ---: |
+    | `point` | 721 µs | 40 µs |
+    | `latest` | 689 µs | 41 µs |
+    | `series` of 252 rows | 6.1 ms | 158 µs |
+    | `section` of 2,000 names | 1.6 ms | 303 µs |
+
+    84 row groups of 5.04M rows are resident in 202 MB: 8 B per value,
+    within A-7.3's 16.
+  - **The aggregate pass** (D-6.4; 06-performance 2.2) gains three things,
+    the answer unchanged.
+    - Groups take dense slots on first sight.
+    - The answer is column by column. Its (t, group) order comes from a
+      counting sort on t's rank, stable over the groups, rather than from
+      a sort of rows.
+    - The put path names a bucket once per span of rows. It leaves rows
+      already sorted and unique as they are, instead of sorting and
+      comparing their values.
+    The rolling 252-row mean of 5.04M rows on eight threads takes 4.7 s
+    (`running`) and 5.3 s (`two_pass`), from 5.6 s and 6.1 s. Writing the
+    answer's log segment is 1.3 s of it: this VM's first write of fresh
+    pages runs at about 190 MB/s.
 
 ## Aggregates
 

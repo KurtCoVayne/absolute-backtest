@@ -219,6 +219,14 @@ pub fn sort_rows(s: &RelationSchema, rows: &RecordBatch) -> Result<RecordBatch, 
         values: rows.column(lay.seq).clone(),
         options: None,
     });
+    // Rows already in order (a writer's answer in (t, entity) order, an
+    // ingest in time order) are returned as they are: one comparison of
+    // neighbours instead of a sort.
+    let fields: Vec<SortField> = keys.iter().map(|k| SortField::new(k.values.data_type().clone())).collect();
+    let converted = RowConverter::new(fields)?.convert_columns(&keys.iter().map(|k| k.values.clone()).collect::<Vec<_>>())?;
+    if (1..converted.num_rows()).all(|i| converted.row(i - 1) <= converted.row(i)) {
+        return Ok(rows.clone());
+    }
     let idx = lexsort_to_indices(&keys, None)?;
     Ok(take_record_batch(rows, &idx)?)
 }
@@ -246,6 +254,10 @@ pub fn dedupe(s: &RelationSchema, sorted: &RecordBatch) -> Result<RecordBatch, D
         Ok(converter.convert_columns(&arrays)?)
     };
     let keys = conv(&key_cols)?;
+    // The values are compared only where two neighbours share a key.
+    if (1..sorted.num_rows()).all(|i| keys.row(i) != keys.row(i - 1)) {
+        return Ok(sorted.clone());
+    }
     let values = if value_cols.is_empty() { None } else { Some(conv(&value_cols)?) };
     let mut keep = vec![true; sorted.num_rows()];
     for (i, k) in keep.iter_mut().enumerate().skip(1) {

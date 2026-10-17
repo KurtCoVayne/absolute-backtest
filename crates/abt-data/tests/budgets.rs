@@ -100,61 +100,72 @@ fn measure_the_budgets() {
         let (_, b) = execute(s, &view, f, None, false).unwrap();
         (t.elapsed().as_secs_f64() * 1e6, b.iter().map(|x| x.num_rows()).sum::<usize>())
     };
-    let mut point = Vec::new();
-    let mut latest = Vec::new();
-    let mut series = Vec::new();
-    let mut section = Vec::new();
-    for i in 0..50u64 {
-        let e = 1 + (i * 37) % entities;
-        let d = ((i * 101) % days as u64) as i64;
-        point.push(
-            q(
-                &s,
-                &QueryForm::Point(Box::new(Point {
+    // The four forms from disk (no resident cache), then resident (a pass
+    // to decode, then the pass measured; E-74).
+    let measure = |s: &Store, label: &str| {
+        let mut point = Vec::new();
+        let mut latest = Vec::new();
+        let mut series = Vec::new();
+        let mut section = Vec::new();
+        for i in 0..50u64 {
+            let e = 1 + (i * 37) % entities;
+            let d = ((i * 101) % days as u64) as i64;
+            point.push(
+                q(
+                    s,
+                    &QueryForm::Point(Box::new(Point {
+                        relation: "equity.close".into(),
+                        identity: ent(e),
+                        t: T0 + d * DAY,
+                    })),
+                )
+                .0,
+            );
+            latest.push(
+                q(
+                    s,
+                    &QueryForm::Latest(Box::new(Latest {
+                        relation: "equity.close".into(),
+                        identity: ent(e),
+                        t_max: T0 + d * DAY + DAY / 2,
+                    })),
+                )
+                .0,
+            );
+            let d0 = d.min(days - 252);
+            let (us, n) = q(
+                s,
+                &QueryForm::Series(Box::new(Series {
                     relation: "equity.close".into(),
                     identity: ent(e),
+                    t0: T0 + d0 * DAY,
+                    t1: T0 + (d0 + 251) * DAY,
+                })),
+            );
+            assert_eq!(n, 252);
+            series.push(us);
+            let (us, n) = q(
+                s,
+                &QueryForm::Section(Box::new(Section {
+                    relation: "equity.close".into(),
                     t: T0 + d * DAY,
                 })),
-            )
-            .0,
-        );
-        latest.push(
-            q(
-                &s,
-                &QueryForm::Latest(Box::new(Latest {
-                    relation: "equity.close".into(),
-                    identity: ent(e),
-                    t_max: T0 + d * DAY + DAY / 2,
-                })),
-            )
-            .0,
-        );
-        let d0 = d.min(days - 252);
-        let (us, n) = q(
-            &s,
-            &QueryForm::Series(Box::new(Series {
-                relation: "equity.close".into(),
-                identity: ent(e),
-                t0: T0 + d0 * DAY,
-                t1: T0 + (d0 + 251) * DAY,
-            })),
-        );
-        assert_eq!(n, 252);
-        series.push(us);
-        let (us, n) = q(
-            &s,
-            &QueryForm::Section(Box::new(Section {
-                relation: "equity.close".into(),
-                t: T0 + d * DAY,
-            })),
-        );
-        assert_eq!(n as u64, entities);
-        section.push(us);
-    }
-    println!("point from disk: median {:.0} us", median_us(point));
-    println!("latest from disk: median {:.0} us", median_us(latest));
-    println!("series of 252 rows from disk: median {:.0} us", median_us(series));
-    println!("section of {} entities from disk: median {:.0} us", entities, median_us(section));
+            );
+            assert_eq!(n as u64, entities);
+            section.push(us);
+        }
+        println!("point {}: median {:.0} us", label, median_us(point));
+        println!("latest {}: median {:.0} us", label, median_us(latest));
+        println!("series of 252 rows {}: median {:.0} us", label, median_us(series));
+        println!("section of {} entities {}: median {:.0} us", entities, label, median_us(section));
+    };
+    s.set_resident_budget(0);
+    measure(&s, "from disk");
+    s.set_resident_budget(8 << 30);
+    measure(&s, "on first touch");
+    measure(&s, "resident");
+    let st = s.resident_stats();
+    println!("resident: {} row groups, {} bytes, {} hits, {} misses", st.groups, st.bytes, st.hits, st.misses);
     // The rolling aggregate: a 252-row mean per entity over the whole span.
     for (threads, numerics) in [(1, Numerics::TwoPass), (8, Numerics::TwoPass), (1, Numerics::Running), (8, Numerics::Running)] {
         abt_data::agg::set_threads(threads);

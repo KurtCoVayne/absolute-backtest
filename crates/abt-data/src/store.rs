@@ -8,10 +8,10 @@
 //! relation's next version on ingest (D-3.3); unchanged buckets keep their
 //! files, which versions share.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use abt_wire::canonical::Canonical;
 use abt_wire::generated::abt::wire::{ColumnType, RelationSchema, Role};
@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DataError;
 use crate::registry::{Registry, VersionRecord};
+use crate::resident::{self, GroupKey, Resident, ResidentStats};
 use crate::rows::{self, layout, stored_schema, Layout};
 
 /// Rows per Parquet row group (X-2.1).
@@ -77,18 +78,27 @@ pub struct RowFilter {
     pub latest_only: bool,
 }
 
-/// The granularity of a relation's partitions (D-3.1; ERRATA E-15).
-fn bucket_of(calendar: Option<&str>, t: i64) -> String {
+/// A bucket of a relation's partitions (D-3.1; ERRATA E-15): its name and
+/// the instants it spans, `[from, to)`: a row whose
+/// time is in the span is in the bucket, so a run of rows in time order
+/// names its bucket once.
+fn bucket_span(calendar: Option<&str>, t: i64) -> (String, i64, i64) {
     let days = t.div_euclid(NANOS_PER_DAY);
     let (y, m, d) = civil_from_days(days);
+    let day = |y: i64, m: u32, d: u32| abt_wire::scalar::days_from_civil(y, m, d) * NANOS_PER_DAY;
+    let next_month = |y: i64, m: u32| if m == 12 { (y + 1, 1) } else { (y, m + 1) };
     match calendar {
-        Some("1d") | Some("1w") => format!("{:04}-{:02}", y, m),
-        Some(c) if c.ends_with('m') || c.ends_with('h') => format!("{:04}-{:02}-{:02}", y, m, d),
+        Some("1d") | Some("1w") => {
+            let (ny, nm) = next_month(y, m);
+            (format!("{:04}-{:02}", y, m), day(y, m, 1), day(ny, nm, 1))
+        }
+        Some(c) if c.ends_with('m') || c.ends_with('h') => (format!("{:04}-{:02}-{:02}", y, m, d), days * NANOS_PER_DAY, (days + 1) * NANOS_PER_DAY),
         Some(c) if c.ends_with('s') => {
             let hour = t.rem_euclid(NANOS_PER_DAY) / NANOS_PER_HOUR;
-            format!("{:04}-{:02}-{:02}T{:02}", y, m, d, hour)
+            let from = days * NANOS_PER_DAY + hour * NANOS_PER_HOUR;
+            (format!("{:04}-{:02}-{:02}T{:02}", y, m, d, hour), from, from + NANOS_PER_HOUR)
         }
-        _ => format!("{:04}", y),
+        _ => (format!("{:04}", y), day(y, 1, 1), day(y + 1, 1, 1)),
     }
 }
 
@@ -107,6 +117,20 @@ pub struct Store {
     ordinal: u64,
     /// A temporary store's directory is removed when the store is dropped.
     temporary: bool,
+    /// Decoded row groups resident under the budget (D-3.2, ERRATA E-74).
+    resident: Resident,
+    /// Each partition file's row groups and its entity offset index,
+    /// memory-mapped: read once per file.
+    files: Mutex<HashMap<PathBuf, Arc<FileInfo>>>,
+    /// The manifests read, by version.
+    manifests: Mutex<HashMap<String, Arc<Manifest>>>,
+}
+
+/// A partition file's row groups (their rows, in order) and its entity
+/// offset index.
+struct FileInfo {
+    groups: Vec<usize>,
+    index: Option<memmap2::Mmap>,
 }
 
 /// Removes the temporary stores (`abt-store-<tag>-<pid>-<n>`) of processes
@@ -161,7 +185,21 @@ impl Store {
             next_seq: BTreeMap::new(),
             ordinal,
             temporary: false,
+            resident: Resident::new(resident::default_budget()),
+            files: Mutex::new(HashMap::new()),
+            manifests: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Sets the resident budget in bytes (0 decodes every read from its
+    /// file), dropping what is resident.
+    pub fn set_resident_budget(&mut self, bytes: u64) {
+        self.resident = Resident::new(bytes);
+    }
+
+    /// What the resident cache has done.
+    pub fn resident_stats(&self) -> ResidentStats {
+        self.resident.stats()
     }
 
     /// A fresh store in a new directory under the system's temporary
@@ -280,8 +318,19 @@ impl Store {
         let mut by_bucket: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         {
             let ts = rows::times(&all, lay.t);
+            let mut span: Option<(String, i64, i64)> = None;
             for i in 0..all.num_rows() {
-                by_bucket.entry(bucket_of(schema.calendar.as_deref(), ts.value(i))).or_default().push(i as u32);
+                let t = ts.value(i);
+                if !span.as_ref().is_some_and(|(_, from, to)| *from <= t && t < *to) {
+                    span = Some(bucket_span(schema.calendar.as_deref(), t));
+                }
+                let (bucket, _, _) = span.as_ref().expect("a span for every row");
+                match by_bucket.get_mut(bucket) {
+                    Some(rows) => rows.push(i as u32),
+                    None => {
+                        by_bucket.insert(bucket.clone(), vec![i as u32]);
+                    }
+                }
             }
         }
         let mut partitions: BTreeMap<String, PartitionRef> = prev_manifest.as_ref().map(|m| m.partitions.iter().map(|p| (p.bucket.clone(), p.clone())).collect()).unwrap_or_default();
@@ -290,7 +339,7 @@ impl Store {
             let new_rows = arrow::compute::take_record_batch(&all, &arrow::array::UInt32Array::from(idx.clone()))?;
             let mut parts = vec![new_rows];
             if let Some(p) = partitions.get(bucket) {
-                parts.extend(self.read_partition(&stored, p, None)?);
+                parts.extend(self.read_partition_file(&stored, p, None)?);
             }
             let merged = rows::concat(&stored, &parts)?;
             let sorted = rows::dedupe(schema, &rows::sort_rows(schema, &merged)?)?;
@@ -432,13 +481,83 @@ impl Store {
 
     pub fn manifest(&self, version: &str) -> Result<Manifest, DataError> {
         let rec = self.registry.version(version).ok_or_else(|| DataError::UnknownVersion(version.to_string()))?;
+        // A version is immutable (D-2.6): its manifest is read once.
+        if let Some(m) = self.manifests.lock().ok().and_then(|c| c.get(version).cloned()) {
+            return Ok((*m).clone());
+        }
         let path = self.root.join("manifest").join(&rec.relation).join(format!("{}.json", version));
-        Ok(serde_json::from_slice(&fs::read(&path)?)?)
+        let m: Manifest = serde_json::from_slice(&fs::read(&path)?)?;
+        if let Ok(mut c) = self.manifests.lock() {
+            c.insert(version.to_string(), Arc::new(m.clone()));
+        }
+        Ok(m)
     }
 
-    /// One partition's rows, those of `identity` only when given (through
-    /// the entity offset index).
+    /// A partition's rows, `identity`'s only when its index names them:
+    /// through the resident cache, its row groups decoded on first touch and
+    /// an entity's rows gathered from them in the file's order (E-74).
     fn read_partition(&self, stored: &SchemaRef, p: &PartitionRef, identity: Option<&[u64]>) -> Result<Vec<RecordBatch>, DataError> {
+        if self.resident.budget() == 0 {
+            return self.read_partition_file(stored, p, identity);
+        }
+        let path = self.root.join(&p.file);
+        let info = self.file_info(&path)?;
+        let wanted = match (identity, &info.index) {
+            (Some(ids), Some(ix)) => Some(read_index_rows(&ix[..], ids)?),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        for (g, &n) in info.groups.iter().enumerate() {
+            let end = start + n;
+            let rows: Option<Vec<u32>> = wanted.as_ref().map(|w| {
+                let (lo, hi) = (w.partition_point(|&r| (r as usize) < start), w.partition_point(|&r| (r as usize) < end));
+                w[lo..hi].iter().map(|r| r - start as u32).collect()
+            });
+            if rows.as_ref().is_some_and(|r| r.is_empty()) {
+                start = end;
+                continue;
+            }
+            let key = GroupKey { file: path.clone(), group: g };
+            let group = self.resident.group(key, || decode_group(&path, g))?;
+            let b = match rows {
+                Some(rows) if rows.len() < n => arrow::compute::take_record_batch(&group, &arrow::array::UInt32Array::from(rows))?,
+                _ => (*group).clone(),
+            };
+            // Partitions keep the stored layout; align the schema object.
+            out.push(RecordBatch::try_new(stored.clone(), b.columns().to_vec())?);
+            start = end;
+        }
+        Ok(out)
+    }
+
+    /// A partition file's row groups and its index, read once.
+    fn file_info(&self, path: &Path) -> Result<Arc<FileInfo>, DataError> {
+        if let Some(info) = self.files.lock().ok().and_then(|f| f.get(path).cloned()) {
+            return Ok(info);
+        }
+        let builder = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path)?)?;
+        let groups = builder.metadata().row_groups().iter().map(|g| g.num_rows() as usize).collect();
+        let ix = path.with_extension("idx");
+        let index = if ix.exists() {
+            let file = fs::File::open(&ix)?;
+            // SAFETY: the index is written once, beside a partition named by
+            // its content's hash, and never written again (D-2.6); the map
+            // is read only.
+            Some(unsafe { memmap2::Mmap::map(&file)? })
+        } else {
+            None
+        };
+        let info = Arc::new(FileInfo { groups, index });
+        if let Ok(mut f) = self.files.lock() {
+            f.insert(path.to_path_buf(), info.clone());
+        }
+        Ok(info)
+    }
+
+    /// A partition's rows read from its file, `identity`'s only by its
+    /// index's row selection.
+    fn read_partition_file(&self, stored: &SchemaRef, p: &PartitionRef, identity: Option<&[u64]>) -> Result<Vec<RecordBatch>, DataError> {
         let path = self.root.join(&p.file);
         let file = fs::File::open(&path)?;
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -608,6 +727,11 @@ impl Store {
                 if p.extension().is_some_and(|x| x == "parquet") {
                     let rel = p.strip_prefix(&self.root).map(|r| r.to_string_lossy().to_string()).unwrap_or_default();
                     if !used.contains(&rel) {
+                        // The file's index map goes with it; its resident
+                        // groups are never asked for again and age out.
+                        if let Ok(mut f) = self.files.lock() {
+                            f.remove(&p);
+                        }
                         fs::remove_file(&p)?;
                         let _ = fs::remove_file(p.with_extension("idx"));
                     }
@@ -818,6 +942,27 @@ fn read_index_rows(ix: &[u8], ids: &[u64]) -> Result<Vec<u32>, DataError> {
     out.sort_unstable();
     out.dedup();
     Ok(out)
+}
+
+/// Row group `g` of a partition file, decoded as one batch.
+fn decode_group(path: &Path, g: usize) -> Result<RecordBatch, DataError> {
+    let reader = ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path)?)?
+        .with_row_groups(vec![g])
+        .with_batch_size(ROW_GROUP)
+        .build()?;
+    let batches = reader.collect::<Result<Vec<_>, _>>()?;
+    match batches.as_slice() {
+        [one] => Ok(one.clone()),
+        _ => {
+            let schema = reader_schema(path)?;
+            Ok(arrow::compute::concat_batches(&schema, &batches)?)
+        }
+    }
+}
+
+/// A partition file's Arrow schema.
+fn reader_schema(path: &Path) -> Result<SchemaRef, DataError> {
+    Ok(ParquetRecordBatchReaderBuilder::try_new(fs::File::open(path)?)?.schema().clone())
 }
 
 /// A row selection of the given rows out of `total`.

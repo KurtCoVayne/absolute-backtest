@@ -29,6 +29,8 @@ blake3 = { version = "1.8", default-features = false, features = ["std", "pure"]
 planus = "1.3.0"
 planus-codegen = "1.3.0"
 planus-translation = "1.3.0"
+# The entity offset index of a partition, memory-mapped (D-3.2).
+memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 # The live gateway's challenge response (Databento's CRAM: SHA-256 of the

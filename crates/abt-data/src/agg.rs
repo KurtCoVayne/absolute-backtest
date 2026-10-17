@@ -35,18 +35,34 @@ use crate::stream::CLOCK;
 /// A group's key: its entity, or its label's code, or nothing.
 type GroupKey = u64;
 
-/// One output row.
-#[derive(Clone, Debug, PartialEq)]
+/// Answer rows, column by column (06-performance 2.2): the time, the
+/// group, the value (none where the aggregate failed), the rows counted,
+/// the failure's message, and the latest receipt of the group's rows at or
+/// before `t`, from which instant the answer is what a reader of the
+/// received rows computes (ERRATA E-47).
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Out {
-    t: i64,
-    group: GroupKey,
-    value: Option<f64>,
-    count: i64,
-    error: Option<String>,
-    /// The latest receipt of the group's rows at or before `t`: from that
-    /// instant on, the answer is what a reader of the received rows computes
-    /// (ERRATA E-47).
-    r: i64,
+    t: Vec<i64>,
+    group: Vec<GroupKey>,
+    value: Vec<Option<f64>>,
+    count: Vec<i64>,
+    error: Vec<Option<String>>,
+    r: Vec<i64>,
+}
+
+impl Out {
+    fn len(&self) -> usize {
+        self.t.len()
+    }
+
+    fn push(&mut self, t: i64, group: GroupKey, value: Option<f64>, count: i64, error: Option<String>, r: i64) {
+        self.t.push(t);
+        self.group.push(group);
+        self.value.push(value);
+        self.count.push(count);
+        self.error.push(error);
+        self.r.push(r);
+    }
 }
 
 /// The labels of a calendar in the view: its `calendar_label` rows.
@@ -145,13 +161,13 @@ pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequ
     }
     let (rows, names) = compute(store, view, request)?;
     let schema = answer_schema(request);
-    let batch = to_batch(&schema, &rows, &names)?;
+    let batch = to_batch(&schema, rows, &names)?;
     let version = store.cache_put(&key, &schema, &[batch])?;
     Ok((version, key))
 }
 
 /// The answer's rows as a batch in the answer schema.
-fn to_batch(schema: &RelationSchema, rows: &[Out], names: &BTreeMap<u64, String>) -> Result<RecordBatch, DataError> {
+fn to_batch(schema: &RelationSchema, rows: Out, names: &BTreeMap<u64, String>) -> Result<RecordBatch, DataError> {
     let mut cols: Vec<ArrayRef> = Vec::new();
     let mut fields = Vec::new();
     let ty = |c: &ColumnSpec| match c.ty {
@@ -159,16 +175,17 @@ fn to_batch(schema: &RelationSchema, rows: &[Out], names: &BTreeMap<u64, String>
         ColumnType::Time => arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
         other => rows::stored_type(other),
     };
+    let Out { t, group, value, count, error, r } = rows;
     for c in &schema.columns {
         fields.push(arrow::datatypes::Field::new(&c.name, ty(c), true));
         let col: ArrayRef = match c.name.as_str() {
-            "entity" => Arc::new(UInt64Array::from(rows.iter().map(|r| r.group).collect::<Vec<_>>())),
-            "group" => Arc::new(StringArray::from(rows.iter().map(|r| names.get(&r.group).cloned().unwrap_or_default()).collect::<Vec<_>>())),
-            "t" | "label" => Arc::new(TimestampNanosecondArray::from(rows.iter().map(|r| r.t).collect::<Vec<_>>())),
-            "r" => Arc::new(TimestampNanosecondArray::from(rows.iter().map(|r| r.r).collect::<Vec<_>>())),
-            "value" => Arc::new(Float64Array::from(rows.iter().map(|r| r.value).collect::<Vec<_>>())),
-            "count" => Arc::new(Int64Array::from(rows.iter().map(|r| r.count).collect::<Vec<_>>())),
-            _ => Arc::new(StringArray::from(rows.iter().map(|r| r.error.clone()).collect::<Vec<_>>())),
+            "entity" => Arc::new(UInt64Array::from(group.clone())),
+            "group" => Arc::new(StringArray::from(group.iter().map(|g| names.get(g).cloned().unwrap_or_default()).collect::<Vec<_>>())),
+            "t" | "label" => Arc::new(TimestampNanosecondArray::from(t.clone())),
+            "r" => Arc::new(TimestampNanosecondArray::from(r.clone())),
+            "value" => Arc::new(Float64Array::from(value.clone())),
+            "count" => Arc::new(Int64Array::from(count.clone())),
+            _ => Arc::new(StringArray::from(error.clone())),
         };
         cols.push(col);
     }
@@ -198,7 +215,7 @@ impl Series {
 
 /// The pass: the request's rows, in (t, group) order, and the texts of the
 /// labels that key a per-label grouping.
-fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Result<(Vec<Out>, BTreeMap<u64, String>), DataError> {
+fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Result<(Out, BTreeMap<u64, String>), DataError> {
     let f = Function::parse(&request.function, request.level).map_err(|e| DataError::Malformed(e.to_string()))?;
     let version = view.version(store, &request.relation)?;
     let m = store.manifest(&version)?;
@@ -257,7 +274,10 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
         }
     };
     use arrow::array::Array;
-    let mut groups: BTreeMap<GroupKey, Series> = BTreeMap::new();
+    // Each group a dense slot on first sight (06-performance 2.2), the slots
+    // put in the groups' order after.
+    let mut slot_of: std::collections::HashMap<GroupKey, usize, std::hash::BuildHasherDefault<IdHasher>> = Default::default();
+    let mut slots: Vec<(GroupKey, Series)> = Vec::new();
     let mut times: Vec<i64> = Vec::new();
     for b in &batches {
         let ts = rows::times(b, lay.t);
@@ -269,7 +289,11 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
                 None => 0,
             };
             let t = ts.value(i);
-            let series = groups.entry(g).or_default();
+            let at = *slot_of.entry(g).or_insert_with(|| {
+                slots.push((g, Series::default()));
+                slots.len() - 1
+            });
+            let series = &mut slots[at].1;
             series.recv.push((t, rs.map_or(t, |r| r.value(i))));
             if b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i)) {
                 continue;
@@ -279,8 +303,9 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
             times.push(t);
         }
     }
+    slots.sort_unstable_by_key(|(g, _)| *g);
     let names: BTreeMap<u64, String> = if request.group == Grouping::PerLabel {
-        groups.keys().map(|&c| (c, store.registry.label_text(c as u32).unwrap_or("").to_string())).collect()
+        slots.iter().map(|&(c, _)| (c, store.registry.label_text(c as u32).unwrap_or("").to_string())).collect()
     } else {
         BTreeMap::new()
     };
@@ -307,7 +332,7 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     // Per group, in parallel over disjoint ranges of groups; each group's
     // sequence is computed in time order by one thread, and the output is
     // put in (t, group) order after (A-D11).
-    let groups: Vec<(GroupKey, Series)> = groups.into_iter().collect();
+    let groups = slots;
     let chunk = groups.len().div_ceil(threads()).max(if THREADS.load(std::sync::atomic::Ordering::Relaxed) == 0 { 64 } else { 1 });
     let ctx = Ctx {
         f,
@@ -318,15 +343,120 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
         t0,
         t1,
     };
-    let mut out: Vec<Out> = std::thread::scope(|sc| {
+    let out: Vec<Out> = std::thread::scope(|sc| {
         let handles: Vec<_> = groups
             .chunks(chunk)
-            .map(|part| sc.spawn(|| part.iter().flat_map(|(g, series)| ctx.group(*g, series)).collect::<Vec<Out>>()))
+            .map(|part| {
+                let ctx = &ctx;
+                sc.spawn(move || {
+                    let mut out = Out::default();
+                    for (g, series) in part {
+                        ctx.group(&mut out, *g, series);
+                    }
+                    out
+                })
+            })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().expect("an aggregate thread")).collect()
+        handles.into_iter().map(|h| h.join().expect("an aggregate thread")).collect()
     });
-    out.sort_by_key(|o| (o.t, o.group));
-    Ok((out, names))
+    Ok((time_major(out), names))
+}
+
+/// The pass's rows in (t, group) order. Each part holds whole groups, the
+/// parts are in group order and each group's rows are in time order, so a
+/// counting sort on the rank of `t` among the answer's times, stable over
+/// the input, puts every row where a stable sort by (t, group) does, in
+/// O(n) after the times' sort, column by column.
+fn time_major(parts: Vec<Out>) -> Out {
+    let n: usize = parts.iter().map(|p| p.len()).sum();
+    let mut ts: Vec<i64> = parts.iter().flat_map(|p| p.t.iter().copied()).collect();
+    ts.sort_unstable();
+    ts.dedup();
+    // Each row's rank: a group's times rise, so a cursor walks forward
+    // within a group and a binary search places a group's first row.
+    let mut ranks: Vec<u32> = Vec::with_capacity(n);
+    for p in &parts {
+        let mut at = 0usize;
+        for i in 0..p.len() {
+            let t = p.t[i];
+            if i == 0 || p.group[i] != p.group[i - 1] || t < ts[at] {
+                at = ts.partition_point(|&x| x < t);
+            } else {
+                while ts[at] < t {
+                    at += 1;
+                }
+            }
+            ranks.push(at as u32);
+        }
+    }
+    let mut next = vec![0usize; ts.len() + 1];
+    for &r in &ranks {
+        next[r as usize + 1] += 1;
+    }
+    for i in 1..next.len() {
+        next[i] += next[i - 1];
+    }
+    // Every row's place, then each column scattered there in turn.
+    let places: Vec<u32> = ranks
+        .iter()
+        .map(|&r| {
+            let at = next[r as usize];
+            next[r as usize] += 1;
+            at as u32
+        })
+        .collect();
+    fn scatter<T: Clone + Default>(places: &[u32], cols: impl Iterator<Item = Vec<T>>, n: usize) -> Vec<T> {
+        let mut out = vec![T::default(); n];
+        let mut i = 0usize;
+        for col in cols {
+            for v in col {
+                out[places[i] as usize] = v;
+                i += 1;
+            }
+        }
+        out
+    }
+    let mut t = Vec::new();
+    let mut group = Vec::new();
+    let mut value = Vec::new();
+    let mut count = Vec::new();
+    let mut error = Vec::new();
+    let mut r = Vec::new();
+    for p in parts {
+        t.push(p.t);
+        group.push(p.group);
+        value.push(p.value);
+        count.push(p.count);
+        error.push(p.error);
+        r.push(p.r);
+    }
+    Out {
+        t: scatter(&places, t.into_iter(), n),
+        group: scatter(&places, group.into_iter(), n),
+        value: scatter(&places, value.into_iter(), n),
+        count: scatter(&places, count.into_iter(), n),
+        error: scatter(&places, error.into_iter(), n),
+        r: scatter(&places, r.into_iter(), n),
+    }
+}
+
+/// A hasher for the dense slots' integer keys: a multiply by the golden
+/// ratio, as in Fibonacci hashing.
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ *b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.0 = x.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
 /// Threads the pass runs groups on; 0 is the machine's cores, at most eight.
@@ -357,37 +487,22 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     #[allow(clippy::too_many_arguments)]
-    fn emit(&self, out: &mut Vec<Out>, series: &Series, received: &[i64], t: i64, group: GroupKey, count: usize, v: Result<Option<f64>, AggError>) {
+    fn emit(&self, out: &mut Out, series: &Series, received: &[i64], t: i64, group: GroupKey, count: usize, v: Result<Option<f64>, AggError>) {
         if t < self.t0 || t > self.t1 {
             return;
         }
         let upto = series.recv.partition_point(|x| x.0 <= t);
         let r = if upto == 0 { i64::MIN } else { received[upto - 1] };
         match v {
-            Ok(Some(x)) => out.push(Out {
-                t,
-                group,
-                value: Some(x),
-                count: count as i64,
-                error: None,
-                r,
-            }),
+            Ok(Some(x)) => out.push(t, group, Some(x), count as i64, None, r),
             Ok(None) => {}
-            Err(e) => out.push(Out {
-                t,
-                group,
-                value: None,
-                count: count as i64,
-                error: Some(e.to_string()),
-                r,
-            }),
+            Err(e) => out.push(t, group, None, count as i64, Some(e.to_string()), r),
         }
     }
 
-    /// One group's answer rows, in time order.
-    fn group(&self, g: GroupKey, all: &Series) -> Vec<Out> {
+    /// One group's answer rows, in time order, after `out`'s.
+    fn group(&self, out: &mut Out, g: GroupKey, all: &Series) {
         let r = self.request;
-        let mut out = Vec::new();
         let received = all.prefix_receipts();
         let series = &all.rows;
         // A group's rows at the labels only, one per label for rows windows.
@@ -414,13 +529,13 @@ impl Ctx<'_> {
                     if prior && row.is_some() {
                         let count = w.count();
                         let v = w.value(min);
-                        self.emit(&mut out, all, &received, t, g, count, v);
+                        self.emit(out, all, &received, t, g, count, v);
                     }
                     w.step(index as u64, t, row.is_some(), row.as_ref().map(|x| x.as_slice()));
                     if !prior && row.is_some() {
                         let count = w.count();
                         let v = w.value(min);
-                        self.emit(&mut out, all, &received, t, g, count, v);
+                        self.emit(out, all, &received, t, g, count, v);
                     }
                 }
             }
@@ -442,14 +557,14 @@ impl Ctx<'_> {
                         w.evict(abt_wire::scalar::sub_duration(t, d.months, d.days, d.nanos));
                         if prior {
                             let v = w.value(min);
-                            self.emit(&mut out, all, &received, t, g, w.len(), v);
+                            self.emit(out, all, &received, t, g, w.len(), v);
                         }
                         for row in &series[i..j] {
                             w.push(t, &row.1);
                         }
                         if !prior {
                             let v = w.value(min);
-                            self.emit(&mut out, all, &received, t, g, w.len(), v);
+                            self.emit(out, all, &received, t, g, w.len(), v);
                         }
                     }
                     i = j;
@@ -468,13 +583,12 @@ impl Ctx<'_> {
                     }
                     if !w.is_empty() {
                         let v = w.value(min);
-                        self.emit(&mut out, all, &received, l, g, w.len(), v);
+                        self.emit(out, all, &received, l, g, w.len(), v);
                     }
                     w = WindowState::new(self.f, Mode::TwoPass);
                 }
             }
         }
-        out
     }
 }
 

@@ -14,6 +14,7 @@ pub mod live;
 pub mod options;
 pub mod query;
 pub mod registry;
+pub mod resident;
 pub mod resolver;
 pub mod rows;
 pub mod service;

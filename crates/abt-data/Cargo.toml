@@ -10,6 +10,7 @@ publish = false
 abt-agg.workspace = true
 abt-wire.workspace = true
 arrow.workspace = true
+memmap2.workspace = true
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true

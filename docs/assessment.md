@@ -145,6 +145,25 @@ M-8's list:
 - a counting sort of the output;
 - columnar grouping instead of a map of row vectors.
 
+**At M-8 (Oct 17): the resident layer.** Reads go through the resident
+cache of decoded row groups, with manifests read once per version
+(ERRATA E-74). Same data, same machine:
+
+| Operation | D-9.1 bound | From disk | Resident | |
+| --- | --- | ---: | ---: | --- |
+| `point` | ≤ 50 µs | 721 µs | 40 µs | within |
+| `latest` | ≤ 50 µs | 689 µs | 41 µs | within |
+| `series` of 252 rows | < 100 µs resident | 6.1 ms | 158 µs | 1.6× over |
+| `section` | < 5 ms at 10,000 names | 1.6 ms at 2,000 | 303 µs at 2,000 | within, scaled |
+| Resident footprint | ≤ 16 B per value | | 8 B per value | within |
+
+M-2's list for the aggregate pass is partly done: dense slots, a columnar
+answer in (t, group) order without a sort, bucket names once per span, and
+no sort of rows already sorted. The rolling mean of 5.04M rows on eight
+threads now takes 4.7 s (`running`), from 5.6 s, and 5.3 s (`two_pass`),
+from 6.1 s. Of that, 1.3 s is the answer's log segment, written at this
+VM's 190 MB/s for fresh pages, and about 1 s is the Parquet encoding.
+
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:
 
