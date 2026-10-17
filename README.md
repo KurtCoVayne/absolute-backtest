@@ -63,7 +63,6 @@ misaligns every bucket.
 | `crates/abt-kernel/src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
 | `crates/abt-kernel/src/bundle.rs` | The bundle format (manifest, security table, monthly partitions, bundle tests), read by the data layer's `bundle_v2` adapter. |
 | `crates/abt-data/src/adapters/` | The vendor adapters (D-7.7): `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `orats` (option chains from ORATS's strikes), `dbn` (DBN versions 1 to 3, known answers from the reference implementation), `http` (the vendors' HTTP requests), and `mock` (the resolver's tests). `crates/abt-data/src/options.rs` answers the chain query (D-4.4). |
-| `crates/abt-kernel/src/dump.rs` | `--dump DIR` (what `reference/` replays). The study API it sat beside (lineages, hold-outs, the trial log, the metrics, the report, the briefs harness) is the query layer's, `crates/abt-query/` (ERRATA E-66). |
 | `crates/abt-kernel/src/cli.rs`, `crates/abt/src/main.rs` | The command line, and `abt`, the front binary that dispatches to it (the layers' own command lines join it as they land). |
 | `corpus-v2/catalog/` | The three classes a program is written against: `equity` (bars as traded at a daily base; `listed`, `ticker`, `split`, `dividend`, `delisted`, `member`, `classification`; the vocabularies of lists, reasons and schemes), `future` (bars per root at a minute base, `session`, `point_value`, `commission`, `member`, `usable`) and `series` (`value` by name, each on its native calendar). A program never names them; its `data` block names what it needs. |
 | `corpus-v2/lib/` | The standard library of section 7, one module a file: `calendar` (`bar`, `prev_row`, `first_row`, `row_number`), `catalog` (`split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `total_return`, `log_return`, `tr_index`), `stat` (`mean_rows[N, R]` and the other rolling and recursive moments), `bars` (`true_range`, `range`, `gap_points`, `gap`, `price_return`, `log_price_return`, `dollar_volume`, `adv[N]`, `liquid[Floor]`), `xsec` (`decile[R]`, `zscore_xs[R]`, `share_above[R, Th]`), `state` (`latch[enter, stay]`, `bars_held`, `entry_price`, `high_since_entry`), `book` (`held`, `short`, `in_book`, `flat`, `weight_now`, `exposure`, `nav_return`, `peak_nav`, `drawdown`, `nav_vol[N]`, `bought_within[W]`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
@@ -638,7 +637,7 @@ or a claim made there is still counted as a trial.
 abt check <files...>
 abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])
         [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
-        [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--dump DIR] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
+        [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
 abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
 abt hash --strategy NAME [--json | --show] <files...>
 abt show --strategy NAME <files...>
@@ -696,8 +695,9 @@ or a command-line name resolves at (default: the data's last bar).
 `--nav FILE` writes the book at every bar as Parquet (`t, equity, cash,
 gross, net, leverage`), `--returns FILE` the returns per reporting period
 (`t, ret, pnl`), `--ledger R1,R2 --ledger-out DIR` the named relations'
-tuples at every bar, `--tables DIR` every state table as Arrow IPC, and
-`--dump DIR` what the reference engine replays. `--timing` prints one
+tuples at every bar, and `--tables DIR` every state table as Arrow IPC.
+A run over a store writes everything it did there (`kernel.<run>.*`), which
+is what the reference engine reads back. `--timing` prints one
 stderr line with the load, build and run times, the bar and tuple counts
 and the kernel's statistics, among them `pushed_answers`, the windows the
 data layer's aggregate pass answered. An aggregate over one stored relation
@@ -862,14 +862,16 @@ source.
 
 `reference/` is a second implementation of the execution contract in plain
 Python over pandas, written from the semantic model's section 6 and sharing
-nothing with the kernel (`docs/data-bundle.md`, section 8). `abt run --dump
-DIR` writes what a run saw and did (the data as Parquet, the configuration,
-decisions, fills, dropped decisions, actions, the book at every bar and the
-final state); `python3 reference/diff.py DIR` replays the decisions through
-the reference executor and compares fills, book, NAV and dropped count
-(`reference/README.md` gives the tolerances). `crates/abt-tests/tests/reference.rs` runs
-the comparison over the daily corpus strategies and skips with a note where
-`python3` with pandas is absent. `.github/workflows/ci.yml` is the GitHub
+nothing with the kernel (`docs/data-bundle.md`, section 8). It reads a run
+back from the store it ran over: the store is the dump (M-9). `python3
+reference/diff.py STORE RUN` reads the run's configuration, data at the
+binding's versions, decisions, events and book through `abt data query`,
+replays the decisions through the reference executor, and compares fills,
+book, NAV and dropped count (`reference/README.md` gives the tolerances).
+`crates/abt/tests/reference.rs` (G6) runs the comparison over the daily
+corpus strategies, a set of policy and model variants and four action
+markets, each over a store of its own, and skips with a note where `python3`
+with pandas is absent. `.github/workflows/ci.yml` is the GitHub
 Actions workflow (format, clippy, tests with pandas installed so the
 comparison runs).
 

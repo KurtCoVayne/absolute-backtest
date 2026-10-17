@@ -1,10 +1,13 @@
-"""Compare a kernel dump with the reference executor's replay of it
-(data-bundle doc, section 8): fills identical in quantity (exactly under
-whole lots, to floating tolerance under fractional ones) and in price to
-floating tolerance, the book identical at the end, the NAV within floating
-tolerance at every bar, the same dropped count.
+"""Compare a run with the reference executor's replay of it (data-bundle doc,
+section 8): fills identical in quantity (exactly under whole lots, to
+floating tolerance under fractional ones) and in price to floating
+tolerance, the book identical at the end, the NAV within floating tolerance
+at every bar, the same dropped count.
 
-    python3 reference/diff.py DUMP_DIR [--tolerance 1e-9]
+The run is read back from the store it ran over (`store.py`; M-9: the
+store is the dump), its data and outputs through `abt data query`:
+
+    python3 reference/diff.py STORE RUN [--abt PATH] [--tolerance 1e-9]
 
 Exit status 0 when they agree; 1 with every disagreement listed.
 """
@@ -13,10 +16,12 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 
 import pandas as pd
 
 from engine import Halt, Reference, read_rows
+from store import export
 
 
 def close(a: float, b: float, tol: float) -> bool:
@@ -75,13 +80,24 @@ def compare(directory: str, tol: float = 1e-9) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
+    def option(name: str):
+        nonlocal argv
+        if name not in argv:
+            return None
+        i = argv.index(name)
+        value = argv[i + 1]
+        argv = argv[:i] + argv[i + 2 :]
+        return value
+
+    tol = float(option("--tolerance") or 1e-9)
+    abt = option("--abt")
+    if len(argv) != 2:
         print(__doc__)
         return 2
-    tol = 1e-9
-    if "--tolerance" in argv:
-        tol = float(argv[argv.index("--tolerance") + 1])
-    problems = compare(argv[0], tol)
+    store, run = argv
+    with tempfile.TemporaryDirectory() as tmp:
+        export(store, run, tmp, abt)
+        problems = compare(tmp, tol)
     if problems:
         for p in problems:
             print(p)

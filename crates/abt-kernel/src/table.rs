@@ -1,6 +1,6 @@
 //! Parquet tables: the one file format of every input and output outside a
 //! bundle's log (vendor exports, loose data directories, the security
-//! table, reviewed exceptions, `--dump` and `--nav`). A table is read whole
+//! table, reviewed exceptions, `--nav` and `--returns`). A table is read whole
 //! as Arrow batches and its cells are reached by column name and row, so a
 //! reader never builds per-row maps; typed columns (integers, floats,
 //! dates, timestamps) and text columns are both accepted, text being parsed

@@ -14,11 +14,12 @@ what this tree does.
 - **E-1 (A-7.1, G1; M-1 principle 1).** G1 needs the books' reference inputs
   (`docs/parity-inputs.md`, `~/data/ref/` on the owner's machine), which the
   build container cannot reach. Every step is gated here instead by the
-  translation-validation golden files (`tests/tv_golden.rs`,
-  `tests/golden/*.txt`: every corpus-v2 strategy and both company books on the
-  seeded synthetic markets, decisions, fills, book and final state rendered
-  exactly; since M-2, by the fold over the stream of a data service holding
-  the market, the batch driver being deleted) and by G6 (`tests/reference.rs`, the pandas reference). The owner
+  translation-validation golden files (`crates/abt-tests/tests/tv_golden.rs`,
+  `crates/abt-tests/tests/golden/*.txt`: every corpus-v2 strategy and both
+  company books on the seeded synthetic markets, decisions, fills, book and
+  final state rendered exactly; since M-2, by the fold over the stream of a
+  data service holding the market, the batch driver being deleted) and by G6
+  (`crates/abt/tests/reference.rs`, the pandas reference, E-79). The owner
   runs `scripts/parity/` for G1. A golden file changes only in a commit that
   names the semantic change it accepts; each such change is listed under
   "Blessed changes" below.
@@ -858,6 +859,30 @@ batch driver agree on every corpus program. Each bless since:
   - **Not deleted.** `ExecConfig` is the kernel's form of the resolved
     `execution` block. No option sets it, which is what M-9 asks; deleting
     the type would rename it, not retire anything.
+- **E-79 (M-9; the store is the dump).** `abt run --dump DIR` and
+  `dump.rs` are gone. G6 reads a run back from the store it ran over.
+  - **What is read.** `reference/store.py` reads through `abt data query
+    --store STORE ... --parquet`, as any reader of the store does:
+    - the configuration: the binding's `configuration`, the resolved
+      `execution` block;
+    - the data: each relation the reference replays, at the version the
+      binding names, each instrument named by its `vendor_id` key as the
+      kernel names it;
+    - the decisions, the events (fills, dropped decisions, actions), the
+      book, the holdings and the report, from `kernel.<run>.*`.
+  - **The engine is unchanged.** `store.py` writes what it read in the
+    layout `engine.py` replays. `diff.py` takes `STORE RUN [--abt PATH]`
+    and exports to a temporary directory before comparing.
+  - **The price and volume relations** are the execution block's, else
+    `close` and `volume` where the program reads them, as the kernel takes
+    them. A derived price relation is not stored, so the reference replays
+    only runs that fill at a primitive one, as the dump did.
+  - **Where G6 runs.** It moves to `crates/abt/tests/reference.rs`, the
+    package that builds the `abt` binary the store is read with. Each case
+    runs in process over a store of its own and writes its outputs there.
+  - **What stays.** `--nav FILE` still writes the book at every bar as
+    Parquet. The command line now always drops its dataset once the data
+    service holds it (E-76's exception for `--dump` is gone).
 
 ## Data layer and protocol
 

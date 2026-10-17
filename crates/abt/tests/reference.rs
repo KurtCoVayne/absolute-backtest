@@ -1,21 +1,27 @@
-//! The pandas reference (data-bundle doc, section 8): every daily corpus-v2
-//! strategy under its own execution block, a set of policy and model
-//! variants, and the tiny action markets, replayed through
-//! `reference/engine.py` from a kernel dump and compared by
-//! `reference/diff.py` (fills identical in quantity, price to floating
-//! tolerance, the book and NAV within tolerance). Skipped, with a note,
-//! where `python3` with pandas is not installed.
+//! The pandas reference (data-bundle doc, section 8; G6): every daily
+//! corpus-v2 strategy under its own execution block, a set of policy and
+//! model variants, and the tiny action markets. Each runs over a store of its
+//! own and writes its outputs there; `reference/diff.py` reads the run back
+//! from the store (`reference/store.py`, through `abt data query`), replays
+//! its decisions through `reference/engine.py` and compares (fills identical
+//! in quantity, price to floating tolerance, the book and NAV within
+//! tolerance). The store is the dump (M-9). Skipped, with a note, where
+//! `python3` with pandas is not installed.
+
+#![allow(clippy::result_large_err)]
 
 use abt_tests as common;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use abt_data::service::{inproc, DataService};
+use abt_data::Store;
 use abt_kernel::check::Program;
 use abt_kernel::data::{business_days, synthetic_daily};
-use abt_kernel::dump::write_dump;
-use abt_kernel::kernel::{Dataset, ExecConfig, OnLeverage, OnOversize, Value};
+use abt_kernel::kernel::{DataClient, Dataset, ExecConfig, OnLeverage, OnOversize, Replay, RunError, Value};
 use abt_tests::run;
 
 fn reference_dir() -> PathBuf {
@@ -27,31 +33,57 @@ fn python_with_pandas() -> bool {
     Command::new("python3").args(["-c", "import pandas"]).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("abt-reference-{}-{}", tag, std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    dir
+/// A store directory of the test's own, removed when dropped.
+struct StoreDir(PathBuf);
+
+impl Drop for StoreDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
-/// Run the kernel, dump, replay with the reference and compare; the
-/// diff's text on disagreement.
-fn diff(tag: &str, prog: &Program, ds: &Dataset, cfg: ExecConfig) -> Result<(), String> {
-    let result = run(prog, ds, cfg.clone()).map_err(|e| format!("{}: {}", tag, e))?;
-    let dir = temp_dir(tag);
-    write_dump(prog, ds, &cfg, &result, &dir)?;
+/// A run over a store holding `ds` that writes its outputs there: the store
+/// and the run's id, the service and its connections closed.
+fn stored(tag: &str, prog: &Program, ds: &Dataset, cfg: ExecConfig) -> Result<(StoreDir, String), RunError> {
+    common::init();
+    let dir = StoreDir(std::env::temp_dir().join(format!("abt-reference-{}-{}", tag, std::process::id())));
+    let _ = fs::remove_dir_all(&dir.0);
+    let mut store = Store::open(&dir.0).map_err(|e| RunError::Config(e.to_string()))?;
+    let attributes = abt::dataset_attributes(ds, &prog.base.to_string(), &BTreeMap::new());
+    abt::ingest_dataset(&mut store, ds, &prog.class, &attributes).map_err(RunError::Config)?;
+    let svc = DataService::new(store);
+    let client = DataClient::connect(inproc(&svc))?;
+    let opts = Replay {
+        write_outputs: true,
+        ..Default::default()
+    };
+    let result = abt_kernel::kernel::run_on(prog, None, &client, cfg, &opts)?;
+    Ok((dir, result.run_id))
+}
+
+/// The reference's comparison of a stored run; the diff's text on
+/// disagreement.
+fn compare(tag: &str, store: &StoreDir, run_id: &str) -> Result<(), String> {
     let out = Command::new("python3")
         .arg(reference_dir().join("diff.py"))
-        .arg(&dir)
+        .arg(&store.0)
+        .arg(run_id)
+        .args(["--abt", env!("CARGO_BIN_EXE_abt")])
         .current_dir(reference_dir())
         .output()
         .map_err(|e| format!("python3: {}", e))?;
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    let _ = fs::remove_dir_all(&dir);
     if out.status.success() {
         Ok(())
     } else {
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         Err(format!("{}: kernel and reference disagree:\n{}", tag, text))
     }
+}
+
+/// Run over a store, then replay with the reference and compare.
+fn diff(tag: &str, prog: &Program, ds: &Dataset, cfg: ExecConfig) -> Result<(), String> {
+    let (store, run_id) = stored(tag, prog, ds, cfg).map_err(|e| format!("{}: {}", tag, e))?;
+    compare(tag, &store, &run_id)
 }
 
 /// The names of the synthetic market: its second name is renamed halfway
@@ -81,13 +113,16 @@ fn every_daily_corpus_strategy_agrees_with_the_reference() {
         let ds = market(400);
         // The run is the program: its execution block configures the executor.
         let cfg = ExecConfig::from_program(&prog);
-        // A run the kernel's policies halt is the policy tests' business;
-        // the comparison wants completed runs.
-        if let Err(abt_kernel::kernel::RunError::Risk { message, .. }) = run(&prog, &ds, cfg.clone()) {
-            eprintln!("{}: halted ({}), not compared", name, message);
-            continue;
-        }
-        diff(&name, &prog, &ds, cfg).unwrap_or_else(|e| panic!("{}", e));
+        let (store, run_id) = match stored(&name, &prog, &ds, cfg) {
+            // A run the kernel's policies halt is the policy tests' business;
+            // the comparison wants completed runs.
+            Err(RunError::Risk { message, .. }) => {
+                eprintln!("{}: halted ({}), not compared", name, message);
+                continue;
+            }
+            other => other.unwrap_or_else(|e| panic!("{}: {}", name, e)),
+        };
+        compare(&name, &store, &run_id).unwrap_or_else(|e| panic!("{}", e));
         compared += 1;
     }
     assert!(compared >= 14, "{} strategies compared", compared);

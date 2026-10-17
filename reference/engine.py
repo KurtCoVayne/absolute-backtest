@@ -2,13 +2,14 @@
 contract of `docs/semantic-model.md` section 6, written in plain Python over
 pandas frames, deliberately slow, sharing nothing with the kernel.
 
-It replays the decisions of a kernel dump (`abt run --dump DIR`) through its
-own book and produces fills, the book at every bar, dropped decisions,
-actions and the final state, for `diff.py` to compare. Where the model
-leaves an operational detail open (the order of orders within a bar, which
-price a liquidation uses, when funding accrues), the choice taken here is
-the one the model's text states, and a disagreement with the kernel is a
-bug in one of the two with the model as referee.
+It replays the decisions of a run, read back from the store it ran over
+(`store.py`), through its own book and produces fills, the book at every
+bar, dropped decisions, actions and the final state, for `diff.py` to
+compare. Where the model leaves an operational detail open (the order of
+orders within a bar, which price a liquidation uses, when funding
+accrues), the choice taken here is the one the model's text states, and a
+disagreement with the kernel is a bug in one of the two with the model as
+referee.
 
 Conventions of the contract, in the order the bar runs them:
 
@@ -56,12 +57,12 @@ DAY = 86_400
 
 
 def epoch(s: str) -> int:
-    """Seconds since the epoch of a dump timestamp (UTC)."""
+    """Seconds since the epoch of an exported timestamp (UTC)."""
     return int(pd.Timestamp(s, tz="UTC").timestamp())
 
 
 def stamp(t: int) -> str:
-    """A dump timestamp of epoch seconds: the date, with a time when not midnight."""
+    """An exported timestamp of epoch seconds: the date, with a time when not midnight."""
     ts = pd.Timestamp(t, unit="s", tz="UTC")
     if t % DAY == 0:
         return ts.strftime("%Y-%m-%d")
@@ -136,7 +137,7 @@ def _stamp(t) -> str:
 
 
 def read_rows(path: str) -> pd.DataFrame:
-    """A Parquet table of the dump as text cells: timestamps formatted as the
+    """A Parquet table of the export as text cells: timestamps formatted as the
     kernel formats them, booleans as `true`/`false`, nulls as empty."""
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -158,7 +159,7 @@ _rows = read_rows
 
 @dataclass
 class Data:
-    """The dataset of a dump: prices and volumes by (symbol, bar), the
+    """The dataset of an export: prices and volumes by (symbol, bar), the
     actions by bar."""
 
     price: dict = field(default_factory=dict)  # (sym, t) -> price
@@ -630,14 +631,14 @@ class Reference:
         return fills, nav, final
 
 
-def run_dump(directory: str) -> Reference:
+def run_export(directory: str) -> Reference:
     return Reference(directory).run()
 
 
 if __name__ == "__main__":
     import sys
 
-    ref = run_dump(sys.argv[1])
+    ref = run_export(sys.argv[1])
     fills, nav, final = ref.frames()
     print(fills.to_string())
     print(nav.tail().to_string())

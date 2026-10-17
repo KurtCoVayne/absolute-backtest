@@ -121,7 +121,6 @@ fn usage_documents_every_option() {
         "--fills",
         "--nav",
         "--returns",
-        "--dump",
         "--tables",
         "--ledger",
         "--ledger-out",

@@ -14,7 +14,6 @@ pub mod cli;
 pub mod compiler;
 pub mod contract;
 pub mod data;
-pub mod dump;
 pub mod functions;
 pub mod ir;
 pub mod kernel;
