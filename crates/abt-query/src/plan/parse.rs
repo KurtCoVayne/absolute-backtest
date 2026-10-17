@@ -335,17 +335,18 @@ pub fn claim(line: &str) -> Result<Claim, String> {
             ))
         }
     };
-    let mut level = 0.05;
+    let mut level = None;
     let mut phase = Phase::After;
     let mut policy = Policy::Warn;
     let mut i = used;
     while i < words.len() {
         match words[i] {
             "at" => {
-                level = num(words.get(i + 1))?;
-                if !(level > 0.0 && level < 1.0) {
-                    return Err(format!("claim {}: the level {} is not in (0, 1)", name, level));
+                let l = num(words.get(i + 1))?;
+                if !(l > 0.0 && l < 1.0) {
+                    return Err(format!("claim {}: the level {} is not in (0, 1)", name, l));
                 }
+                level = Some(l);
                 i += 2;
                 continue;
             }
@@ -725,8 +726,8 @@ fn validate(plan: &Plan) -> Result<(), String> {
                 _ => Err(format!("study {}: {} reads `ledger {}`, which is no ledger step", name, who, s)),
             },
             Input::Grid(s) => match kind_of(s) {
-                Some("grid") => Ok(()),
-                _ => Err(format!("study {}: {} reads `grid {}`, which is no grid step", name, who, s)),
+                Some("grid" | "walk_forward") => Ok(()),
+                _ => Err(format!("study {}: {} reads `grid {}`, which is no grid or walk-forward step", name, who, s)),
             },
         }
     };
@@ -753,6 +754,19 @@ fn validate(plan: &Plan) -> Result<(), String> {
             return Err(format!("study {}: `{}` names both a claim and a step", name, c.name));
         }
         check_input(&format!("claim `{}`", c.name), &c.input)?;
+        // A `before` claim is judged before any grid or walk-forward runs:
+        // it reads a feed, or a `run` step, which runs first (Q-5.1).
+        if c.phase == Phase::Before {
+            if let Some(s) = c.input.steps().into_iter().find(|s| kind_of(s) != Some("run")) {
+                return Err(format!(
+                    "study {}: claim `{}` is judged before the runs, so it reads a feed or a `run` step, not the {} step `{}`",
+                    name,
+                    c.name,
+                    kind_of(&s).unwrap_or("unknown"),
+                    s
+                ));
+            }
+        }
     }
     Ok(())
 }

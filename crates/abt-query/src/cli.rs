@@ -127,10 +127,12 @@ struct Args {
     positional: Vec<String>,
     opts: BTreeMap<String, String>,
     flags: Vec<String>,
+    /// Every `--with NAME=VALUE`, in order.
+    with: Vec<(String, String)>,
 }
 
 /// The options every command takes or the front consumes; the flags.
-const OPTS: [&str; 8] = ["study", "threads", "reason", "data", "store", "kernel", "kernels", "run"];
+const OPTS: [&str; 12] = ["study", "threads", "reason", "data", "store", "kernel", "kernels", "run", "binding", "over", "relation", "seed"];
 const FLAGS: [&str; 2] = ["json", "dry-run"];
 
 fn args(raw: &[String]) -> Result<Args, String> {
@@ -138,11 +140,18 @@ fn args(raw: &[String]) -> Result<Args, String> {
         positional: vec![],
         opts: BTreeMap::new(),
         flags: vec![],
+        with: vec![],
     };
     let mut i = 0;
     while i < raw.len() {
         match raw[i].strip_prefix("--") {
             Some(f) if FLAGS.contains(&f) => a.flags.push(f.to_string()),
+            Some("with") => {
+                let v = raw.get(i + 1).ok_or("--with needs NAME=VALUE")?;
+                let (k, x) = v.split_once('=').ok_or_else(|| format!("--with takes NAME=VALUE, not `{}`", v))?;
+                a.with.push((k.trim().to_string(), x.trim().to_string()));
+                i += 1;
+            }
             Some(o) if OPTS.contains(&o) => {
                 let v = raw.get(i + 1).ok_or_else(|| format!("--{} needs a value", o))?;
                 a.opts.insert(o.to_string(), v.clone());
@@ -390,6 +399,30 @@ fn plan_command(cmd: &str, mut a: Args, data: Connection, kernel_conns: Vec<Conn
             }
             Ok(0)
         }
+        "report" if !json => {
+            // The report the plan's latest execution wrote (Q-8): its text
+            // when the report block asked for one, else its tables.
+            let of = |n: &str| plan::trials::relation_of(&normal.hash, &format!("report.{}", n));
+            if let Some(b) = crate::relation::read(&data, &of("text")).map_err(|e| e.to_string())? {
+                println!("plan {} {}", p.name, normal.hash);
+                print!("{}", crate::relation::texts(&b, "text").map_err(|e| e.to_string())?.into_iter().flatten().next().unwrap_or_default());
+                return Ok(0);
+            }
+            let mut any = false;
+            for t in ["summary", "trials", "claims", "tests", "contract", "warnings", "biases", "surface", "folds", "subperiods"] {
+                if let Some(b) = crate::relation::read(&data, &of(t)).map_err(|e| e.to_string())? {
+                    if !any {
+                        println!("plan {} {}", p.name, normal.hash);
+                        any = true;
+                    }
+                    print!("{}", stored_sheet(t, &b)?.text());
+                }
+            }
+            if !any {
+                return Err(format!("plan {} ({}) has written no report (`abt plan run` with a report step first)", p.name, short(&normal.hash)));
+            }
+            Ok(0)
+        }
         "report" => {
             let stored = plan::trials::outcomes(&data, &normal.hash).map_err(|e| e.to_string())?;
             if stored.is_empty() {
@@ -504,6 +537,35 @@ fn print_execution(ex: &exec::Execution) {
     for (step, rel) in &ex.ledgers {
         println!("ledger {}: {}", step, rel);
     }
+    for j in ex.claims.iter().chain(&ex.tests) {
+        let r = j.result.as_ref();
+        println!(
+            "{} {}{}: {}@{} on {}  statistic {}  p {}  adjusted {}{}",
+            j.kind,
+            j.name,
+            if j.in_sample { "" } else { " (out of sample)" },
+            j.test,
+            j.test_version,
+            j.input,
+            r.map(|r| format!("{:.4}", r.statistic)).unwrap_or_else(|| "-".into()),
+            r.and_then(|r| r.p_value).map(|p| format!("{:.4}", p)).unwrap_or_else(|| "-".into()),
+            j.p_adjusted.map(|p| format!("{:.4}", p)).unwrap_or_else(|| "-".into()),
+            match (&j.verdict, &j.error) {
+                (Some(v), _) => format!("  {}", v.text()),
+                (None, Some(e)) => format!("  error: {}", e),
+                _ => String::new(),
+            }
+        );
+    }
+    for s in &ex.sheets {
+        print!("{}", s.text());
+    }
+    for (step, why) in &ex.skipped {
+        println!("step {} did not run: {}", step, why);
+    }
+    for r in &ex.reports {
+        println!("report {}", r);
+    }
     if let Some(d) = &ex.dsr {
         println!("deflated sharpe {:.4} over {} trials in the lineage", d.dsr, ex.trials);
     } else {
@@ -588,4 +650,231 @@ pub fn lineage_main(cmd: &str, raw: &[String], data: Connection, kernel_conns: V
             1
         }
     }
+}
+
+/// A stored table as a sheet of text cells (its key columns left out).
+fn stored_sheet(name: &str, b: &arrow::record_batch::RecordBatch) -> Result<crate::sheet::Sheet, String> {
+    let names: Vec<String> = b.schema().fields().iter().map(|f| f.name().clone()).filter(|n| n != "row" && n != "t").collect();
+    let mut sheet = crate::sheet::Sheet::new(name, &names.iter().map(String::as_str).collect::<Vec<_>>());
+    let cols: Vec<Vec<Option<String>>> = names.iter().map(|n| crate::relation::texts(b, n).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+    for i in 0..b.num_rows() {
+        sheet.push(cols.iter().map(|c| c[i].clone().map(crate::sheet::Cell::Text).unwrap_or(crate::sheet::Cell::Null)).collect());
+    }
+    Ok(sheet)
+}
+
+// ---- tests, claims, feed and activation statistics outside a plan (Q-9) ----
+
+/// What a run's binding records (`kernel.<run>.binding`): its relations
+/// with their versions, its program's hash and normal form, its id.
+struct Bound {
+    relations: Vec<(String, String)>,
+    program_hash: String,
+    normal_form: String,
+    binding: String,
+}
+
+fn bound_of_run(data: &Data, run: &str) -> Result<Bound, String> {
+    let rel = format!("kernel.{}.binding", run);
+    let b = crate::relation::read(data, &rel).map_err(|e| e.to_string())?.ok_or_else(|| format!("the store holds no run {}", run))?;
+    let t = |c: &str| crate::relation::texts(&b, c).map_err(|e| e.to_string());
+    let (r, v, h, nf, id) = (t("relation")?, t("version")?, t("program_hash")?, t("normal_form")?, t("binding_id")?);
+    Ok(Bound {
+        relations: r.into_iter().zip(v).filter_map(|(r, v)| Some((r?, v?))).collect(),
+        program_hash: h.into_iter().flatten().next().unwrap_or_default(),
+        normal_form: nf.into_iter().flatten().next().unwrap_or_default(),
+        binding: id.into_iter().flatten().next().unwrap_or_default(),
+    })
+}
+
+/// A binding by its id: the first run recorded over it.
+fn bound_of_binding(data: &Data, binding: &str) -> Result<Bound, String> {
+    for (rel, _) in data.relations("kernel.", ".binding").map_err(|e| e.to_string())? {
+        let run = rel.trim_start_matches("kernel.").trim_end_matches(".binding");
+        let b = bound_of_run(data, run)?;
+        if b.binding == binding || b.binding.starts_with(binding) {
+            return Ok(b);
+        }
+    }
+    Err(format!("no run in the store was bound to {}", binding))
+}
+
+fn window_arg(a: &Args) -> Result<(Option<i64>, Option<i64>), String> {
+    match a.opts.get("over") {
+        None => Ok((None, None)),
+        Some(w) => {
+            let (f, t) = w.split_once("..").ok_or_else(|| format!("--over takes FROM..TO, not `{}`", w))?;
+            let end = |s: &str| crate::time::parse_timestamp(s).ok_or_else(|| format!("`{}` is not a time", s.trim()));
+            Ok((Some(end(f)?), Some(end(t)?)))
+        }
+    }
+}
+
+fn query_usage() -> i32 {
+    eprintln!(
+        "usage:\n  abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json]   (one test outside a plan, counted: INPUT as a claim's, its runs named by id)\n  abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json]   (one claim on a run, counted)\n  abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json]   (coverage, revisions, latency, returns, liquidity, survivorship, actions, membership, chains)\n  abt activation --run RUN [--json]   (the rules' firing, their pairs, the cross-lag co-activation, the effective number of rules)\n  (--store DIR | --data SOCKET)"
+    );
+    2
+}
+
+/// `abt test`, `abt claim`, `abt feed` and `abt activation`; the exit code.
+pub fn query_main(cmd: &str, raw: &[String], conn: Connection) -> i32 {
+    let go = || -> Result<i32, String> {
+        let a = args(raw)?;
+        let json = a.flags.iter().any(|f| f == "json");
+        let data = Data::connect(conn).map_err(|e| e.to_string())?;
+        let mut run = a.opts.get("run").cloned();
+        match cmd {
+            "feed" => {
+                let stat = a.positional.first().ok_or("abt feed STATISTIC")?;
+                let bound = match (a.opts.get("binding"), &run) {
+                    (Some(b), _) => bound_of_binding(&data, b)?,
+                    (None, Some(r)) => bound_of_run(&data, r)?,
+                    (None, None) => return Ok(query_usage()),
+                };
+                let s = crate::feed::statistic(&data, &bound.relations, stat, a.opts.get("relation").map(String::as_str), window_arg(&a)?).map_err(|e| e.to_string())?;
+                if json {
+                    println!("{}", serde_json::to_string(&s).map_err(|e| e.to_string())?);
+                } else {
+                    print!("{}", s.text());
+                }
+                Ok(0)
+            }
+            "activation" => {
+                let run = run.ok_or("abt activation --run RUN")?;
+                let bound = bound_of_run(&data, &run)?;
+                let strategy = bound
+                    .normal_form
+                    .lines()
+                    .find_map(|l| {
+                        l.trim()
+                            .strip_prefix("strategy ")
+                            .map(|r| r.split(|c: char| c.is_whitespace() || c == '{').next().unwrap_or("").to_string())
+                    })
+                    .unwrap_or_default();
+                let seed = a.opts.get("seed").map(|s| s.parse().map_err(|_| format!("--seed: `{}` is not a number", s))).transpose()?.unwrap_or(0);
+                let act = crate::activation::activation(&data, &run, &strategy, seed, crate::activation::PHI_THRESHOLD).map_err(|e| e.to_string())?;
+                if json {
+                    println!("{}", serde_json::to_string(&act).map_err(|e| e.to_string())?);
+                } else {
+                    for s in act.sheets() {
+                        print!("{}", s.text());
+                    }
+                }
+                Ok(0)
+            }
+            "test" | "claim" => {
+                // A claim's line, or a test's `TEST on INPUT` as one.
+                let (claim, line) = if cmd == "claim" {
+                    let line = a.positional.join(" ");
+                    (plan::parse::claim(&line)?, line)
+                } else {
+                    let line = format!("test : {} expect accept", a.positional.join(" "));
+                    (plan::parse::claim(&line).map_err(|e| e.replace("claim test: ", ""))?, line)
+                };
+                let mut params = claim.params.clone();
+                params.extend(a.with.iter().cloned());
+                // Outside a plan an input names its run by id (`returns of
+                // RUN`), or `--run` does.
+                if run.is_none() {
+                    run = claim.input.steps().into_iter().find(|s| s.len() >= 16 && s.chars().all(|c| c.is_ascii_hexdigit()));
+                }
+                let run_id = run.clone();
+                let bound = match (&run_id, a.opts.get("binding")) {
+                    (Some(r), _) => bound_of_run(&data, r)?,
+                    (None, Some(b)) => bound_of_binding(&data, b)?,
+                    (None, None) => match &claim.input {
+                        plan::Input::Feed { .. } => return Err("a feed's input needs --binding B or --run RUN".into()),
+                        _ => return Err("the input reads a run: name it with --run RUN".into()),
+                    },
+                };
+                let strategy = bound
+                    .normal_form
+                    .lines()
+                    .find_map(|l| {
+                        l.trim()
+                            .strip_prefix("strategy ")
+                            .map(|r| r.split(|c: char| c.is_whitespace() || c == '{').next().unwrap_or("").to_string())
+                    })
+                    .unwrap_or_default();
+                let r2 = run_id.clone();
+                let ctx = plan::claims::Context {
+                    data: &data,
+                    strategy: &strategy,
+                    binding: &bound.relations,
+                    // Outside a plan, every step an input names is the run.
+                    runs: Box::new(move |_| {
+                        r2.clone()
+                            .map(|r| vec![r])
+                            .ok_or_else(|| crate::data::Error::Missing("the input reads a run: name it with --run RUN".into()))
+                    }),
+                    ledger: Box::new({
+                        let r3 = run_id.clone();
+                        move |s: &str| {
+                            r3.clone()
+                                .map(|r| format!("kernel.{}.{}", r, s))
+                                .ok_or_else(|| crate::data::Error::Missing("--run RUN names the run".into()))
+                        }
+                    }),
+                    folds: Box::new(|_: &str| None),
+                    defaults: crate::tests::Params::new(),
+                    plan_hash: "",
+                };
+                let window = window_arg(&a)?;
+                let keep = move |t: i64| window.0.is_none_or(|f| t >= f) && window.1.is_none_or(|e| t <= e);
+                let mut judged = if cmd == "claim" {
+                    let mut c = claim.clone();
+                    c.params = params;
+                    plan::claims::judge(&ctx, &[(&c, c.name.clone())], &keep, true).remove(0)
+                } else {
+                    plan::claims::apply(&ctx, "test", "test", "test", &claim.test, &claim.input, &claim.over, &params, &keep, true)
+                };
+                // Counted (Q-9): a trial of the program's lineage.
+                let checked = crate::kernel::Checked {
+                    program_hash: bound.program_hash.clone(),
+                    normal_form: bound.normal_form.clone(),
+                    diagnostics: vec![],
+                };
+                let now = exec::now();
+                let opened = plan::lineage::open(&data, &checked, &strategy, now).map_err(|e| e.to_string())?;
+                if judged.trial_id.is_empty() {
+                    judged.trial_id = abt_wire::Hash::of(format!("{}:{}:{}", line, run_id.clone().unwrap_or_default(), now).as_bytes()).hex();
+                }
+                plan::trials::write_judged(&data, &opened.lineage, &bound.program_hash, &bound.binding, now, &judged).map_err(|e| e.to_string())?;
+                if json {
+                    println!("{}", serde_json::to_string(&judged).map_err(|e| e.to_string())?);
+                    return Ok(0);
+                }
+                let r = judged.result.as_ref();
+                println!("{}@{} on {}", judged.test, judged.test_version, judged.input);
+                if let Some(r) = r {
+                    println!(
+                        "statistic {:.6}  p {}  effect {}  interval {}  n {}",
+                        r.statistic,
+                        r.p_value.map(|p| format!("{:.6}", p)).unwrap_or_else(|| "-".into()),
+                        r.effect.map(|e| format!("{:.6}", e)).unwrap_or_else(|| "-".into()),
+                        r.interval.map(|(l, h, c)| format!("[{:.6}, {:.6}] at {}", l, h, c)).unwrap_or_else(|| "-".into()),
+                        r.n
+                    );
+                    for n in &r.notes {
+                        println!("note: {}", n);
+                    }
+                }
+                if let Some(e) = &judged.error {
+                    println!("error: {}", e);
+                }
+                if let Some(v) = &judged.verdict {
+                    println!("verdict: {}", v.text());
+                }
+                println!("dependence {}", judged.dependence);
+                println!("counted in lineage {}", short(&opened.lineage));
+                Ok(if judged.error.is_some() && judged.result.is_none() { 1 } else { 0 })
+            }
+            _ => Ok(query_usage()),
+        }
+    };
+    go().unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        1
+    })
 }

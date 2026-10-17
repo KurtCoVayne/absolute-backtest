@@ -73,33 +73,69 @@ fn metric_columns(os: &[&Outcome]) -> Vec<(&'static str, Col)> {
 pub fn write(data: &Data, plan: &Plan, ex: &Execution) -> Result<(), Error> {
     let os: Vec<&Outcome> = ex.outcomes.iter().collect();
     let best: Vec<bool> = (0..os.len()).map(|i| ex.grids.iter().any(|g| g.runs.get(g.best) == Some(&i))).collect();
-    if !os.is_empty() {
-        // The trials, added to every earlier one.
-        let texts = |f: &dyn Fn(&Outcome) -> String| Col::Label(os.iter().map(|o| Some(f(o))).collect());
-        let (schema, batch) = Rows::new(TRIALS)
-            .col("trial_id", Role::Label, texts(&|o| o.run_id.clone()))
-            .col("t", Role::EventTime, Col::Time(vec![Some(ex.at); os.len()]))
-            .col("plan_hash", Role::Value, Col::Label(vec![Some(ex.hash.clone()); os.len()]))
-            .col("step", Role::Value, texts(&|o| o.step.clone()))
-            .col("lineage", Role::Value, Col::Label(vec![Some(ex.lineage.clone()); os.len()]))
-            .col("program_hash", Role::Value, texts(&|o| o.program_hash.clone()))
-            .col("binding_id", Role::Value, texts(&|o| o.binding.clone()))
-            .col("run_id", Role::Value, texts(&|o| o.run_id.clone()))
-            .col("point", Role::Value, Col::Bytes(os.iter().map(|o| Some(point_json(&o.point))).collect()))
-            .col("window_from", Role::Value, Col::Time(os.iter().map(|o| o.window.map(|w| w.0)).collect()))
-            .col("window_to", Role::Value, Col::Time(os.iter().map(|o| o.window.map(|w| w.1)).collect()))
-            .col("holdout", Role::Value, Col::Label(vec![Some(ex.holdout.clone()); os.len()]))
-            .col("kind", Role::Value, texts(&|o| o.kind.name().to_string()))
-            .col("objective", Role::Value, Col::Label(vec![Some(plan.objective.clone()); os.len()]))
-            .col("value", Role::Value, Col::Num(os.iter().map(|o| num(o.objective)).collect()))
-            .col("sharpe", Role::Value, Col::Num(os.iter().map(|o| num(o.returns.sharpe_period)).collect()))
-            .col("fold", Role::Value, Col::Count(os.iter().map(|o| o.fold.as_ref().map(|f| f.k as i64)).collect()))
-            .col("phase", Role::Value, Col::Label(os.iter().map(|o| o.fold.as_ref().map(|f| f.phase.to_string())).collect()))
-            .col("status", Role::Value, texts(&|o| o.status.clone()))
-            .col("test", Role::Value, Col::Label(vec![None; os.len()]))
-            .col("test_version", Role::Value, Col::Label(vec![None; os.len()]))
-            .finish()?;
+    // The trials, added to every earlier one: the runs, then the claims and
+    // tests judged.
+    let mut trials: Vec<TrialRow> = os
+        .iter()
+        .map(|o| TrialRow {
+            trial_id: o.run_id.clone(),
+            step: o.step.clone(),
+            program_hash: o.program_hash.clone(),
+            binding_id: o.binding.clone(),
+            run_id: Some(o.run_id.clone()),
+            point: point_json(&o.point),
+            window: o.window,
+            kind: o.kind.name().to_string(),
+            objective: Some(plan.objective.clone()),
+            value: num(o.objective),
+            sharpe: num(o.returns.sharpe_period),
+            fold: o.fold.as_ref().map(|f| f.k as i64),
+            phase: o.fold.as_ref().map(|f| f.phase.to_string()),
+            status: o.status.clone(),
+            test: None,
+            test_version: None,
+        })
+        .collect();
+    for j in ex.claims.iter().chain(&ex.tests) {
+        trials.push(TrialRow {
+            trial_id: j.trial_id.clone(),
+            step: j.name.clone(),
+            program_hash: ex.program_hash.clone(),
+            binding_id: ex.binding.clone(),
+            run_id: j.runs.first().cloned(),
+            point: super::claims::params_json(&j.params),
+            window: j.window,
+            kind: j.kind.to_string(),
+            objective: None,
+            value: j.result.as_ref().and_then(|r| num(r.statistic)),
+            sharpe: None,
+            fold: None,
+            phase: j.phase.map(|p| format!("{:?}", p).to_lowercase()),
+            status: j
+                .verdict
+                .as_ref()
+                .map(|v| v.text())
+                .unwrap_or_else(|| j.error.clone().map(|e| format!("error: {}", e)).unwrap_or_else(|| "ran".into())),
+            test: Some(j.test.clone()),
+            test_version: Some(j.test_version.clone()),
+        });
+    }
+    trials.retain(|t| !t.trial_id.is_empty());
+    if !trials.is_empty() {
+        let (schema, batch) = trial_rows(ex, &trials)?;
         data.put(schema, &batch, false)?;
+    }
+    // The claims' verdicts and the tests' results: the latest execution's,
+    // a reveal's added (Q-5.1: the pair of verdicts is a row each).
+    let reveal = os.iter().any(|o| o.kind == Kind::Reveal);
+    for (name, js) in [("verdicts", &ex.claims), ("tests", &ex.tests)] {
+        if js.is_empty() {
+            continue;
+        }
+        let (schema, batch) = judged_rows(&relation_of(&ex.hash, name), ex.at, js)?;
+        data.put(schema, &batch, !reveal)?;
+    }
+    if !os.is_empty() {
         // The outcomes, the latest execution's.
         let mut rows = Rows::new(relation_of(&ex.hash, "outcomes"))
             .col("step", Role::Label, Col::Label(os.iter().map(|o| Some(o.step.clone())).collect()))
@@ -119,7 +155,6 @@ pub fn write(data: &Data, plan: &Plan, ex: &Execution) -> Result<(), Error> {
             rows = rows.col(name, Role::Value, c);
         }
         // A reveal adds its run to the outcomes it revealed a point of.
-        let reveal = os.iter().any(|o| o.kind == Kind::Reveal);
         let (schema, batch) = rows.finish()?;
         data.put(schema, &batch, !reveal)?;
     }
@@ -156,6 +191,178 @@ pub fn write(data: &Data, plan: &Plan, ex: &Execution) -> Result<(), Error> {
         }
     }
     write_plans(data, &plans)
+}
+
+/// A row of `query.trials`.
+struct TrialRow {
+    trial_id: String,
+    step: String,
+    program_hash: String,
+    binding_id: String,
+    run_id: Option<String>,
+    point: String,
+    window: Option<(i64, i64)>,
+    kind: String,
+    objective: Option<String>,
+    value: Option<f64>,
+    sharpe: Option<f64>,
+    fold: Option<i64>,
+    phase: Option<String>,
+    status: String,
+    test: Option<String>,
+    test_version: Option<String>,
+}
+
+/// `query.trials`' rows, with every column in one order: a put of another
+/// shape would start the relation over.
+fn trial_rows(ex: &Execution, rows: &[TrialRow]) -> Result<(abt_wire::generated::abt::wire::RelationSchema, arrow::record_batch::RecordBatch), Error> {
+    let n = rows.len();
+    let text = |f: &dyn Fn(&TrialRow) -> Option<String>| Col::Label(rows.iter().map(f).collect());
+    Rows::new(TRIALS)
+        .col("trial_id", Role::Label, text(&|r| Some(r.trial_id.clone())))
+        .col("t", Role::EventTime, Col::Time(vec![Some(ex.at); n]))
+        .col("plan_hash", Role::Value, Col::Label(vec![Some(ex.hash.clone()); n]))
+        .col("step", Role::Value, text(&|r| Some(r.step.clone())))
+        .col("lineage", Role::Value, Col::Label(vec![Some(ex.lineage.clone()); n]))
+        .col("program_hash", Role::Value, text(&|r| Some(r.program_hash.clone())))
+        .col("binding_id", Role::Value, text(&|r| Some(r.binding_id.clone())))
+        .col("run_id", Role::Value, text(&|r| r.run_id.clone()))
+        .col("point", Role::Value, Col::Bytes(rows.iter().map(|r| Some(r.point.clone())).collect()))
+        .col("window_from", Role::Value, Col::Time(rows.iter().map(|r| r.window.map(|w| w.0)).collect()))
+        .col("window_to", Role::Value, Col::Time(rows.iter().map(|r| r.window.map(|w| w.1)).collect()))
+        .col("holdout", Role::Value, Col::Label(vec![Some(ex.holdout.clone()); n]))
+        .col("kind", Role::Value, text(&|r| Some(r.kind.clone())))
+        .col("objective", Role::Value, text(&|r| r.objective.clone()))
+        .col("value", Role::Value, Col::Num(rows.iter().map(|r| r.value).collect()))
+        .col("sharpe", Role::Value, Col::Num(rows.iter().map(|r| r.sharpe).collect()))
+        .col("fold", Role::Value, Col::Count(rows.iter().map(|r| r.fold).collect()))
+        .col("phase", Role::Value, text(&|r| r.phase.clone()))
+        .col("status", Role::Value, text(&|r| Some(r.status.clone())))
+        .col("test", Role::Value, text(&|r| r.test.clone()))
+        .col("test_version", Role::Value, text(&|r| r.test_version.clone()))
+        .finish()
+}
+
+/// One test or claim judged outside a plan (`abt test`, `abt claim`), a
+/// trial of its program's lineage (Q-9).
+pub fn write_judged(data: &Data, lineage: &str, program_hash: &str, binding: &str, at: i64, j: &super::claims::Judged) -> Result<(), Error> {
+    let ex = Execution {
+        plan: String::new(),
+        hash: String::new(),
+        normal_form: String::new(),
+        program_hash: program_hash.to_string(),
+        lineage: lineage.to_string(),
+        binding: binding.to_string(),
+        sample: (0, 0),
+        holdout: "none".into(),
+        embargo: crate::metrics::validate::Embargo::none(),
+        outcomes: vec![],
+        grids: vec![],
+        walk_forwards: vec![],
+        comparisons: vec![],
+        ledgers: vec![],
+        claims: vec![],
+        tests: vec![],
+        sheets: vec![],
+        skipped: vec![],
+        reports: vec![],
+        trials: 0,
+        trial_kinds: BTreeMap::new(),
+        var_trials: 0.0,
+        dsr: None,
+        warnings: vec![],
+        at,
+    };
+    let row = TrialRow {
+        trial_id: j.trial_id.clone(),
+        step: j.name.clone(),
+        program_hash: program_hash.to_string(),
+        binding_id: binding.to_string(),
+        run_id: j.runs.first().cloned(),
+        point: super::claims::params_json(&j.params),
+        window: j.window,
+        kind: j.kind.to_string(),
+        objective: None,
+        value: j.result.as_ref().and_then(|r| num(r.statistic)),
+        sharpe: None,
+        fold: None,
+        phase: j.phase.map(|p| format!("{:?}", p).to_lowercase()),
+        status: j
+            .verdict
+            .as_ref()
+            .map(|v| v.text())
+            .unwrap_or_else(|| j.error.clone().map(|e| format!("error: {}", e)).unwrap_or_else(|| "ran".into())),
+        test: Some(j.test.clone()),
+        test_version: Some(j.test_version.clone()),
+    };
+    let (schema, batch) = trial_rows(&ex, &[row])?;
+    data.put(schema, &batch, false).map(|_| ())
+}
+
+/// The rows of claims or tests judged (P-4's `tests`, `verdicts`).
+fn judged_rows(name: &str, at: i64, js: &[super::claims::Judged]) -> Result<(abt_wire::generated::abt::wire::RelationSchema, arrow::record_batch::RecordBatch), Error> {
+    let n = js.len();
+    let text = |f: &dyn Fn(&super::claims::Judged) -> Option<String>| Col::Bytes(js.iter().map(f).collect());
+    let label = |f: &dyn Fn(&super::claims::Judged) -> Option<String>| Col::Label(js.iter().map(f).collect());
+    let numf = |f: &dyn Fn(&super::claims::Judged) -> Option<f64>| Col::Num(js.iter().map(|j| f(j).filter(|v| v.is_finite())).collect());
+    let r = |j: &super::claims::Judged| j.result.clone();
+    Rows::new(name)
+        .col("name", Role::Label, Col::Label(js.iter().map(|j| Some(j.name.clone())).collect()))
+        .col("t", Role::EventTime, Col::Time(vec![Some(at); n]))
+        .col("test", Role::Value, label(&|j| Some(j.test.clone())))
+        .col("test_version", Role::Value, label(&|j| Some(j.test_version.clone())))
+        .col("input", Role::Value, text(&|j| Some(j.input.clone())))
+        .col("window_from", Role::Value, Col::Time(js.iter().map(|j| j.window.map(|w| w.0)).collect()))
+        .col("window_to", Role::Value, Col::Time(js.iter().map(|j| j.window.map(|w| w.1)).collect()))
+        .col("params", Role::Value, text(&|j| Some(super::claims::params_json(&j.params))))
+        .col("statistic", Role::Value, numf(&|j| r(j).map(|r| r.statistic)))
+        .col("p_value", Role::Value, numf(&|j| r(j).and_then(|r| r.p_value)))
+        .col("p_adjusted", Role::Value, numf(&|j| j.p_adjusted))
+        .col("interval_lo", Role::Value, numf(&|j| r(j).and_then(|r| r.interval.map(|i| i.0))))
+        .col("interval_hi", Role::Value, numf(&|j| r(j).and_then(|r| r.interval.map(|i| i.1))))
+        .col("level", Role::Value, numf(&|j| j.level))
+        .col("effect", Role::Value, numf(&|j| r(j).and_then(|r| r.effect)))
+        .col("n", Role::Value, Col::Count(js.iter().map(|j| r(j).map(|r| r.n as i64)).collect()))
+        .col("dependence", Role::Value, text(&|j| Some(j.dependence.clone())))
+        .col("phase", Role::Value, label(&|j| j.phase.map(|p| format!("{:?}", p).to_lowercase())))
+        .col("policy", Role::Value, label(&|j| j.policy.map(|p| format!("{:?}", p).to_lowercase())))
+        .col("expect", Role::Value, text(&|j| j.expect.clone()))
+        .col("verdict", Role::Value, label(&|j| j.verdict.as_ref().map(|v| v.text())))
+        .col("in_sample", Role::Value, Col::Bool(js.iter().map(|j| Some(j.in_sample)).collect()))
+        .col(
+            "notes",
+            Role::Value,
+            text(&|j| Some(r(j).map(|r| r.notes.join("; ")).unwrap_or_else(|| j.error.clone().unwrap_or_default()))),
+        )
+        .finish()
+}
+
+/// A verdict as the store holds it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredVerdict {
+    pub name: String,
+    pub in_sample: bool,
+    pub policy: String,
+    pub verdict: String,
+}
+
+/// The verdicts the plan's executions recorded.
+pub fn verdicts(data: &Data, hash: &str) -> Result<Vec<StoredVerdict>, Error> {
+    let Some(b) = relation::read(data, &relation_of(hash, "verdicts"))? else { return Ok(vec![]) };
+    let (n, i, p, v) = (
+        relation::texts(&b, "name")?,
+        relation::bools(&b, "in_sample")?,
+        relation::texts(&b, "policy")?,
+        relation::texts(&b, "verdict")?,
+    );
+    Ok((0..b.num_rows())
+        .map(|k| StoredVerdict {
+            name: n[k].clone().unwrap_or_default(),
+            in_sample: i[k].unwrap_or(false),
+            policy: p[k].clone().unwrap_or_default(),
+            verdict: v[k].clone().unwrap_or_default(),
+        })
+        .collect())
 }
 
 /// A plan as `query.plans` holds it.

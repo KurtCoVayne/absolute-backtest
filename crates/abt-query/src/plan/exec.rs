@@ -192,9 +192,22 @@ pub struct Execution {
     pub comparisons: Vec<Comparison>,
     /// `ledger` steps: the relation each wrote.
     pub ledgers: Vec<(String, String)>,
-    /// The lineage's trials after this execution, and the deflated Sharpe
-    /// ratio of the plan's main result over them (Q-3.2).
+    /// The claims judged (in sample, and on a reveal out of sample) and the
+    /// test steps run.
+    pub claims: Vec<super::claims::Judged>,
+    pub tests: Vec<super::claims::Judged>,
+    /// The feed and activation steps' tables.
+    pub sheets: Vec<crate::sheet::Sheet>,
+    /// The steps that did not run, and why (a failed `block` claim).
+    pub skipped: Vec<(String, String)>,
+    /// The report relations written.
+    pub reports: Vec<String>,
+    /// The lineage's trials after this execution, by kind, the variance of
+    /// their Sharpe ratios, and the deflated Sharpe ratio of the plan's main
+    /// result over them (Q-3.2).
     pub trials: usize,
+    pub trial_kinds: BTreeMap<String, usize>,
+    pub var_trials: f64,
     pub dsr: Option<DeflatedSharpe>,
     pub warnings: Vec<Warning>,
     /// When it ran.
@@ -409,7 +422,9 @@ pub fn embargo(holdout: &Holdout, first: i64, last: i64) -> Embargo {
 
 /// The plan's steps run against its program's sample, each run through the
 /// endpoints, and every trial, outcome and the plan written to the data
-/// layer.
+/// layer. The order (Q-5.1): the `run` steps the `before` claims read, the
+/// `before` claims, every other step (none that runs the kernel when a
+/// `block` claim failed), the `after` claims, the reports.
 pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) -> Result<Execution, Error> {
     let kernel = ends.kernels.first().ok_or_else(|| Error::Missing("a plan runs on at least one kernel".into()))?;
     let checked = kernel.check(prog)?;
@@ -419,18 +434,13 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
             Some(Step::Reveal { .. }) => {}
             _ => return Err(Error::Missing(format!("study {} has no reveal step `{}`", plan.name, r))),
         }
-    }
-    for s in &plan.steps {
-        if let Step::Test { .. } | Step::Feed { .. } | Step::Activation { .. } = s {
-            return Err(Error::Malformed(format!(
-                "study {}: `{}` steps are judged by the claims machinery (M-5d), not yet here",
-                plan.name,
-                s.kind()
-            )));
+        // A failed `block` claim after the runs bars the reveal (Q-5.1).
+        if let Some(c) = super::trials::verdicts(ends.data, &normal.hash)?
+            .into_iter()
+            .find(|v| v.in_sample && v.policy == "block" && v.verdict == "fails")
+        {
+            return Err(Error::Malformed(format!("study {}: claim `{}` (block) failed, so nothing is revealed", plan.name, c.name)));
         }
-    }
-    if !plan.claims.is_empty() {
-        return Err(Error::Malformed(format!("study {}: claims are judged by the claims machinery (M-5d), not yet here", plan.name)));
     }
     let sample: Sample = kernel.sample(prog, &plan.params)?;
     let (Some(first), Some(last)) = (sample.first, sample.last) else {
@@ -455,6 +465,26 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
     // The runs a later step queries through the kernel stay held.
     let queried: Vec<&Ref> = plan.steps.iter().filter_map(|s| if let Step::Ledger { of, .. } = s { Some(of) } else { None }).collect();
     let held = |step: &str| queried.iter().any(|r| r.step == step);
+    // What the tests and claims read of a step's runs beyond its own
+    // observations: the ledgers of `feature R of S`.
+    let inputs: Vec<&super::Input> = plan
+        .steps
+        .iter()
+        .filter_map(|s| if let Step::Test { input, .. } = s { Some(input) } else { None })
+        .chain(plan.claims.iter().map(|c| &c.input))
+        .collect();
+    let features = |step: &str| -> Vec<String> {
+        let mut v: Vec<String> = inputs
+            .iter()
+            .filter_map(|i| match i {
+                super::Input::Feature { relation, of } if of.step == step => Some(relation.clone()),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
     let ask = |step: &str, point: Point, over: &Option<super::Window>, observe: Vec<String>, kind: Kind, keep: Keep| -> Ask {
         let (s, e) = match over {
             Some(_) => window_of(over),
@@ -490,7 +520,14 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
         walk_forwards: vec![],
         comparisons: vec![],
         ledgers: vec![],
+        claims: vec![],
+        tests: vec![],
+        sheets: vec![],
+        skipped: vec![],
+        reports: vec![],
         trials: 0,
+        trial_kinds: BTreeMap::new(),
+        var_trials: 0.0,
         dsr: None,
         warnings: vec![],
         at: opts.now,
@@ -498,7 +535,7 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
     if let Some(w) = &opened.warning {
         out.warnings.push(warn("data-snooping", w.clone()));
     }
-    if plan.holdout == Holdout::None {
+    if plan.holdout == Holdout::None && opts.reveal.is_none() {
         out.warnings.push(warn(
             "out-of-sample",
             "the plan declares no hold-out: every run sees the whole sample, and nothing is left to reveal".into(),
@@ -527,197 +564,324 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
             runs.last().copied().ok_or_else(|| Error::Missing(format!("step `{}` made no run", r.step)))
         }
     };
-    for (i, _) in &normal.order {
-        let step = &plan.steps[*i];
-        // `abt plan reveal` runs its reveal step alone.
-        if opts.reveal.is_some() && !matches!(step, Step::Reveal { name, .. } if Some(name) == opts.reveal.as_ref()) {
-            continue;
-        }
-        match step {
-            Step::Run { name, at, over, observe } => {
-                let point = match at {
-                    None => merged(&plan.params, &vec![]),
-                    Some(At::Point(p)) => merged(&plan.params, p),
-                    Some(At::Best(g)) => {
-                        let b = *best.get(g).ok_or_else(|| Error::Missing(format!("grid `{}` has no best point", g)))?;
-                        out.outcomes[b].point.clone()
-                    }
-                };
-                let runs = ex.run_all(&[ask(name, point, over, observe.clone(), Kind::Trial, Keep::Outside)])?;
-                let placed = push(&mut out, runs);
-                runs_of.insert(name.clone(), placed);
+    // The `run` steps the `before` claims read run first.
+    let early: std::collections::BTreeSet<String> = plan.claims.iter().filter(|c| c.phase == super::Phase::Before).flat_map(|c| c.input.steps()).collect();
+    let canonical_claims = |phase: super::Phase| -> Vec<(&super::Claim, String)> { plan.claims.iter().filter(|c| c.phase == phase).map(|c| (c, normal.canonical(&c.name).to_string())).collect() };
+    let in_sample = |t: i64| !embargo.contains(t);
+    let mut blocked: Option<String> = None;
+    let mut reports: Vec<String> = Vec::new();
+    for stage in [true, false] {
+        for (i, _) in &normal.order {
+            let step = &plan.steps[*i];
+            if early.contains(step.name()) != stage {
+                continue;
             }
-            Step::Grid { name } => {
-                let asks: Vec<Ask> = plan.grid_points().into_iter().map(|p| ask(name, p, &None, vec![], Kind::Trial, Keep::Outside)).collect();
-                let runs = ex.run_all(&asks)?;
-                let placed = push(&mut out, runs);
-                let idx: Vec<usize> = placed.iter().map(|(i, _)| *i).collect();
-                let b = best_of(&out.outcomes, &idx, &plan.objective);
-                best.insert(name.clone(), idx[b]);
-                let ppy = out.outcomes[idx[b]].periods_per_year;
-                let pbo = if idx.len() >= 2 {
-                    let rets: Vec<Returns> = idx.iter().map(|&i| Returns::from_curve(&out.outcomes[i].curve, ppy)).collect();
-                    let n = rets.iter().map(|r| r.len()).min().unwrap_or(0);
-                    let rows: Vec<Vec<f64>> = (0..n).map(|t| rets.iter().map(|r| r.r[t]).collect()).collect();
-                    metrics::pbo_cscv(&rows, 16).or_else(|| metrics::pbo_cscv(&rows, 8))
-                } else {
-                    None
-                };
-                let values: Vec<f64> = idx.iter().map(|&i| out.outcomes[i].objective).collect();
-                let surface = validate::surface(&plan.grid, &values, b);
-                let subperiods = validate::subperiod_sharpes(&out.outcomes[idx[b]].curve, ppy, 20);
-                out.grids.push(GridResult {
-                    step: name.clone(),
-                    runs: idx,
-                    best: b,
-                    pbo,
-                    surface,
-                    subperiods,
-                });
-                runs_of.insert(name.clone(), placed);
+            // `abt plan reveal` runs its reveal step alone, and a plain
+            // execution none.
+            match (step, &opts.reveal) {
+                (Step::Reveal { name, .. }, Some(r)) if name == r => {}
+                (_, Some(_)) | (Step::Reveal { .. }, None) => continue,
+                _ => {}
             }
-            Step::WalkForward { name } => {
-                let scheme = plan.walk_forward.clone().expect("a walk-forward step has a scheme (checked)");
-                let wf_last = horizon.map_or(last, |h| h.min(last));
-                let folds = scheme.folds(first, wf_last);
-                if folds.is_empty() {
-                    return Err(Error::Missing(format!(
-                        "the sample ({} to {}) is shorter than one train and one test window of {}",
-                        format_timestamp(first),
-                        format_timestamp(wf_last),
-                        scheme.describe()
-                    )));
-                }
-                let within = |h: i64| Some(horizon.map_or(h, |s| s.min(h)));
-                let points = plan.grid_points();
-                let mut reports = Vec::new();
-                let mut stitched: Vec<(i64, f64)> = Vec::new();
-                let mut level = 1.0;
-                let mut placed_all = Vec::new();
-                let mut ppy = 0.0;
-                for (k, &(train_from, train_to, test_from, test_to)) in folds.iter().enumerate() {
-                    let fold = |phase: &'static str, from: i64, to: i64| Fold {
-                        k: k + 1,
-                        of: folds.len(),
-                        phase,
-                        from,
-                        to,
-                    };
-                    let asks: Vec<Ask> = points
-                        .iter()
-                        .map(|p| {
-                            let mut a = ask(name, p.clone(), &None, vec![], Kind::Trial, Keep::Window(train_from, train_to));
-                            a.fold = Some(fold("train", train_from, train_to));
-                            a.horizon = within(test_from - 1);
-                            a
-                        })
-                        .collect();
-                    let placed = push(&mut out, ex.run_all(&asks)?);
-                    let idx: Vec<usize> = placed.iter().map(|(i, _)| *i).collect();
-                    placed_all.extend(placed);
-                    if idx.iter().all(|&i| !out.outcomes[i].objective.is_finite()) {
-                        continue;
-                    }
-                    let b = best_of(&out.outcomes, &idx, &plan.objective);
-                    let (is_v, is_cagr) = (out.outcomes[idx[b]].objective, out.outcomes[idx[b]].returns.cagr);
-                    let mut a = ask(name, points[b].clone(), &None, vec![], Kind::Trial, Keep::Window(test_from, test_to));
-                    a.fold = Some(fold("test", test_from, test_to));
-                    a.horizon = within(test_to - 1);
-                    let placed = push(&mut out, ex.run_all(&[a])?);
-                    let t = placed[0].0;
-                    placed_all.extend(placed);
-                    let o = &out.outcomes[t];
-                    ppy = o.periods_per_year;
-                    for w in o.curve.windows(2) {
-                        let r = if w[0].1 > 0.0 { w[1].1 / w[0].1 - 1.0 } else { 0.0 };
-                        if stitched.is_empty() {
-                            stitched.push((w[0].0, level));
+            if let Some(why) = blocked.as_ref().filter(|_| step.runs()) {
+                out.skipped.push((step.name().to_string(), why.clone()));
+                continue;
+            }
+            if let Some(x) = step.inputs().into_iter().find(|x| out.skipped.iter().any(|(s, _)| s == x)) {
+                out.skipped.push((step.name().to_string(), format!("it reads `{}`, which did not run", x)));
+                continue;
+            }
+            match step {
+                Step::Run { name, at, over, observe } => {
+                    let point = match at {
+                        None => merged(&plan.params, &vec![]),
+                        Some(At::Point(p)) => merged(&plan.params, p),
+                        Some(At::Best(g)) => {
+                            let b = *best.get(g).ok_or_else(|| Error::Missing(format!("grid `{}` has no best point", g)))?;
+                            out.outcomes[b].point.clone()
                         }
-                        level *= 1.0 + r;
-                        stitched.push((w[1].0, level));
-                    }
-                    reports.push(FoldReport {
-                        train: (train_from, train_to),
-                        test: (test_from, test_to),
+                    };
+                    let mut obs = observe.clone();
+                    obs.extend(features(name));
+                    let runs = ex.run_all(&[ask(name, point, over, obs, Kind::Trial, Keep::Outside)])?;
+                    let placed = push(&mut out, runs);
+                    runs_of.insert(name.clone(), placed);
+                }
+                Step::Grid { name } => {
+                    let asks: Vec<Ask> = plan.grid_points().into_iter().map(|p| ask(name, p, &None, features(name), Kind::Trial, Keep::Outside)).collect();
+                    let runs = ex.run_all(&asks)?;
+                    let placed = push(&mut out, runs);
+                    let idx: Vec<usize> = placed.iter().map(|(i, _)| *i).collect();
+                    let b = best_of(&out.outcomes, &idx, &plan.objective);
+                    best.insert(name.clone(), idx[b]);
+                    let ppy = out.outcomes[idx[b]].periods_per_year;
+                    let pbo = if idx.len() >= 2 {
+                        let rets: Vec<Returns> = idx.iter().map(|&i| Returns::from_curve(&out.outcomes[i].curve, ppy)).collect();
+                        let n = rets.iter().map(|r| r.len()).min().unwrap_or(0);
+                        let rows: Vec<Vec<f64>> = (0..n).map(|t| rets.iter().map(|r| r.r[t]).collect()).collect();
+                        metrics::pbo_cscv(&rows, 16).or_else(|| metrics::pbo_cscv(&rows, 8))
+                    } else {
+                        None
+                    };
+                    let values: Vec<f64> = idx.iter().map(|&i| out.outcomes[i].objective).collect();
+                    let surface = validate::surface(&plan.grid, &values, b);
+                    let subperiods = validate::subperiod_sharpes(&out.outcomes[idx[b]].curve, ppy, 20);
+                    out.grids.push(GridResult {
+                        step: name.clone(),
+                        runs: idx,
                         best: b,
-                        in_sample: is_v,
-                        out_of_sample: o.objective,
-                        in_sample_cagr: is_cagr,
-                        out_of_sample_cagr: o.returns.cagr,
+                        pbo,
+                        surface,
+                        subperiods,
                     });
+                    runs_of.insert(name.clone(), placed);
                 }
-                let n = reports.len().max(1) as f64;
-                let is_mean = reports.iter().map(|f| f.in_sample_cagr).sum::<f64>() / n;
-                let oos_mean = reports.iter().map(|f| f.out_of_sample_cagr).sum::<f64>() / n;
-                let efficiency = if is_mean > 0.0 { Some(oos_mean / is_mean) } else { None };
-                match efficiency {
-                    Some(e) if e < 0.5 => out.warnings.push(warn(
-                        "walk-forward",
-                        format!("walk-forward efficiency {:.2}: out of sample the chosen points earn less than half their in-sample rate", e),
-                    )),
-                    None => out
-                        .warnings
-                        .push(warn("walk-forward", "walk-forward efficiency is undefined: the chosen points did not earn in sample".into())),
-                    _ => {}
+                Step::WalkForward { name } => {
+                    let scheme = plan.walk_forward.clone().expect("a walk-forward step has a scheme (checked)");
+                    let wf_last = horizon.map_or(last, |h| h.min(last));
+                    let folds = scheme.folds(first, wf_last);
+                    if folds.is_empty() {
+                        return Err(Error::Missing(format!(
+                            "the sample ({} to {}) is shorter than one train and one test window of {}",
+                            format_timestamp(first),
+                            format_timestamp(wf_last),
+                            scheme.describe()
+                        )));
+                    }
+                    let within = |h: i64| Some(horizon.map_or(h, |s| s.min(h)));
+                    let points = plan.grid_points();
+                    let mut reports = Vec::new();
+                    let mut stitched: Vec<(i64, f64)> = Vec::new();
+                    let mut level = 1.0;
+                    let mut placed_all = Vec::new();
+                    let mut ppy = 0.0;
+                    for (k, &(train_from, train_to, test_from, test_to)) in folds.iter().enumerate() {
+                        let fold = |phase: &'static str, from: i64, to: i64| Fold {
+                            k: k + 1,
+                            of: folds.len(),
+                            phase,
+                            from,
+                            to,
+                        };
+                        let asks: Vec<Ask> = points
+                            .iter()
+                            .map(|p| {
+                                let mut a = ask(name, p.clone(), &None, vec![], Kind::Trial, Keep::Window(train_from, train_to));
+                                a.fold = Some(fold("train", train_from, train_to));
+                                a.horizon = within(test_from - 1);
+                                a
+                            })
+                            .collect();
+                        let placed = push(&mut out, ex.run_all(&asks)?);
+                        let idx: Vec<usize> = placed.iter().map(|(i, _)| *i).collect();
+                        placed_all.extend(placed);
+                        if idx.iter().all(|&i| !out.outcomes[i].objective.is_finite()) {
+                            continue;
+                        }
+                        let b = best_of(&out.outcomes, &idx, &plan.objective);
+                        let (is_v, is_cagr) = (out.outcomes[idx[b]].objective, out.outcomes[idx[b]].returns.cagr);
+                        let mut a = ask(name, points[b].clone(), &None, vec![], Kind::Trial, Keep::Window(test_from, test_to));
+                        a.fold = Some(fold("test", test_from, test_to));
+                        a.horizon = within(test_to - 1);
+                        let placed = push(&mut out, ex.run_all(&[a])?);
+                        let t = placed[0].0;
+                        placed_all.extend(placed);
+                        let o = &out.outcomes[t];
+                        ppy = o.periods_per_year;
+                        for w in o.curve.windows(2) {
+                            let r = if w[0].1 > 0.0 { w[1].1 / w[0].1 - 1.0 } else { 0.0 };
+                            if stitched.is_empty() {
+                                stitched.push((w[0].0, level));
+                            }
+                            level *= 1.0 + r;
+                            stitched.push((w[1].0, level));
+                        }
+                        reports.push(FoldReport {
+                            train: (train_from, train_to),
+                            test: (test_from, test_to),
+                            best: b,
+                            in_sample: is_v,
+                            out_of_sample: o.objective,
+                            in_sample_cagr: is_cagr,
+                            out_of_sample_cagr: o.returns.cagr,
+                        });
+                    }
+                    let n = reports.len().max(1) as f64;
+                    let is_mean = reports.iter().map(|f| f.in_sample_cagr).sum::<f64>() / n;
+                    let oos_mean = reports.iter().map(|f| f.out_of_sample_cagr).sum::<f64>() / n;
+                    let efficiency = if is_mean > 0.0 { Some(oos_mean / is_mean) } else { None };
+                    match efficiency {
+                        Some(e) if e < 0.5 => out.warnings.push(warn(
+                            "walk-forward",
+                            format!("walk-forward efficiency {:.2}: out of sample the chosen points earn less than half their in-sample rate", e),
+                        )),
+                        None => out
+                            .warnings
+                            .push(warn("walk-forward", "walk-forward efficiency is undefined: the chosen points did not earn in sample".into())),
+                        _ => {}
+                    }
+                    out.walk_forwards.push(WalkForwardResult {
+                        step: name.clone(),
+                        scheme,
+                        folds: reports,
+                        efficiency,
+                        out_of_sample: metrics::return_metrics(&stitched, if ppy > 0.0 { ppy } else { 252.0 }),
+                    });
+                    runs_of.insert(name.clone(), placed_all);
                 }
-                out.walk_forwards.push(WalkForwardResult {
-                    step: name.clone(),
-                    scheme,
-                    folds: reports,
-                    efficiency,
-                    out_of_sample: metrics::return_metrics(&stitched, if ppy > 0.0 { ppy } else { 252.0 }),
-                });
-                runs_of.insert(name.clone(), placed_all);
-            }
-            Step::Reveal { name, of } => {
-                if opts.reveal.as_deref() != Some(name.as_str()) {
-                    continue;
-                }
-                // The committed point: the one the plan's latest execution
-                // ran (Q-2.2).
-                let stored = super::trials::outcomes(ends.data, &normal.hash)?;
-                let point = stored
-                    .iter()
-                    .filter(|r| r.step == of.step && r.kind == "trial" && (!of.best || r.best))
-                    .map(|r| r.point.clone())
-                    .next_back()
-                    .ok_or_else(|| {
-                        Error::Missing(format!(
-                            "study {} has not run step `{}`: a reveal names a committed point, one the plan has run (`abt plan run` first)",
-                            plan.name, of.step
-                        ))
-                    })?;
-                if embargo.is_empty() {
-                    return Err(Error::Missing(format!("study {}'s hold-out embargoes no bar of the sample: there is nothing to reveal", plan.name)));
-                }
-                let placed = push(&mut out, ex.run_all(&[ask(name, point, &None, vec![], Kind::Reveal, Keep::Inside)])?);
-                runs_of.insert(name.clone(), placed);
-            }
-            Step::Compare { name, runs, by } => {
-                let mut rows = Vec::new();
-                for r in runs {
-                    let (i, _) = the_run(&runs_of, &best, r)?;
-                    let o = &out.outcomes[i];
-                    let values = by
+                Step::Reveal { name, of } => {
+                    // The committed point: the one the plan's latest execution
+                    // ran (Q-2.2).
+                    let stored = super::trials::outcomes(ends.data, &normal.hash)?;
+                    let point = stored
                         .iter()
-                        .map(|m| {
-                            metrics::objective_value(m, &o.returns, &o.trading)
-                                .map(|v| (m.clone(), v))
-                                .ok_or_else(|| Error::Malformed(format!("compare {}: `{}` is not a metric ({})", name, m, metrics::METRIC_NAMES.join(", "))))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    rows.push((o.run_id.clone(), values));
+                        .filter(|r| r.step == of.step && r.kind == "trial" && (!of.best || r.best))
+                        .map(|r| r.point.clone())
+                        .next_back()
+                        .ok_or_else(|| {
+                            Error::Missing(format!(
+                                "study {} has not run step `{}`: a reveal names a committed point, one the plan has run (`abt plan run` first)",
+                                plan.name, of.step
+                            ))
+                        })?;
+                    if embargo.is_empty() {
+                        return Err(Error::Missing(format!("study {}'s hold-out embargoes no bar of the sample: there is nothing to reveal", plan.name)));
+                    }
+                    let placed = push(&mut out, ex.run_all(&[ask(name, point, &None, features(&of.step), Kind::Reveal, Keep::Inside)])?);
+                    runs_of.insert(name.clone(), placed);
                 }
-                out.comparisons.push(Comparison { step: name.clone(), rows });
+                Step::Compare { name, runs, by } => {
+                    let mut rows = Vec::new();
+                    for r in runs {
+                        let (i, _) = the_run(&runs_of, &best, r)?;
+                        let o = &out.outcomes[i];
+                        let values = by
+                            .iter()
+                            .map(|m| {
+                                metrics::objective_value(m, &o.returns, &o.trading)
+                                    .map(|v| (m.clone(), v))
+                                    .ok_or_else(|| Error::Malformed(format!("compare {}: `{}` is not a metric ({})", name, m, metrics::METRIC_NAMES.join(", "))))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        rows.push((o.run_id.clone(), values));
+                    }
+                    out.comparisons.push(Comparison { step: name.clone(), rows });
+                }
+                Step::Ledger { name, relation, of, into } => {
+                    let (i, k) = the_run(&runs_of, &best, of)?;
+                    let run_id = out.outcomes[i].run_id.clone();
+                    ends.kernels[k].ledger(&run_id, relation, into)?;
+                    out.ledgers.push((name.clone(), format!("kernel.{}.{}", run_id, into)));
+                }
+                Step::Test { name, test, input, params, over } => {
+                    let j = {
+                        let ctx = context(&ex, &out, &runs_of, &best, &sample);
+                        super::claims::apply(&ctx, name, normal.canonical(name), "test", test, input, over, params, &in_sample, true)
+                    };
+                    out.tests.push(j);
+                }
+                Step::Feed { name, statistic, relation, over } => {
+                    let w = window_of(over);
+                    let mut s = crate::feed::statistic(ends.data, &sample.relations, statistic, Some(relation.as_str()).filter(|r| !r.is_empty()), w)?;
+                    s.name = format!("feed.{}", name);
+                    out.sheets.push(s);
+                }
+                Step::Activation { name, of } => {
+                    let (i, _) = the_run(&runs_of, &best, of)?;
+                    let a = crate::activation::activation(
+                        ends.data,
+                        &out.outcomes[i].run_id,
+                        &prog.strategy,
+                        super::claims::seed(&normal.hash, normal.canonical(name)),
+                        crate::activation::PHI_THRESHOLD,
+                    )?;
+                    for s in a.sheets() {
+                        let mut s = s.clone();
+                        s.name = format!("{}.{}", name, s.name);
+                        out.sheets.push(s);
+                    }
+                    let pairs = &a.pairs;
+                    if let Some(c) = pairs.column("candidate") {
+                        for (k, cell) in c.iter().enumerate() {
+                            if **cell == crate::sheet::Cell::Bool(true) {
+                                let r = &pairs.rows[k];
+                                out.warnings.push(warn(
+                                    "overfitting",
+                                    format!(
+                                        "rules {:?} and {:?} fire together (phi above {}): a candidate for the kernel's structural check (`abt contract --implications`)",
+                                        r[0],
+                                        r[1],
+                                        crate::activation::PHI_THRESHOLD
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Step::Report { name } => reports.push(name.clone()),
             }
-            Step::Ledger { name, relation, of, into } => {
-                let (i, k) = the_run(&runs_of, &best, of)?;
-                let run_id = out.outcomes[i].run_id.clone();
-                ends.kernels[k].ledger(&run_id, relation, into)?;
-                out.ledgers.push((name.clone(), format!("kernel.{}.{}", run_id, into)));
+        }
+        if stage && opts.reveal.is_none() {
+            // The `before` claims, on the in-sample bars.
+            let judged = {
+                let ctx = context(&ex, &out, &runs_of, &best, &sample);
+                super::claims::judge(&ctx, &canonical_claims(super::Phase::Before), &in_sample, true)
+            };
+            if let Some(j) = judged.iter().find(|j| j.policy == Some(super::Policy::Block) && j.verdict == Some(super::claims::Verdict::Fails)) {
+                blocked = Some(format!("claim `{}` (block) failed", j.name));
             }
-            Step::Report { .. } => {}
-            Step::Test { .. } | Step::Feed { .. } | Step::Activation { .. } => unreachable!("refused above"),
+            out.claims.extend(judged);
+        }
+    }
+    if opts.reveal.is_none() {
+        let judged = {
+            let ctx = context(&ex, &out, &runs_of, &best, &sample);
+            super::claims::judge(&ctx, &canonical_claims(super::Phase::After), &in_sample, true)
+        };
+        out.claims.extend(judged);
+    } else if let Some(Step::Reveal { name, of }) = opts.reveal.as_ref().and_then(|r| plan.step(r)) {
+        // Every claim again over the embargoed bars: what read the revealed
+        // step reads the reveal's run; another step's runs never saw the
+        // embargo (Q-5.1).
+        if let Some(&(i, _)) = runs_of.get(name).and_then(|v| v.first()) {
+            let reveal_run = out.outcomes[i].run_id.clone();
+            let stored = super::trials::outcomes(ends.data, &normal.hash)?;
+            let revealed = of.step.clone();
+            let runs = |r: &Ref| -> Result<Vec<String>, Error> {
+                if r.step == revealed {
+                    Ok(vec![reveal_run.clone()])
+                } else if stored.iter().any(|s| s.step == r.step) {
+                    Err(Error::Missing(format!("step `{}`'s runs never saw the embargoed bars", r.step)))
+                } else {
+                    Err(Error::Missing(format!("step `{}` made no run", r.step)))
+                }
+            };
+            let ledger = |s: &str| -> Result<String, Error> { Err(Error::Missing(format!("ledger step `{}` read no embargoed bar", s))) };
+            let ctx = super::claims::Context {
+                data: ends.data,
+                strategy: &prog.strategy,
+                binding: &sample.relations,
+                runs: Box::new(runs),
+                ledger: Box::new(ledger),
+                folds: Box::new(|_: &str| None),
+                defaults: lineage_defaults(ends.data, &out.lineage, &out.outcomes),
+                plan_hash: &normal.hash,
+            };
+            let outside = |t: i64| embargo.contains(t);
+            let judged: Vec<_> = [super::Phase::Before, super::Phase::After]
+                .into_iter()
+                .flat_map(|phase| super::claims::judge(&ctx, &canonical_claims(phase), &outside, false))
+                .collect();
+            drop(ctx);
+            out.claims.extend(judged);
+        }
+    }
+    for (step, why) in &out.skipped {
+        out.warnings.push(warn("out-of-sample", format!("step `{}` did not run: {}", step, why)));
+    }
+    for j in out.claims.iter().filter(|j| j.in_sample) {
+        if let Some(v @ (super::claims::Verdict::Fails | super::claims::Verdict::Undecidable(_))) = &j.verdict {
+            out.warnings.push(warn("false statistical significance", format!("claim `{}` {}", j.name, v.text())));
         }
     }
     // The runs held for later steps are released.
@@ -735,15 +899,17 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
             }
         }
     }
-    // The rows: the trials, the outcomes, the plan and its execution.
+    // The rows: the trials, the outcomes, the verdicts, the plan and its
+    // execution.
     super::trials::write(ends.data, plan, &out)?;
     // The lineage's trials, every one ever made (Proposition Q-2.2), and the
     // deflated Sharpe ratio of the main result over them.
     let counted = super::lineage::trials(ends.data, &opened.lineage)?;
     out.trials = counted.count;
+    out.trial_kinds = counted.by_kind.clone();
+    out.var_trials = metrics_variance(&counted.sharpes);
     if let Some(m) = out.main().map(|o| o.returns.clone()) {
-        let var = metrics_variance(&counted.sharpes);
-        let dsr = metrics::deflated_sharpe(m.sharpe_period, m.n, m.skew, m.kurtosis, counted.count.max(1), var);
+        let dsr = metrics::deflated_sharpe(m.sharpe_period, m.n, m.skew, m.kurtosis, counted.count.max(1), out.var_trials);
         let ppy = out.main().map(|o| o.periods_per_year).unwrap_or(252.0);
         sample_warnings(&mut out.warnings, &m, ppy, &dsr);
         out.dsr = Some(dsr);
@@ -787,7 +953,67 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
             }
         }
     }
+    // The reports, over everything above (Q-8).
+    if opts.reveal.is_none() {
+        for _ in &reports {
+            let report = crate::report::build(ends.data, &out, &plan.report)?;
+            out.reports = crate::report::write(ends.data, &out, &report, &plan.report)?;
+        }
+    }
     Ok(out)
+}
+
+/// What the tests and claims resolve their inputs against.
+fn context<'a>(ex: &'a Executor<'a>, out: &'a Execution, runs_of: &'a BTreeMap<String, Vec<(usize, usize)>>, best: &'a BTreeMap<String, usize>, sample: &'a Sample) -> super::claims::Context<'a> {
+    let runs = Box::new(move |r: &Ref| -> Result<Vec<String>, Error> {
+        let placed = runs_of.get(&r.step).ok_or_else(|| Error::Missing(format!("step `{}` made no run before it is read", r.step)))?;
+        if r.best {
+            let b = *best.get(&r.step).ok_or_else(|| Error::Missing(format!("grid `{}` has no best point", r.step)))?;
+            Ok(vec![out.outcomes[b].run_id.clone()])
+        } else {
+            Ok(placed.iter().map(|(i, _)| out.outcomes[*i].run_id.clone()).collect())
+        }
+    });
+    let ledger = Box::new(move |s: &str| -> Result<String, Error> {
+        out.ledgers
+            .iter()
+            .find(|(n, _)| n == s)
+            .map(|(_, r)| r.clone())
+            .ok_or_else(|| Error::Missing(format!("ledger step `{}` wrote no table", s)))
+    });
+    let folds = Box::new(move |s: &str| -> Option<Vec<(f64, f64)>> {
+        out.walk_forwards
+            .iter()
+            .find(|w| w.step == s)
+            .map(|w| w.folds.iter().map(|f| (f.in_sample_cagr, f.out_of_sample_cagr)).collect())
+    });
+    super::claims::Context {
+        data: ex.ends.data,
+        strategy: &ex.prog.strategy,
+        binding: &sample.relations,
+        runs,
+        ledger,
+        folds,
+        defaults: lineage_defaults(ex.ends.data, &out.lineage, &out.outcomes),
+        plan_hash: &ex.normal.hash,
+    }
+}
+
+/// The parameters a plan supplies a claim with (Q-3.2): the lineage's trial
+/// count, this execution's runs among them, and the variance of their
+/// Sharpe ratios.
+fn lineage_defaults(data: &Data, lineage: &str, outcomes: &[Outcome]) -> crate::tests::Params {
+    let extra: Vec<(String, f64)> = outcomes
+        .iter()
+        .filter(|o| o.returns.sharpe_period.is_finite() && !o.run_id.is_empty())
+        .map(|o| (o.run_id.clone(), o.returns.sharpe_period))
+        .collect();
+    let mut p = crate::tests::Params::new();
+    if let Ok(c) = super::lineage::trials_with(data, lineage, &extra) {
+        p.insert("trials".into(), crate::tests::Param::Int(c.count.max(1) as i64));
+        p.insert("var_trials".into(), crate::tests::Param::Float(metrics_variance(&c.sharpes)));
+    }
+    p
 }
 
 /// The sample variance of the trials' Sharpe ratios (Q-3.2), 0 below two.

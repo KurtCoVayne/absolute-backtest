@@ -13,76 +13,21 @@
 #![allow(clippy::result_large_err)]
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use abt_kernel::check::Program as Checked;
 use abt_kernel::data::synthetic_daily;
-use abt_kernel::kernel::service::KernelService;
-use abt_kernel::kernel::{DataClient, Dataset, ExecConfig};
+use abt_kernel::kernel::ExecConfig;
 use abt_kernel::study::{self as old, Grid, Holdout as OldHoldout, Project, Provenance};
 use abt_query::data::Data;
 use abt_query::kernel::{Kernel, Program};
 use abt_query::plan::exec::{execute, Endpoints, Execution, Kind, Options};
 use abt_query::plan::{self, Plan};
 use abt_tests as common;
-use abt_wire::generated::abt::wire::SourceFile;
 
-/// The momentum book of the old study's tests: the top `n` names by their
-/// return over `lookback`, at equal weight.
+use abt_tests::{momentum as momentum_with, plan_program as program, plan_services as services, FRICTIONLESS};
+
+/// The momentum book under the default execution block.
 fn momentum(name: &str) -> String {
     momentum_with(name, "equity_default")
-}
-
-/// An execution block with no cost and no leverage limit, the last price
-/// on a delisting: the old study's tests' frictionless executor, whose
-/// one-name books survive the synthetic market's bankruptcy.
-const FRICTIONLESS: &str = "{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission none\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }";
-
-/// `momentum` under another execution block.
-fn momentum_with(name: &str, execution: &str) -> String {
-    common::StrategyParts {
-        name: name.into(),
-        needs: "need bars @1d   need listing   need actions".into(),
-        params: "    lookback : Duration = 3mo in 1mo..1y\n    skip : Duration = 0d\n    n : Count = 2 in 1..5".into(),
-        rules: "    rel momentum(A: Equity, @T, M: Scalar)\n    momentum(A, T, M) :- universe(A, T), lag(T, skip, T1), close(A, T1, P1), lag(T, lookback, T0), close(A, T0, P0), M = P1 / P0 - 1.\n    rel candidate(A: Equity, @T, M: Scalar)\n    candidate(A, T, M) :- universe(A, T), momentum(A, T, M).\n    rel selected(A: Equity, @T)\n    selected(A, T) :- bar(T), top[n](candidate(A, T, M) by (M desc, A asc)) within (T).\n    rel n_selected(@T, N: Count)\n    n_selected(T, N) :- bar(T), N = count(A) over (selected(A, T)) within (T), N > 0.\n".into(),
-        decides: "    decide(T, hold(A, W)) :- selected(A, T), n_selected(T, N), W = 1 / N.\n    decide(T, hold(A, 0)) :- held(A, T, _), not selected(A, T).".into(),
-        execution: execution.into(),
-        ..Default::default()
-    }
-    .render()
-}
-
-/// The catalog, the library and the strategy's text, as the kernel takes
-/// them.
-fn program(src: &str, name: &str) -> Program {
-    let mut sources: Vec<SourceFile> = common::dsl_files("catalog")
-        .into_iter()
-        .chain(common::dsl_files("lib"))
-        .map(|p| SourceFile {
-            text: std::fs::read_to_string(&p).unwrap(),
-            path: Some(p.to_string_lossy().into_owned()),
-        })
-        .collect();
-    sources.push(SourceFile {
-        text: src.to_string(),
-        path: Some(format!("{}.dsl", name)),
-    });
-    Program { sources, strategy: name.to_string() }
-}
-
-/// A data service holding the market and `n` kernel services reaching it,
-/// in this process; the query layer's clients of them.
-fn services(prog: &Checked, ds: &Dataset, n: usize) -> (Data, Vec<Kernel>) {
-    let svc = abt::serve_dataset(ds, prog).unwrap();
-    let data = Data::connect(abt_data::service::inproc(&svc)).unwrap();
-    let kernels = (0..n)
-        .map(|_| {
-            let s = svc.clone();
-            let k = KernelService::new(Arc::new(move || DataClient::connect(abt_data::service::inproc(&s))));
-            Kernel::connect(abt_kernel::kernel::service::inproc(&k)).unwrap()
-        })
-        .collect();
-    (data, kernels)
 }
 
 fn study(text: &str, name: &str) -> Plan {

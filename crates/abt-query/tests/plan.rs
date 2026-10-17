@@ -234,10 +234,20 @@ fn what_a_step_or_claim_reads_must_be_a_step_of_its_kind() {
     assert!(refused("run a\nreveal r of best(a)", "").contains("not a grid"));
     assert!(refused("feed f: coverage on close\nactivation x of f", "").contains("makes none"));
     assert!(refused("grid g\ntest t: adf on ledger g", "").contains("no ledger step"));
-    assert!(refused("run a", "claims { c : pbo on grid a expect statistic < 0.5 }").contains("no grid step"));
+    assert!(refused("run a", "claims { c : pbo on grid a expect statistic < 0.5 }").contains("no grid or walk-forward step"));
     assert!(refused("reveal r of r", "").contains("cycle"));
     assert!(refused("run a\nrun b at best(a) observe x", "").contains("not a grid"));
     assert!(refused("grid g\nreveal r of g", "").contains("name it best(g)"));
+    // A claim before the runs reads a feed or a run step.
+    assert!(refused("grid g", "claims { c : pbo on grid g expect statistic < 0.5 before }").contains("judged before the runs"));
+    // A run step before, a walk-forward's folds after: accepted.
+    assert_eq!(
+        refused(
+            "run w\ngrid g\nwalk_forward f",
+            "claims { c : adf on returns of w expect reject before\n d : wfe on grid f expect statistic > 0.5 }"
+        ),
+        ""
+    );
     assert_eq!(refused("grid g\nwalk_forward f\nreveal r of best(g)\nrun x at best(g) over 2010-01-01 .. 2011-01-01", ""), "");
     let no_holdout = one("study s { program p.dsl\n steps { run a\n reveal r of a } }", "s");
     assert!(no_holdout.is_err_and(|e| e.contains("nothing to reveal")));

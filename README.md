@@ -524,9 +524,22 @@ the ledgers. It writes every run as a trial row of `query.trials`, the
 plan's outcomes under `query.<hash>.outcomes` and the plan, which pins its
 bindings, in `query.plans`. `abt plan reveal PLAN STEP` runs one committed
 point over the whole sample and reports the embargoed bars; `abt plan
-report` reads the outcomes back, and `abt plan drop` unpins. `abt lineage`
+report` prints the report, and `abt plan drop` unpins. `abt lineage`
 counts a lineage's trials, every run ever made of its members, and `abt
 dispute` records a dispute of an attachment (ERRATA E-59).
+
+A plan's claims are tests of the registry, 24 of them in the starting set
+(`docs/spec/03-query.md`, section 4), each checked against its known
+answers (ERRATA E-60 to E-62). Each claim is judged on its input with an
+expected outcome. Its p-value is adjusted by Benjamini–Hochberg among the
+claims of its phase, and its verdict is written as a row of
+`query.<hash>.verdicts`. A `before` claim that fails under `block` stops
+the runs that would follow it. A reveal judges every claim again over the
+embargoed bars. Feed statistics describe the binding's data, activation
+statistics a run's rules, and the report the whole execution, with the
+forty biases and the layer that owns each (ERRATA E-63). `abt test`, `abt
+claim`, `abt feed` and `abt activation` do the same outside a plan; a test
+or a claim made there is still counted as a trial.
 
 ## The command line
 
@@ -550,6 +563,10 @@ abt plan check|run|report|drop PLAN [SOURCES...] [--study NAME] [--threads N] [-
 abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
 abt lineage PROGRAM [SOURCES...] [--json] (--data SOCKET | --store DIR)
 abt dispute PROGRAM --reason TEXT [SOURCES...] (--data SOCKET | --store DIR)
+abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
+abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data SOCKET | --store DIR)
+abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
+abt activation --run RUN [--json] (--data SOCKET | --store DIR)
 abt kernel serve [--socket PATH] --data SOCKET
 abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint]

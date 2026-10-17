@@ -3,7 +3,9 @@
 //! of the language (`parse`); its normal form, with templates substituted
 //! and names canonicalised, is what its hash H(Π) is over (`normal`).
 
+pub mod claims;
 pub mod exec;
+pub mod inputs;
 pub mod lineage;
 pub mod normal;
 pub mod parse;
@@ -222,7 +224,8 @@ impl Expect {
 
 /// When a claim is judged: on the in-sample window before any run, or on
 /// the outcomes after them (Q-5.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Phase {
     Before,
     After,
@@ -230,7 +233,8 @@ pub enum Phase {
 
 /// What a claim's failure does: warns (the default), or blocks the steps
 /// that depend on it (Q-5.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Policy {
     Warn,
     Block,
@@ -245,7 +249,9 @@ pub struct Claim {
     pub over: Option<Window>,
     pub params: Point,
     pub expect: Expect,
-    pub level: f64,
+    /// The level, when written (`reject` and `accept` take 0.05 without
+    /// one; a comparison without one is the comparison alone).
+    pub level: Option<f64>,
     pub phase: Phase,
     pub policy: Policy,
 }
@@ -260,10 +266,12 @@ impl Claim {
         if !self.params.is_empty() {
             s.push_str(&format!(" with {}", render_point(&self.params)));
         }
+        s.push_str(&format!(" expect {}", self.expect.render()));
+        if let Some(l) = self.level {
+            s.push_str(&format!(" at {}", l));
+        }
         s.push_str(&format!(
-            " expect {} at {} {} {}",
-            self.expect.render(),
-            self.level,
+            " {} {}",
             if self.phase == Phase::Before { "before" } else { "after" },
             if self.policy == Policy::Block { "block" } else { "warn" }
         ));

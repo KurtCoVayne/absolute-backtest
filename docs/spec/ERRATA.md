@@ -1073,6 +1073,95 @@ batch driver agree on every corpus program. Each bless since:
     agree, and are checked to one unit of their last printed digit (half
     a unit for the textbook).
 
+- **E-63 (Q-4.3, Q-5 to Q-9, P-4; claims, statistics, reports and their
+  commands as built).**
+  - **The tables a test reads**, by input:
+    - `returns of S`: the run's bar returns as `returns`.
+    - A grid read whole (`returns of G`, `grid G`): a column per point,
+      `trial0`…, on the bars every point has.
+    - `grid W` of a walk-forward: its folds' `in_sample` and
+      `out_of_sample` CAGR, which `wfe` reads.
+    - `events of S`: one row per instance (a bar and an instrument a rule
+      decided on), a column per rule (`decide_1`, or `unit__head_k` for a
+      library's rule, since `#` starts a comment). For `cost_realism`,
+      the fills' realised and modelled slippage per unit of notional,
+      equal in a simulated run.
+    - `feature R of S`: R's ledger, its numeric arguments as columns. When
+      the test reads `feature` and `forward`, R's last value column, and
+      each instrument's forward return over `horizon` bars of the binding's
+      close. A step whose runs a `feature R of` reads observes R, outside
+      H(P).
+    - `feed R`: R's rows as a panel. With `(A in (T1, T2))`, a column per
+      instrument by ticker on the times they share, in the filter's
+      order.
+  - **Phases.** A `before` claim reads a feed or a `run` step; those run
+    steps run first. The adjustment is Benjamini–Hochberg within the
+    claims of a phase, since a `before` claim decides before the `after`
+    ones exist.
+  - **The level is written or none.** `reject` and `accept` take 0.05
+    without one. A comparison without one is the comparison alone, and
+    with one it also asks the adjusted p-value to be below the level.
+  - **Seeds.** A claim's or a test's seed is the first eight bytes of
+    BLAKE3(H(Π):canonical name).
+  - **`dsr`** is given the lineage's trial count, this execution's runs
+    included, and the variance of their Sharpe ratios, unless the claim
+    writes them (Q-3.2).
+  - **A failed `block` claim.** Before the runs, it stops the steps that
+    ask the kernel for runs and every step that reads one. After them, it
+    bars the reveal. An undecidable verdict blocks nothing. Failed and
+    undecidable verdicts are warned under false statistical significance.
+  - **A reveal judges every claim again** over the embargoed bars. A claim
+    that reads the revealed step reads the reveal's run. A claim that
+    reads another step's runs is undecidable, since those runs never saw
+    the embargo.
+  - **Rows.**
+    - `query.<plan>.verdicts` and `.tests` have P-4's columns, plus
+      `policy` and `expect`, keyed by name and time. An execution's
+      in-sample rows replace the last, and a reveal adds its own.
+    - Claims and tests are trials in `query.trials` (kinds `claim` and
+      `test`), each identified by BLAKE3 over its plan, canonical name,
+      sample, runs and window.
+    - `abt test` and `abt claim` record the same outside a plan.
+  - **Feed statistics.**
+    - `coverage` counts gaps against the binding's close bars, each
+      entity within its own span.
+    - `revisions` counts the rows received after their bar's day: the
+      store returns a fact's latest revision.
+    - `latency` gives quantiles of r − t in seconds.
+    - `returns` gives simple returns' moments per name and pooled.
+    - `liquidity` gives ADV, dollar volume and the zero-volume share; the
+      spread needs quotes, which no class binds yet.
+    - `survivorship` gives listings and delistings per year with their
+      reasons, and the share of the first bar's listed names still listed
+      at the last.
+    - `actions` gives splits and dividends per year, and the splits whose
+      close across the ex-date moves by the factor's inverse within a
+      quarter.
+    - `membership` gives list sizes, entries, exits, and member rows on
+      bars without a close.
+    - `chains` is empty until M-7.
+  - **Activation statistics** read the run's decisions, so the attempted
+    instances are those any rule decided on. The failure table F of
+    `trace instances` is not read yet. Phi's interval is `coactivation`'s
+    bootstrap. A pair above phi 0.9 is warned as a candidate for `abt
+    contract --implications`. The cross-lag co-activation is over decision
+    bars, for k from 1 to 20.
+  - **Reports.**
+    - `query.<plan>.report.*` holds `summary` (the report block's metrics,
+      else Sharpe, CAGR, maximum drawdown, volatility, Sortino, Calmar and
+      turnover), `trials`, `claims`, `tests`, `contract`, `warnings`,
+      `biases`, `surface`, `folds`, `subperiods`, and the feed and
+      activation steps' tables.
+    - Each row is keyed by its position and the execution's time; `text`
+      holds the rendering when the report block asks for it.
+    - The forty biases carry their owner layer, status and source.
+      Out-of-sample is `warned` without a hold-out.
+    - `abt plan report` prints the text, else the tables.
+  - **Commands.** `abt test TEST on INPUT` and `abt claim 'CLAIM'` name
+    their run by id, in the input or by `--run`. `abt feed STATISTIC`
+    takes `--binding B`, found through a run recorded over it, or `--run`.
+    `abt activation --run RUN` prints the tables.
+
 
 ## Layout
 

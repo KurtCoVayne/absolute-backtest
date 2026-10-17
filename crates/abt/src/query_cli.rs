@@ -126,3 +126,14 @@ pub fn metrics(args: &[String]) -> i32 {
         }
     }
 }
+
+/// `abt test`, `abt claim`, `abt feed` and `abt activation`; the exit code.
+pub fn query(cmd: &str, args: &[String]) -> i32 {
+    match connection(args) {
+        Ok(conn) => abt_query::cli::query_main(cmd, args, conn),
+        Err(e) => {
+            eprintln!("{}", e);
+            2
+        }
+    }
+}

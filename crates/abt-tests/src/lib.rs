@@ -371,3 +371,58 @@ pub fn study_run(
 ) -> Result<abt_kernel::kernel::RunResult, abt_kernel::kernel::RunError> {
     abt_kernel::kernel::run_on(prog, None, client, cfg, &abt_kernel::kernel::Replay { horizon, ..Default::default() })
 }
+
+// ---- plans over in-process services (Q-2) ----
+
+/// An execution block with no cost and no leverage limit, the last price
+/// on a delisting: the old study's tests' frictionless executor, whose
+/// one-name books survive the synthetic market's bankruptcy.
+pub const FRICTIONLESS: &str = "{\n    price close\n    orders market\n    lot whole\n    capital 1_000_000 USD fixed\n    commission none\n    slippage none\n    impact none\n    participation none\n    financing none\n    leverage unconstrained\n    actions apply\n    delisting last_price\n    oversize halt\n    ruin halt\n    numerics running\n  }";
+
+/// The old study's momentum book under the execution block `execution`:
+/// the top `n` names by their return over `lookback`, at equal weight.
+pub fn momentum(name: &str, execution: &str) -> String {
+    StrategyParts {
+        name: name.into(),
+        needs: "need bars @1d   need listing   need actions".into(),
+        params: "    lookback : Duration = 3mo in 1mo..1y\n    skip : Duration = 0d\n    n : Count = 2 in 1..5".into(),
+        rules: "    rel momentum(A: Equity, @T, M: Scalar)\n    momentum(A, T, M) :- universe(A, T), lag(T, skip, T1), close(A, T1, P1), lag(T, lookback, T0), close(A, T0, P0), M = P1 / P0 - 1.\n    rel candidate(A: Equity, @T, M: Scalar)\n    candidate(A, T, M) :- universe(A, T), momentum(A, T, M).\n    rel selected(A: Equity, @T)\n    selected(A, T) :- bar(T), top[n](candidate(A, T, M) by (M desc, A asc)) within (T).\n    rel n_selected(@T, N: Count)\n    n_selected(T, N) :- bar(T), N = count(A) over (selected(A, T)) within (T), N > 0.\n".into(),
+        decides: "    decide(T, hold(A, W)) :- selected(A, T), n_selected(T, N), W = 1 / N.\n    decide(T, hold(A, 0)) :- held(A, T, _), not selected(A, T).".into(),
+        execution: execution.into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// The catalog, the library and a strategy's text, as the kernel service
+/// takes them.
+pub fn plan_program(src: &str, name: &str) -> abt_query::kernel::Program {
+    let mut sources: Vec<abt_wire::generated::abt::wire::SourceFile> = dsl_files("catalog")
+        .into_iter()
+        .chain(dsl_files("lib"))
+        .map(|p| abt_wire::generated::abt::wire::SourceFile {
+            text: fs::read_to_string(&p).unwrap(),
+            path: Some(p.to_string_lossy().into_owned()),
+        })
+        .collect();
+    sources.push(abt_wire::generated::abt::wire::SourceFile {
+        text: src.to_string(),
+        path: Some(format!("{}.dsl", name)),
+    });
+    abt_query::kernel::Program { sources, strategy: name.to_string() }
+}
+
+/// A data service holding the market and `n` kernel services reaching it,
+/// in this process; the query layer's clients of them.
+pub fn plan_services(prog: &Program, ds: &Dataset, n: usize) -> (abt_query::data::Data, Vec<abt_query::kernel::Kernel>) {
+    let svc = abt::serve_dataset(ds, prog).unwrap();
+    let data = abt_query::data::Data::connect(abt_data::service::inproc(&svc)).unwrap();
+    let kernels = (0..n)
+        .map(|_| {
+            let s = svc.clone();
+            let k = abt_kernel::kernel::service::KernelService::new(std::sync::Arc::new(move || abt_kernel::kernel::DataClient::connect(abt_data::service::inproc(&s))));
+            abt_query::kernel::Kernel::connect(abt_kernel::kernel::service::inproc(&k)).unwrap()
+        })
+        .collect();
+    (data, kernels)
+}

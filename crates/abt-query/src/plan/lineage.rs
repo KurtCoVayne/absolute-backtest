@@ -250,6 +250,12 @@ pub struct Counted {
 }
 
 pub fn trials(data: &Data, lineage: &str) -> Result<Counted, Error> {
+    trials_with(data, lineage, &[])
+}
+
+/// `trials`, with the runs of an execution not yet written judged too: their
+/// Sharpe ratios by run id (the variance of Q-3.2 reads them).
+pub fn trials_with(data: &Data, lineage: &str, extra: &[(String, f64)]) -> Result<Counted, Error> {
     let members: BTreeSet<String> = members(data)?.into_iter().filter(|m| m.lineage == lineage).map(|m| m.program_hash).collect();
     let mut runs: BTreeSet<String> = BTreeSet::new();
     for (rel, _) in data.relations("kernel.", ".binding")? {
@@ -277,6 +283,9 @@ pub fn trials(data: &Data, lineage: &str) -> Result<Counted, Error> {
                 }
             }
         }
+    }
+    for (id, sharpe) in extra {
+        judged.insert(id.clone(), ("trial".into(), Some(*sharpe)));
     }
     let mut sharpes = Vec::new();
     let mut count = 0;
