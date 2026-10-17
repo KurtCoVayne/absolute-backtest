@@ -159,6 +159,34 @@ pub enum EventKind {
         price_divisor: f64,
         cause: String,
     },
+    /// A future settled daily at its session's close (K-5.4): the
+    /// settlement price, the variation `Q · (S − reference) · point value`
+    /// moved to cash, and the session; the price is the position's
+    /// reference from now on. `at_close`: no settlement price was bound, so
+    /// the close stands in.
+    Settlement { price: f64, variation: f64, session: i64, at_close: bool },
+    /// A root's continuous series changing contract with a position held
+    /// (K-5.4): the old contract closed at its last price and the new
+    /// opened at its first, the position carried, with a commission each;
+    /// the series' additive adjustment changes by `adjustment`, which is not
+    /// P&L.
+    Roll {
+        from: Sym,
+        to: Sym,
+        quantity: f64,
+        from_price: f64,
+        to_price: f64,
+        adjustment: f64,
+        commissions: f64,
+    },
+    /// A futures contract held at its last trade (K-5.4): settled at
+    /// `price`, cash-settled or closed (a physical contract is not
+    /// delivered, warned), the position gone.
+    ContractExpiry { quantity: f64, price: f64, cash_settled: bool },
+    /// What a margin call under the margin models sold (K-5.6): the
+    /// requirement, the equity, and the forced fills by their seq, the
+    /// largest maintenance per unit first.
+    ForcedLiquidation { requirement: f64, equity: f64, fills: Vec<u64> },
 }
 
 impl EventKind {
@@ -188,6 +216,10 @@ impl EventKind {
             EventKind::Assignment { .. } => "assignment",
             EventKind::OptionExpiry { .. } => "option_expiry",
             EventKind::Adjustment { .. } => "adjustment",
+            EventKind::Settlement { .. } => "settlement",
+            EventKind::Roll { .. } => "roll",
+            EventKind::ContractExpiry { .. } => "contract_expiry",
+            EventKind::ForcedLiquidation { .. } => "forced_liquidation",
         }
     }
 }
@@ -213,6 +245,10 @@ pub struct Book {
     /// The average cost a unit of each position was opened at (price units).
     pub avg_cost: BTreeMap<Sym, f64>,
     pub receivables: Vec<Receivable>,
+    /// Under daily settlement, the price each future held is valued
+    /// against: its last settlement, or the fill that opened it (E-10).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reference: BTreeMap<Sym, f64>,
 }
 
 impl Book {
@@ -237,6 +273,7 @@ impl Book {
         if q.abs() < 1e-9 {
             self.positions.remove(&sym);
             self.avg_cost.remove(&sym);
+            self.reference.remove(&sym);
         } else {
             self.positions.insert(sym, q);
         }
@@ -267,6 +304,9 @@ impl Book {
                     self.avg_cost.insert(sym, cost);
                 }
                 self.set_position(sym, new);
+                if let (Some(r), true) = (fill.reference, new.abs() >= 1e-9) {
+                    self.reference.insert(sym, r);
+                }
             }
             EventKind::DividendDeclared { amount, shares, pay, receivable } => {
                 if let Some(sym) = e.instrument {
@@ -314,6 +354,18 @@ impl Book {
                 }
             }
             EventKind::OptionExpiry { .. } => {
+                if let Some(sym) = e.instrument {
+                    self.set_position(sym, 0.0);
+                }
+            }
+            EventKind::Settlement { price, .. } => {
+                if let Some(sym) = e.instrument {
+                    if self.positions.contains_key(&sym) {
+                        self.reference.insert(sym, *price);
+                    }
+                }
+            }
+            EventKind::ContractExpiry { .. } => {
                 if let Some(sym) = e.instrument {
                     self.set_position(sym, 0.0);
                 }

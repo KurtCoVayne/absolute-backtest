@@ -117,6 +117,12 @@ static TAG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A data service holding the market and the chain, every version reviewed.
 fn serve(m: &Market, rows: &[Row], terms: &str) -> Arc<DataService> {
+    serve_with_margins(m, rows, terms, &[])
+}
+
+/// `serve`, with published margins: (contract, day, initial, maintenance)
+/// per contract, as `option.margin` rows of the vendor's keys.
+fn serve_with_margins(m: &Market, rows: &[Row], terms: &str, margins: &[(String, usize, f64, f64)]) -> Arc<DataService> {
     common::init();
     let n = TAG.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tag = format!("options-{}-{}", std::process::id(), n);
@@ -143,6 +149,30 @@ fn serve(m: &Market, rows: &[Row], terms: &str) -> Arc<DataService> {
     let (fetched, _) = o.read(o.options()).unwrap();
     fetched.ingest(&mut store, "orats", "orats", &attributes).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+    if !margins.is_empty() {
+        use arrow::array::{Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        let ts = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        let schema = Schema::new(vec![
+            Field::new("A", DataType::Utf8, false),
+            Field::new("T", ts.clone(), false),
+            Field::new("Initial", DataType::Float64, true),
+            Field::new("Maintenance", DataType::Float64, true),
+            Field::new("r", ts, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(StringArray::from(margins.iter().map(|x| x.0.clone()).collect::<Vec<_>>())),
+                Arc::new(TimestampNanosecondArray::from(margins.iter().map(|x| d(x.1)).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(margins.iter().map(|x| x.2).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(margins.iter().map(|x| x.3).collect::<Vec<_>>())),
+                Arc::new(TimestampNanosecondArray::from(margins.iter().map(|x| d(x.1)).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap();
+        abt_data::adapter::ingest_keyed(&mut store, "orats", &[], &[], &[("option.margin".to_string(), batch)], "orats", &attributes).unwrap();
+    }
     DataService::new(store)
 }
 
@@ -735,4 +765,119 @@ fn a_rule_prices_an_option_with_the_functions_of_f() {
     assert_eq!(fair, Some(bsm::price(100.0, 100.0, 46.0 / 365.0, 0.0, 0.0, 0.25, Right::Call)));
     let v = vol.expect("the mid's volatility");
     assert!(close(bsm::price(100.0, 100.0, 46.0 / 365.0, 0.0, 0.0, v, Right::Call), 3.2), "{}", v);
+}
+
+/// A `margin_by` row as the tests read it: contract, maintenance, source.
+type MarginRow = (String, f64, String);
+
+/// The margin of a book at d1 under `margin`: a decided book of XYZ
+/// options (`decides`), quoted every day at the model's prices at a
+/// volatility of 25 % (bid and ask a nickel either side of the model), the
+/// options European; `margin_req` and the `margin_by` rows at d1.
+fn margin_at_d1(decides: &str, margin: &str, margins: &[(String, usize, f64, f64)]) -> (RunResult, (f64, f64), Vec<MarginRow>) {
+    use abt_kernel::functions::{bsm, Right};
+    let m = market(&[(XYZ, flat(100.0))]);
+    let mut rows = Vec::new();
+    for i in 0..10 {
+        // τ from the end of the day to the end of 2024-04-19 (K-2.5).
+        let tau = ((day("2024-04-19") - d(i)) / abt_kernel::kernel::time::DAY) as f64 / 365.0;
+        for k in [95.0, 100.0, 105.0] {
+            let c = bsm::price(100.0, k, tau, 0.0, 0.0, 0.25, Right::Call);
+            let p = bsm::price(100.0, k, tau, 0.0, 0.0, 0.25, Right::Put);
+            rows.push(row(i, "2024-04-19", k, 100.0, Some((c - 0.05, c + 0.05)), Some((p - 0.05, p + 0.05))));
+        }
+    }
+    let svc = serve_with_margins(&m, &rows, "XYZ=european:physical:pm", margins);
+    let prog = program_on(XYZ, "    qty : Quantity<Contracts> = 1 contracts", decides, &[("margin", margin), ("margin_call", "allow")]);
+    let (r, (req, by)) = run_with(&prog, &svc, |r, k| {
+        let req = k
+            .query("margin_req", d(1), &[])
+            .unwrap()
+            .first()
+            .map(|tu| (tu[1].as_f64().unwrap(), tu[2].as_f64().unwrap()))
+            .expect("margin_req");
+        let names = r.symbols.clone();
+        let by: Vec<MarginRow> = k
+            .query("margin_by", d(1), &[])
+            .unwrap()
+            .into_iter()
+            .map(|tu| (names[tu[0].as_equity().unwrap() as usize].clone(), tu[3].as_f64().unwrap(), k.show(&tu[4])))
+            .collect();
+        (req, by)
+    });
+    (r, req, by)
+}
+
+/// Sell (or buy) `q` contracts of the XYZ `right` of `strike` to 2024-04-19 at d0.
+fn leg_at_d0(right: char, strike: f64, q: &str) -> String {
+    format!("    decide(T, trade(A, Q)) :- universe(A, T), T = 2024-03-04, A = \"{}\", Q = {}.", occ("2024-04-19", right, strike), q)
+}
+
+/// The mid of a contract's quote at d1 (the model's price at 25 %).
+fn mid_at_d1(right: abt_kernel::functions::Right, strike: f64) -> f64 {
+    let tau = ((day("2024-04-19") - d(1)) / abt_kernel::kernel::time::DAY) as f64 / 365.0;
+    abt_kernel::functions::bsm::price(100.0, strike, tau, 0.0, 0.0, 0.25, right)
+}
+
+#[test]
+fn a_naked_short_put_under_reg_t_needs_twenty_percent_of_the_underlying_less_otm_plus_the_premium() {
+    use abt_kernel::functions::Right;
+    let (_, (_, maintenance), by) = margin_at_d1(&leg_at_d0('P', 100.0, "-qty"), "reg_t", &[]);
+    // max(20 % · 100 − 0 + p, 10 % · 100 + p) × 100 × 1, the premium at its mark.
+    let p = mid_at_d1(Right::Put, 100.0);
+    let expected = (0.2f64 * 100.0 - 0.0 + p).max(0.1 * 100.0 + p) * 100.0;
+    assert!(close(maintenance, expected), "{} against {}", maintenance, expected);
+    assert_eq!(by.len(), 1);
+    assert_eq!(by[0].2, "reg_t");
+}
+
+#[test]
+fn a_vertical_spread_under_reg_t_needs_its_maximum_loss() {
+    use abt_kernel::functions::Right;
+    // A credit spread: the call of 100 sold, the call of 105 bought: the
+    // width less the credit at the marks.
+    let decides = format!("{}\n{}", leg_at_d0('C', 100.0, "-qty"), leg_at_d0('C', 105.0, "qty"));
+    let (_, (_, maintenance), _) = margin_at_d1(&decides, "reg_t", &[]);
+    let credit = mid_at_d1(Right::Call, 100.0) - mid_at_d1(Right::Call, 105.0);
+    assert!(close(maintenance, (5.0 - credit) * 100.0), "{} against {}", maintenance, (5.0 - credit) * 100.0);
+    // A debit spread: the debit.
+    let decides = format!("{}\n{}", leg_at_d0('C', 100.0, "qty"), leg_at_d0('C', 105.0, "-qty"));
+    let (_, (_, maintenance), _) = margin_at_d1(&decides, "reg_t", &[]);
+    assert!(close(maintenance, credit * 100.0), "{} against {}", maintenance, credit * 100.0);
+}
+
+#[test]
+fn a_straddle_under_portfolio_needs_its_worst_loss_over_the_grid_at_its_volatility() {
+    use abt_kernel::functions::{bsm, Right};
+    let decides = format!("{}\n{}", leg_at_d0('C', 100.0, "-qty"), leg_at_d0('P', 100.0, "-qty"));
+    let (_, (_, maintenance), by) = margin_at_d1(&decides, "portfolio", &[]);
+    let tau = ((day("2024-04-19") - d(1)) / abt_kernel::kernel::time::DAY) as f64 / 365.0;
+    // The straddle's value per unit at the underlying's price s.
+    let v = |s: f64| bsm::price(s, 100.0, tau, 0.0, 0.0, 0.25, Right::Call) + bsm::price(s, 100.0, tau, 0.0, 0.0, 0.25, Right::Put);
+    // The two shorts lose what the straddle gains: the worst over eleven
+    // points from −15 % to +15 %, floored at 0.375 × 100 a contract.
+    let worst = (0..11).map(|i| (v(100.0 * (0.85 + 0.03 * i as f64)) - v(100.0)) * 100.0).fold(0.0, f64::max);
+    let want = worst.max(2.0 * 0.375 * 100.0);
+    assert!((maintenance - want).abs() < 1e-6 * want, "{} against {}", maintenance, want);
+    assert!(by.iter().all(|x| x.2 == "portfolio"), "{:?}", by);
+}
+
+#[test]
+fn published_margins_price_the_contracts_they_cover_and_reg_t_the_rest() {
+    let (put100, put95) = (occ("2024-04-19", 'P', 100.0), occ("2024-04-19", 'P', 95.0));
+    let margins: Vec<(String, usize, f64, f64)> = (0..10).map(|i| (put100.clone(), i, 1_500.0, 1_200.0)).collect();
+    let decides = format!("{}\n{}", leg_at_d0('P', 100.0, "-qty"), leg_at_d0('P', 95.0, "-qty"));
+    let (_, _, by) = margin_at_d1(&decides, "published, reg_t", &margins);
+    let source = |name: &str| by.iter().find(|x| x.0 == name).map(|x| (x.1, x.2.clone()));
+    assert_eq!(source(&put100), Some((1_200.0, "published".to_string())), "{:?}", by);
+    assert_eq!(source(&put95).map(|x| x.1), Some("reg_t".to_string()), "{:?}", by);
+}
+
+#[test]
+fn approx_alone_is_a_fraction_of_the_underlyings_notional_warned_at_every_bar() {
+    let (r, (_, maintenance), by) = margin_at_d1(&leg_at_d0('P', 100.0, "-qty"), "approx 0.2", &[]);
+    assert!(close(maintenance, 0.2 * 100.0 * 100.0), "{}", maintenance);
+    assert_eq!(by[0].2, "approx");
+    let w: Vec<&str> = r.warnings.iter().filter(|w| w.bias == "margin").map(|w| w.message.as_str()).collect();
+    assert!(w.iter().any(|m| m.contains("approx") && m.contains("of 10 bars")), "{:?}", r.warnings);
 }

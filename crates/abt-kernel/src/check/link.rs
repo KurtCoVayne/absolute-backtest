@@ -97,7 +97,23 @@ struct Resolved {
     read: Read,
 }
 
-const KERNEL_RELS: &[&str] = &["position", "cash", "nav", "capital", "mark", "fill", "decided", "decide", "clock", "spec", "chain", "greeks"];
+const KERNEL_RELS: &[&str] = &[
+    "position",
+    "cash",
+    "nav",
+    "capital",
+    "mark",
+    "fill",
+    "decided",
+    "decide",
+    "clock",
+    "spec",
+    "chain",
+    "greeks",
+    "margin_req",
+    "margin_by",
+    "contract",
+];
 const BAR_PRIMS: &[&str] = &["open", "high", "low", "close", "volume"];
 
 fn is_var(name: &str) -> bool {
@@ -127,6 +143,15 @@ impl<'a> Checker<'a> {
             for sig in crate::ir::option_relations(&self.decision_cal) {
                 self.relations.insert(sig.name.clone(), sig);
             }
+        }
+        if self.class_name == "future" {
+            for sig in crate::ir::future_relations(&self.decision_cal) {
+                self.relations.insert(sig.name.clone(), sig);
+            }
+        }
+        let by_instrument = self.exec.as_ref().is_some_and(|x| !x.margin.is_empty());
+        for sig in crate::ir::margin_relations(&self.decision_cal, by_instrument) {
+            self.relations.insert(sig.name.clone(), sig);
         }
         if self.clock_offset.is_some() {
             self.relations.insert(
@@ -472,7 +497,12 @@ impl<'a> Checker<'a> {
                 return None;
             }
             if !self.relations.contains_key(name) {
-                let why = if name == "clock" { "the clock has no session offset" } else { "it is the option class's (K-2.4)" };
+                let why = match name {
+                    "clock" => "the clock has no session offset",
+                    "margin_by" => "the execution block lists no margin model (K-5.6)",
+                    "contract" => "it is the future class's (K-2.4)",
+                    _ => "it is the option class's (K-2.4)",
+                };
                 err(self, Code::U, format!("`{}` is not a relation of this program ({})", name, why));
                 return None;
             }
@@ -1544,7 +1574,7 @@ impl<'a> Checker<'a> {
     fn key_term_of(&self, a: &ast::Atom, name: &str, unit: &str) -> Option<Term> {
         let pos = if KERNEL_RELS.contains(&name) {
             match name {
-                "position" | "mark" | "fill" | "clock" | "spec" | "chain" | "greeks" => 1,
+                "position" | "mark" | "fill" | "clock" | "spec" | "chain" | "greeks" | "margin_by" | "contract" => 1,
                 _ => 0,
             }
         } else if name == "universe" {

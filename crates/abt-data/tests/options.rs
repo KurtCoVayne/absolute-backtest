@@ -345,6 +345,7 @@ fn put_demand(money: f64) -> Demand {
             scope: None,
             attributes: None,
             label: Some("bars".into()),
+            optional: false,
         }]),
         require: None,
         prefer: None,

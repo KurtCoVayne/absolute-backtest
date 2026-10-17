@@ -1388,7 +1388,19 @@ impl<'a> Checker<'a> {
         // Execution and report.
         if let Some(eb) = &root.execution {
             match config::expand_execution(eb, &self.ws.presets()) {
-                Ok(x) => self.exec = Some(x),
+                Ok(x) => {
+                    // What the executor reads where the store holds it: a
+                    // future's settlement prices under `settlement daily`
+                    // (K-5.4), the published margins `margin published`
+                    // names (K-5.6); an optional need of the demand.
+                    if self.class_name == "future" && x.settlement.as_deref() == Some("daily") {
+                        self.admit_class_relation("settlement");
+                    }
+                    if x.margin.contains(&MarginModel::Published) {
+                        self.admit_class_relation("margin");
+                    }
+                    self.exec = Some(x);
+                }
                 Err(errs) => {
                     for (sp, m) in errs {
                         self.unit_diag(Code::P, sp, m);
@@ -1700,6 +1712,21 @@ impl<'a> Checker<'a> {
             self.relations.insert(sig.name.clone(), sig);
         }
         self.demand = d;
+    }
+
+    /// A relation of the class's catalog in scope as a primitive, beside
+    /// those the needs admit (a relation the executor reads where held).
+    fn admit_class_relation(&mut self, name: &str) {
+        if self.relations.contains_key(name) {
+            return;
+        }
+        let Some(decl) = self.class_decls.iter().find(|r| r.name == name).cloned() else { return };
+        let class = self.class_name.clone();
+        let Some(mut sig) = self.signature_of(&decl, &class, Cal::Base) else { return };
+        sig.kind = Kind::Primitive { class };
+        sig.complete = decl.complete;
+        sig.native = if self.base.is_sub_daily() { Some(Resolution::D1) } else { None };
+        self.relations.insert(sig.name.clone(), sig);
     }
 
     /// The core signature of a declaration: entity sorts, the key with its

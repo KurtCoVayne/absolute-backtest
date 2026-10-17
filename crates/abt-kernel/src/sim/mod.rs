@@ -17,8 +17,11 @@ use crate::kernel::{
 };
 
 mod equity;
+mod future;
 mod limits;
+pub mod margin;
 pub(crate) mod option;
+mod requirement;
 
 pub use limits::LimitState;
 
@@ -142,6 +145,17 @@ pub struct SimExecutor {
     forced_expiries: usize,
     #[serde(default)]
     unpriced_expiries: usize,
+    /// Settlements at the close for want of a settlement price, futures
+    /// contracts expired without delivery, bars `approx` margined, and the
+    /// models the margin passed over: what the run's warnings report.
+    #[serde(default)]
+    settled_at_close: usize,
+    #[serde(default)]
+    physical_expiries: usize,
+    #[serde(default)]
+    approx_bars: usize,
+    #[serde(default)]
+    margin_notes: Vec<String>,
 }
 
 impl SimExecutor {
@@ -169,6 +183,10 @@ impl SimExecutor {
             adjusted: BTreeMap::new(),
             forced_expiries: 0,
             unpriced_expiries: 0,
+            settled_at_close: 0,
+            physical_expiries: 0,
+            approx_bars: 0,
+            margin_notes: Vec::new(),
         }
     }
 
@@ -185,13 +203,33 @@ impl SimExecutor {
         let mut nav = self.book.cash;
         for (&sym, &q) in &self.book.positions {
             if let Some(p) = k.price_at(sym, t) {
-                nav += q * p * k.multiplier(sym);
+                nav += self.position_value(k, sym, q, p);
             }
         }
         for r in &self.book.receivables {
             nav += r.cash;
         }
         nav
+    }
+
+    /// The book at `t`'s marks: its NAV (cash, the positions, the
+    /// receivables, in that order), its gross and its net exposure.
+    fn marked(&self, k: &mut Kernel, t: i64) -> (f64, f64, f64) {
+        let mut equity = self.book.cash;
+        let mut gross = 0.0;
+        let mut net = 0.0;
+        for (&sym, &q) in &self.book.positions {
+            if let Some(p) = k.price_at(sym, t) {
+                let m = k.multiplier(sym);
+                equity += self.position_value(k, sym, q, p);
+                gross += q.abs() * p * m;
+                net += q * p * m;
+            }
+        }
+        for r in &self.book.receivables {
+            equity += r.cash;
+        }
+        (equity, gross, net)
     }
 
     /// Commission on an order of `qty` of `sym`: a future's per-contract
@@ -625,7 +663,7 @@ impl SimExecutor {
             let fill_price = if qty > 0.0 { p * (1.0 + slip + imp) } else { p * (1.0 - slip - imp) };
             let commission = self.commission(k, sym, qty, fill_price);
             let fee = if qty < 0.0 { qty.abs() * fill_price * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
-            let cost = qty * fill_price * m + commission + fee;
+            let cost = self.traded_cash(k, sym, qty, fill_price) + commission + fee;
             let slippage = qty.abs() * p * m * slip;
             let impact = qty.abs() * p * m * imp;
             let allowance = bar_costs + commission + fee + slippage + impact;
@@ -655,16 +693,19 @@ impl SimExecutor {
                 let new_cash = self.book.cash - cost;
                 let mut gross = 0.0;
                 let mut net = new_cash;
+                // A future margined daily is valued against its reference
+                // (the fill's when it opens), E-10.
+                let after_ref = self.fill_reference(k, sym, fill_price);
                 for (&s2, &q2) in &self.book.positions {
                     let q2 = if s2 == sym { q2 + qty } else { q2 };
                     let p2 = if s2 == sym { p } else { k.price_at(s2, tn).unwrap_or(0.0) };
                     let m2 = k.multiplier(s2);
                     gross += q2.abs() * p2 * m2;
-                    net += q2 * p2 * m2;
+                    net += if s2 == sym { self.value_at(k, s2, q2, p2, after_ref) } else { self.position_value(k, s2, q2, p2) };
                 }
                 if !self.book.positions.contains_key(&sym) {
                     gross += qty.abs() * p * m;
-                    net += qty * p * m;
+                    net += self.value_at(k, sym, qty, p, after_ref);
                 }
                 // The NAV after the fill counts the receivables (K-5.1).
                 for r in &self.book.receivables {
@@ -730,6 +771,7 @@ impl SimExecutor {
                 partial,
                 forced: false,
                 spread: if option { (fill_price - mid) * qty * m } else { 0.0 },
+                reference: self.fill_reference(k, sym, fill_price),
             };
             let remainder = partial.then(|| (requested - qty.abs(), if reissue { Fate::Reissued } else { Fate::Expired }));
             self.record(result, RunEvent::new(at, Some(sym), EventKind::Fill { fill, remainder }).rule(*rule).order(*id).cash(-cost));
@@ -780,6 +822,8 @@ impl SimExecutor {
                     let qty = -pos;
                     let m = k.multiplier(sym);
                     let commission = self.commission(k, sym, qty, p);
+                    let flow = self.traded_cash(k, sym, qty, p) + commission;
+                    let reference = self.fill_reference(k, sym, p);
                     let fill = FillRecord {
                         t: tn,
                         equity: sym,
@@ -794,14 +838,9 @@ impl SimExecutor {
                         partial: false,
                         forced: false,
                         spread: 0.0,
+                        reference,
                     };
-                    self.record(
-                        result,
-                        RunEvent::new(tn, Some(sym), EventKind::Fill { fill, remainder: None })
-                            .rule(rule)
-                            .order(id)
-                            .cash(-(qty * p * m + commission)),
-                    );
+                    self.record(result, RunEvent::new(tn, Some(sym), EventKind::Fill { fill, remainder: None }).rule(rule).order(id).cash(-flow));
                     self.limit_state.traded.push_back((tn, qty.abs() * p * m));
                     result.costs.commissions += commission;
                     result.costs.turnover += qty.abs() * p * m;
@@ -968,29 +1007,31 @@ impl Executor for SimExecutor {
             changed |= self.option_expiries(k, t, result);
             changed |= self.early_assignments(k, t, result);
         }
+        // A future's roll, its contract's expiry, then the session's
+        // settlement (K-5.4).
+        changed |= self.rolls(k, t, result);
+        changed |= self.contract_expiries(k, t, result);
+        changed |= self.settlements(k, t, result);
         if changed {
             self.rewrite_book(k, t);
         }
         // Mark to market before the bar's decisions: the NAV counts the
         // receivables (K-5.1).
-        let mut equity = self.book.cash;
-        let mut gross = 0.0;
-        let mut net = 0.0;
-        for (&sym, &q) in &self.book.positions {
-            if let Some(p) = k.price_at(sym, t) {
-                let m = k.multiplier(sym);
-                equity += q * p * m;
-                gross += q.abs() * p * m;
-                net += q * p * m;
+        let (mut equity, mut gross, mut net) = self.marked(k, t);
+        // The margin models' requirement (K-5.6), when the block lists any:
+        // a margin call is the equity below its maintenance.
+        let mut by_models = (!self.cfg.margin_models.is_empty()).then(|| self.requirement(k, t));
+        if let Some((margin, holdings)) = &by_models {
+            if self.margin_call_by_models(k, t, equity, margin, holdings, result)? {
+                self.rewrite_book(k, t);
+                (equity, gross, net) = self.marked(k, t);
+                by_models = Some(self.requirement(k, t));
             }
-        }
-        for r in &self.book.receivables {
-            equity += r.cash;
         }
         // Maintenance: positive equity below the margin of gross exposure is
         // a margin call (a non-positive equity is ruin, judged when an order
         // comes to be filled).
-        if gross > 0.0 && equity > 0.0 && equity < self.cfg.maintenance_margin * gross - 1e-9 * gross {
+        if by_models.is_none() && gross > 0.0 && equity > 0.0 && equity < self.cfg.maintenance_margin * gross - 1e-9 * gross {
             let message = format!(
                 "margin call: equity {:.2} is below {}% of gross exposure {:.2} at {}",
                 equity,
@@ -1038,7 +1079,8 @@ impl Executor for SimExecutor {
                         let m = k.multiplier(sym);
                         let commission = self.commission(k, sym, qty, p);
                         let fee = if qty < 0.0 { qty.abs() * p * m * self.cfg.fee_bps_on_sells / 10_000.0 } else { 0.0 };
-                        let flow = qty * p * m + commission + fee;
+                        let flow = self.traded_cash(k, sym, qty, p) + commission + fee;
+                        let reference = self.fill_reference(k, sym, p);
                         equity -= commission + fee;
                         gross -= qty.abs() * p * m;
                         net -= -qty * p * m;
@@ -1060,6 +1102,7 @@ impl Executor for SimExecutor {
                             partial: false,
                             forced: true,
                             spread: 0.0,
+                            reference,
                         };
                         self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }).cash(-flow));
                     }
@@ -1078,9 +1121,14 @@ impl Executor for SimExecutor {
             leverage: if equity > 0.0 { gross / equity } else { 0.0 },
             receivables: self.book.receivable_cash(),
             capital: base,
-            margin_initial: gross / self.cfg.max_gross.max(1.0),
-            margin_maintenance: self.cfg.maintenance_margin * gross,
+            margin_initial: by_models.as_ref().map(|(m, _)| m.initial).unwrap_or(gross / self.cfg.max_gross.max(1.0)),
+            margin_maintenance: by_models.as_ref().map(|(m, _)| m.maintenance).unwrap_or(self.cfg.maintenance_margin * gross),
         });
+        let (initial, maintenance) = match &by_models {
+            Some((m, _)) => (m.initial, m.maintenance),
+            None => (gross / self.cfg.max_gross.max(1.0), self.cfg.maintenance_margin * gross),
+        };
+        self.write_requirement(k, t, initial, maintenance, by_models.as_ref().map(|(m, _)| m));
         result.equity_curve.push((t, equity));
         // `nav(T, N)`: the book's value at T's mark, before T's decisions
         // (data-bundle doc, section 7: what the metrics library reads).
@@ -1109,6 +1157,7 @@ impl Executor for SimExecutor {
         if k.quote_cols.is_some() {
             self.write_option_relations(k, t);
         }
+        self.write_contract_relation(k, t);
         Ok(())
     }
 
@@ -1250,6 +1299,37 @@ impl Executor for SimExecutor {
                     "{} involuntary delistings closed with no haircut; the default is a total loss (data-bundle doc, section 4)",
                     self.zero_haircut_involuntary
                 ),
+            });
+        }
+        if self.settled_at_close > 0 {
+            result.warnings.push(RunWarning {
+                bias: "settlement".into(),
+                message: format!("{} daily settlements at the close: the binding holds no settlement price for them (K-5.4)", self.settled_at_close),
+            });
+        }
+        if self.physical_expiries > 0 {
+            result.warnings.push(RunWarning {
+                bias: "settlement".into(),
+                message: format!(
+                    "{} physically settled futures contracts closed at their final settlement: the simulation does not deliver (K-5.4)",
+                    self.physical_expiries
+                ),
+            });
+        }
+        if self.approx_bars > 0 {
+            result.warnings.push(RunWarning {
+                bias: "margin".into(),
+                message: format!(
+                    "margin `approx` priced the book at {} of {} bars: a fraction of the notional, the owner's open item (K-5.6, A-8)",
+                    self.approx_bars,
+                    self.bars.len()
+                ),
+            });
+        }
+        for note in &self.margin_notes {
+            result.warnings.push(RunWarning {
+                bias: "margin".into(),
+                message: format!("a margin model passed over: {}", note),
             });
         }
         if self.forced_expiries > 0 {

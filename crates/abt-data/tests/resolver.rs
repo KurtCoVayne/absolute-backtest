@@ -63,6 +63,7 @@ fn need(relations: &[&str], calendar: Option<&str>, attributes: &[(&str, &str)])
                 .collect()
         }),
         label: Some(format!("{} test", relations.join(", "))),
+        optional: false,
     }
 }
 

@@ -671,6 +671,78 @@ batch driver agree on every corpus program. Each bless since:
     `crates/abt-tests/tests/golden/program_hashes.tsv`; its golden runs do
     not. A library's probe program states its class's own fields.
 
+- **E-72 (K-2.4, K-5.4, K-5.6, D-7.1, D-7.7; the futures model and the
+  margin models).**
+  - **Optional needs (D-7.1).** A `Need` gains `optional`: a relation of
+    an optional need that neither the store nor a source covers is left
+    out of the binding, with a note, not refused. The kernel asks
+    optionally for `settlement` (a futures program under `settlement
+    daily`) and `margin` (`margin published`); the checker admits them
+    there and nowhere else, so no other program's demand or hash changes.
+  - **Daily settlement (K-5.4, E-10).**
+    - Each future held has a reference price: the fill's that opened it,
+      then each settlement's.
+    - A fill moves −q · (price − reference) · point value, plus its costs.
+    - Each session's close moves Q · (S − reference) · point value to cash
+      and makes S the reference: a daily bar's close, or the bar whose
+      barrier passes the root's session end. S is the binding's
+      `settlement` row at the bar, else the close (warned, `at_close`).
+    - The NAV counts Q · (mark − reference) · point value. So do sizing,
+      the leverage check, the limits' NAV and `inv.nav`.
+    - `settlement none` books a future fully paid, as before.
+  - **Rolls.** A `roll` is recorded at the bar where the series' contract
+    changes, with a position on the root.
+    - Both contracts are filled at the series' price of the bar before,
+      where the adapter measures the gap: the old less its adjustment,
+      the new less its own. So the bar's P&L over the two contracts is the
+      series' change, and the change of adjustment is not P&L (K-5.4).
+    - Each fill takes the root's commission per contract, and only the
+      commissions move cash.
+    - The position stays on the root.
+  - **Contract expiry.** A contract held directly (one with
+    `future_spec`) is settled on its last trade's day (its expiry's when
+    none is stated) and closed: at its `settlement` row, else its close.
+    Under `settlement none` it closes at the close, since only `settlement
+    daily` reads settlement prices. A physical contract is not delivered,
+    warned.
+  - **`contract(A, @T, Root, Expiry, PointValue)`**: A is the contract the
+    series Root holds at T, both entities.
+  - **`exposure`** of K-2.4 is not added: the book module's `exposure(@T,
+    G)` has the name. The book record carries the gross, the net and the
+    leverage.
+  - **The margin models (K-5.6)** price the book at every decision bar
+    when the execution block lists any.
+    - Holdings: a stock, a future (its point value), an option (its terms,
+      its expiry instant).
+    - An option's underlying is a broad-based index when the option
+      settles in cash, an equity otherwise.
+    - An option is repriced at the volatility its mark implies.
+    - SPAN is skipped: no risk arrays are bound.
+    - `margin_req` is written for every program; without models it is the
+      leverage model's (gross over the multiple, the maintenance fraction
+      of gross). `margin_by` is written where models are listed. The book
+      record's margin columns are the totals.
+    - A margin call is the equity below the models' maintenance. `liquidate`
+      sells whole units at the bar's marks, in the order of maintenance per
+      unit (largest first), until the shortfall net of each fill's
+      commission is covered; `forced_liquidation` names the fills.
+    - `approx` is warned once, counting the bars it priced, where K-9.3
+      says every bar: one line with the count carries the same fact. A
+      model passed over is warned, at most 20 notes.
+    - The leverage field still governs orders; the models judge the margin
+      call.
+  - **A demand file** (`abt data resolve --demand`) may leave out
+    `optional`: a need without it is required, as a FlatBuffers reader
+    takes the field's absence.
+  - **Databento's statistics (D-7.7)** become `future.settlement` and
+    `future.open_interest`, both for the contract the series holds in the
+    session.
+    - Settlement prices (`StatType` 3) are back-adjusted as the bars;
+      open interest (9) is kept as published.
+    - A row is keyed at the session's last close and received when
+      published. The last one received is kept; a deleted statistic is
+      left out.
+
 ## Data layer and protocol
 
 - **E-13 (D-5.2, D-5.3; the instant of a barrier).** A barrier's `at` is the

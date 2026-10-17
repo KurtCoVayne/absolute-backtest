@@ -1367,6 +1367,10 @@ pub struct FillRecord {
     /// quantity × multiplier; 0 for every other fill.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub spread: f64,
+    /// Under daily settlement, the price the future's position is valued
+    /// against after the fill (E-10): the opening fill's, else unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<f64>,
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -2106,9 +2110,15 @@ impl<'p> Kernel<'p> {
                 ),
             });
         }
-        // The vocabularies the executor writes `spec` in (K-2.4).
+        // The vocabularies the executor writes `spec` and `margin_by` in
+        // (K-2.4, E-4).
         if prog.class == "option" {
             for w in ["call", "put", "american", "european", "physical", "cash"] {
+                labels.intern(w);
+            }
+        }
+        if !cfg.margin_models.is_empty() {
+            for w in ["published", "reg_t", "portfolio", "span", "approx"] {
                 labels.intern(w);
             }
         }

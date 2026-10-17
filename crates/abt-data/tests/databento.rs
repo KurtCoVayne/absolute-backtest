@@ -622,3 +622,54 @@ fn a_live_session_is_authenticated_subscribed_and_stamped_at_acceptance() {
     h.join().unwrap();
     let _ = DAY;
 }
+
+fn stat(id: u32, day: &str, kind: u16, price: f64, quantity: i64) -> Decoded {
+    rec(Record::Statistics {
+        hd: Header {
+            rtype: rtype::STATISTICS,
+            publisher_id: 1,
+            instrument_id: id,
+            ts_event: (t(day) + 21 * 60 * MIN) as u64,
+        },
+        ts_recv: (t(day) + 21 * 60 * MIN + 2 * MIN) as u64,
+        ts_ref: t(day) as u64,
+        price: if kind == 3 { fixed(price) } else { dbn::UNDEF_PRICE },
+        quantity: if kind == 9 { quantity } else { dbn::UNDEF_STAT_QUANTITY },
+        sequence: 1,
+        ts_in_delta: 0,
+        stat_type: kind,
+        channel_id: 0,
+        update_action: 1,
+        stat_flags: 0,
+    })
+}
+
+#[test]
+fn the_venues_settlement_prices_and_open_interest_are_the_series_back_adjusted() {
+    // ES's three sessions, with H4's settlements on the first two days and
+    // M4's on the third (the session after the roll), and their open
+    // interest; one of H4's prices published twice, the later kept.
+    let mut raw = Raw::default();
+    raw.add_dbn(&es_stream(), "es").unwrap();
+    let stats = vec![
+        stat(1, "2024-03-11", 3, 5003.50, 0),
+        stat(1, "2024-03-12", 3, 5013.00, 0),
+        stat(1, "2024-03-12", 3, 5013.25, 0),
+        stat(2, "2024-03-13", 3, 5074.75, 0),
+        stat(1, "2024-03-11", 9, 0.0, 2_000_000),
+        stat(2, "2024-03-13", 9, 0.0, 1_500_000),
+        // M4's settlement of a session the series holds H4 at: not the series'.
+        stat(2, "2024-03-11", 3, 5053.00, 0),
+    ];
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &stats), "stats").unwrap();
+    let (f, _) = futures(&raw, &Options::default()).unwrap();
+    let s = relation(&f, "future.settlement");
+    // H4 + the gap of 50 before the roll, M4's own after it.
+    assert_eq!(column(s, "P"), vec![5053.50, 5063.25, 5074.75]);
+    assert!(strings(s, "A").iter().all(|k| k == "ES.v.0"));
+    // Keyed at the session's last close, received when published.
+    assert_eq!(times(s, "T")[0], t("2024-03-11") + 14 * 60 * MIN + 35 * MIN);
+    assert_eq!(times(s, "r")[0], t("2024-03-11") + 21 * 60 * MIN + 2 * MIN);
+    let oi = relation(&f, "future.open_interest");
+    assert_eq!(column(oi, "N"), vec![2_000_000.0, 1_500_000.0]);
+}

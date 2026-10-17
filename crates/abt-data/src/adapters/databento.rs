@@ -152,6 +152,20 @@ pub struct RootReport {
     pub rolls: Vec<String>,
 }
 
+/// A statistic the venue published: a settlement price (`StatType` 3) or
+/// an open interest (9), for the trading day of its reference time.
+#[derive(Clone, Debug)]
+struct Stat {
+    id: u32,
+    day: i64,
+    recv: i64,
+    kind: u16,
+    value: f64,
+}
+
+const STAT_SETTLEMENT: u16 = 3;
+const STAT_OPEN_INTEREST: u16 = 9;
+
 /// One bar as read: its instrument, the start of its interval and its
 /// close, its prices, and what names it.
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +201,8 @@ struct Def {
 pub struct Raw {
     bars: Vec<Bar>,
     defs: BTreeMap<u32, Def>,
+    /// The venue's settlement prices and open interest (`statistics`).
+    stats: Vec<Stat>,
     /// `(instrument, from, to, symbol)`: an instrument's symbol over
     /// `[from, to)`.
     mappings: Vec<(u32, i64, i64, String)>,
@@ -344,6 +360,32 @@ impl Raw {
                 } => {
                     let to = ts(*end_ts).unwrap_or(i64::MAX);
                     self.mappings.push((hd.instrument_id, ts(*start_ts).unwrap_or(i64::MIN), to, stype_in_symbol.clone()));
+                }
+                // A statistic new or updated (2 deletes one, left out).
+                Record::Statistics {
+                    hd,
+                    ts_recv,
+                    ts_ref,
+                    price,
+                    quantity,
+                    stat_type,
+                    update_action,
+                    ..
+                } if *update_action != 2 && (*stat_type == STAT_SETTLEMENT || *stat_type == STAT_OPEN_INTEREST) => {
+                    let value = if *stat_type == STAT_SETTLEMENT {
+                        dbn::price(*price)
+                    } else {
+                        (*quantity != dbn::UNDEF_STAT_QUANTITY).then_some(*quantity as f64)
+                    };
+                    let Some(value) = value else { continue };
+                    let at = ts(*ts_ref).unwrap_or(hd.ts_event as i64);
+                    self.stats.push(Stat {
+                        id: hd.instrument_id,
+                        day: at.div_euclid(DAY) * DAY,
+                        recv: ts(*ts_recv).unwrap_or(hd.ts_event as i64),
+                        kind: *stat_type,
+                        value,
+                    });
                 }
                 _ => {}
             }
@@ -721,6 +763,8 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     let mut sessions_rows = Rows::default();
     let mut point_rows = Rows::default();
     let mut commission_rows = Rows::default();
+    let mut settle_rows = Rows::default();
+    let mut oi_rows = Rows::default();
     let mut spec = Rows::default();
     let mut intervals = BTreeSet::new();
     for (root, mut rbars) in by_root {
@@ -865,6 +909,17 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
             sessions_rows.times.push(sess.open);
             sessions_rows.r.push(last.max(sess.close + opts.processing_delay));
             let day = sess.close.div_euclid(DAY) * DAY;
+            // The venue's statistics of the contract held, for the
+            // session's day: the settlement back-adjusted as the bars, the
+            // open interest as published; the last received of each.
+            for (kind, rows, shift) in [(STAT_SETTLEMENT, &mut settle_rows, adj), (STAT_OPEN_INTEREST, &mut oi_rows, 0.0)] {
+                if let Some(st) = raw.stats.iter().filter(|x| x.id == c && x.kind == kind && x.day == day).max_by_key(|x| x.recv) {
+                    rows.keys.push(root_key.clone());
+                    rows.t.push(sess.close);
+                    rows.r.push(st.recv.max(sess.close));
+                    rows.nums.push(vec![st.value + shift]);
+                }
+            }
             if let Some(pv) = point_of(c) {
                 point_rows.keys.push(root_key.clone());
                 point_rows.t.push(day);
@@ -916,6 +971,18 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
         "future.point_value".to_string(),
         keyed("T", point_rows.keys.clone(), point_rows.t.clone(), vec![("V", col(&point_rows, 0))], point_rows.r.clone())?,
     ));
+    if !settle_rows.keys.is_empty() {
+        relations.push((
+            "future.settlement".to_string(),
+            keyed("T", settle_rows.keys.clone(), settle_rows.t.clone(), vec![("P", col(&settle_rows, 0))], settle_rows.r.clone())?,
+        ));
+    }
+    if !oi_rows.keys.is_empty() {
+        relations.push((
+            "future.open_interest".to_string(),
+            keyed("T", oi_rows.keys.clone(), oi_rows.t.clone(), vec![("N", col(&oi_rows, 0))], oi_rows.r.clone())?,
+        ));
+    }
     if opts.commission.is_some() {
         relations.push((
             "future.commission".to_string(),

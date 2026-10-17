@@ -152,6 +152,7 @@ pub fn prepare(store: &Store, demand: &Demand) -> Result<Prepared, DataError> {
             scope: None,
             attributes: None,
             label: Some(format!("chain of {} ({})", symbol, d.relation)),
+            optional: false,
         });
         out.notes.push(format!(
             "the pre-pass of the chain of {} ({}): {} contracts admitted over {} days{}",

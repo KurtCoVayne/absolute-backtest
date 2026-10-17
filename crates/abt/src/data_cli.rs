@@ -245,7 +245,15 @@ pub fn main(args: &[String]) {
             } else {
                 std::fs::read_to_string(&path).unwrap_or_else(|e| fail(&format!("{}: {}", path, e)))
             };
-            let demand: abt_wire::generated::abt::wire::Demand = serde_json::from_str(&text).unwrap_or_else(|e| fail(&format!("{}: not a demand: {}", path, e)));
+            // A need without `optional` is required, as a FlatBuffers reader
+            // takes the field's absence (E-72).
+            let mut value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| fail(&format!("{}: not a demand: {}", path, e)));
+            if let Some(needs) = value.get_mut("needs").and_then(|n| n.as_array_mut()) {
+                for need in needs.iter_mut().filter_map(|n| n.as_object_mut()) {
+                    need.entry("optional").or_insert(serde_json::Value::Bool(false));
+                }
+            }
+            let demand: abt_wire::generated::abt::wire::Demand = serde_json::from_value(value).unwrap_or_else(|e| fail(&format!("{}: not a demand: {}", path, e)));
             let dry_run = a.flags.iter().any(|f| f == "dry-run");
             let svc = DataService::with_sources(open(&a), sources(&a));
             let r = svc.resolve(&demand, dry_run).unwrap_or_else(|e| {

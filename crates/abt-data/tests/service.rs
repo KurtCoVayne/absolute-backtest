@@ -174,6 +174,7 @@ fn script(c: &Client) -> Vec<String> {
             scope: None,
             attributes: None,
             label: None,
+            optional: false,
         }]),
         require: None,
         prefer: None,

@@ -523,7 +523,11 @@ impl Invariants {
                 let mut n = b.cash;
                 for (&sym, &q) in &b.positions {
                     if let Some(p) = k.price_at(sym, t) {
-                        n += q * p * k.multiplier(sym);
+                        // A future margined daily against its reference (E-10).
+                        n += match b.reference.get(&sym) {
+                            Some(r) if k.cfg.settlement_daily && k.is_future(sym) => q * (p - r) * k.multiplier(sym),
+                            _ => q * p * k.multiplier(sym),
+                        };
                     }
                 }
                 for r in &b.receivables {

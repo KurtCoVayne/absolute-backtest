@@ -288,6 +288,36 @@ pub fn growing(run: &str, prog: &Program, ids: &Ids, result: &RunResult, from: W
                     reason[i] = Some(cause.clone());
                     detail[i] = Some(serde_json::json!({"before": terms_json(before), "after": terms_json(after), "position": position, "price_divisor": price_divisor}).to_string());
                 }
+                EventKind::Settlement {
+                    price: p,
+                    variation,
+                    session,
+                    at_close,
+                } => {
+                    price[i] = Some(*p);
+                    detail[i] = Some(serde_json::json!({"variation": variation, "session": super::time::format_timestamp(*session), "at_close": at_close}).to_string());
+                }
+                EventKind::Roll {
+                    from,
+                    to,
+                    quantity: q,
+                    from_price,
+                    to_price,
+                    adjustment,
+                    commissions,
+                } => {
+                    quantity[i] = Some(*q);
+                    commission[i] = Some(*commissions);
+                    detail[i] = Some(serde_json::json!({"from": id_of(*from), "to": id_of(*to), "from_price": from_price, "to_price": to_price, "adjustment": adjustment}).to_string());
+                }
+                EventKind::ContractExpiry { quantity: q, price: p, cash_settled } => {
+                    quantity[i] = Some(*q);
+                    price[i] = Some(*p);
+                    detail[i] = Some(serde_json::json!({"settlement": if *cash_settled { "cash" } else { "physical" }}).to_string());
+                }
+                EventKind::ForcedLiquidation { requirement, equity, fills } => {
+                    detail[i] = Some(serde_json::json!({"requirement": requirement, "equity": equity, "fills": fills}).to_string());
+                }
             }
         }
         out.push(

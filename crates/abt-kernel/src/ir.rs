@@ -1100,6 +1100,9 @@ pub const RESERVED_NAMES: &[&str] = &[
     "spec",
     "chain",
     "greeks",
+    "margin_req",
+    "margin_by",
+    "contract",
     "universe",
     "instruments",
     "not",
@@ -1237,6 +1240,69 @@ pub fn option_relations(cal: &Cal) -> Vec<Signature> {
             ],
         ),
     ]
+}
+
+/// The book's margin (K-2.4, ERRATA E-4) at the decision calendar:
+/// `margin_req(@T, Initial, Maintenance)`, the book's requirement, and
+/// `margin_by(A, @T, Initial, Maintenance, Source)`, each instrument's with
+/// the model that priced it. The second only where the execution block
+/// lists margin models.
+pub fn margin_relations(cal: &Cal, by_instrument: bool) -> Vec<Signature> {
+    let arg = |name: &str, ty: Ty| Arg {
+        name: name.to_string(),
+        mode: if name == "T" { Mode::Key } else { Mode::Out },
+        ty,
+    };
+    let sig = |name: &str, args: Vec<Arg>| Signature {
+        name: name.to_string(),
+        args,
+        cal: cal.clone(),
+        complete: true,
+        kind: Kind::Executor,
+        span: Span::default(),
+        native: None,
+    };
+    let usd = || Ty::Quantity(Dim::notional("USD"));
+    let mut out = vec![sig("margin_req", vec![arg("T", Ty::Timestamp), arg("Initial", usd()), arg("Maintenance", usd())])];
+    if by_instrument {
+        out.push(sig(
+            "margin_by",
+            vec![
+                arg("A", Ty::Entity),
+                arg("T", Ty::Timestamp),
+                arg("Initial", usd()),
+                arg("Maintenance", usd()),
+                arg("Source", Ty::Label),
+            ],
+        ));
+    }
+    out
+}
+
+/// The future class's kernel relation (K-2.4): `contract(A, @T, Root,
+/// Expiry, PointValue)`, the contract A a root's continuous series holds at
+/// T (D-2.4 `continuous`), with its expiry and point value.
+pub fn future_relations(cal: &Cal) -> Vec<Signature> {
+    let arg = |name: &str, ty: Ty| Arg {
+        name: name.to_string(),
+        mode: if name == "T" { Mode::Key } else { Mode::Out },
+        ty,
+    };
+    vec![Signature {
+        name: "contract".to_string(),
+        args: vec![
+            arg("A", Ty::Entity),
+            arg("T", Ty::Timestamp),
+            arg("Root", Ty::Entity),
+            arg("Expiry", Ty::Timestamp),
+            arg("PointValue", Ty::scalar()),
+        ],
+        cal: cal.clone(),
+        complete: true,
+        kind: Kind::Executor,
+        span: Span::default(),
+        native: None,
+    }]
 }
 
 /// The executor and kernel-state relations every strategy sees at its

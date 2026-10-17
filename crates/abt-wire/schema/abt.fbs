@@ -251,6 +251,10 @@ table Need {
   attributes: [Attribute];
   // The need as the program writes it, for the resolver's messages.
   label: string;
+  // What the binding names only when the store holds it or a source offers
+  // it (a future's settlement price, a published margin): a relation of an
+  // optional need that cannot be covered is left out, noted, never refused.
+  optional: bool = false;
 }
 
 table Budget {

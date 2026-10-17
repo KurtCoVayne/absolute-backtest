@@ -1088,6 +1088,7 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
                 }]
             }),
             label: Some(label),
+            optional: false,
         });
     };
     let done = |complete: bool| if complete { " complete" } else { "" };
@@ -1122,6 +1123,22 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
     }
     if d.commission {
         need("commission", "commission".into(), None, None, false);
+    }
+    // What the executor reads where the store holds it (K-5.4, K-5.6): a
+    // future's settlement prices, a source's published margins.
+    for rel in ["settlement", "margin"] {
+        if matches!(prog.relations.get(rel).map(|s| &s.kind), Some(Kind::Primitive { .. })) {
+            needs.push(Need {
+                relations: vec![stored_name(rel).unwrap_or_else(|| format!("{}.{}", prog.class, rel))],
+                calendar: None,
+                from: None,
+                to: None,
+                scope: None,
+                attributes: None,
+                label: Some(format!("{} where held", rel)),
+                optional: true,
+            });
+        }
     }
     let prefer = match d.prefer.as_str() {
         "base finest" => Preference {

@@ -502,6 +502,28 @@ The hand-computed cases are `crates/abt-tests/tests/options.rs` (ERRATA
 E-71). The pricing functions' known answers are
 `crates/abt-kernel/tests/pricing.rs`.
 
+A future is booked fully paid under `settlement none`, as R8L's book is.
+Under `settlement daily` it is margined (ERRATA E-72): a fill moves only its
+costs and the variation of the units it closes against the position's
+reference price, each session's close moves the variation since the
+reference to cash at the binding's `settlement` price (the close where it
+has none, warned) and makes that price the reference, and the NAV counts the
+position against its reference. A roll of the continuous series with a
+position on the root records the two contracts' fills and their commissions
+(`roll`); a contract held itself is settled and closed at its last trade
+(`contract_expiry`). `contract(A, @T, Root, Expiry, PointValue)` names the
+contract each series holds. The execution block's `margin published, reg_t,
+portfolio, span, approx F` price the book at every decision bar, the first
+model that covers an instrument setting its requirement: the binding's
+published margins, Reg T's option and stock rules, a portfolio margin over
+the underlying's moves with each option repriced at the volatility its mark
+implies, or a fraction of the notional. `margin_req(@T, Initial,
+Maintenance)` is written for every program and `margin_by` per instrument
+where models are listed; a margin call below the maintenance halts, is
+allowed, or liquidates whole units, the largest maintenance per unit first
+(`forced_liquidation`). The cases are `crates/abt-tests/tests/futures.rs` and
+the margin rules' are `crates/abt-kernel/tests/margin.rs`.
+
 Parameters are the only values a run may vary: `--param name=value`
 (repeatable; `unit::name` for a library's) replaces a default with a
 literal in the DSL's grammar (`30d`, `50 shares`, `0.02`, `"SPY"`). An
@@ -742,7 +764,9 @@ A vendor's data enters a store through the data layer's adapters (D-7.7,
   `ES.c.0`, by expiry) with `continuous`, `future_spec`, sessions and point
   values; equities are joined to the store's tickers by symbol. Bars are
   keyed at their close and received at `ts_recv` or the close, plus
-  `--processing-delay S`.
+  `--processing-delay S`. The venue's statistics give `settlement`
+  (back-adjusted as the bars) and `open_interest`, each keyed at the
+  session's last close and received when published.
 - `databento_live` is the live gateway's session (CRAM, the subscription,
   DBN), every record stamped at acceptance.
 - `orats` reads ORATS's strikes, files or the Data API (`--from

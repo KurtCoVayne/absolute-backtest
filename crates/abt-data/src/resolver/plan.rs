@@ -477,8 +477,13 @@ pub fn plan(store: &Store, catalog: &Catalog, demand: &Demand) -> Result<Planned
         let label = need.label.clone().unwrap_or_else(|| need.relations.join(", "));
         for rel in &need.relations {
             let rel = if rel.contains('.') { rel.clone() } else { qualified(&demand.class, rel) };
-            let rp = relation_plan(store, catalog, demand, i, need, &label, &rel, named.as_deref(), &prefer, &order, &mut out.notes)?;
-            out.relations.push(rp);
+            match relation_plan(store, catalog, demand, i, need, &label, &rel, named.as_deref(), &prefer, &order, &mut out.notes) {
+                Ok(rp) => out.relations.push(rp),
+                // An optional need's relation that nothing covers is left
+                // out of the binding (D-7.1, ERRATA E-72).
+                Err(DataError::Unresolved(why)) if need.optional => out.notes.push(format!("`{}` is not bound: {}", rel, why)),
+                Err(e) => return Err(e),
+            }
         }
     }
     let total = out.relations.iter().flat_map(|r| &r.parts).fold(Cost::default(), |c, p| c + p.cost);

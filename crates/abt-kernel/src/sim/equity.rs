@@ -151,7 +151,11 @@ impl SimExecutor {
                 let qty = -pos;
                 let m = k.multiplier(sym);
                 let commission = if self.cfg.delist_at_last_price { 0.0 } else { self.commission(k, sym, qty, price) };
-                let proceeds = -qty * price * m - commission;
+                let proceeds = if self.settled_daily(k, sym) {
+                    -self.traded_cash(k, sym, qty, price) - commission
+                } else {
+                    -qty * price * m - commission
+                };
                 result.costs.commissions += commission;
                 result.costs.turnover += qty.abs() * price * m;
                 k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
@@ -171,6 +175,7 @@ impl SimExecutor {
                     partial: false,
                     forced: true,
                     spread: 0.0,
+                    reference: None,
                 };
                 self.record(result, RunEvent::new(t, Some(sym), EventKind::Fill { fill, remainder: None }));
                 let delisted = EventKind::Action {
