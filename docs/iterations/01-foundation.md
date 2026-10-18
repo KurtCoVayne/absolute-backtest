@@ -208,7 +208,26 @@ The ingest time is the Norgate adapter's read of the lake since 2014 (thirteen y
 
 ### Phase 5 · Deploy
 
-(Pending: filled in below once run.)
+The three programs on Unix sockets, release binaries of 375332a, over the NDLake store of phase 4 (`data/store/ndlake-2014`: 756 names since 2014, five hot bar relations) with a synthetic live session recorded beside it (`--record synthetic --session S --symbols AAA,BBB`, two hours of minute bars at sixty times the wall clock). The script is `phase5.sh` in the session's scratch directory; its log is quoted below.
+
+```
+abt-data serve --store data/store/ndlake-2014 --socket D --profile workstation --record synthetic --session s1 ...
+abt-kernel serve --socket K --data D
+abt-query serve --socket Q --data D --kernel K
+abt-kernel kernel run --kernel K --strategy momentum_12_1 --param n=20 --start 2023-01-03 --end 2024-12-31 corpus-v2/...
+```
+
+| Step | Measured |
+| --- | --- |
+| Cold start, `workstation` profile | the socket 111 ms after the spawn; the service's own line: 5 hot versions, 163,664,112 bytes prefaulted, 163,664,112 locked, 0 refused, 87 ms to serving (the lock is granted to the container's root; the 8 MB `memlock` limit of the shell does not bind it) |
+| Run A, replay-sim through the kernel service | run `9b626799…`, 12 output relations (`kernel.<run>.{events, book, holdings, decisions, fills, coverage, contract, binding, plans, late, report, …}`), 41,488 rows as `abt-data query` renders them |
+| Run B, the same command, `kill -9` of the data process 5 s in | the kernel refuses the run: `Refused: configuration error: the data service: the connection closed`; nothing is written |
+| Restart (the same command; the journal replayed, the tails rebuilt) | the socket 112 ms after the spawn; 10 hot versions (the live session's relations now among them), 163,695,192 bytes prefaulted and locked, 0 refused, 92 ms to serving: 300 times inside the 30 s of A-7.3 |
+| Run A again after the restart (the pinned binding) | the same run id `9b626799…`; the same 12 output relations, 5,118,256 bytes rendered, byte for byte; the same summary |
+| A live-sim run with the deployment document (`account SIM0001 broker mock; kill_switch { halt_all on SIGTERM }; deadline { base 55s }; recording stream s2`), through the front over the data socket | run `29dd0140…`: 121 bars from 14:31 to 16:31 over 758 symbols, 123 decisions, 122 fills, 1 dropped; the run's summary logs `mode: live-sim deployment cdd139b4…`, the document's hash (A-D52). Asked of the kernel service first, the same command exited 1 (its message was overwritten by the fallback's log; the second part below keeps it) |
+| The replay of that run's recording (`--replay-of`) | 39 decisions, a strict prefix of the live run's up to 15:05, where the **first** session's recording ends: the store had recorded two live sessions of the same two instruments (s1 by the first service, killed 35 session minutes in, and s2 by the restarted one), and the live run's binding resolved the instruments' current version to s1's rows while its stream read s2's. One live session per store is the rule the deployment document should state; the second part reruns the pair on a copy of the store with one session |
+
+{{PHASE5B}}
 
 ### Amendments
 
