@@ -1,0 +1,187 @@
+//! ST-13, the codec's property tests: encode then decode is the identity on
+//! random blocks at every width 0 to 64, with and without exceptions, with
+//! `recip_exact` set and unset (Proposition 3.2); the quantum is the data's
+//! (ST-2.2's binary fractions: eighths, 1/64, 1/256, 0.25); and the lane
+//! layout packs and unpacks every width.
+
+use abt_codec::block::{extract, pack, patch, unpack, unpack_rows, Horizontal, Words};
+use abt_codec::tick::{best_width, encode, exponent, Exception, Source};
+use abt_codec::BLOCK;
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+    fn uniform(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+fn offsets(r: &mut Rng, n: usize, width: u8) -> Vec<u64> {
+    let m = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+    (0..n).map(|_| if width >= 64 { r.next() } else { r.next() & m }).collect()
+}
+
+#[test]
+fn the_lane_layout_packs_and_unpacks_every_width() {
+    let mut r = Rng(7);
+    for width in 0..=64u8 {
+        for &n in &[BLOCK, 1, 31, 32, 33, 1000] {
+            let u = offsets(&mut r, n, width);
+            let mut full = u.clone();
+            full.resize(BLOCK, 0);
+            let p = pack(&full, width);
+            match (&p.words, width) {
+                (Words::W32(w), 0..=32) => assert_eq!(w.len(), 32 * width as usize),
+                (Words::W64(w), 33..=64) => assert_eq!(w.len(), 32 * (width as usize).div_ceil(2)),
+                _ => panic!("words of the wrong size at width {}", width),
+            }
+            let mut out = [0u64; BLOCK];
+            unpack(&p, &mut out);
+            assert_eq!(&out[..n], &u[..], "width {} n {}", width, n);
+            for _ in 0..20 {
+                let j = r.below(n as u64) as usize;
+                assert_eq!(extract(&p, j), u[j], "extract at width {}", width);
+            }
+            // Row ranges equal the full decoding, at every kind of boundary.
+            for (a, b) in [
+                (0, n),
+                (0, 1),
+                (n - 1, n),
+                (n / 3, n / 3 + 1),
+                (31usize.min(n - 1), 33usize.min(n)),
+                (n / 2, n),
+                (5usize.min(n), 300usize.min(n)),
+            ] {
+                if a > b {
+                    continue;
+                }
+                let mut rows = vec![0u64; b - a];
+                unpack_rows(&p, a, b, &mut rows);
+                assert_eq!(&rows[..], &u[a..b], "rows {}..{} at width {}", a, b, width);
+            }
+        }
+    }
+}
+
+#[test]
+fn encode_then_decode_is_the_identity_with_and_without_exceptions() {
+    let mut r = Rng(3);
+    for case in 0..300 {
+        let n = 1 + r.below(BLOCK as u64) as usize;
+        let source = if case % 2 == 0 { Source::F64 } else { Source::F32 };
+        // A grid: a quantum, a base, offsets of a width; some blocks get a
+        // few wide outliers (patched), some a value off the grid (raw).
+        let e = r.below(7) as u8;
+        let g = [1u64, 1, 2, 5, 25, 125, 3, 7][r.below(8) as usize];
+        let width = r.below(20) as u8;
+        let base = r.below(1 << 30) as i64;
+        let mut ints: Vec<i64> = offsets(&mut r, n, width).iter().map(|&u| base + (g * u) as i64).collect();
+        let outliers = if case % 3 == 0 { r.below(4) as usize } else { 0 };
+        for _ in 0..outliers {
+            let j = r.below(n as u64) as usize;
+            ints[j] = base + (g * (1u64 << 40) + g * r.below(1000)) as i64;
+        }
+        let scale = 10f64.powi(e as i32);
+        let mut values: Vec<f64> = ints.iter().map(|&i| i as f64 / scale).collect();
+        if source == Source::F32 {
+            values = values.iter().map(|&x| (x as f32) as f64).collect();
+        }
+        let raw_at = if case % 5 == 0 {
+            let j = r.below(n as u64) as usize;
+            values[j] = 0.1234567891234 + r.uniform(); // off every grid up to 10^-9
+            Some(j)
+        } else {
+            None
+        };
+        let enc = encode(&values, source);
+        assert_eq!(enc.n as usize, n);
+        let back = enc.decode();
+        for (j, (&a, &b)) in values.iter().zip(&back).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "case {} row {}: {} came back as {}", case, j, a, b);
+        }
+        assert_eq!(enc.exact(), raw_at.is_none(), "case {}", case);
+        if let Some(j) = raw_at {
+            assert!(enc.exceptions.iter().any(|x| matches!(x, Exception::Raw { position, .. } if *position as usize == j)));
+        }
+        assert!(enc.exceptions.windows(2).all(|w| w[0].position() < w[1].position()), "exceptions are sorted");
+        // The packed words with the exceptions patched decode to the offsets.
+        let mut full = enc.offsets.clone();
+        full.resize(BLOCK, 0);
+        let p = pack(&full, enc.width);
+        let mut out = [0u64; BLOCK];
+        unpack(&p, &mut out);
+        patch(&enc.exceptions, 0, n, &mut out[..n]);
+        for (j, &o) in out.iter().enumerate().take(n) {
+            if let Some(u) = enc.offset(j) {
+                assert_eq!(o, u, "case {} row {}", case, j);
+            }
+        }
+        // The exact sum of any range is the sum of the integers.
+        if enc.exact() {
+            let (a, b) = (r.below(n as u64) as usize, n);
+            let want: i128 = (a..b).map(|j| enc.integer(j).unwrap() as i128).sum();
+            assert_eq!(enc.sum(a, b), Some(want));
+        }
+    }
+}
+
+#[test]
+fn the_quantum_is_found_from_the_data() {
+    // Eighths at exponent 3 with GCD 125 (1995's close), 0.25 ticks (ES),
+    // 1/64 (ZN), whole volumes.
+    for (values, e, g) in [
+        (vec![12.125, 12.25, 12.5, 13.0, 12.375], 3u8, 125u64),
+        (vec![4_200.25, 4_200.5, 4_201.0, 4_199.75], 2, 25),
+        (vec![110.0 + 1.0 / 64.0, 110.0 + 3.0 / 64.0, 110.0 + 10.0 / 64.0], 6, 15625), // 1/64 = 0.015625
+        (vec![1_000.0, 2_500.0, 1_000_000.0], 0, 1500),
+    ] {
+        let enc = encode(&values, Source::F64);
+        assert_eq!((enc.e, enc.g), (e, g), "{:?}", values);
+        assert_eq!(enc.decode(), values);
+        assert!(enc.exact());
+    }
+    assert_eq!(exponent(&[1.5, 2.25], Source::F64), Some(2));
+    assert_eq!(exponent(&[0.1 + 0.2], Source::F64), None);
+    // A constant block has width 0 and GCD 1.
+    let enc = encode(&[7.5; 100], Source::F64);
+    assert_eq!((enc.width, enc.g, enc.e), (0, 1, 1));
+    // The width minimises bits plus 74 per exception.
+    assert_eq!(best_width(&[1, 2, 3, 1 << 40]), 2);
+    assert_eq!(best_width(&[1 << 40; 100]), 41);
+    // An f32 source: values exactly f32, with the view rounding back to the bits.
+    let values: Vec<f64> = (0..200).map(|i| (123.456f32 + i as f32 * 0.01) as f64).collect();
+    let enc = encode(&values, Source::F32);
+    assert!(enc.exact(), "f32 prices at 2 decimals are on a grid: exponent {}", enc.e);
+    assert_eq!(
+        enc.decode().iter().map(|&x| (x as f32).to_bits()).collect::<Vec<_>>(),
+        values.iter().map(|&x| (x as f32).to_bits()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_tail_appends_in_place_and_reads_its_visible_prefix() {
+    let mut r = Rng(5);
+    for width in [0u8, 1, 7, 12, 31, 32, 33, 50, 64] {
+        let u = offsets(&mut r, 1000, width);
+        let mut h = Horizontal::new(width);
+        for (j, &v) in u.iter().enumerate() {
+            assert!(h.fits(v));
+            h.push(v);
+            assert_eq!(h.get(j), v);
+        }
+        assert_eq!(h.values(1000), u);
+        assert_eq!(h.values(10), &u[..10]);
+        assert_eq!(Horizontal::of(&u, width), h);
+        if width < 64 {
+            assert!(!h.fits(1u64 << width), "a value above the width does not fit");
+        }
+    }
+}
