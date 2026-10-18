@@ -1,24 +1,25 @@
-//! `abt data` (D-10): the data layer's commands, over a store directory
-//! (`--store DIR`, else `$ABT_STORE`, else `./abt-store`).
+//! The data layer's commands (D-10): `abt-data` is the layer's binary and
+//! `abt data` the front's door to the same functions, over a store
+//! directory (`--store DIR`, else `$ABT_STORE`, else `./abt-store`).
 //!
 //! ```text
-//! abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...']
+//! abt-data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...']
 //!                  [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]
-//! abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...']
+//! abt-data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...']
 //!                  [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]
-//! abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry]
+//! abt-data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry]
 //!                  [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE]
 //!                  [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]
-//! abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100]
+//! abt-data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100]
 //!                  [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]
-//! abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--attributes K=V,...] <files...>
-//! abt data ingest  [--store DIR] --adapter synthetic --class C [--days N] [--symbols A,B] [--seed N] <files...>
-//! abt data catalog [--store DIR] [--class C | --sources [--config FILE]]
-//! abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
-//! abt data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
-//! abt data stats   [--store DIR] [--relation R] [--json]
-//! abt data pin|unpin [--store DIR] VERSION | --binding B
-//! abt data gc      [--store DIR] [--disk-budget BYTES]
+//! abt-data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--base CAL] [--attributes K=V,...]
+//! abt-data ingest  [--store DIR] --adapter synthetic --class C [--base CAL] [--days N] [--symbols A,B] [--seed N]
+//! abt-data catalog [--store DIR] [--class C | --sources [--config FILE]]
+//! abt-data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
+//! abt-data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
+//! abt-data stats   [--store DIR] [--relation R] [--json]
+//! abt-data pin|unpin [--store DIR] VERSION | --binding B
+//! abt-data gc      [--store DIR] [--disk-budget BYTES]
 //! ```
 //!
 //! `norgate` reads the NDLake lake (D-7.7, `adapters::norgate`), ingested
@@ -29,26 +30,26 @@
 //! `orats` reads ORATS's strikes files, or its Data API at a URL
 //! (`adapters::orats`): option contracts keyed by their OCC symbols, their
 //! underlyings joined to the store's tickers.
-//! `bundle_v2` reads the present bundle formats (a bundle directory with its
-//! manifest, or a directory of one Parquet file per relation) with the
-//! kernel's loaders and ingests them through the adapter of keyed rows; the
-//! class files among `<files...>` name the relations (ERRATA E-38).
-//! `synthetic` is the present generators, ingested the same way. The versions
-//! carry the calendar of the bars, `reviewed = complete` for a bundle whose
-//! tests passed and for the generators' markets, the bundle's `version`, and
-//! what `--attributes` states (a reviewer vouching for a directory, D-2.1).
+//! `bundle_v2` reads a bundle of the first formulation (a directory with its
+//! manifest, `adapters::bundle`) under the registry's schemas of `--class`
+//! and ingests it through the adapter of keyed rows. `synthetic` is the
+//! deterministic markets of `adapters::synthetic`, ingested the same way;
+//! `--base` names the bars' calendar (the class's finest by default: `1d`
+//! for equities, `1m` for futures). The versions carry the calendar of the
+//! bars, `reviewed = complete` for a bundle whose tests passed and for the
+//! generators' markets, the bundle's `version`, and what `--attributes`
+//! states (a reviewer vouching for a directory, D-2.1).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::Arc;
 
-use abt_data::catalog::{classes, render_class};
-use abt_data::query::{execute, explain, ResolvedView};
-use abt_data::service::{listen, DataService};
-use abt_data::Store;
-use abt_kernel::check::{class_program_at, Program, Workspace};
-use abt_kernel::data::{load_parquet_dir, synthetic_for_program};
+use crate::adapters::{bundle, market, synthetic};
+use crate::catalog::{classes, render_class};
+use crate::query::{execute, explain, ResolvedView};
+use crate::service::{listen, DataService};
+use crate::Store;
 use abt_wire::generated::abt::wire::{Atom, Constant, ConstantKind, Disjunction, Identity, Latest, Op, Point, Predicate, QueryForm, Scan, Section, Series, View};
 use abt_wire::scalar::Time;
 use arrow::array::RecordBatch;
@@ -95,7 +96,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--attributes K=V,...] <files...>\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--days N] [--symbols A,B,C] [--seed N] <files...>\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--base CAL] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--base CAL] [--days N] [--symbols A,B,C] [--seed N]\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>"
     );
     exit(1)
 }
@@ -112,45 +113,21 @@ fn open(a: &Args) -> Store {
     Store::open(&store_dir(a)).unwrap_or_else(|e| fail(&format!("{}: {}", store_dir(a).display(), e)))
 }
 
-fn workspace(files: &[String]) -> Workspace {
-    let mut ws = Workspace::new();
-    let mut paths = Vec::new();
-    fn collect(p: &Path, out: &mut Vec<PathBuf>) {
-        if p.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(p) {
-                for e in rd.flatten() {
-                    collect(&e.path(), out);
-                }
-            }
-        } else if p.extension().is_some_and(|x| x == "dsl") {
-            out.push(p.to_path_buf());
-        }
-    }
-    for f in files {
-        collect(Path::new(f), &mut paths);
-    }
-    paths.sort();
-    for p in paths {
-        let src = std::fs::read_to_string(&p).unwrap_or_else(|e| fail(&format!("{}: {}", p.display(), e)));
-        if let Err(e) = ws.add_source(&src) {
-            fail(&format!("{}:{}: parse error: {}", p.display(), e.span, e.message));
-        }
-    }
-    ws
+/// The class and the bars' calendar an ingest of a market is asked for:
+/// `--class C` (one the registry knows) and `--base CAL` (the class's
+/// finest by default).
+fn class_of(a: &Args) -> (String, String) {
+    let class = a.opts.get("class").cloned().unwrap_or_else(|| fail("--class names the class (equity, future, option)"));
+    let def = classes().into_iter().find(|k| k.name == class).unwrap_or_else(|| fail(&format!("no class `{}`", class)));
+    let base = a
+        .opts
+        .get("base")
+        .map(|b| b.trim_start_matches('@').to_string())
+        .or_else(|| def.base.map(|(b, _)| b.to_string()))
+        .unwrap_or_else(|| "1d".to_string());
+    (class, base)
 }
 
-fn class_program(a: &Args) -> Program {
-    let class = a.opts.get("class").cloned().unwrap_or_else(|| fail("--class CLASS names the class the rows are of"));
-    let ws = workspace(&a.positional);
-    class_program_at(&ws, &class, None).unwrap_or_else(|diags| {
-        for d in &diags {
-            eprintln!("{}", d);
-        }
-        fail(&format!("the class `{}` does not check; pass its class file and the library among the files", class))
-    })
-}
-
-/// `abt data`.
 pub fn main(args: &[String]) {
     let a = parse(args);
     match a.cmd.as_str() {
@@ -175,45 +152,34 @@ pub fn main(args: &[String]) {
                 vendor_ingest(&a, v);
                 return;
             }
-            let prog = class_program(&a);
-            let ds = match a.opts.get("adapter").map(String::as_str) {
+            let (class, base) = class_of(&a);
+            let sub_daily = synthetic::is_sub_daily(&base);
+            let mut store = open(&a);
+            let m = match a.opts.get("adapter").map(String::as_str) {
                 Some("bundle_v2") => {
                     let from = a.opts.get("from").cloned().unwrap_or_else(|| fail("--from DIR names the bundle"));
-                    let dir = Path::new(&from);
-                    if dir.join("manifest.json").exists() {
-                        let (ds, m) = abt_kernel::bundle::load_bundle(&prog, dir).unwrap_or_else(|e| fail(&e));
-                        eprintln!("bundle {}@{}{}", m.name, m.version, if ds.unreviewed { ", its tests not passed: unreviewed" } else { "" });
-                        ds
-                    } else {
-                        let (ds, notes) = load_parquet_dir(&prog, dir).unwrap_or_else(|e| fail(&e));
-                        for n in notes {
-                            eprintln!("note: {}", n);
-                        }
-                        ds
-                    }
+                    let schemas = store.registry.schemas(None);
+                    let (m, manifest) = bundle::load(Path::new(&from), &class, &schemas).unwrap_or_else(|e| fail(&e.to_string()));
+                    eprintln!("bundle {}@{}{}", manifest.name, manifest.version, if m.unreviewed { ", its tests not passed: unreviewed" } else { "" });
+                    m
                 }
                 Some("synthetic") => {
+                    let (names, days, start, seed) = synthetic::defaults(sub_daily);
                     let syms: Vec<String> = a
                         .opts
                         .get("symbols")
                         .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
-                        .unwrap_or_else(|| ["AAA", "XYZ", "BBB", "SPY", "DDD"].iter().map(|s| s.to_string()).collect());
+                        .unwrap_or_else(|| names.iter().map(|s| s.to_string()).collect());
                     let syms: Vec<&str> = syms.iter().map(String::as_str).collect();
-                    let days: usize = a
-                        .opts
-                        .get("days")
-                        .map(|d| d.parse().unwrap_or_else(|_| fail("--days takes a number")))
-                        .unwrap_or(if prog.base.is_sub_daily() { 40 } else { 500 });
-                    let seed: u64 = a.opts.get("seed").map(|d| d.parse().unwrap_or_else(|_| fail("--seed takes a number"))).unwrap_or(7);
-                    let start = if prog.base.is_sub_daily() { (2024, 1, 2) } else { (2022, 1, 3) };
-                    synthetic_for_program(&prog, &syms, start, days, seed)
+                    let days: usize = a.opts.get("days").map(|d| d.parse().unwrap_or_else(|_| fail("--days takes a number"))).unwrap_or(days);
+                    let seed: u64 = a.opts.get("seed").map(|d| d.parse().unwrap_or_else(|_| fail("--seed takes a number"))).unwrap_or(seed);
+                    synthetic::market(&class, sub_daily, &syms, start, days, seed)
                 }
-                _ => fail("--adapter is norgate, databento, bundle_v2 or synthetic"),
+                _ => fail("--adapter is norgate, databento, orats, bundle_v2 or synthetic"),
             };
             let extra = statements(&a);
-            let attributes = crate::dataset_attributes(&ds, &prog.base.to_string(), &extra);
-            let mut store = open(&a);
-            crate::ingest_dataset(&mut store, &ds, &prog.class, &attributes).unwrap_or_else(|e| fail(&e));
+            let attributes = market::attributes(&m, &base, &extra);
+            market::ingest(&mut store, &m, &class, &attributes).unwrap_or_else(|e| fail(&e.to_string()));
             for (r, s, v) in store.registry.currents() {
                 println!("{} {} {}", r, s, v);
             }
@@ -502,7 +468,7 @@ fn time(s: &str) -> Result<i64, String> {
 
 /// An instrument key (a vendor key the registry holds) as its id.
 fn key_id(store: &Store, key: &str) -> Result<u64, String> {
-    let ins = abt_data::adapter::instruments(store).map_err(|e| e.to_string())?;
+    let ins = crate::adapter::instruments(store).map_err(|e| e.to_string())?;
     ins.iter().find(|i| i.key == key).map(|i| i.id).ok_or_else(|| format!("`{}` is no instrument key of the store", key))
 }
 
@@ -647,7 +613,7 @@ fn parse_query(store: &Store, text: &str) -> Result<(QueryForm, Option<i64>), St
 /// `--clock-rate R` one running R times as fast from `--clock-origin T`
 /// (default: one bar before the recorded session's start), a rehearsal's;
 /// and the calendars' graces, `--grace 'base=0.25;days=0'` in seconds.
-fn live_clock(a: &Args) -> (Arc<dyn abt_data::live::Clock>, BTreeMap<String, i64>) {
+fn live_clock(a: &Args) -> (Arc<dyn crate::live::Clock>, BTreeMap<String, i64>) {
     let mut grace = BTreeMap::new();
     for kv in a.opts.get("grace").map(|s| s.split(';').map(str::to_string).collect::<Vec<_>>()).unwrap_or_default() {
         if kv.trim().is_empty() {
@@ -658,14 +624,14 @@ fn live_clock(a: &Args) -> (Arc<dyn abt_data::live::Clock>, BTreeMap<String, i64
         grace.insert(k.trim().to_string(), (secs * 1e9).round() as i64);
     }
     let Some(rate) = a.opts.get("clock-rate") else {
-        return (Arc::new(abt_data::live::WallClock), grace);
+        return (Arc::new(crate::live::WallClock), grace);
     };
     let rate: f64 = rate.parse().ok().filter(|r: &f64| *r > 0.0).unwrap_or_else(|| fail("--clock-rate takes a positive number"));
     let origin = match a.opts.get("clock-origin").or(a.opts.get("start")) {
         Some(t) => parse_time(t) - bar_of(a) * 2,
         None => fail("--clock-rate starts the clock at --clock-origin T (or two bars before --start)"),
     };
-    (Arc::new(abt_data::live::ScaledClock::new(origin, rate)), grace)
+    (Arc::new(crate::live::ScaledClock::new(origin, rate)), grace)
 }
 
 fn parse_time(t: &str) -> i64 {
@@ -675,7 +641,7 @@ fn parse_time(t: &str) -> i64 {
 /// The bar a recorded session plans (`--bar 1m`).
 fn bar_of(a: &Args) -> i64 {
     let bar = a.opts.get("bar").map(String::as_str).unwrap_or("1m");
-    abt_data::resolver::calendar_nanos(bar).unwrap_or_else(|| fail(&format!("--bar: `{}` is not a bar (1m, 5m, 1h)", bar)))
+    crate::resolver::calendar_nanos(bar).unwrap_or_else(|| fail(&format!("--bar: `{}` is not a bar (1m, 5m, 1h)", bar)))
 }
 
 /// `abt data serve --record synthetic --session S --symbols A,B --start T
@@ -685,7 +651,7 @@ fn bar_of(a: &Args) -> i64 {
 /// default), recorded while the service serves. A vendor's live feed is
 /// recorded through the data layer's `DataService::record` with its
 /// adapter's subscription (ERRATA E-69).
-fn record(a: &Args, svc: &Arc<DataService>, source: &str, clock: Arc<dyn abt_data::live::Clock>) -> abt_data::live::Recording {
+fn record(a: &Args, svc: &Arc<DataService>, source: &str, clock: Arc<dyn crate::live::Clock>) -> crate::live::Recording {
     if source != "synthetic" {
         fail(&format!(
             "--record {}: the command line records the synthetic feed; a vendor's live feed is recorded through its adapter's subscription (ERRATA E-69)",
@@ -707,7 +673,7 @@ fn record(a: &Args, svc: &Arc<DataService>, source: &str, clock: Arc<dyn abt_dat
     let syms: Vec<&str> = symbols.iter().map(String::as_str).collect();
     let delay = a.opts.get("delay").map(|d| d.parse::<f64>().unwrap_or_else(|_| fail("--delay takes milliseconds"))).unwrap_or(50.0);
     let seed = a.opts.get("seed").map(|d| d.parse().unwrap_or_else(|_| fail("--seed takes a number"))).unwrap_or(7);
-    let feed = abt_data::live::SyntheticFeed::new(clock, &syms, labels.clone(), (delay * 1e6).round() as i64, seed);
+    let feed = crate::live::SyntheticFeed::new(clock, &syms, labels.clone(), (delay * 1e6).round() as i64, seed);
     let prelude = feed.prelude().unwrap_or_else(|e| fail(&e.to_string()));
     svc.open_session(&session, "synthetic", &prelude, &labels).unwrap_or_else(|e| fail(&e.to_string()));
     eprintln!("recording session `{}`: {} bars of {} from {}", session, labels.len(), symbols.join(", "), Time(start).iso());
@@ -749,7 +715,7 @@ fn vendor_ingest(a: &Args, adapter: &str) {
                     settings.insert(key.to_string(), v.clone());
                 }
             }
-            let n = abt_data::adapters::norgate::Norgate::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
+            let n = crate::adapters::norgate::Norgate::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
             let (got, r) = n.read().unwrap_or_else(|e| fail(&e.to_string()));
             eprintln!(
                 "norgate: {} assets, {} bars from {} to {}; {} splits, {} dividends, {} delistings, {} membership intervals, {} reviewed exceptions",
@@ -789,7 +755,7 @@ fn vendor_ingest(a: &Args, adapter: &str) {
                     settings.insert(key.to_string(), v.clone());
                 }
             }
-            let d = abt_data::adapters::databento::Databento::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
+            let d = crate::adapters::databento::Databento::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
             let (got, r) = d.read(d.options()).unwrap_or_else(|e| fail(&e.to_string()));
             let rolls: usize = r.roots.values().map(|x| x.rolls.len()).sum();
             eprintln!(
@@ -827,7 +793,7 @@ fn vendor_ingest(a: &Args, adapter: &str) {
                     settings.insert(key.to_string(), v.clone());
                 }
             }
-            let o = abt_data::adapters::orats::Orats::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
+            let o = crate::adapters::orats::Orats::from_settings(&settings).unwrap_or_else(|e| fail(&e.to_string()));
             let (got, r) = o.read(o.options()).unwrap_or_else(|e| fail(&e.to_string()));
             eprintln!(
                 "orats: {} files, {} rows kept of {}; {} contracts in {} snapshots of {}",
@@ -856,12 +822,12 @@ fn vendor_ingest(a: &Args, adapter: &str) {
 
 /// The sources beside the store: the catalog `--config FILE` names, with
 /// the adapters its sources are fetched by.
-fn sources(a: &Args) -> abt_data::resolver::Sources {
-    let Some(path) = a.opts.get("config") else { return abt_data::resolver::Sources::store_only() };
-    let catalog = abt_data::resolver::Catalog::load(Path::new(path)).unwrap_or_else(|e| fail(&e.to_string()));
-    let (adapters, missing) = crate::adapters_of(&catalog);
+fn sources(a: &Args) -> crate::resolver::Sources {
+    let Some(path) = a.opts.get("config") else { return crate::resolver::Sources::store_only() };
+    let catalog = crate::resolver::Catalog::load(Path::new(path)).unwrap_or_else(|e| fail(&e.to_string()));
+    let (adapters, missing) = crate::adapters::of_catalog(&catalog);
     for m in missing {
         eprintln!("note: {}: no adapter {}; it is planned, not bought from", path, m);
     }
-    abt_data::resolver::Sources { catalog, adapters }
+    crate::resolver::Sources { catalog, adapters }
 }

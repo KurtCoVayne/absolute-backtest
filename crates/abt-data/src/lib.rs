@@ -9,6 +9,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod agg;
 pub mod catalog;
+pub mod cli;
 pub mod error;
 pub mod live;
 pub mod options;

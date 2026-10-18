@@ -8,6 +8,7 @@ pub mod activation;
 pub mod briefs;
 pub mod cli;
 pub mod data;
+pub mod dispatch;
 pub mod feed;
 pub mod kernel;
 pub mod metrics;

@@ -11,7 +11,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | Id | Decision | Code | Test | Status | Note |
 | --- | --- | --- | --- | --- | --- |
 | A-D1 | The split lands the second formulation | `crates/abt-kernel/src/{syntax,check,compiler}`, `corpus-v2/` | `abt-tests/tests/corpus_v2.rs` | done | M-3 |
-| A-D2 | Three programs in one Cargo workspace | `crates/abt-{data,kernel,query}` as libraries; one binary `abt` with `data`, `kernel`, `query` subcommands | `abt/tests/deployment.rs` | contradicts | E-81: no `abt-data`, `abt-kernel`, `abt-query` binaries; iteration 1 (M-0) adds them and moves each layer's commands into its crate |
+| A-D2 | Three programs in one Cargo workspace | `crates/abt-data/src/bin/abt-data.rs`, `crates/abt-kernel/src/bin/abt-kernel.rs`, `crates/abt-query/src/bin/abt-query.rs`; the layers' commands in `abt_data::cli`, `abt_kernel::{cli,kernel_cli}`, `abt_query::dispatch`; `abt` dispatches to them | `abt/tests/deployment.rs` (the three programs on sockets), `abt-tests/tests/{layering,synthetic}.rs` | done | E-83 (iteration 1, M-0); E-81's one-binary state closed |
 | A-D3 | The protocol is the only boundary | `crates/abt-wire` (frames, FlatBuffers, in-process channel) | `abt-wire/tests/rpc.rs`, `abt-tests/tests/determinism.rs` | done | E-29, E-36 |
 | A-D4 | All Rust | the workspace; Python only in `scripts/parity`, `reference/`, `scripts/study` | — | done | E-19 (BLAKE3 pure Rust) |
 | A-D5 | `abt` is a thin front | `crates/abt/src/main.rs` | `abt/tests/cli.rs` | done | |
@@ -33,7 +33,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | A-D21 | The data layer resolves demands | `crates/abt-data/src/resolver/` | `abt-data/tests/resolver.rs` | done | E-67 |
 | A-D22 | Budgets default to zero money | `resolver/cost.rs` | `resolver.rs::a_demand_with_money_budget_zero_never_asks_a_vendor` | done | |
 | A-D23 | Static and dynamic demands | `resolver/prepass.rs` | `abt-data/tests/options.rs` | done | E-70 |
-| A-D24 | Vendors: Norgate, Databento (historical and live), ORATS | `crates/abt-data/src/adapters/{norgate,databento,databento_live,dbn,orats}.rs` | `abt-data/tests/{norgate,databento,dbn,live,options}.rs` on fixtures | partial | E-68: fixtures only here; a real session and the lake are the owner's; the hot staging of A-D38 is missing |
+| A-D24 | Vendors: Norgate, Databento (historical and live), ORATS | `crates/abt-data/src/adapters/{norgate,databento,databento_live,dbn,orats}.rs`; the test adapters `synthetic` and `bundle` are the data layer's own (E-83) | `abt-data/tests/{norgate,databento,dbn,live,options}.rs` on fixtures; `abt-tests/tests/synthetic.rs` | partial | E-68: fixtures only here; a real session and the lake are the owner's; the hot staging of A-D38 is missing |
 | A-D25 | Options in scope | `crates/abt-kernel/src/sim/{option,combo,exercise,adjust}.rs`, `functions/` | `abt-tests/tests/options.rs`, `abt-kernel/tests/pricing.rs` | partial | E-71; the owner's options book (A-8) not supplied |
 | A-D26 | Margin not simplified: five models | `sim/margin/` | `abt-kernel/tests/margin.rs` | done | E-72 |
 | A-D27 | Three run modes, one evaluator | `kernel/mod.rs::RunMode`, `live/` | `abt-tests/tests/{replay,live_mock}.rs` | done | E-69, E-82 (the broker's reports are polled, not stream events) |

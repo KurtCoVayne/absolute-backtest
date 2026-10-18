@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "abt-query"
+path = "src/bin/abt-query.rs"
+
 [dependencies]
 abt-wire.workspace = true
 arrow.workspace = true

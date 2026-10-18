@@ -141,8 +141,7 @@ fn a_query_binds_a_variable() {
 fn a_ledger_query_over_a_store_writes_to_the_store() {
     let dir = scratch("ledger-store");
     let store = dir.join("store").to_string_lossy().to_string();
-    let lib = [corpus("catalog").to_string_lossy().to_string(), corpus("lib").to_string_lossy().to_string()];
-    let ingest = abt(&["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "200", &lib[0], &lib[1]]);
+    let ingest = abt(&["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "200"]);
     assert!(ingest.status.success(), "{:?}", text(&ingest));
     let files = strategy_files("sma_crossover");
     let mut args = vec!["query", "--strategy", "sma_crossover", "--text", "ledger above into above_daily", "--data", &store];
@@ -176,8 +175,7 @@ fn a_ledger_query_over_a_store_writes_to_the_store() {
 fn a_live_broker_run_goes_through_the_deployments_broker() {
     let dir = scratch("live-broker");
     let store = dir.join("store").to_string_lossy().to_string();
-    let lib = [corpus("catalog").to_string_lossy().to_string(), corpus("lib").to_string_lossy().to_string()];
-    let ingest = abt(&["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "200", &lib[0], &lib[1]]);
+    let ingest = abt(&["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "200"]);
     assert!(ingest.status.success(), "{:?}", text(&ingest));
     let document = |name: &str, body: &str| {
         let p = dir.join(name);

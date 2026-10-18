@@ -2305,3 +2305,38 @@ batch driver agree on every corpus program. Each bless since:
   package's tests; suites that span layers live in a test-only crate
   `crates/abt-tests` (with the shared fixtures as its library); each layer's
   own suites live in its crate.
+
+- **E-83 (A-D2, Definition A-2.1, D-7.7, M-0; the three programs).**
+  Definition A-2.1 gives each layer a binary `abt-L` that links no other
+  layer; until iteration 1 (`docs/iterations/01-foundation.md`) the three
+  services were subcommands of the front alone (E-81). Now
+  `crates/abt-data/src/bin/abt-data.rs`, `crates/abt-kernel/src/bin/abt-kernel.rs`
+  and `crates/abt-query/src/bin/abt-query.rs` are the programs, and the
+  front's `abt data|kernel|query ...` and `abt plan|metrics|...` are doors to
+  the same functions. What this moved:
+  - The data layer's commands live in `abt_data::cli`. Its `synthetic` and
+    `bundle_v2` adapters are the data layer's own (`adapters::synthetic`,
+    `adapters::bundle`, over `adapters::market`): the kernel's generators and
+    bundle loader were the front's (E-38), and a layer's binary cannot link
+    them. The data layer's markets are the kernel's bit for bit
+    (`crates/abt-tests/tests/synthetic.rs` holds every generator and a
+    written bundle equal through both), so the golden runs are unchanged and
+    a store either fills is the same store. `abt data ingest` no longer
+    takes the class files: `--class C` names the class the registry knows
+    and `--base CAL` the bars' calendar (the class's finest by default).
+    The directory-of-Parquet-files form of `bundle_v2` (a loose directory
+    without a manifest, read by the kernel's `load_parquet_dir`) is not an
+    adapter of the data layer: it is a test loader, and the front keeps it
+    (`abt::loose_ingest`, which `abt data ingest` tries first); `abt-data`
+    refuses such a directory naming the manifest it needs.
+  - The query layer's commands live in `abt_query::dispatch`, which reaches
+    sockets alone; the front passes it `Links` that add a store served in
+    process (`--store DIR`) and kernels in process (`--kernels N`).
+    `abt-query briefs` reads the briefs market from the data service it is
+    given; the front makes that market itself.
+  - `abt-kernel` reads its data at `--data SOCKET` only: `--synthetic` and a
+    store directory are the front's, which links the data layer (the
+    kernel's provider hooks, `kernel::bind::install_provider`, stay empty in
+    the binary and refuse with the message naming `--data SOCKET`).
+  - `crates/abt/tests/deployment.rs` runs the three programs, found beside
+    the front's binary; `cargo test --workspace` builds them.

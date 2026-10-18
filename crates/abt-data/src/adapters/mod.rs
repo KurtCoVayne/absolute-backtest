@@ -16,13 +16,16 @@ use crate::error::DataError;
 use crate::resolver::catalog::Offer;
 use crate::store::Store;
 
+pub mod bundle;
 pub mod databento;
 pub mod databento_live;
 pub mod dbn;
 pub mod http;
+pub mod market;
 pub mod mock;
 pub mod norgate;
 pub mod orats;
+pub mod synthetic;
 
 /// A purchase: one relation of a need over a span, as the plan priced it.
 #[derive(Clone, Debug, PartialEq)]
@@ -182,4 +185,30 @@ pub trait Feed: Send {
     /// The rows of the next records to arrive, waiting until one does;
     /// `None` when the session ends.
     fn next(&mut self) -> Result<Option<Fetched>, DataError>;
+}
+
+/// The adapters a catalog's sources are fetched by (D-7.7), each
+/// configured by its source's settings and keyed by the source's name, and
+/// what could not be made of the others (an adapter abt does not have, a
+/// setting it refuses): such a source is listed and planned, and buying
+/// from it is refused naming its adapter.
+pub fn of_catalog(catalog: &crate::resolver::Catalog) -> (BTreeMap<String, Arc<dyn Adapter>>, Vec<String>) {
+    let mut out: BTreeMap<String, Arc<dyn Adapter>> = BTreeMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    for s in &catalog.sources {
+        let made: Result<Arc<dyn Adapter>, String> = match s.adapter.as_str() {
+            "norgate" => norgate::Norgate::from_settings(&s.settings).map(|n| Arc::new(n) as _).map_err(|e| e.to_string()),
+            "databento" => databento::Databento::from_settings(&s.settings).map(|d| Arc::new(d) as _).map_err(|e| e.to_string()),
+            "databento_live" => databento_live::DatabentoLive::from_settings(&s.settings).map(|d| Arc::new(d) as _).map_err(|e| e.to_string()),
+            "orats" => orats::Orats::from_settings(&s.settings).map(|o| Arc::new(o) as _).map_err(|e| e.to_string()),
+            other => Err(format!("`{}` (no such adapter)", other)),
+        };
+        match made {
+            Ok(a) => {
+                out.insert(s.name.clone(), a);
+            }
+            Err(e) => missing.push(format!("{} for the source `{}`", e, s.name)),
+        }
+    }
+    (out, missing)
 }

@@ -36,7 +36,7 @@ In one process, the front serving a store directory itself:
 
 ```
 abt check corpus-v2/catalog corpus-v2/lib corpus-v2/strategies      # every strategy, against the catalog and the library
-abt data ingest --store ./store --adapter synthetic --class equity --days 500 corpus-v2/catalog corpus-v2/lib   # a synthetic market in a store
+abt data ingest --store ./store --adapter synthetic --class equity --days 500   # a synthetic market in a store
 abt run --strategy sma_crossover --data ./store --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN: ...`
 abt metrics --run RUN --store ./store
 abt data query --store ./store 'kernel.RUN.book'
@@ -46,18 +46,24 @@ abt query --strategy sma_crossover --text 'trace decide at 2022-04-07' --text 'w
 abt query --strategy sma_crossover --text '? above(A, T), close(A, T, P), P > 50 USD/share at T = 2022-04-07' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 ```
 
-As three processes over sockets, one per layer (a socket's path must be
-shorter than 108 bytes):
+As three programs over sockets, one per layer (Definition 2.1: each
+layer's binary links that layer and the shared crates and no other layer;
+a socket's path must be shorter than 108 bytes):
 
 ```
-abt data serve --store ./store --socket data.sock &
-abt kernel serve --socket kernel.sock --data data.sock &
-abt query serve --socket query.sock --data data.sock --kernel kernel.sock &
-abt kernel run --kernel kernel.sock --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN`
-abt kernel query --kernel kernel.sock --run RUN --text 'coverage'
-abt plan run study.plan corpus-v2/catalog corpus-v2/lib --query query.sock
-abt metrics --run RUN --query query.sock
+abt-data serve --store ./store --socket data.sock &
+abt-kernel serve --socket kernel.sock --data data.sock &
+abt-query serve --socket query.sock --data data.sock --kernel kernel.sock &
+abt-kernel kernel run --kernel kernel.sock --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN`
+abt-kernel kernel query --kernel kernel.sock --run RUN --text 'coverage'
+abt-query plan run study.plan corpus-v2/catalog corpus-v2/lib --query query.sock
+abt-query metrics --run RUN --query query.sock
 ```
+
+The front runs the same commands as `abt data ...`, `abt kernel ...` and
+`abt plan|metrics|...`, and adds what one process can do: a store served
+in process (`--data STORE`, `--store DIR`), a synthetic market
+(`--synthetic`) and kernels in process (`--kernels N`).
 
 A run reads its data from a store:
 - `--data STORE` serves a store directory in the process, and the run's
@@ -168,8 +174,8 @@ error naming both rows; an identical row is dropped), a missing or empty
 file leaving the relation empty with a `note:`.
 
 ```
-abt data ingest --store ./store --adapter bundle_v2 --from ./bundle --class equity corpus-v2/catalog corpus-v2/lib
-abt data ingest --store ./reviewed --adapter bundle_v2 --from ./bundle --class equity --attributes reviewed=complete corpus-v2/catalog corpus-v2/lib
+abt data ingest --store ./store --adapter bundle_v2 --from ./bundle --class equity
+abt data ingest --store ./reviewed --adapter bundle_v2 --from ./bundle --class equity --attributes reviewed=complete
 abt run --strategy sma_crossover --data ./store corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 ```
 
@@ -1105,6 +1111,9 @@ abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VA
 abt kernel run ... [--mode replay-sim|live-sim|live-broker] [--session S] [--deployment FILE]
 abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint | flatten | release]
 abt query serve [--socket PATH] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt-data CMD ...    the data layer's program: `abt data CMD ...` without the front
+abt-kernel CMD ...  the kernel's program: `abt kernel CMD ...` as `abt-kernel kernel CMD ...` (or `abt-kernel serve|status|control`), the program commands (check, run, ...) as themselves, over --data SOCKET only
+abt-query CMD ...   the query layer's program: serve, plan, metrics, lineage, dispute, test, claim, feed, activation, briefs, over --data SOCKET and --kernel SOCKET only
 abt plan|metrics|test|claim|feed|activation|lineage|dispute ... --query SOCKET   (asked of the query service)
 abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
 ```

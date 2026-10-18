@@ -6,7 +6,7 @@ The `abt` binary is $ABT, else target/release/abt in the repository, else
 `abt` on the PATH. The run is the id `abt run --data SOCKET` prints (its
 outputs are written to the store the data service holds):
 
-  abt data ingest --store STORE --adapter bundle_v2 --from BUNDLE --class C <files...>
+  abt data ingest --store STORE --adapter bundle_v2 --from BUNDLE --class C
   abt data serve --store STORE --socket SOCKET &
   abt run --strategy NAME --data SOCKET <files...>      # prints `run <id>: ...`
 """

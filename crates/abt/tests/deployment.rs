@@ -1,11 +1,11 @@
 //! The three-process deployment (docs/spec/00-architecture.md, 7.1; the gate
 //! of 05-migration's M-9): the data layer, the kernel and the query layer as
-//! three processes on sockets (`abt data serve`, `abt kernel serve`, `abt
-//! query serve`) give the runs the front gives in one process. A plan run
-//! through the query service, and a run through the kernel service, equal
-//! the same commands in process: the plan's execution but for its instant,
-//! and every run's outputs byte for byte (G3, Proposition P-5.1, across
-//! processes).
+//! three programs on sockets (`abt-data serve`, `abt-kernel serve`,
+//! `abt-query serve`, each the layer's own binary, Definition A-2.1) give
+//! the runs the front gives in one process. A plan run through the query
+//! service, and a run through the kernel service, equal the same commands in
+//! process: the plan's execution but for its instant, and every run's
+//! outputs byte for byte (G3, Proposition P-5.1, across processes).
 
 use abt_tests as common;
 
@@ -14,6 +14,14 @@ use std::process::{Child, Command, Output, Stdio};
 
 fn abt(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_abt")).args(args).output().expect("abt runs")
+}
+
+/// A layer's program, built beside the front's binary by `cargo test
+/// --workspace` (`cargo build -p abt-data --bin abt-data` builds one alone).
+fn layer(name: &str) -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_abt")).with_file_name(name);
+    assert!(path.exists(), "{} is not built: cargo build -p {} --bin {}", path.display(), name, name);
+    path
 }
 
 fn stdout(o: &Output) -> String {
@@ -29,13 +37,13 @@ fn ok(o: Output, what: &str) -> String {
 struct Services(Vec<Child>);
 
 impl Services {
-    fn start(&mut self, args: &[&str], socket: &Path) {
-        let child = Command::new(env!("CARGO_BIN_EXE_abt"))
+    fn start(&mut self, binary: &str, args: &[&str], socket: &Path) {
+        let child = Command::new(layer(binary))
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("abt serves");
+            .unwrap_or_else(|e| panic!("{} serves: {}", binary, e));
         self.0.push(child);
         for _ in 0..200 {
             if socket.exists() {
@@ -81,7 +89,10 @@ fn three_processes_give_the_runs_the_front_gives_in_one() {
     // Two stores of one synthetic market.
     for store in [&served, &here] {
         ok(
-            abt(&["data", "ingest", "--store", store, "--adapter", "synthetic", "--class", "equity", "--days", "500", &lib[0], &lib[1]]),
+            Command::new(layer("abt-data"))
+                .args(["ingest", "--store", store, "--adapter", "synthetic", "--class", "equity", "--days", "500"])
+                .output()
+                .expect("abt-data runs"),
             "ingest",
         );
     }
@@ -94,13 +105,29 @@ fn three_processes_give_the_runs_the_front_gives_in_one() {
     let (data_sock, kernel_sock, query_sock) = (path("d.sock"), path("k.sock"), path("q.sock"));
     let (plan_served, run_served) = {
         let mut services = Services(Vec::new());
-        services.start(&["data", "serve", "--store", &served, "--socket", &data_sock], Path::new(&data_sock));
-        services.start(&["kernel", "serve", "--socket", &kernel_sock, "--data", &data_sock], Path::new(&kernel_sock));
-        services.start(&["query", "serve", "--socket", &query_sock, "--data", &data_sock, "--kernel", &kernel_sock], Path::new(&query_sock));
-        let plan_out = ok(abt(&["plan", "run", &plan, &lib[0], &lib[1], "--query", &query_sock, "--json"]), "plan run through the query service");
+        services.start("abt-data", &["serve", "--store", &served, "--socket", &data_sock], Path::new(&data_sock));
+        services.start("abt-kernel", &["serve", "--socket", &kernel_sock, "--data", &data_sock], Path::new(&kernel_sock));
+        services.start("abt-query", &["serve", "--socket", &query_sock, "--data", &data_sock, "--kernel", &kernel_sock], Path::new(&query_sock));
+        // The query layer's own program asks its service; the front asks it
+        // the same way.
+        let plan_out = ok(
+            Command::new(layer("abt-query"))
+                .args(["plan", "run", &plan, &lib[0], &lib[1], "--query", &query_sock, "--json"])
+                .output()
+                .expect("abt-query runs"),
+            "plan run through the query service",
+        );
+        let plan_front = ok(
+            abt(&["plan", "run", &plan, &lib[0], &lib[1], "--query", &query_sock, "--json"]),
+            "plan run through the query service, by the front",
+        );
+        assert_eq!(execution(&plan_out), execution(&plan_front), "the front and abt-query ask the service alike");
         let mut args = vec!["kernel", "run", "--kernel", kernel_sock.as_str(), "--strategy", "sma_crossover"];
         args.extend(files);
-        let run_out = ok(abt(&args), "kernel run through the kernel service");
+        let run_out = ok(
+            Command::new(layer("abt-kernel")).args(&args).output().expect("abt-kernel runs"),
+            "kernel run through the kernel service",
+        );
         (plan_out, run_out)
     };
 

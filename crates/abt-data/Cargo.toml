@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "abt-data"
+path = "src/bin/abt-data.rs"
+
 [dependencies]
 abt-agg.workspace = true
 abt-wire.workspace = true

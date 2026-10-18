@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-pub mod data_cli;
 pub mod query_cli;
 
 use abt_data::adapter::{ingest_empty, ingest_keyed, securities_of, terms_of};
@@ -151,32 +150,82 @@ pub fn briefs_market() -> Result<Arc<DataService>, String> {
     Ok(DataService::new(store))
 }
 
-/// The adapters a catalog's sources are fetched by (D-7.7), each
-/// configured by its source's settings and keyed by the source's name, and
-/// what could not be made of the others (an adapter abt does not have, a
-/// setting it refuses): such a source is listed and planned, and buying
-/// from it is refused naming its adapter.
-pub fn adapters_of(catalog: &abt_data::resolver::Catalog) -> (BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>>, Vec<String>) {
-    let mut out: BTreeMap<String, Arc<dyn abt_data::adapters::Adapter>> = BTreeMap::new();
-    let mut missing: Vec<String> = Vec::new();
-    for s in &catalog.sources {
-        let made: Result<Arc<dyn abt_data::adapters::Adapter>, String> = match s.adapter.as_str() {
-            "norgate" => abt_data::adapters::norgate::Norgate::from_settings(&s.settings).map(|n| Arc::new(n) as _).map_err(|e| e.to_string()),
-            "databento" => abt_data::adapters::databento::Databento::from_settings(&s.settings)
-                .map(|d| Arc::new(d) as _)
-                .map_err(|e| e.to_string()),
-            "databento_live" => abt_data::adapters::databento_live::DatabentoLive::from_settings(&s.settings)
-                .map(|d| Arc::new(d) as _)
-                .map_err(|e| e.to_string()),
-            "orats" => abt_data::adapters::orats::Orats::from_settings(&s.settings).map(|o| Arc::new(o) as _).map_err(|e| e.to_string()),
-            other => Err(format!("`{}` (no such adapter)", other)),
-        };
-        match made {
-            Ok(a) => {
-                out.insert(s.name.clone(), a);
-            }
-            Err(e) => missing.push(format!("{} for the source `{}`", e, s.name)),
-        }
+/// `abt data ingest --adapter bundle_v2 --from DIR ...` of a directory
+/// without a manifest: one Parquet file per relation (typed or text
+/// columns), the kernel's test loader `data::load_parquet_dir`, which the
+/// front keeps because it links the kernel; the data layer's own program
+/// reads bundles with manifests only (ERRATA E-83). `Some(exit code)` when
+/// the words are that command; `None` otherwise (the data layer's).
+pub fn loose_ingest(args: &[String]) -> Option<i32> {
+    let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    if args.first().map(String::as_str) != Some("ingest") || opt("--adapter").as_deref() != Some("bundle_v2") {
+        return None;
     }
-    (out, missing)
+    let from = opt("--from")?;
+    let dir = std::path::PathBuf::from(&from);
+    if dir.join("manifest.json").exists() {
+        return None;
+    }
+    let run = || -> Result<(), String> {
+        let class = opt("--class").ok_or("--class names the class (equity, future, option)")?;
+        let store = opt("--store")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("ABT_STORE").map(std::path::PathBuf::from))
+            .unwrap_or_else(|| std::path::PathBuf::from("abt-store"));
+        let mut files: Vec<String> = Vec::new();
+        let mut i = 1;
+        while i < args.len() {
+            if args[i].starts_with("--") {
+                i += 2;
+                continue;
+            }
+            files.push(args[i].clone());
+            i += 1;
+        }
+        let mut paths = Vec::new();
+        fn collect(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if p.is_dir() {
+                if let Ok(rd) = std::fs::read_dir(p) {
+                    for e in rd.flatten() {
+                        collect(&e.path(), out);
+                    }
+                }
+            } else if p.extension().is_some_and(|x| x == "dsl") {
+                out.push(p.to_path_buf());
+            }
+        }
+        for f in &files {
+            collect(std::path::Path::new(f), &mut paths);
+        }
+        paths.sort();
+        let mut ws = abt_kernel::check::Workspace::new();
+        for p in paths {
+            let src = std::fs::read_to_string(&p).map_err(|e| format!("{}: {}", p.display(), e))?;
+            ws.add_source(&src).map_err(|e| format!("{}:{}: parse error: {}", p.display(), e.span, e.message))?;
+        }
+        let prog = abt_kernel::check::class_program_at(&ws, &class, None).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?;
+        let (ds, notes) = abt_kernel::data::load_parquet_dir(&prog, &dir)?;
+        for n in notes {
+            eprintln!("note: {}", n);
+        }
+        let mut extra = BTreeMap::new();
+        for kv in opt("--attributes").map(|s| s.split(',').map(str::to_string).collect::<Vec<_>>()).unwrap_or_default() {
+            let (k, v) = kv.split_once('=').ok_or("--attributes takes KEY=VALUE[,KEY=VALUE...]")?;
+            extra.insert(k.trim().to_string(), v.trim().to_string());
+        }
+        let attributes = dataset_attributes(&ds, &prog.base.to_string(), &extra);
+        let mut store = Store::open(&store).map_err(|e| format!("{}: {}", store.display(), e))?;
+        ingest_dataset(&mut store, &ds, &prog.class, &attributes)?;
+        for (r, s, v) in store.registry.currents() {
+            println!("{} {} {}", r, s, v);
+        }
+        Ok(())
+    };
+    Some(match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{}", e);
+            2
+        }
+    })
 }
