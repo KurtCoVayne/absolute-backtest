@@ -130,6 +130,13 @@ fn atom_mask(store: &Store, s: &RelationSchema, b: &RecordBatch, a: &Atom) -> Re
             }
             values.iter().any(|v| {
                 let ord = match ty {
+                    // A tick answer (ST-10.4) compares its decimal view.
+                    ColumnType::Num if matches!(col.data_type(), DataType::Decimal128(_, _)) => {
+                        let DataType::Decimal128(_, scale) = col.data_type() else { return false };
+                        let x = col.as_primitive::<arrow::datatypes::Decimal128Type>().value(i);
+                        let c = if v.kind == ConstantKind::Num { v.num } else { v.int as f64 };
+                        abt_agg::exact::tick_to_f64(x, *scale as u32).partial_cmp(&c)
+                    }
                     ColumnType::Num => {
                         let x = col.as_primitive::<arrow::datatypes::Float64Type>().value(i);
                         let c = if v.kind == ConstantKind::Num { v.num } else { v.int as f64 };
@@ -228,8 +235,9 @@ fn predicate_of(form: &QueryForm) -> Option<&Predicate> {
     }
 }
 
-/// Answers a query: its schema and batches.
-pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool) -> Result<(SchemaRef, Vec<RecordBatch>), DataError> {
+/// Answers a query: its schema and batches; `ticks` asks for a hot
+/// relation's tick columns as `Decimal128(18, s)` (ST-10.4).
+pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool, ticks: bool) -> Result<(SchemaRef, Vec<RecordBatch>), DataError> {
     if let QueryForm::Chain(c) = form {
         let (schema, batches, _) = crate::options::chain(store, view, c, r_max)?;
         return Ok((schema, batches));
@@ -247,14 +255,22 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
     // `latest` of an identity that fixes the key reads back from `t_max` to
     // the first bucket holding its rows; any other read takes the range.
     let newest = matches!(form, QueryForm::Latest(_)) && filter.identity.is_some() && lay.key.len() == lay.identity.len();
-    let mut parts = if newest { store.read_newest(&version, &filter)? } else { store.read(&version, &filter)? };
+    let mut parts = if ticks && store.is_hot(&version) {
+        store.read_ticks(&version, &filter)?.1
+    } else if newest {
+        store.read_newest(&version, &filter)?
+    } else {
+        store.read(&version, &filter)?
+    };
     if let Some(p) = predicate_of(form) {
         parts = parts
             .iter()
             .map(|b| Ok(arrow::compute::filter_record_batch(b, &predicate_mask(store, &schema, b, p)?)?))
             .collect::<Result<_, DataError>>()?;
     }
-    let all = rows::concat(&stored, &parts)?;
+    // A tick answer carries its own column types (Decimal128 for Num).
+    let layout_schema = parts.first().map(|b| b.schema()).unwrap_or_else(|| stored.clone());
+    let all = rows::concat(&layout_schema, &parts)?;
     let rows = match form {
         QueryForm::Latest(_) if all.num_rows() > 0 => {
             // The greatest t ≤ t_max per fact key: rows are in (t, key) order,

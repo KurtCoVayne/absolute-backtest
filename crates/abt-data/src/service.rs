@@ -492,7 +492,7 @@ impl Service for DataService {
                     return out.respond(Message::ExplainResponse(Box::new(e))).map_err(wire);
                 }
                 let r_max = r.receipt_filter.as_ref().and_then(|f| f.r_max);
-                let (schema, batches) = query::execute(&st, &view, &r.form, r_max, r.with_seq).map_err(data)?;
+                let (schema, batches) = query::execute(&st, &view, &r.form, r_max, r.with_seq, r.ticks).map_err(data)?;
                 drop(st);
                 out.table(&schema, batches).map_err(wire)
             }

@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use abt_agg::{reduce, Function, Mode, RowsWindow};
+use abt_agg::{reduce, reduce_ticks, Function, Mode, RowsWindow};
 use abt_data::agg::{aggregate, answer};
 use abt_data::query::ResolvedView;
 use abt_data::Store;
@@ -134,6 +134,10 @@ fn rows(s: &mut Store, req: &AggregateRequest) -> Vec<Row> {
             )
         })
         .collect()
+}
+
+fn rows_of(s: &mut Store, req: &AggregateRequest) -> Vec<Row> {
+    rows(s, req)
 }
 
 /// The rows of an instrument at the calendar's labels.
@@ -333,4 +337,152 @@ fn answers_are_cache_objects_keyed_by_request_and_versions() {
     req.t1 = Some(T0 + 22 * DAY);
     let got = rows(&mut s, &req);
     assert!(got.iter().all(|r| r.1 >= T0 + 20 * DAY && r.1 <= T0 + 22 * DAY) && !got.is_empty());
+}
+
+// ---------------------------------------------------------------- exact
+
+/// The price walk on cents: values on a decimal grid, as a vendor's are.
+fn data_cents() -> Vec<(u64, i64, f64)> {
+    data().into_iter().map(|(a, t, p)| (a, t, (p * 100.0).round() / 100.0)).collect()
+}
+
+/// A store holding the cents walk hot (07-storage.md).
+fn hot_store(rows: &[(u64, i64, f64)]) -> Store {
+    let mut s = Store::temporary("agg-hot").unwrap();
+    let hot = BTreeMap::from([("storage".to_string(), "hot".to_string())]);
+    s.ingest("equity.close", &[close_rows(rows)], "test", hot).unwrap();
+    let mut cal: Vec<(&str, i64)> = (0..DAYS).map(|d| ("1d", T0 + d * DAY)).collect();
+    cal.extend((0..DAYS).filter(|d| d % 5 == 4).map(|d| ("1w", T0 + d * DAY)));
+    s.ingest("calendar_label", &[calendar_rows(&cal)], "test", BTreeMap::new()).unwrap();
+    s
+}
+
+/// An instrument's rows at the calendar's labels, as cents.
+fn units(rows: &[(u64, i64, f64)], a: u64) -> Vec<(i64, i128)> {
+    rows.iter().filter(|r| r.0 == a && (r.1 - T0) % DAY == 0).map(|r| (r.1, (r.2 * 100.0).round() as i128)).collect()
+}
+
+#[test]
+fn exact_rows_windows_over_a_hot_relation_are_the_exact_reduction_of_the_ticks() {
+    let rows = data_cents();
+    let mut s = hot_store(&rows);
+    assert!(s.is_hot(s.registry.current("equity.close", Some("test")).unwrap()));
+    let labels: Vec<i64> = (0..DAYS).map(|d| T0 + d * DAY).collect();
+    for f in ["sum", "mean", "var", "std", "median", "min", "max", "first", "last", "count"] {
+        let mut req = request(f, WindowKind::Rows);
+        req.n = 5;
+        req.numerics = Numerics::Exact;
+        let got = rows_of(&mut s, &req);
+        for a in 1..=3u64 {
+            let ticks = units(&rows, a);
+            // The same walk through abt-agg over the ticks (P-1.1).
+            let func = Function::parse(f, None).unwrap();
+            let mut w = RowsWindow::<i128>::with_scales(func, Mode::Exact, [2, 0], 5);
+            let mut expect: Vec<(i64, Option<f64>)> = Vec::new();
+            let mut next = 0usize;
+            for (index, &t) in labels.iter().enumerate() {
+                while next < ticks.len() && ticks[next].0 < t {
+                    next += 1;
+                }
+                let row = (next < ticks.len() && ticks[next].0 == t).then(|| [ticks[next].1, 0i128]);
+                if t < ticks[0].0 {
+                    continue;
+                }
+                w.step(index as u64, t, row.is_some(), row.as_ref().map(|x| x.as_slice()));
+                if row.is_some() {
+                    // The pass emits a value or an error, never an empty window.
+                    match w.value(5) {
+                        Ok(Some(v)) => expect.push((t, Some(v))),
+                        Ok(None) => {}
+                        Err(_) => expect.push((t, None)),
+                    }
+                }
+            }
+            let mine: Vec<(i64, Option<f64>)> = got.iter().filter(|r| r.0 == a).map(|r| (r.1, r.2)).collect();
+            assert_eq!(mine, expect, "{} of instrument {}", f, a);
+        }
+        // Exact and two-pass agree on the values that are exact in both
+        // (a selection), and the exact mean is the correctly rounded
+        // rational of cents.
+        if f == "mean" {
+            for r in got.iter().filter(|r| r.2.is_some()) {
+                let ticks = units(&rows, r.0);
+                let at = ticks.iter().position(|x| x.0 == r.1).unwrap();
+                let window: Vec<i128> = ticks[at + 1 - 5..=at].iter().map(|x| x.1).collect();
+                let sum: i128 = window.iter().sum();
+                let expect = abt_agg::exact::ratio_to_f64(&abt_agg::exact::Int::from_i128(sum), &abt_agg::exact::Wide::from_u128(500));
+                assert_eq!(r.2.unwrap().to_bits(), expect.to_bits());
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_span_and_bucket_windows_over_a_hot_relation() {
+    let rows = data_cents();
+    let mut s = hot_store(&rows);
+    for f in ["sum", "mean", "var", "median", "quantile", "max"] {
+        let mut req = request(f, WindowKind::Bucket);
+        req.bucket = Some("1w".into());
+        req.numerics = Numerics::Exact;
+        if f == "quantile" {
+            req.level = Some(0.25);
+        }
+        let got = rows_of(&mut s, &req);
+        let func = Function::parse(f, if f == "quantile" { Some(0.25) } else { None }).unwrap();
+        let buckets: Vec<i64> = (0..DAYS).filter(|d| d % 5 == 4).map(|d| T0 + d * DAY).collect();
+        for a in 1..=3u64 {
+            let ticks = units(&rows, a);
+            let mut expect = Vec::new();
+            let mut lo = i64::MIN;
+            for &b in &buckets {
+                let w: Vec<i128> = ticks.iter().filter(|x| x.0 > lo && x.0 <= b).map(|x| x.1).collect();
+                if !w.is_empty() {
+                    match reduce_ticks(func, &[abt_agg::Ticks { units: &w, scale: 2 }]) {
+                        Ok(Some(v)) => expect.push((b, Some(v))),
+                        Ok(None) => {}
+                        Err(_) => expect.push((b, None)),
+                    }
+                }
+                lo = b;
+            }
+            let mine: Vec<(i64, Option<f64>)> = got.iter().filter(|r| r.0 == a).map(|r| (r.1, r.2)).collect();
+            assert_eq!(mine, expect, "{} of instrument {}", f, a);
+        }
+        // A span window of 3 days.
+        let mut req = request(f, WindowKind::Span);
+        req.span = Some(Box::new(Duration { months: 0, days: 3, nanos: 0 }));
+        req.numerics = Numerics::Exact;
+        if f == "quantile" {
+            req.level = Some(0.25);
+        }
+        let got = rows_of(&mut s, &req);
+        for a in 1..=3u64 {
+            let ticks = units(&rows, a);
+            let mut expect = Vec::new();
+            for &(t, _) in &ticks {
+                let w: Vec<i128> = ticks.iter().filter(|x| x.0 >= t - 3 * DAY && x.0 <= t).map(|x| x.1).collect();
+                match reduce_ticks(func, &[abt_agg::Ticks { units: &w, scale: 2 }]) {
+                    Ok(Some(v)) => expect.push((t, Some(v))),
+                    Ok(None) => {}
+                    Err(_) => expect.push((t, None)),
+                }
+            }
+            let mine: Vec<(i64, Option<f64>)> = got.iter().filter(|r| r.0 == a).map(|r| (r.1, r.2)).collect();
+            assert_eq!(mine, expect, "{} span of instrument {}", f, a);
+        }
+    }
+}
+
+#[test]
+fn exact_is_refused_over_values_off_any_grid_and_two_pass_still_answers() {
+    // The raw walk's prices are quotients: off every decimal grid.
+    let mut s = hot_store(&data());
+    let mut req = request("mean", WindowKind::Rows);
+    req.n = 5;
+    req.numerics = Numerics::Exact;
+    let err = aggregate(&mut s, &ResolvedView::default(), &req).expect_err("exact refused");
+    assert!(err.to_string().contains("off any decimal grid"), "{}", err);
+    req.numerics = Numerics::TwoPass;
+    assert!(!rows_of(&mut s, &req).is_empty());
 }

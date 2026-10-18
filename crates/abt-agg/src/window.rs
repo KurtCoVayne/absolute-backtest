@@ -12,27 +12,79 @@
 
 use std::collections::VecDeque;
 
+use crate::exact::{reduce_ticks, Ticks};
 use crate::function::{AggError, Function, Mode};
 use crate::moments::{checkpoint_period, ShiftedSums};
 use crate::reduce::reduce;
 
-/// A sliding window over a time extent: the rows held, in time order.
-#[derive(Clone, Debug)]
-pub struct WindowState {
-    f: Function,
-    mode: Mode,
-    rows: VecDeque<(i64, [f64; 2])>,
+/// What a window's rows hold: `f64` views reduced by `two_pass` or
+/// `running`, or integer ticks (`i128` units at a scale per column)
+/// reduced exactly (`exact`, 07-storage.md Proposition 3.3).
+pub trait Value: Copy + Default + std::fmt::Debug + Send + Sync + 'static {
+    /// The function over the rows' columns (the second column for a
+    /// bivariate function), `scales` the columns' tick scales (unused by
+    /// floats).
+    fn reduce(f: Function, mode: Mode, scales: [u32; 2], rows: &[[Self; 2]]) -> Result<Option<f64>, AggError>;
+    /// The value as the running sums take it.
+    fn as_f64(self) -> f64;
 }
 
-impl WindowState {
-    pub fn new(f: Function, mode: Mode) -> WindowState {
-        WindowState { f, mode, rows: VecDeque::new() }
+impl Value for f64 {
+    fn reduce(f: Function, mode: Mode, _scales: [u32; 2], rows: &[[f64; 2]]) -> Result<Option<f64>, AggError> {
+        let a: Vec<f64> = rows.iter().map(|r| r[0]).collect();
+        let b: Vec<f64> = rows.iter().map(|r| r[1]).collect();
+        let cols: Vec<&[f64]> = if f.arity() == 2 { vec![&a, &b] } else { vec![&a] };
+        reduce(f, mode, &cols)
+    }
+    fn as_f64(self) -> f64 {
+        self
+    }
+}
+
+impl Value for i128 {
+    fn reduce(f: Function, _mode: Mode, scales: [u32; 2], rows: &[[i128; 2]]) -> Result<Option<f64>, AggError> {
+        let a: Vec<i128> = rows.iter().map(|r| r[0]).collect();
+        let b: Vec<i128> = rows.iter().map(|r| r[1]).collect();
+        let cols: Vec<Ticks> = if f.arity() == 2 {
+            vec![Ticks { units: &a, scale: scales[0] }, Ticks { units: &b, scale: scales[1] }]
+        } else {
+            vec![Ticks { units: &a, scale: scales[0] }]
+        };
+        reduce_ticks(f, &cols)
+    }
+    fn as_f64(self) -> f64 {
+        self as f64
+    }
+}
+
+/// A sliding window over a time extent: the rows held, in time order.
+#[derive(Clone, Debug)]
+pub struct WindowState<V: Value = f64> {
+    f: Function,
+    mode: Mode,
+    scales: [u32; 2],
+    rows: VecDeque<(i64, [V; 2])>,
+}
+
+impl<V: Value> WindowState<V> {
+    pub fn new(f: Function, mode: Mode) -> WindowState<V> {
+        Self::with_scales(f, mode, [0, 0])
+    }
+
+    /// A window over ticks at `scales` (per column).
+    pub fn with_scales(f: Function, mode: Mode, scales: [u32; 2]) -> WindowState<V> {
+        WindowState {
+            f,
+            mode,
+            scales,
+            rows: VecDeque::new(),
+        }
     }
 
     /// A row at time `t` enters (rows enter in time order).
-    pub fn push(&mut self, t: i64, x: &[f64]) {
+    pub fn push(&mut self, t: i64, x: &[V]) {
         debug_assert!(self.rows.back().is_none_or(|(u, _)| *u <= t), "rows enter in time order");
-        self.rows.push_back((t, [x.first().copied().unwrap_or(0.0), x.get(1).copied().unwrap_or(0.0)]));
+        self.rows.push_back((t, [x.first().copied().unwrap_or_default(), x.get(1).copied().unwrap_or_default()]));
     }
 
     /// Every row before `t` leaves.
@@ -56,10 +108,8 @@ impl WindowState {
         if self.rows.len() < min {
             return Ok(None);
         }
-        let a: Vec<f64> = self.rows.iter().map(|r| r.1[0]).collect();
-        let b: Vec<f64> = self.rows.iter().map(|r| r.1[1]).collect();
-        let cols: Vec<&[f64]> = if self.f.arity() == 2 { vec![&a, &b] } else { vec![&a] };
-        reduce(self.f, self.mode, &cols)
+        let rows: Vec<[V; 2]> = self.rows.iter().map(|r| r.1).collect();
+        V::reduce(self.f, self.mode, self.scales, &rows)
     }
 }
 
@@ -69,14 +119,15 @@ pub const ROWS_SLACK: usize = 16;
 
 /// A `rows(N)` window walked label by label.
 #[derive(Clone, Debug)]
-pub struct RowsWindow {
+pub struct RowsWindow<V: Value = f64> {
     f: Function,
     mode: Mode,
+    scales: [u32; 2],
     n: usize,
     /// The window reaches the group's first label.
     from_start: bool,
     anchors: VecDeque<i64>,
-    rows: VecDeque<(i64, [f64; 2])>,
+    rows: VecDeque<(i64, [V; 2])>,
     /// The id of `rows[0]`: a row's id is its position since the walk began.
     base_id: u64,
     /// The running sums with the row ids `lo..hi` they hold.
@@ -84,12 +135,18 @@ pub struct RowsWindow {
     at: i64,
 }
 
-impl RowsWindow {
+impl<V: Value> RowsWindow<V> {
     /// A window of `n` anchored labels walked from the group's first label.
-    pub fn new(f: Function, mode: Mode, n: usize) -> RowsWindow {
+    pub fn new(f: Function, mode: Mode, n: usize) -> RowsWindow<V> {
+        Self::with_scales(f, mode, [0, 0], n)
+    }
+
+    /// A window over ticks at `scales` (per column).
+    pub fn with_scales(f: Function, mode: Mode, scales: [u32; 2], n: usize) -> RowsWindow<V> {
         RowsWindow {
             f,
             mode,
+            scales,
             n,
             from_start: true,
             anchors: VecDeque::new(),
@@ -119,19 +176,20 @@ impl RowsWindow {
     }
 
     fn rebuild(&mut self, lo: usize, hi: usize) {
-        let sums = ShiftedSums::of_rows(self.rows.range(lo..hi).map(|r| r.1.as_slice()));
+        let floats: Vec<[f64; 2]> = self.rows.range(lo..hi).map(|r| [r.1[0].as_f64(), r.1[1].as_f64()]).collect();
+        let sums = ShiftedSums::of_rows(floats.iter().map(|r| r.as_slice()));
         self.sums = Some((self.base_id + lo as u64, self.base_id + hi as u64, sums));
     }
 
     /// The label with index `index` in the window's calendar: whether it is
     /// anchored for the group, and the group's row there if it has one.
     /// Labels are stepped in order, every label of the calendar.
-    pub fn step(&mut self, index: u64, t: i64, anchored: bool, row: Option<&[f64]>) {
+    pub fn step(&mut self, index: u64, t: i64, anchored: bool, row: Option<&[V]>) {
         if anchored {
             self.anchors.push_back(t);
         }
         if let Some(x) = row {
-            self.rows.push_back((t, [x.first().copied().unwrap_or(0.0), x.get(1).copied().unwrap_or(0.0)]));
+            self.rows.push_back((t, [x.first().copied().unwrap_or_default(), x.get(1).copied().unwrap_or_default()]));
         }
         self.at = t;
         if self.mode == Mode::Running && self.f.running() {
@@ -144,10 +202,12 @@ impl RowsWindow {
                     None => self.rebuild(lo, hi),
                     Some((slo, shi, sums)) if anchored => {
                         for id in (*shi).max(lo_id)..hi_id {
-                            sums.apply(&self.rows[(id - base) as usize].1, 1.0);
+                            let r = self.rows[(id - base) as usize].1;
+                            sums.apply(&[r[0].as_f64(), r[1].as_f64()], 1.0);
                         }
                         for id in *slo..lo_id.min(*shi) {
-                            sums.apply(&self.rows[(id - base) as usize].1, -1.0);
+                            let r = self.rows[(id - base) as usize].1;
+                            sums.apply(&[r[0].as_f64(), r[1].as_f64()], -1.0);
                         }
                         *slo = lo_id.max(*slo);
                         *shi = hi_id.max(*shi);
@@ -193,9 +253,10 @@ impl RowsWindow {
                 return Ok(Some(v));
             }
         }
-        let a: Vec<f64> = self.rows.range(lo..hi).map(|r| r.1[0]).collect();
-        let b: Vec<f64> = self.rows.range(lo..hi).map(|r| r.1[1]).collect();
-        let cols: Vec<&[f64]> = if self.f.arity() == 2 { vec![&a, &b] } else { vec![&a] };
-        reduce(self.f, Mode::TwoPass, &cols)
+        // The two-pass reduction of the window's rows in time order, or the
+        // exact one over ticks.
+        let rows: Vec<[V; 2]> = self.rows.range(lo..hi).map(|r| r.1).collect();
+        let mode = if self.mode == Mode::Exact { Mode::Exact } else { Mode::TwoPass };
+        V::reduce(self.f, mode, self.scales, &rows)
     }
 }

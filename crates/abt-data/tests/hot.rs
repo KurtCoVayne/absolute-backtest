@@ -375,3 +375,67 @@ fn a_corrupted_segment_is_refused_by_its_hash() {
     let err = HotVersion::open(a.root(), "equity.close", &va, true).err().expect("the hash check refuses the segment");
     assert!(err.to_string().contains("hash"), "{}", err);
 }
+
+#[test]
+fn a_query_asking_for_ticks_answers_exact_decimals_that_view_as_the_floats() {
+    use abt_data::query::{execute, ResolvedView};
+    use abt_wire::generated::abt::wire::{Atom, Constant, ConstantKind, Disjunction, Identity, Op, Predicate, QueryForm, Scan, Series};
+    let mut rng = Rng(4);
+    let ids = [2u64, 4, 6];
+    let rows = market(&mut rng, &ids, 20_000, 120);
+    let mut a = Store::temporary("hot-ticks").unwrap();
+    a.ingest("equity.close", &[close_rows(&rows)], "test", hot()).unwrap();
+    let ent = |x: u64| Identity {
+        values: vec![Constant {
+            kind: ConstantKind::Entity,
+            num: 0.0,
+            int: x as i64,
+            text: None,
+        }],
+    };
+    let series = QueryForm::Series(Box::new(Series {
+        relation: "equity.close".into(),
+        identity: Some(Box::new(ent(4))),
+        t0: 20_010 * NANOS_PER_DAY,
+        t1: 20_100 * NANOS_PER_DAY,
+    }));
+    let (_, floats) = execute(&a, &ResolvedView::default(), &series, None, false, false).unwrap();
+    let (schema, ticks) = execute(&a, &ResolvedView::default(), &series, None, false, true).unwrap();
+    let p = schema.index_of("P").unwrap();
+    assert_eq!(schema.field(p).data_type(), &DataType::Decimal128(18, 2), "cents at scale 2");
+    let f = floats[0].column(p).as_primitive::<arrow::datatypes::Float64Type>();
+    let d = ticks[0].column(p).as_primitive::<arrow::datatypes::Decimal128Type>();
+    assert_eq!(f.len(), d.len());
+    assert!(f.len() > 10);
+    for i in 0..f.len() {
+        assert_eq!(abt_agg::exact::tick_to_f64(d.value(i), 2).to_bits(), f.value(i).to_bits(), "row {}", i);
+    }
+    // A predicate over the ticks compares their decimal view.
+    let scan = |ticks: bool| {
+        let form = QueryForm::Scan(Box::new(Scan {
+            relation: "equity.close".into(),
+            t0: 20_000 * NANOS_PER_DAY,
+            t1: 20_200 * NANOS_PER_DAY,
+            predicate: Some(Box::new(Predicate {
+                all: Some(vec![Disjunction {
+                    atoms: vec![Atom {
+                        column: "P".into(),
+                        op: Op::Gt,
+                        values: Some(vec![Constant {
+                            kind: ConstantKind::Num,
+                            num: 250.0,
+                            int: 0,
+                            text: None,
+                        }]),
+                    }],
+                }]),
+            })),
+            columns: None,
+        }));
+        execute(&a, &ResolvedView::default(), &form, None, false, ticks).unwrap().1
+    };
+    let (f, d) = (scan(false), scan(true));
+    let n = |b: &[RecordBatch]| b.iter().map(|x| x.num_rows()).sum::<usize>();
+    assert_eq!(n(&f), n(&d));
+    assert!(n(&f) > 0 && n(&f) < rows.len());
+}

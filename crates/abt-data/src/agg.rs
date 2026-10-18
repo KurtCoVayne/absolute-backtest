@@ -197,6 +197,9 @@ fn to_batch(schema: &RelationSchema, rows: Out, names: &BTreeMap<u64, String>) -
 #[derive(Default)]
 struct Series {
     rows: Vec<(i64, [f64; 2])>,
+    /// The rows as integer ticks when the pass runs `exact` over a hot
+    /// relation (ST-10.4): units at `Ctx::scales`.
+    ticks: Vec<(i64, [i128; 2])>,
     recv: Vec<(i64, i64)>,
 }
 
@@ -259,7 +262,41 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
         latest_only: true,
         ..RowFilter::default()
     };
-    let batches = store.read(&version, &filter)?;
+    // `exact` over a hot relation reads the ticks themselves (ST-10.4):
+    // every Num column at the version's finest scale, counts at scale 0.
+    // A column with a value off any grid has no exact form.
+    let exact_ticks = request.numerics == Numerics::Exact && store.is_hot(&version);
+    let mut scales = [0u32; 2];
+    let batches = if exact_ticks {
+        let hv = store.hot(&version)?;
+        for (k, c) in std::iter::once(vc).chain(wc).enumerate() {
+            let entry = hv.manifest.columns.iter().find(|e| e.name == s.columns[c].name);
+            if entry.is_some_and(|e| e.raw) {
+                return Err(DataError::Malformed(format!(
+                    "`{}`.`{}` holds values off any decimal grid: `exact` has no integer form for it (ST-3.2); ask `two_pass`",
+                    s.name, s.columns[c].name
+                )));
+            }
+            if s.columns[c].ty == ColumnType::Num {
+                scales[k] = u32::MAX;
+            }
+        }
+        let (scale, batches) = store.read_ticks(&version, &filter)?;
+        for sc in scales.iter_mut() {
+            if *sc == u32::MAX {
+                *sc = scale;
+            }
+        }
+        batches
+    } else {
+        store.read(&version, &filter)?
+    };
+    let units = |b: &RecordBatch, c: usize, i: usize| -> i128 {
+        match b.column(c).data_type() {
+            arrow::datatypes::DataType::Decimal128(_, _) => b.column(c).as_primitive::<arrow::datatypes::Decimal128Type>().value(i),
+            _ => b.column(c).as_primitive::<arrow::datatypes::Int64Type>().value(i) as i128,
+        }
+    };
     let value = |b: &RecordBatch, c: usize, i: usize| -> f64 {
         match s.columns[c].ty {
             ColumnType::Count => b.column(c).as_primitive::<arrow::datatypes::Int64Type>().value(i) as f64,
@@ -298,8 +335,12 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
             if b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i)) {
                 continue;
             }
-            let x = [value(b, vc, i), wc.map(|w| value(b, w, i)).unwrap_or(0.0)];
-            series.rows.push((t, x));
+            if exact_ticks {
+                series.ticks.push((t, [units(b, vc, i), wc.map(|w| units(b, w, i)).unwrap_or(0)]));
+            } else {
+                let x = [value(b, vc, i), wc.map(|w| value(b, w, i)).unwrap_or(0.0)];
+                series.rows.push((t, x));
+            }
             times.push(t);
         }
     }
@@ -341,6 +382,8 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     let ctx = Ctx {
         f,
         mode,
+        scales,
+        exact: exact_ticks,
         request,
         labels: &labels,
         buckets: &buckets,
@@ -482,6 +525,9 @@ fn threads() -> usize {
 struct Ctx<'a> {
     f: Function,
     mode: Mode,
+    /// The tick scales of the two columns under `exact` over a hot relation.
+    scales: [u32; 2],
+    exact: bool,
     request: &'a AggregateRequest,
     labels: &'a [i64],
     buckets: &'a [i64],
@@ -506,9 +552,17 @@ impl Ctx<'_> {
 
     /// One group's answer rows, in time order, after `out`'s.
     fn group(&self, out: &mut Out, g: GroupKey, all: &Series) {
+        if self.exact {
+            self.walk(out, g, all, &all.ticks)
+        } else {
+            self.walk(out, g, all, &all.rows)
+        }
+    }
+
+    /// The walk over a group's rows, as floats or as ticks (`Value`).
+    fn walk<V: abt_agg::Value>(&self, out: &mut Out, g: GroupKey, all: &Series, series: &[(i64, [V; 2])]) {
         let r = self.request;
         let received = all.prefix_receipts();
-        let series = &all.rows;
         // A group's rows at the labels only, one per label for rows windows.
         let at_label = |t: i64| self.labels.binary_search(&t).is_ok();
         match r.window {
@@ -519,7 +573,7 @@ impl Ctx<'_> {
                 // E-28: running sums answer `rows(N)`; a prior window is reduced
                 // by the two-pass formulas.
                 let mode = if prior { Mode::TwoPass } else { self.mode };
-                let mut w = RowsWindow::new(self.f, mode, n);
+                let mut w = RowsWindow::<V>::with_scales(self.f, mode, self.scales, n);
                 let mut next = 0usize;
                 let first = series.first().map(|x| x.0).unwrap_or(i64::MAX);
                 for (index, &t) in self.labels.iter().enumerate() {
@@ -547,7 +601,7 @@ impl Ctx<'_> {
                 let d = r.span.as_deref().cloned().unwrap_or_default();
                 let min = r.min.map(|m| m as usize).unwrap_or(1);
                 let prior = r.window == WindowKind::PriorSpan;
-                let mut w = WindowState::new(self.f, Mode::TwoPass);
+                let mut w = WindowState::<V>::with_scales(self.f, Mode::TwoPass, self.scales);
                 let mut i = 0usize;
                 while i < series.len() {
                     let t = series[i].0;
@@ -576,7 +630,7 @@ impl Ctx<'_> {
             }
             WindowKind::Bucket => {
                 let min = r.min.map(|m| m as usize).unwrap_or(1);
-                let mut w = WindowState::new(self.f, Mode::TwoPass);
+                let mut w = WindowState::<V>::with_scales(self.f, Mode::TwoPass, self.scales);
                 let mut i = 0usize;
                 for &l in self.buckets {
                     while i < series.len() && series[i].0 <= l {
@@ -589,7 +643,7 @@ impl Ctx<'_> {
                         let v = w.value(min);
                         self.emit(out, all, &received, l, g, w.len(), v);
                     }
-                    w = WindowState::new(self.f, Mode::TwoPass);
+                    w = WindowState::<V>::with_scales(self.f, Mode::TwoPass, self.scales);
                 }
             }
         }

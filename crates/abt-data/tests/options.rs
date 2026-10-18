@@ -240,7 +240,7 @@ fn the_chain_query_admits_by_expiry_moneyness_right_and_open_interest() {
         ..ChainFilters::default()
     };
     let ids = |form: &QueryForm| -> Vec<String> {
-        let (_, b) = execute(&s, &view, form, None, false).unwrap();
+        let (_, b) = execute(&s, &view, form, None, false, false).unwrap();
         b.iter().flat_map(|b| texts(b, "occ")).collect()
     };
     assert_eq!(ids(&chain_form(spy, "2024-03-11", near_puts.clone(), 510.0)), vec!["SPY   240315P00500000", "SPY   240315P00510000"]);

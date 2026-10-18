@@ -20,4 +20,4 @@ pub use exact::{reduce_ticks, ExactSums, Ticks};
 pub use function::{AggError, Class, Function, Mode};
 pub use moments::{checkpoint_period, Neumaier, ShiftedSums};
 pub use reduce::reduce;
-pub use window::{RowsWindow, WindowState};
+pub use window::{RowsWindow, Value, WindowState};

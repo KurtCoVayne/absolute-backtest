@@ -120,7 +120,7 @@ fn closes(batches: &[RecordBatch]) -> Vec<(u64, i64, f64)> {
 }
 
 fn run(s: &Store, form: QueryForm, r_max: Option<i64>) -> Vec<(u64, i64, f64)> {
-    let (_, b) = execute(s, &ResolvedView::default(), &form, r_max, false).unwrap();
+    let (_, b) = execute(s, &ResolvedView::default(), &form, r_max, false, false).unwrap();
     closes(&b)
 }
 
@@ -271,6 +271,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         })),
         None,
         false,
+        false,
     )
     .unwrap();
     assert!(b[0].column(0).as_boolean().value(0));
@@ -286,6 +287,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         })),
         None,
         false,
+        false,
     )
     .unwrap();
     assert!(!b[0].column(0).as_boolean().value(0));
@@ -299,6 +301,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
             predicate: p(),
         })),
         None,
+        false,
         false,
     )
     .unwrap();
@@ -316,6 +319,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         })),
         None,
         false,
+        false,
     )
     .unwrap();
     assert_eq!(b[0].column(0).as_primitive::<arrow::datatypes::Int64Type>().value(0), 10);
@@ -330,6 +334,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
             predicate: p_null,
         })),
         None,
+        false,
         false,
     )
     .unwrap();
@@ -347,6 +352,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
         })),
         None,
         false,
+        false,
     )
     .unwrap();
     assert_eq!(schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>(), vec!["P", "A"]);
@@ -362,6 +368,7 @@ fn scan_exists_count_and_distinct_take_a_predicate() {
             t1: T0 + 4 * DAY,
         })),
         None,
+        false,
         false,
     )
     .unwrap();
@@ -380,7 +387,7 @@ fn a_view_reads_its_versions_at_its_sequence_number() {
     };
     let read = |s: &Store, view: &View| {
         let v = ResolvedView::of(s, Some(view)).unwrap();
-        closes(&execute(s, &v, &form(), None, false).unwrap().1)
+        closes(&execute(s, &v, &form(), None, false, false).unwrap().1)
     };
     let pinned = View {
         versions: Some(vec![VersionRef {
@@ -472,6 +479,7 @@ fn the_series_class_is_keyed_by_a_label() {
         })),
         None,
         false,
+        false,
     )
     .unwrap();
     let names = out[0].column(0).as_dictionary::<arrow::datatypes::UInt32Type>();
@@ -497,6 +505,7 @@ fn the_series_class_is_keyed_by_a_label() {
             t1: T0 + DAY,
         })),
         None,
+        false,
         false,
     )
     .unwrap();
@@ -537,6 +546,7 @@ fn catalog_reads_the_registry_and_only_it() {
         })),
         None,
         false,
+        false,
     )
     .unwrap();
     assert_eq!(out[0].column(0).as_primitive::<arrow::datatypes::UInt64Type>().values().to_vec(), vec![1]);
@@ -549,6 +559,7 @@ fn catalog_reads_the_registry_and_only_it() {
             predicate: None,
         })),
         None,
+        false,
         false,
     );
     assert!(err.is_err(), "close is not a registry relation");
@@ -610,8 +621,8 @@ fn answers_are_deterministic_and_carry_seq_on_request() {
         predicate: None,
         columns: None,
     }));
-    let (a, x) = execute(&s, &ResolvedView::default(), &form, None, true).unwrap();
-    let (b, y) = execute(&s, &ResolvedView::default(), &form, None, true).unwrap();
+    let (a, x) = execute(&s, &ResolvedView::default(), &form, None, true, false).unwrap();
+    let (b, y) = execute(&s, &ResolvedView::default(), &form, None, true, false).unwrap();
     assert_eq!(a, b);
     assert_eq!(x, y);
     assert_eq!(a.fields().last().unwrap().name(), "seq");

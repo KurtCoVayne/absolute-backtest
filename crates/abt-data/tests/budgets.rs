@@ -97,7 +97,7 @@ fn measure_the_budgets() {
     drop(read);
     let q = |s: &Store, f: &QueryForm| {
         let t = Instant::now();
-        let (_, b) = execute(s, &view, f, None, false).unwrap();
+        let (_, b) = execute(s, &view, f, None, false, false).unwrap();
         (t.elapsed().as_secs_f64() * 1e6, b.iter().map(|x| x.num_rows()).sum::<usize>())
     };
     // The four forms from disk (no resident cache), then resident (a pass

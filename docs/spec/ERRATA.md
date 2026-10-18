@@ -2441,3 +2441,22 @@ batch driver agree on every corpus program. Each bless since:
     a late row: equal byte for byte but for the sequence numbers, whose
     numbering differs by design (A-D50) and whose semantics (a snapshot is
     exactly the rows with seq ≤ N) are checked per store.
+
+- **E-88 (ST-10.4, D-6.3, P-1.1, A-D44, A-D47; ticks on the wire and the
+  exact pass as built).** A `query` with `ticks = true` (and `abt data
+  query --ticks`) over a hot relation answers its `Num` columns as
+  `Decimal128(18, s)`, `s` the finest exponent among the version's tick
+  columns, with predicates compared on the decimal view; over a Parquet
+  relation `ticks` is ignored and the floats come, as A-D44 says a reader
+  must accept. The aggregate pass under `numerics = exact` over a hot
+  relation reads the ticks (`Store::read_ticks`) and walks them through
+  `abt-agg`'s windows, which are now generic over their value (`Value`:
+  `f64` reduced by `two_pass` or `running`, `i128` units reduced by
+  `reduce_ticks`), so the pass and a direct `abt-agg` reduction of the
+  same ticks give one answer (P-1.1 on the data layer's side). A column
+  holding a value off any decimal grid (a raw exception, ST-3.2) refuses
+  `exact` by name and answers `two_pass`; `exact` over a Parquet relation
+  stays `two_pass` (A-D47). The running sums of `rows(N)` windows remain
+  the floats' (E-27); the exact window re-reduces its rows at every
+  label, O(N) per output, which the sliding `ExactSums` of E-85 can
+  replace when phase 4 measures the need.
