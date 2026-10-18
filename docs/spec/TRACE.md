@@ -114,7 +114,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | G9 | The starting set to its known answers | `abt-query/tests/known_answers_{samples,series,panels,regression}.rs` | done | E-60, E-61, E-62 record the tolerances |
 | G10 | The targets of A-7.3 on the reference machine | `scripts/bench.sh` | partial | measured on this VM (`docs/assessment.md`); the M4 is the owner's |
 | G-ST1 | The codec's figures on the M4 with the full store | `crates/abt-codec/benches` (iteration 1) | missing | the M4 is the owner's; this VM's figures are labelled |
-| G-ST2 | The sizing run over the full history | `abt data stage --measure` (iteration 1) | missing | NDLake in full here; Databento's full history needs a consolidated object per root |
+| G-ST2 | The sizing run over the full history | `abt data ingest --measure` and `abt data stats --measure` (E-91), run over NDLake since 2014 | partial | NDLake in full does not fit this VM through the Norgate adapter (every bar in Arrow before staging); Databento's full history needs a consolidated object per root; the run on the owner's machine |
 
 ## Test rows of the documents
 
@@ -159,7 +159,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | P-1.2 `tests/agg.rs` | every function and mode against a 128-bit rational reference | `abt-agg/tests/agg.rs`; `exact` in `abt-agg/tests/exact.rs` against an independent big-integer oracle (correct rounding, ties, order independence) | done | E-85 |
 | P-2 transport | the same exchange in process and over a socket; version refusal; flow control | `abt-wire/tests/{rpc,frame,schema}.rs` | done | E-64 |
 | ST-13 codec property tests | encode→decode identity at every width, with and without exceptions, `recip_exact` set and unset; extraction equals decoding | `abt-codec/tests/roundtrip.rs` | done | E-86 |
-| ST-13 real-data round trip | every block of the staged store decodes bit for bit | — | missing | iteration 1, over the NDLake history fetched from S3 |
+| ST-13 real-data round trip | every block of the staged store decodes bit for bit | `staging/build.rs` (S4) over the NDLake store since 2014: 4,160,182 values per bar relation decoded against their source, every summary recomputed, 581,225 random ranges and 575,177 ladder bars per relation checked | partial | the full history and the Databento futures are open with the sizing run (phase 4 of iteration 1) |
 | ST-13 exact aggregates | sums, moments and windows against the rational reference | `abt-codec/tests/summary.rs` (windows from cumulatives against a direct `i128` reduction); `abt-agg/tests/exact.rs` | partial | over the store's blocks with M-2 |
 | ST-13 ladder | every precomputed bar equals its bucket recomputed from base rows | `staging/build.rs::verify_ladder` (S4, every version); `abt-data/tests/hot.rs::the_ladder_bars_equal_their_buckets_recomputed_from_base_rows` (daily and minute markets, every level, values, counts, labels, receipts) | done | E-89 |
 | ST-13 ranges | every query of ST-6.3 on random ranges, edges, exceptions, the tail, earlier sequences, receipt filters | `staging/build.rs::verify_ranges` (S4: moments and extremes on random ranges of every rebuilt instrument); `abt-data/tests/hot.rs` (reads at earlier sequences and with receipt filters over revised rows); `abt-data/tests/appends.rs` (reads reaching the tail and the sealed blocks, at earlier sequences) | partial | order statistics and bars over the store, exceptions on real data (phase 3) |
@@ -174,7 +174,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | ST-13 ticks on the wire | `Decimal128` round trip; the kernel's exact aggregates equal the data layer's | `abt-data/tests/hot.rs::a_query_asking_for_ticks_answers_exact_decimals_that_view_as_the_floats` (every staged value's decimal views as its float, bit for bit); `abt-data/tests/agg.rs::exact_*` (the pass equals `abt-agg` over the same ticks) | partial | the kernel half (its exact windows) in iteration 2 |
 | ST-13 residency | zero major faults through a G10 run with the store locked | `hot/residency.rs` (the lock, the shortfall and the faults in `stats`) | partial | the lock is refused on this VM (8 MB limit): the row runs on the M4 |
 | ST-13 G-ST1 | the codec on the M4 | — | missing | the owner's |
-| ST-13 G-ST2 | the sizing run | — | missing | iteration 1's harness; the Databento half needs the full history |
+| ST-13 G-ST2 | the sizing run | `abt data ingest --measure`, `abt data stats --measure` over NDLake since 2014 (E-91) | partial | the full history and the Databento half need the owner's machine and a consolidated Databento object per root |
 
 ## Targets
 
@@ -202,4 +202,4 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | D-9.1 resident footprint | ≤ 16 B per value | 8 B | done | |
 | ST-2.4 decode and sum | 0.18 to 0.38 ns per value, widths 5 to 27 | not measured in this tree | missing | iteration 1: `cargo bench -p abt-codec` on this VM; the M4 is the owner's |
 | ST-2.4 ranges | point 26 ns; series, range max, OHLCV bar, median, count as the table | not measured in this tree | missing | iteration 1 |
-| ST-9 store | ≈ 6.8 to 7.2 GB hot | not measured | missing | iteration 1: the sizing run |
+| ST-9 store | ≈ 6.8 to 7.2 GB hot | NDLake since 2014 on this VM (756 assets, 2,080,091 bars): base value columns 4.46 B per value (volume 4.07), the four daily ladder levels 11.0 B per base row, 16.0 to 16.3 B per row per bar relation, 115 MB hot for the five relations (`abt-data ingest --measure`, `abt-data stats --measure`) | partial | measured on this VM over 2014 to 2026 (`docs/iterations/01-foundation.md`, phase 4): the exponent a block takes and the padded last block per instrument and level are the two costs above the table's estimate; the full history does not fit this VM through the Norgate adapter; Databento open |

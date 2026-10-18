@@ -70,7 +70,45 @@ The TV golden (`abt-tests/tests/tv_golden.rs`) and G6 stayed unchanged through t
 
 ### Phase 4 · Performance
 
-(Pending the driver: filled in below once measured.)
+Every figure below is from this VM (the machine above), release binaries of 375332a, one measurement at a time, nothing else running.
+
+**The vendor data.** NDLake in full: `curated/bars_by_date` (132 year files, 1896 to 2026), `archive`, the registry, the index membership and the classification, 4.0 GB under `data/vendor/ndlake/` (git-ignored; `data/README.md` says what is where). Databento: the six study roots on 2025-03-03 and 2025-03-04, ES and CL over March 2024 (20 trading days each), the 28 `GLBX.MDP3` definitions and `manifest.csv`, 21 MB under `data/vendor/dbn/`; every file's SHA-256 matches the manifest. Nothing was downloaded twice and nothing is deleted by the tooling: the stores built from these files live under `data/store/`.
+
+**The sizing run (ST-7.4, G-ST2's harness).** The full NDLake history does not fit this VM's memory through the Norgate adapter (it holds every bar of the lake in Arrow before staging, and S2 reads the current version whole), so the run covers the S&P 500's members since 2014-01-01, the span `scripts/bench.sh` uses:
+
+```
+abt-data ingest --store data/store/ndlake-2014 --adapter norgate --from data/vendor/ndlake \
+  --start 2014-01-01 --exceptions scripts/reviewed/norgate-spx-2014.parquet --attributes reviewed=complete --measure
+abt-data stats --store data/store/ndlake-2014 --measure
+```
+
+| Measured | Value |
+| --- | --- |
+| Universe | 756 assets, 2,080,091 bars from 2014-01-02 to 2026-10-14; 146 splits, 24,477 dividends, 153 delistings, 769 membership intervals, 383 reviewed exceptions |
+| Ingest, whole process (the adapter's read, S1 to S5 of five bar relations, the Parquet relations, the log) | 100.2 s wall, 87.2 s user, peak RSS 7,071 MB |
+| Staging per bar relation, S1 to S5 (`open`) | 96, 255, 1,495, 1,252, 782 ms (normalise, classify, build, verify, publish) |
+| S4 per bar relation | 5,194 blocks and 4,160,182 values decoded against their source, 5,194 summaries recomputed, 581,225 random ranges checked, 756 instruments; the ladder's 575,177 bars (four levels) each against its base rows |
+| Base value column (`open`, `high`, `low`, `close`; 2,597 blocks) | 9.27 to 9.30 MB: 4.46 B per value |
+| Base value column (`volume`) | 8.47 MB: 4.07 B per value |
+| Receipt residual, per relation | 0.57 MB: 0.28 B per row (the residual is constant under the receipt rule; the bytes are the lane layout's floor per block) |
+| Presence (labels, bitmaps, sequence runs), per relation | 0.34 MB: 0.16 B per row |
+| Manifest; directory (one 16-byte locator per block, in memory) | 0.13 MB; 0.28 MB (17,290 locators) |
+| Ladder, per relation (week, month, quarter, year: value, count, sequence, residual, presence) | 5.3 + 5.7 + 6.0 + 5.9 MB = 22.9 MB: 11.0 B per base row |
+| Hot bytes per bar relation (base, ladder, presence, manifest, directory) | 33.4 to 33.9 MB: 16.0 to 16.3 B per row |
+| Hot segments on disk, the five relations (the ladder's count, sequence and residual segments are shared by hash) | 111 MB; `hot/` 115 MB |
+| The store on disk | 762 MB: the write-ahead log 608 MB, Parquet relations (`member` 1.6M rows, `listed`, `ticker`, `delisted`, `dividend`, `split`, `classification`, the registry) 37 MB, manifests 1.6 MB |
+
+Against ST-9's table (148M Norgate rows in 1.3 GB, 1.76 B per value for five columns): the base columns measure 4.46 B per value here, two and a half times the study's `for_bpv` of 1.6 (ST-2.2, blocks of 184 rows at the value's own exponent). Three causes, each measured:
+
+1. **NDLake's prices are `f32` adjusted values whose exact decimals run to eight places** (the study's exponent distribution for 1995: 14 % of close values at exponent 0, 37 % at 2, 29 % at 3, 2 % at 4, 0.7 % at 5, and a tail to 8; the 2014 store's version exponent for `close` is 6). A block of 1,024 rows takes the finest exponent any of its values needs (Proposition 3.2 is per block), so one value at 10⁻⁶ puts four years of a stock's prices at 28 bits each. The codec's width rule (ST-4.4) patches wide *offsets* as exceptions but does not trade the *exponent* against raw exceptions; doing so (a cost-based exponent, the off-grid values as raw-bit exceptions at 74 bits) would halve the base columns but make `exact` unavailable on such blocks (A-D49's rule: a raw exception refuses `exact` for the column). This is an owner decision for iteration 2 (open question 5).
+2. **Each instrument's last block is padded to 1,024 rows by the lane layout** (ST-4.1 lets only the last block be short): 756 of the 2,597 base blocks are partial, and every ladder level holds one padded block per instrument and column, so the four coarse levels cost 11 B per base row, more than the base itself, and the yearly level 321 B per bar. The ladder is 0.35 GB in ST-9's table for the full history; with one padded block per instrument, level and column, its cost scales with instruments (about 3.5 KB each), not rows. A short-block layout for coarse levels, or levels built on demand below a row count, is iteration 2's (open question 5).
+3. **The log is kept whole after publication**: 608 MB for 2.1M bars of five columns and the Parquet relations, four times the hot store. ST-9's "append logs and live tails 0.5 GB" counts the live path only; the historical ingest's log can be truncated at `replay_from` once a version is published (`abt data gc`, iteration 2).
+
+A projection to the full history would multiply 4.5 to 4.9 B per value by about 148M rows and five columns (3.3 to 3.6 GB for the base columns alone) and the ladder by the number of instruments ever listed; it is a projection, not a measurement, and the run on the owner's machine replaces it. The Databento half is not measured: the bucket's per-day objects (open question 1).
+
+**The real-data round trip (ST-13).** Every block of the five bar relations decoded bit for bit against its source in S4 (4,160,182 values per relation, 20.8M in all), every summary recomputed, 581,225 random ranges per relation checked, and 575,177 ladder bars per relation recomputed from their base rows: `verified` in the staging reports above. The full history and the Databento futures are open with the sizing run.
+
+{{PHASE4_BENCHES}}
 
 ### Phase 5 · Deploy
 
