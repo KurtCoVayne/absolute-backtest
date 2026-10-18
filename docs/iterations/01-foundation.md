@@ -146,7 +146,39 @@ Range operations at width 11, rows chosen at random over the length named (the p
 
 The structures do what ST-6 says above a few thousand rows: a range max over up to 65,536 rows in 2.1 µs against a 10.5 µs scan, a median over 30,000 rows in 0.36 µs against 33.8 µs, an OHLCV bar in 23 µs against 72 µs. Below that the packed forms cost more than a scan of the raw rows, and the window sum from cumulatives costs 16 to 24 µs where ST-2.4's study measured 0.6 to 4 µs for the same operation in `lanes-bench extra`: the crate decodes whole edge blocks where the study's bench decodes the shorter edge's rows only. The study's benches run on this VM below for the comparison on one machine; closing the gap (row-range decoding at the edges, ST-5.1's shorter-edge rule inside the crate's `summary` path) is an iteration 2 item, not a regression against `docs/assessment.md`, whose rows are the kernel's.
 
-{{PHASE4_STUDY}}
+**The encoding study on this VM (`scripts/study/encoding`, the samples under `data/study/` as links into the vendor files, `python3 -I`; `pcodec` from PyPI).** The Python studies reproduce ST-2's sizes (sizes do not depend on the machine; the pcodec speeds do):
+
+| Column | Rows | Lanes, FOR, blocks per instrument and year (B per value) | With the block GCD | Parquet as stored | pcodec | Exponent p50 / max |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| NDLake 1995 close | 3.06M (13,989 assets) | 1.626 | 0.906 (GCD p50 125) | 1.99 | 0.80 (`f32`), 0.65 (ints) | 3 / 8 |
+| NDLake 2024 close | 5.43M (20,905 assets) | 1.714 | 1.601 (GCD p50 1) | 3.27 | 1.77 (`f32`), 1.24 (ints) | 3 / 6 |
+| NDLake 2024 volume | | 2.689 | | 2.84 | 2.37 | |
+| ES close (2025-03-03/04) | | 1.648 | 1.142 (GCD 25) | 2.36 | 0.90 | 2 / 2 |
+| ZN close | | 2.541 | 0.816 (GCD 15,625) | 1.00 | 0.36 | 6 / 7 |
+| ZT close | | 3.103 | 0.766 (GCD 390,625) | 1.24 | 0.40 | 8 / 8 |
+| CL close | | 0.832 | 0.829 | 1.60 | 0.58 | 2 / 4 |
+| GC close | | 0.946 | 0.946 | 2.09 | 0.78 | 1 / 1 |
+| 6J close | | 1.190 | 0.924 (GCD 3) | 2.02 | 0.71 | 7 / 7 |
+
+Every NDLake value is an `f32` and round-trips under the `f32` rule (`roundtrip_exact_share` 1.0); the Databento ticks round-trip exactly through the definitions' tick sizes for 55 to 100 % of rows per root (the rest are contracts without a definition in the sample: 4 to 76 % of CL's rows are spreads). pcodec decodes at 2.3 to 5.4 ns per value here, ten times the lane decode. The prediction study: OHLC from the close takes NDLake 2024 from 1.543 to 1.387 B per value, 1995 from 0.828 to 0.667; ES from 0.903 to 0.695, CL from 0.631 to 0.448, ZN from 0.586 to 0.379, GC from 0.803 to 0.604; the ORATS sections are skipped (no sample).
+
+The study's 1.6 to 1.7 B per value for NDLake closes against the store's 4.46 is the block length: the study's blocks are one instrument's year (184 rows on average) at the exponent its own values need (p50 3), the store's are 1,024 rows (about four years of one stock) at the finest exponent among them, and NDLake's `f32` adjusted prices put a value at 10⁻⁵ or 10⁻⁶ into most of them. Cause 1 above, and open question 5.
+
+**The study's Rust benches on this VM** (`scripts/study/encoding/{lanes,raw,real,codec}-bench`, `cargo run --release`, single-threaded, best of 9; 33.5M values per test where the study says so):
+
+| Bench | Measured here |
+| --- | --- |
+| `lanes-bench`: packed decode + exact sum, widths 5, 8, 11, 14, 20, 27 | 0.191, 0.249, 0.254, 0.349, 0.410, 0.404 ns per value; raw `u32` scan 0.29 to 0.41; raw `i64` scan 0.81 to 0.92; `f64` canonical-order sum 1.18 to 1.26 |
+| `lanes-bench extra`: encode (min, GCD, width, pack) | 8.8 (w8), 9.1 (w11), 11.5 (w20) ns per value |
+| `lanes-bench extra`: random window sum, cumulative block sums with the shorter edge decoded, width 11 | 663 ns (5 to 255 rows), 717 ns (250 to 2,250), 669 ns (2,000 to 22,000); scanning raw `u32` 132, 579, 3,327 ns |
+| `lanes-bench range`: point extract; series decode + sum, batch sorted, range max, OHLCV bar over 1 to 32 rows / 32 to 1,024 rows | 20.1 ns (raw load 15.8); 203 / 542 ns series (raw 34 / 352), 75 / 253 ns batch, 233 / 640 ns range max (raw 68 / 550), 855 / 2,264 ns OHLCV bar (raw 268 / 2,422) |
+| `raw-bench`: NDLake 2024 closes, 4.19M values, resident uncompressed | exact `i64` scan 0.376 ns per value; `f64` scan in canonical order 0.760; rolling 252-row mean 1.58 ns per output by sliding state, 2.36 by prefix sums; exact rolling variance 7.13; random window mean 14.5 ns by prefix sums against 178.5 ns scanning |
+| `real-bench`: the real columns packed with the block GCD, fused decode + exact sum | NDLake 1995 close 0.91 B per value (median width 6), 1.72 ns per value; NDLake 2024 close 1.60 B (width 11), 1.41 ns; 2024 volume 2.69 B (width 20), 1.78 ns; ES close 1.14 B (width 8), 1.43 ns; CL close 0.83 B (width 5), 1.30 ns; the exact `f32` rebuild gives the source bits on every column; the ORATS rows stop the run (no sample: exit 101 after the rows above) |
+| `codec-bench` (synthetic first pass, 16.4M values) | ALP+FOR block to exact `i64` sum 1.69 B per value at 1.29 ns; ALP+delta 1.36 B at 1.45 ns; `f64` canonical sum 1.07 ns; exact `i64` tick sum 0.58 ns; exact `i128` sum of squares 0.72 ns |
+
+Two comparisons on one machine, the study's bench against the crate: the decode + sum kernel runs at 0.25 ns per value in `lanes-bench` and 0.46 in `abt-codec` at width 11 (the study's kernel is a const-generic width, the crate's a dispatch over generated kernels; best of 9 against a Criterion median), and the random window sum from cumulatives takes 0.7 µs in the study's bench and 4 to 24 µs in the crate, whose `summary` path decodes whole edge blocks. Both are iteration 2's (the crate's row-range decode exists in `block::unpack_rows` and is not yet what `summary` uses); neither changes an answer.
+
+{{PHASE4_BENCH_SH}}
 
 ### Phase 5 · Deploy
 
@@ -173,6 +205,7 @@ Errata E-83 to E-90 record how each of M-0 to M-2 was built against the document
 2. **G-ST1, residency and G10 on the M4.** This VM cannot lock the store (8 MB `memlock`), is not the reference machine, and the targets of ST-2.4 and A-7.3 are the M4's; the figures here are labelled and the rows stay open for the owner's run.
 3. **G1 on the v2 books.** `~/data/ref` and the books' bundles are the owner's; the stand-in is `tv_golden.rs`.
 4. **The ORATS samples** (ST-11) were not pulled: the encoding study's ORATS sections are skipped and said so.
+5. **The exponent a block takes, and the ladder's padded blocks** (phase 4): NDLake's prices are `f32` adjusted values with decimals to 10⁻⁸, so a 1,024-row block takes an exponent of 5 or 6 and 28 bits per value where the study's 184-row blocks took 13; the four daily ladder levels cost one padded block per instrument, level and column. The choices for iteration 2, the owner's since they touch ST-3 and ST-4: (a) a cost-based exponent per block with the off-grid values as raw-bit exceptions, which halves the base columns and refuses `exact` on such blocks under A-D49's rule, or a per-block `exact` refusal instead of per column; (b) shorter blocks, or the study's instrument-year blocks, for daily data; (c) a compact block for a level with fewer than 1,024 rows per instrument, or coarse levels built on demand. The measured store stands as the baseline either way.
 
 ### Iteration 2 (plan)
 
