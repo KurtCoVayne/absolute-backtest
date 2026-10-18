@@ -108,7 +108,45 @@ A projection to the full history would multiply 4.5 to 4.9 B per value by about 
 
 **The real-data round trip (ST-13).** Every block of the five bar relations decoded bit for bit against its source in S4 (4,160,182 values per relation, 20.8M in all), every summary recomputed, 581,225 random ranges per relation checked, and 575,177 ladder bars per relation recomputed from their base rows: `verified` in the staging reports above. The full history and the Databento futures are open with the sizing run.
 
-{{PHASE4_BENCHES}}
+**The codec's benches (`cargo bench -p abt-codec`, 375332a; Criterion medians, 100 samples each).** `decode_and_sum` runs over 32,768 blocks (33.5M values) at six widths; the figures are per value.
+
+| Width | Packed decode + sum | Raw `u32` scan | One value (`extract`) |
+| ---: | ---: | ---: | ---: |
+| 5 | 0.405 ns | 0.438 ns | 24.7 ns |
+| 8 | 0.279 ns | 0.400 ns | 27.8 ns |
+| 11 | 0.461 ns | 0.419 ns | 35.5 ns |
+| 14 | 0.466 ns | 0.519 ns | 37.8 ns |
+| 20 | 0.506 ns | 0.399 ns | 38.5 ns |
+| 27 | 0.502 ns | 0.519 ns | 48.0 ns |
+
+ST-2.4's study measured 0.18 to 0.38 ns per value for the packed decode and 0.63 to 0.85 ns for an `i64` scan on a 2-core 2.8 GHz VM; here the packed decode runs at the speed of a raw `u32` scan, 0.28 to 0.51 ns per value, with the two inside each other's noise at every width (the run-to-run spread of the raw scan alone is 12.3 to 16.7 ms at width 5). The target rows of ST-2.4 are the M4's.
+
+Range operations at width 11, rows chosen at random over the length named (the packed form against a raw `u32` scan of the same rows):
+
+| Operation | Rows | Packed | Raw scan |
+| --- | ---: | ---: | ---: |
+| window sum from cumulatives, edges decoded | 5 to 255 | 4.03 µs | 0.14 µs |
+| | 250 to 2,250 | 23.5 µs | 0.53 µs |
+| | 2,000 to 22,000 | 16.2 µs | 3.79 µs |
+| series sum | 1 to 32 | 1.09 µs | 0.009 µs |
+| | 32 to 1,024 | 15.9 µs | 0.27 µs |
+| | 1,024 to 65,536 | 14.4 µs | 11.2 µs |
+| range max (sparse table, edges decoded) | 1 to 32 | 0.60 µs | 0.03 µs |
+| | 32 to 1,024 | 1.39 µs | 0.37 µs |
+| | 1,024 to 65,536 | 2.11 µs | 10.5 µs |
+| OHLCV bar | 1 to 32 | 4.21 µs | 0.19 µs |
+| | 32 to 1,024 | 21.2 µs | 1.47 µs |
+| | 1,024 to 65,536 | 23.1 µs | 72.1 µs |
+| median (wavelet matrix against copy and select) | 20 to 300 | 0.82 µs | 0.65 µs |
+| | 300 to 3,000 | 0.45 µs | 3.53 µs |
+| | 3,000 to 30,000 | 0.36 µs | 33.8 µs |
+| count below (wavelet against a scan) | 20 to 300 | 0.23 µs | 0.29 µs |
+| | 300 to 3,000 | 0.20 µs | 1.38 µs |
+| | 3,000 to 30,000 | 0.21 µs | 13.1 µs |
+
+The structures do what ST-6 says above a few thousand rows: a range max over up to 65,536 rows in 2.1 µs against a 10.5 µs scan, a median over 30,000 rows in 0.36 µs against 33.8 µs, an OHLCV bar in 23 µs against 72 µs. Below that the packed forms cost more than a scan of the raw rows, and the window sum from cumulatives costs 16 to 24 µs where ST-2.4's study measured 0.6 to 4 µs for the same operation in `lanes-bench extra`: the crate decodes whole edge blocks where the study's bench decodes the shorter edge's rows only. The study's benches run on this VM below for the comparison on one machine; closing the gap (row-range decoding at the edges, ST-5.1's shorter-edge rule inside the crate's `summary` path) is an iteration 2 item, not a regression against `docs/assessment.md`, whose rows are the kernel's.
+
+{{PHASE4_STUDY}}
 
 ### Phase 5 · Deploy
 
