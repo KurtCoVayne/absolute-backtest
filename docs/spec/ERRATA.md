@@ -2460,3 +2460,27 @@ batch driver agree on every corpus program. Each bless since:
   the floats' (E-27); the exact window re-reduces its rows at every
   label, O(N) per output, which the sliding `ExactSums` of E-85 can
   replace when phase 4 measures the need.
+
+- **E-89 (ST-5.3, A-D46, Proposition 5.2; the calendar ladder as built).**
+  A hot bar relation (one value column, a bar rule by its name: `open`
+  first, `high` max, `low` min, `close` last, `volume` sum) carries its
+  ladder: for a day base the week, month, quarter and year levels; for a
+  minute base 5, 15 and 30 minutes, 1 hour, day, week and month. Each
+  level is a relation of its own in the block format (`<relation>@<level>`:
+  the bar's value at the instrument's exponent, the base rows it
+  summarises, the sequence number of its last base row, and the receipt
+  residual from the bucket's start) with a presence over the level's
+  labels, built from the nearest finer level and verified at S4 against
+  the base rows of every instrument on every ingest. What differs from
+  ST-5.3 or is not yet built: trade dates are UTC dates until the session
+  table names them (the `session` level and the futures' day by session
+  are iteration 3's, with the Databento adapter); every instrument's bars
+  are rebuilt at every version (a level's segments are not shared between
+  versions, since a coarser bucket's label and receipt move when base
+  labels are appended; M-2c's open buckets replace this); no reader
+  consumes the levels yet: the aggregate pass's bucket windows keep their
+  generic walk, since a bucket window's receipt there is the latest
+  receipt among the rows read (the pass's rule) and not the bucket's end
+  (the ladder's, ST-5.3), and the kernel's bar views over coarser
+  calendars reach the ladder with M-8. `Store::read_level` answers a
+  level's bars for tests and tools.

@@ -37,12 +37,12 @@ pub struct Planned {
 
 /// A stored instrument's rows and revisions, as rows.
 fn stored_rows(prev: &HotVersion, ordinal: usize) -> (Vec<Row>, Vec<Row>) {
-    let inst = &prev.presence.instruments[ordinal];
+    let inst = &prev.presence().instruments[ordinal];
     let f = crate::store::RowFilter {
         identity: Some(vec![inst.id]),
         ..crate::store::RowFilter::default()
     };
-    let rows = prev.read(&f, 0, prev.presence.labels.len() as u32).expect("a stored instrument reads");
+    let rows = prev.read(&f, 0, prev.presence().labels.len() as u32).expect("a stored instrument reads");
     let kinds: Vec<Kind> = prev.manifest.columns.iter().map(|c| c.kind).collect();
     let mut current = Vec::with_capacity(rows.len());
     for i in 0..rows.len() {
@@ -83,7 +83,7 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
     let mut planned: BTreeMap<u64, Planned> = BTreeMap::new();
     // Every stored instrument, kept unless the input touches it.
     if let Some(p) = prev {
-        for (o, inst) in p.presence.instruments.iter().enumerate() {
+        for (o, inst) in p.presence().instruments.iter().enumerate() {
             if !input.by_id.contains_key(&inst.id) {
                 let (rows, _) = stored_rows(p, o);
                 let revisions = p.manifest.revisions.iter().filter(|x| x.id == inst.id).cloned().collect();
@@ -101,7 +101,7 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
         }
     }
     for (&id, rows) in &input.by_id {
-        let (stored, superseded) = match prev.and_then(|p| p.presence.ordinal(id).map(|o| (p, o))) {
+        let (stored, superseded) = match prev.and_then(|p| p.presence().ordinal(id).map(|o| (p, o))) {
             Some((p, o)) => stored_rows(p, o as usize),
             None => (Vec::new(), Vec::new()),
         };

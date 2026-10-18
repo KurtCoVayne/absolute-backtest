@@ -48,6 +48,12 @@ pub struct LevelEntry {
     pub calendar: String,
     /// The presence file, relative to the version's directory.
     pub presence: String,
+    /// A ladder level's columns (its bar's value, the base rows it
+    /// summarises, the sequence of its last base row, the receipt
+    /// residual from the bucket's start); empty for the base, whose
+    /// columns are the manifest's.
+    #[serde(default)]
+    pub columns: Vec<ColumnEntry>,
     /// Per value column (the manifest's order), the segments holding it, in
     /// the order the directory reads them.
     pub segments: Vec<Vec<SegmentRef>>,

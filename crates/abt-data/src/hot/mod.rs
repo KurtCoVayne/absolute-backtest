@@ -7,6 +7,7 @@
 //! it names under `hot/segments/`. Staging (ST-7) builds versions in
 //! `crate::staging`.
 
+pub mod ladder;
 pub mod manifest;
 pub mod presence;
 pub mod segment;

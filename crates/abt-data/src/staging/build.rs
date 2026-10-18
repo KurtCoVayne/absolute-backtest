@@ -20,6 +20,7 @@ use abt_wire::generated::abt::wire::RelationSchema;
 use super::classify::Planned;
 use super::normalise::Row;
 use crate::error::DataError;
+use crate::hot::ladder::{self, Bar, Level, Rule, Source as LadderSource};
 use crate::hot::manifest::{Bucket, ColumnEntry, HotManifest, Kind, LevelEntry, Revision, SegmentRef};
 use crate::hot::presence::{Instrument, Presence};
 use crate::hot::segment::{Sealed, Writer};
@@ -42,6 +43,9 @@ pub struct Measure {
     pub manifest: u64,
     pub segments_new: usize,
     pub segments_kept: usize,
+    /// The ladder's levels built and their bars.
+    pub levels: usize,
+    pub bars: u64,
 }
 
 /// What S4 checked.
@@ -214,8 +218,8 @@ pub fn build(
             enc.exponents
         } else {
             let pv = prev.expect("a kept instrument has a previous version");
-            let o = pv.presence.ordinal(p.id).expect("a kept instrument is stored") as usize;
-            pv.presence.instruments[o].exponents.clone()
+            let o = pv.presence().ordinal(p.id).expect("a kept instrument is stored") as usize;
+            pv.presence().instruments[o].exponents.clone()
         };
         for c in 0..ncols {
             column_exponent[c] = column_exponent[c].max(exponents[c]);
@@ -239,7 +243,7 @@ pub fn build(
     // so the kept runs must be rewritten. The id order is the ordinal
     // order (presence), so compare.
     if let Some(pv) = prev {
-        let shifted = pv.presence.instruments.iter().enumerate().any(|(o, inst)| planned.get(o).is_none_or(|p| p.id != inst.id));
+        let shifted = pv.presence().instruments.iter().enumerate().any(|(o, inst)| planned.get(o).is_none_or(|p| p.id != inst.id));
         if shifted {
             // Rewrite every kept instrument into new runs at its new ordinal
             // (a copy of its blocks, byte for byte).
@@ -331,17 +335,38 @@ pub fn build(
     let presence_bytes = presence.to_bytes();
     fs::write(staging_dir.join("presence.bin"), &presence_bytes)?;
     measure.presence = presence_bytes.len() as u64;
+    // The calendar ladder (ST-5.3): every level's bars, each level its own
+    // segments and presence (E-89).
+    let exponents_of: Vec<Vec<u8>> = presence.instruments.iter().map(|i| i.exponents.clone()).collect();
+    let mut levels = vec![LevelEntry {
+        calendar: calendar.unwrap_or("base").to_string(),
+        presence: "presence.bin".to_string(),
+        columns: Vec::new(),
+        segments: segment_lists,
+    }];
+    if let Some(cal) = calendar {
+        levels.extend(build_ladder(
+            root,
+            &seg_dir,
+            &staging_dir,
+            relation,
+            cal,
+            kinds,
+            &labels,
+            planned,
+            &exponents_of,
+            column_raw[0],
+            &mut measure,
+            &mut new_segments,
+        )?);
+    }
     let mut manifest = HotManifest {
         relation: relation.to_string(),
         version: String::new(),
         source: source.to_string(),
         schema: schema.clone(),
         columns,
-        levels: vec![LevelEntry {
-            calendar: calendar.unwrap_or("base").to_string(),
-            presence: "presence.bin".to_string(),
-            segments: segment_lists,
-        }],
+        levels,
         rows,
         from: labels.first().copied(),
         to: labels.last().copied(),
@@ -358,11 +383,13 @@ pub fn build(
     let mut hasher = blake3::Hasher::new();
     hasher.update(relation.as_bytes());
     hasher.update(schema.canonical_hash().map_err(|e| DataError::Malformed(e.to_string()))?.hex().as_bytes());
-    for c in 0..ncols {
-        for inst in 0..provisional.presence.instruments.len() {
-            let view = provisional.column(c, inst);
-            for b in 0..view.blocks() {
-                hasher.update(provisional.block_hash(c, inst, b).as_bytes());
+    for (li, lv) in provisional.levels.iter().enumerate() {
+        for c in 0..lv.entries.len() {
+            for inst in 0..lv.presence.instruments.len() {
+                let view = provisional.column_at(li, c, inst);
+                for b in 0..view.blocks() {
+                    hasher.update(provisional.block_hash_at(li, c, inst, b).as_bytes());
+                }
             }
         }
     }
@@ -386,6 +413,194 @@ pub fn build(
         measure,
         verified,
     })
+}
+
+/// The integer of a stored value at exponent `e` (0 for a value off the
+/// grid, which the ladder refuses above).
+fn value_int(kind: Kind, bits: u64, e: u8) -> i64 {
+    match kind {
+        Kind::Tick | Kind::TickF32 => abt_codec::tick::scaled_or_zero(f64::from_bits(bits), e),
+        Kind::Int | Kind::Residual => bits as i64,
+    }
+}
+
+/// The `f64` view of a bar's value, as the base's rows show theirs.
+fn value_view(kind: Kind, v: i64, e: u8) -> f64 {
+    let x = abt_agg::exact::tick_to_f64(v as i128, e as u32);
+    if kind == Kind::TickF32 {
+        (x as f32) as f64
+    } else {
+        x
+    }
+}
+
+/// The calendar ladder of a bar relation (ST-5.3; Proposition 5.2): every
+/// level's bars of every instrument, each level built from the nearest
+/// finer one (the base's rows count one each), written as segments of its
+/// own (columns: the bar's value, its base-row count, the sequence of its
+/// last base row, the receipt residual from the bucket's start) with a
+/// presence over the level's labels. Every instrument's bars are rebuilt
+/// at every version (E-89). A relation without a bar rule, with several
+/// value columns or with values off any grid has no ladder.
+#[allow(clippy::too_many_arguments)]
+fn build_ladder(
+    root: &Path,
+    seg_dir: &Path,
+    staging_dir: &Path,
+    relation: &str,
+    calendar: &str,
+    kinds: &[Kind],
+    base_labels: &[i64],
+    planned: &[Planned],
+    exponents: &[Vec<u8>],
+    raw: bool,
+    measure: &mut Measure,
+    new_segments: &mut Vec<(String, PathBuf)>,
+) -> Result<Vec<LevelEntry>, DataError> {
+    let Some(rule) = Rule::of_relation(relation) else { return Ok(Vec::new()) };
+    if kinds.len() != 2 || raw {
+        return Ok(Vec::new());
+    }
+    let value_kind = kinds[0];
+    let source_kind = if value_kind == Kind::TickF32 { Source::F32 } else { Source::F64 };
+    let mut bars_of: BTreeMap<Level, Vec<Vec<Bar>>> = BTreeMap::new();
+    let mut labels_of: BTreeMap<Level, Vec<(i64, i64)>> = BTreeMap::new();
+    let mut out = Vec::new();
+    for level in Level::of_base(calendar) {
+        let labels = level.labels(base_labels);
+        let index = ladder::index_of(&labels);
+        let label_of = |lv: Level, key: i64| -> i64 {
+            let l = &labels_of[&lv];
+            l[*ladder::index_of(l).get(&key).expect("a bucket of the source level") as usize].1
+        };
+        let mut per_inst: Vec<Vec<Bar>> = Vec::with_capacity(planned.len());
+        for (o, p) in planned.iter().enumerate() {
+            let e = exponents[o][0];
+            let source: Vec<LadderSource> = match level.source(calendar) {
+                None => p.rows.iter().map(|r| LadderSource::row(r.t, value_int(value_kind, r.vals[0], e), r.r, r.seq)).collect(),
+                Some(src) => bars_of[&src][o]
+                    .iter()
+                    .map(|b| {
+                        let label = label_of(src, b.key);
+                        LadderSource {
+                            label,
+                            value: b.value,
+                            count: b.count,
+                            r: b.receipt(label),
+                            seq: b.seq,
+                            last_label: b.last_label,
+                            last_r: b.last_r,
+                        }
+                    })
+                    .collect(),
+            };
+            per_inst.push(ladder::build(level, rule, &source));
+        }
+        // The level's segments and presence.
+        let ncols = 4usize;
+        let mut writers: Vec<Writer> = (0..ncols).map(|_| Writer::new()).collect();
+        let mut lists: Vec<Vec<SegmentRef>> = vec![Vec::new(); ncols];
+        let mut instruments: Vec<Instrument> = Vec::with_capacity(planned.len());
+        let mut exponent = 0u8;
+        for (o, p) in planned.iter().enumerate() {
+            let bars = &per_inst[o];
+            if bars.is_empty() {
+                continue;
+            }
+            let e = exponents[o][0];
+            exponent = exponent.max(e);
+            let first = index[&bars[0].key];
+            let last = index[&bars[bars.len() - 1].key];
+            let mut bits = Bitmap::new();
+            let mut at = first;
+            for b in bars {
+                let l = index[&b.key];
+                while at < l {
+                    bits.push(false);
+                    at += 1;
+                }
+                bits.push(true);
+                at += 1;
+            }
+            let views: Vec<f64> = bars.iter().map(|b| value_view(value_kind, b.value, e)).collect();
+            let counts: Vec<i64> = bars.iter().map(|b| b.count).collect();
+            let seqs: Vec<i64> = bars.iter().map(|b| b.seq as i64).collect();
+            let residuals: Vec<i64> = bars.iter().map(|b| b.receipt(labels[index[&b.key] as usize].1) - b.key).collect();
+            let values: Vec<i64> = bars.iter().map(|b| b.value).collect();
+            let columns: [(Vec<Encoded>, Vec<Vec<i64>>); 4] = [
+                (views.chunks(BLOCK).map(|c| encode(c, source_kind)).collect(), values.chunks(BLOCK).map(|c| c.to_vec()).collect()),
+                (counts.chunks(BLOCK).map(encode_integers).collect(), counts.chunks(BLOCK).map(|c| c.to_vec()).collect()),
+                (seqs.chunks(BLOCK).map(encode_integers).collect(), seqs.chunks(BLOCK).map(|c| c.to_vec()).collect()),
+                (residuals.chunks(BLOCK).map(encode_integers).collect(), residuals.chunks(BLOCK).map(|c| c.to_vec()).collect()),
+            ];
+            // A bar's value decodes to its integer at the instrument's
+            // exponent: the ladder is exact (Proposition 5.2).
+            for (enc, vals) in columns[0].0.iter().zip(&columns[0].1) {
+                let back = enc
+                    .integers()
+                    .ok_or_else(|| DataError::Schema(format!("S4 verify, `{}` level `{}`: a bar's value is off the grid", relation, level.name())))?;
+                let scale = abt_agg::exact::pow10((e - enc.e) as u32) as i64;
+                if back.iter().zip(vals).any(|(b, v)| b.wrapping_mul(scale) != *v) {
+                    return Err(DataError::Schema(format!(
+                        "S4 verify, `{}` level `{}`: instrument {}'s bars do not reproduce their ticks",
+                        relation,
+                        level.name(),
+                        p.id
+                    )));
+                }
+            }
+            let run_exponents = [e, 0, 0, 0];
+            for (c, w) in writers.iter_mut().enumerate() {
+                let (encs, vals) = &columns[c];
+                let blocks: Vec<Sealed> = encs.iter().zip(vals).map(|(enc, values)| Sealed { enc, values }).collect();
+                let run = w.run(instruments.len() as u32, 0, run_exponents[c], &blocks, &Cumulative::ZERO, 0);
+                measure.blocks += run.blocks as u64;
+                if w.len() >= SEGMENT_BYTES {
+                    finish_into(root, seg_dir, c, w, new_segments, &mut lists)?;
+                }
+            }
+            measure.bars += bars.len() as u64;
+            instruments.push(Instrument {
+                id: p.id,
+                first,
+                last,
+                rows: bars.len() as u64,
+                seq_runs: vec![(0, 0, bars.len() as u64)],
+                exponents: run_exponents.to_vec(),
+                presence: bits,
+            });
+        }
+        for (c, w) in writers.iter_mut().enumerate() {
+            finish_into(root, seg_dir, c, w, new_segments, &mut lists)?;
+        }
+        let name = level.name();
+        let presence = Presence::new(labels.iter().map(|l| l.1).collect(), instruments);
+        let bytes = presence.to_bytes();
+        let file = format!("presence-{}.bin", name);
+        fs::write(staging_dir.join(&file), &bytes)?;
+        measure.presence += bytes.len() as u64;
+        measure.levels += 1;
+        let entry = |n: &str, kind: Kind, e: u8| ColumnEntry {
+            name: n.to_string(),
+            kind,
+            exponent: e,
+            raw: false,
+        };
+        out.push(LevelEntry {
+            calendar: name,
+            presence: file,
+            columns: vec![
+                entry("value", value_kind, exponent),
+                entry("count", Kind::Int, 0),
+                entry("seq", Kind::Int, 0),
+                entry("r", Kind::Residual, 0),
+            ],
+            segments: lists,
+        });
+        bars_of.insert(level, per_inst);
+        labels_of.insert(level, labels);
+    }
+    Ok(out)
 }
 
 /// Copies every kept instrument's blocks into new runs at its new ordinal
@@ -413,14 +628,14 @@ fn rewrite_kept(
         if p.rebuild {
             continue;
         }
-        let o = prev.presence.ordinal(p.id).expect("a kept instrument is stored") as usize;
+        let o = prev.presence().ordinal(p.id).expect("a kept instrument is stored") as usize;
         for (c, w) in writers.iter_mut().enumerate() {
             let view = prev.column(c, o);
             let n = view.blocks();
             let encs: Vec<Encoded> = (0..n).map(|b| prev.encoded(c, o, b)).collect();
             let values: Vec<Vec<i64>> = (0..n).map(|b| view.block(b)).collect();
             let blocks: Vec<Sealed> = encs.iter().zip(&values).map(|(enc, values)| Sealed { enc, values }).collect();
-            let run = w.run(ordinal as u32, 0, prev.presence.instruments[o].exponents[c], &blocks, &Cumulative::ZERO, 0);
+            let run = w.run(ordinal as u32, 0, prev.presence().instruments[o].exponents[c], &blocks, &Cumulative::ZERO, 0);
             measure.blocks += run.blocks as u64;
             if w.len() >= SEGMENT_BYTES {
                 finish_into(root, seg_dir, c, w, new_segments, segment_lists)?;
@@ -546,8 +761,12 @@ pub fn verify_ranges(v: &HotVersion, planned: &[Planned], sample: usize, verifie
         rng
     };
     for (o, p) in planned.iter().enumerate().filter(|(_, p)| p.rebuild) {
-        let inst = &v.presence.instruments[o];
-        let labels: Vec<i64> = inst.rows_with_labels(0, v.presence.labels.len() as u32).iter().map(|&(_, l)| v.presence.labels[l as usize]).collect();
+        let inst = &v.presence().instruments[o];
+        let labels: Vec<i64> = inst
+            .rows_with_labels(0, v.presence().labels.len() as u32)
+            .iter()
+            .map(|&(_, l)| v.presence().labels[l as usize])
+            .collect();
         if labels.len() != p.rows.len() || labels.iter().zip(&p.rows).any(|(l, r)| *l != r.t) {
             return Err(DataError::Schema(format!("S4 verify, instrument {}: its presence does not give its rows' times", p.id)));
         }
@@ -582,6 +801,58 @@ pub fn verify_ranges(v: &HotVersion, planned: &[Planned], sample: usize, verifie
                     return Err(DataError::Schema(format!(
                         "S4 verify, instrument {} column {}: extremes over [{}, {}) differ from the direct reduction",
                         p.id, c, a, b
+                    )));
+                }
+                verified.ranges += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// S4 over the ladder (Proposition 5.2, ST-13's ladder row): every bar of
+/// every level equals the bar recomputed from the instrument's base rows
+/// under ST-5.3's rules (its value, base-row count, label, receipt and
+/// sequence), and a level's labels are the calendar's.
+pub fn verify_ladder(v: &HotVersion, planned: &[Planned], verified: &mut Verified) -> Result<(), DataError> {
+    let relation = &v.manifest.relation;
+    let Some(rule) = Rule::of_relation(relation) else { return Ok(()) };
+    let base_labels = &v.levels[0].presence.labels;
+    for (li, lv) in v.levels.iter().enumerate().skip(1) {
+        let level = lv.level.expect("a ladder level");
+        let labels = level.labels(base_labels);
+        if lv.presence.labels != labels.iter().map(|l| l.1).collect::<Vec<_>>() {
+            return Err(DataError::Schema(format!("S4 verify, `{}` level `{}`: its labels are not the calendar's", relation, lv.calendar)));
+        }
+        let index = ladder::index_of(&labels);
+        for (o, p) in planned.iter().enumerate() {
+            let e = v.levels[0].presence.instruments[o].exponents[0];
+            let kind = v.manifest.columns[0].kind;
+            let source: Vec<LadderSource> = p.rows.iter().map(|r| LadderSource::row(r.t, value_int(kind, r.vals[0], e), r.r, r.seq)).collect();
+            let expect = ladder::build(level, rule, &source);
+            let f = crate::store::RowFilter {
+                identity: Some(vec![p.id]),
+                ..crate::store::RowFilter::default()
+            };
+            let rows = v.read_at(li, &f, 0, u32::MAX)?;
+            if rows.len() != expect.len() {
+                return Err(DataError::Schema(format!(
+                    "S4 verify, `{}` level `{}`: instrument {} has {} bars, its rows give {}",
+                    relation,
+                    lv.calendar,
+                    p.id,
+                    rows.len(),
+                    expect.len()
+                )));
+            }
+            for (i, b) in expect.iter().enumerate() {
+                let label = labels[index[&b.key] as usize].1;
+                let got = (rows.t[i], rows.ints[0][i], rows.ints[1][i], rows.r[i], rows.seq[i], rows.floats[0][i].to_bits());
+                let want = (label, b.value, b.count, b.receipt(label), b.seq, value_view(kind, b.value, e).to_bits());
+                if got != want {
+                    return Err(DataError::Schema(format!(
+                        "S4 verify, `{}` level `{}`: instrument {} bar {} reads {:?}, the base rows give {:?}",
+                        relation, lv.calendar, p.id, i, got, want
                     )));
                 }
                 verified.ranges += 1;

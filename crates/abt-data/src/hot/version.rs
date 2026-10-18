@@ -1,9 +1,10 @@
 //! A hot version in memory (ST-4.8, ST-6.3): its manifest, its presence,
-//! its segments mapped read-only, the directory (per column and
+//! its segments mapped read-only, the directory (per level, column and
 //! instrument, the block table built from the segments' runs) with a
 //! sparse table per instrument, a decoded-block cache, and the reads the
 //! store answers from them: a row filter's rows in canonical order, the
-//! newest row of an instrument, a bucket's rows for the stream.
+//! newest bucket, a bucket's rows for the stream, and the rows of a
+//! level of the calendar ladder (ST-5.3).
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -14,11 +15,12 @@ use abt_codec::block::{patch, unpack};
 use abt_codec::summary::{BlockSummary, Column, Cumulative, SparseTable};
 use abt_codec::tick::{decode_value, Exception};
 use abt_codec::BLOCK;
-use abt_wire::generated::abt::wire::ColumnType;
+use abt_wire::generated::abt::wire::{ColumnSpec, ColumnType, RelationSchema, Role};
 use arrow::array::{ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, RecordBatch, TimestampNanosecondArray, UInt32Array, UInt64Array};
 use arrow::datatypes::SchemaRef;
 
-use super::manifest::{HotManifest, Kind, Revision};
+use super::ladder::Level;
+use super::manifest::{ColumnEntry, HotManifest, Kind, Revision};
 use super::presence::{Instrument, Presence};
 use super::segment::{Run, Segment};
 use crate::error::DataError;
@@ -63,6 +65,17 @@ pub struct ColumnDir {
     pub sparse: Vec<SparseTable>,
 }
 
+/// A level's structures: its presence over its own labels, its columns'
+/// directories and what each column holds.
+pub struct LevelData {
+    /// `None` for the base.
+    pub level: Option<Level>,
+    pub calendar: String,
+    pub presence: Presence,
+    pub columns: Vec<ColumnDir>,
+    pub entries: Vec<ColumnEntry>,
+}
+
 /// A decoded block: integers at the instrument's exponent of the column,
 /// and the values as the source wrote them.
 pub struct Block {
@@ -81,9 +94,10 @@ struct Cache {
 
 pub struct HotVersion {
     pub manifest: HotManifest,
-    pub presence: Presence,
     pub segments: Vec<Mapped>,
-    pub columns: Vec<ColumnDir>,
+    /// `levels[0]` is the base; the others the ladder's, in the
+    /// manifest's order.
+    pub levels: Vec<LevelData>,
     cache: Mutex<Cache>,
 }
 
@@ -162,6 +176,11 @@ fn ones(words: &[u64], from: usize, to: usize) -> impl Iterator<Item = usize> + 
     })
 }
 
+/// The cache key of a block: the level in the column's high byte.
+fn key(level: usize, c: usize, inst: usize, b: usize) -> Key {
+    (((level as u32) << 24) | c as u32, inst as u32, b as u32)
+}
+
 impl HotVersion {
     /// Opens a version under the store's root, mapping its segments.
     /// `verify` checks every segment's hash (recovery, S4).
@@ -179,11 +198,9 @@ impl HotVersion {
     /// Opens a version whose files sit in `dir` (a staging directory before
     /// publication); its segments are under the store's root.
     pub fn open_manifest_at(root: &Path, dir: &Path, manifest: HotManifest, verify: bool) -> Result<HotVersion, DataError> {
-        let base = manifest
-            .levels
-            .first()
-            .ok_or_else(|| DataError::Schema(format!("`{}`: a hot version without a base level", manifest.relation)))?;
-        let presence = Presence::from_bytes(&fs::read(dir.join(&base.presence))?, manifest.columns.len())?;
+        if manifest.levels.is_empty() {
+            return Err(DataError::Schema(format!("`{}`: a hot version without a base level", manifest.relation)));
+        }
         let mut segments: Vec<Mapped> = Vec::new();
         let mut index: HashMap<String, u32> = HashMap::new();
         for s in manifest.segments() {
@@ -198,75 +215,91 @@ impl HotVersion {
             index.insert(s.hash.clone(), segments.len() as u32);
             segments.push(Mapped { hash: s.hash.clone(), mmap, runs });
         }
-        let mut columns = Vec::with_capacity(manifest.columns.len());
-        for (c, col) in manifest.columns.iter().enumerate() {
-            let mut blocks: Vec<Vec<Loc>> = vec![Vec::new(); presence.instruments.len()];
-            for sref in &base.segments[c] {
-                let si = index[&sref.hash];
-                let seg = &segments[si as usize];
-                for (ri, run) in seg.runs.iter().enumerate() {
-                    let inst = run.instrument as usize;
-                    if inst >= blocks.len() {
-                        return Err(DataError::Schema(format!(
-                            "`{}`: segment {} names instrument {} of {}",
-                            manifest.relation,
-                            sref.hash,
-                            inst,
-                            blocks.len()
-                        )));
-                    }
-                    let table = &mut blocks[inst];
-                    table.truncate(run.first_block as usize);
-                    if table.len() != run.first_block as usize {
-                        return Err(DataError::Schema(format!(
-                            "`{}`: a run of instrument {} starts at block {} of {}",
-                            manifest.relation,
-                            inst,
-                            run.first_block,
-                            table.len()
-                        )));
-                    }
-                    if run.exponent != presence.instruments[inst].exponents[c] {
-                        return Err(DataError::Schema(format!(
-                            "`{}`: instrument {}'s `{}` run is at exponent {}, its presence says {}",
-                            manifest.relation, inst, col.name, run.exponent, presence.instruments[inst].exponents[c]
-                        )));
-                    }
-                    let s = seg.segment();
-                    for b in 0..run.blocks as usize {
-                        let h = s.header(run, b);
-                        table.push(Loc {
-                            seg: si,
-                            run: ri as u32,
-                            block: b as u32,
-                            n: h.n,
-                        });
+        let mut levels = Vec::with_capacity(manifest.levels.len());
+        for (li, entry) in manifest.levels.iter().enumerate() {
+            let entries: Vec<ColumnEntry> = if li == 0 || entry.columns.is_empty() { manifest.columns.clone() } else { entry.columns.clone() };
+            let presence = Presence::from_bytes(&fs::read(dir.join(&entry.presence))?, entries.len())?;
+            let level = if li == 0 {
+                None
+            } else {
+                Some(Level::parse(&entry.calendar).ok_or_else(|| DataError::Schema(format!("`{}`: a level named `{}`", manifest.relation, entry.calendar)))?)
+            };
+            let mut columns = Vec::with_capacity(entries.len());
+            for (c, col) in entries.iter().enumerate() {
+                let mut blocks: Vec<Vec<Loc>> = vec![Vec::new(); presence.instruments.len()];
+                for sref in entry.segments.get(c).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    let si = index[&sref.hash];
+                    let seg = &segments[si as usize];
+                    for (ri, run) in seg.runs.iter().enumerate() {
+                        let inst = run.instrument as usize;
+                        if inst >= blocks.len() {
+                            return Err(DataError::Schema(format!(
+                                "`{}`: segment {} names instrument {} of {}",
+                                manifest.relation,
+                                sref.hash,
+                                inst,
+                                blocks.len()
+                            )));
+                        }
+                        let table = &mut blocks[inst];
+                        table.truncate(run.first_block as usize);
+                        if table.len() != run.first_block as usize {
+                            return Err(DataError::Schema(format!(
+                                "`{}`: a run of instrument {} starts at block {} of {}",
+                                manifest.relation,
+                                inst,
+                                run.first_block,
+                                table.len()
+                            )));
+                        }
+                        if run.exponent != presence.instruments[inst].exponents[c] {
+                            return Err(DataError::Schema(format!(
+                                "`{}`: instrument {}'s `{}` run is at exponent {}, its presence says {}",
+                                manifest.relation, inst, col.name, run.exponent, presence.instruments[inst].exponents[c]
+                            )));
+                        }
+                        let s = seg.segment();
+                        for b in 0..run.blocks as usize {
+                            let h = s.header(run, b);
+                            table.push(Loc {
+                                seg: si,
+                                run: ri as u32,
+                                block: b as u32,
+                                n: h.n,
+                            });
+                        }
                     }
                 }
-            }
-            let mut sparse = Vec::with_capacity(blocks.len());
-            for (i, table) in blocks.iter().enumerate() {
-                let rows: u64 = table.iter().map(|l| l.n as u64).sum();
-                if rows != presence.instruments[i].rows {
-                    return Err(DataError::Schema(format!(
-                        "`{}`: instrument {} has {} rows of `{}` and {} in its presence",
-                        manifest.relation, presence.instruments[i].id, rows, col.name, presence.instruments[i].rows
-                    )));
+                let mut sparse = Vec::with_capacity(blocks.len());
+                for (i, table) in blocks.iter().enumerate() {
+                    let rows: u64 = table.iter().map(|l| l.n as u64).sum();
+                    if rows != presence.instruments[i].rows {
+                        return Err(DataError::Schema(format!(
+                            "`{}` level `{}`: instrument {} has {} rows of `{}` and {} in its presence",
+                            manifest.relation, entry.calendar, presence.instruments[i].id, rows, col.name, presence.instruments[i].rows
+                        )));
+                    }
+                    let summaries: Vec<BlockSummary> = table
+                        .iter()
+                        .map(|l| segments[l.seg as usize].segment().summary(&segments[l.seg as usize].runs[l.run as usize], l.block as usize))
+                        .collect();
+                    sparse.push(SparseTable::of(&summaries));
                 }
-                let summaries: Vec<BlockSummary> = table
-                    .iter()
-                    .map(|l| segments[l.seg as usize].segment().summary(&segments[l.seg as usize].runs[l.run as usize], l.block as usize))
-                    .collect();
-                sparse.push(SparseTable::of(&summaries));
+                columns.push(ColumnDir { blocks, sparse });
             }
-            columns.push(ColumnDir { blocks, sparse });
+            levels.push(LevelData {
+                level,
+                calendar: entry.calendar.clone(),
+                presence,
+                columns,
+                entries,
+            });
         }
         let budget = std::env::var("ABT_BLOCK_CACHE").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(CACHE_BYTES);
         Ok(HotVersion {
             manifest,
-            presence,
             segments,
-            columns,
+            levels,
             cache: Mutex::new(Cache {
                 map: HashMap::new(),
                 order: VecDeque::new(),
@@ -276,24 +309,59 @@ impl HotVersion {
         })
     }
 
-    /// The value columns but the receipt residual.
+    /// The base level's presence.
+    pub fn presence(&self) -> &Presence {
+        &self.levels[0].presence
+    }
+
+    /// The base level's column directories.
+    pub fn columns(&self) -> &[ColumnDir] {
+        &self.levels[0].columns
+    }
+
+    /// The index of a ladder level by name (`levels[0]` is the base).
+    pub fn level_index(&self, name: &str) -> Option<usize> {
+        self.levels.iter().position(|l| l.level.is_some() && l.calendar == name)
+    }
+
+    /// The value columns but the receipt residual, of a level: a ladder
+    /// level's are its value and its base-row count; its sequence column
+    /// and residual are read apart.
+    pub fn value_columns_of(&self, level: usize) -> usize {
+        if level == 0 {
+            self.levels[level].entries.len() - 1
+        } else {
+            self.levels[level].entries.len() - 2
+        }
+    }
+
+    /// The index of a ladder level's sequence column.
+    fn seq_column(&self, level: usize) -> usize {
+        self.levels[level].entries.len() - 2
+    }
+
+    /// The base's value columns but the receipt residual.
     pub fn value_columns(&self) -> usize {
-        self.manifest.columns.len() - 1
+        self.value_columns_of(0)
     }
 
-    fn residual_column(&self) -> usize {
-        self.manifest.columns.len() - 1
+    fn residual_column(&self, level: usize) -> usize {
+        self.levels[level].entries.len() - 1
     }
 
-    /// Block `b` of instrument `inst`'s column `c`, decoded (through the
-    /// cache).
+    /// Block `b` of instrument `inst`'s column `c` of the base, decoded
+    /// (through the cache).
     pub fn block(&self, c: usize, inst: usize, b: usize) -> Arc<Block> {
-        let key = (c as u32, inst as u32, b as u32);
+        self.block_at(0, c, inst, b)
+    }
+
+    pub fn block_at(&self, level: usize, c: usize, inst: usize, b: usize) -> Arc<Block> {
+        let k = key(level, c, inst, b);
         if let Ok(mut cache) = self.cache.lock() {
-            if let Some(blk) = cache.map.get(&key) {
+            if let Some(blk) = cache.map.get(&k) {
                 return blk.clone();
             }
-            let blk = Arc::new(self.decode(c, inst, b));
+            let blk = Arc::new(self.decode(level, c, inst, b));
             let bytes = blk.ints.len() * 16;
             while cache.bytes + bytes > cache.budget {
                 let Some(old) = cache.order.pop_front() else { break };
@@ -301,16 +369,17 @@ impl HotVersion {
                     cache.bytes -= gone.ints.len() * 16;
                 }
             }
-            cache.map.insert(key, blk.clone());
-            cache.order.push_back(key);
+            cache.map.insert(k, blk.clone());
+            cache.order.push_back(k);
             cache.bytes += bytes;
             return blk;
         }
-        Arc::new(self.decode(c, inst, b))
+        Arc::new(self.decode(level, c, inst, b))
     }
 
-    fn decode(&self, c: usize, inst: usize, b: usize) -> Block {
-        let loc = self.columns[c].blocks[inst][b];
+    fn decode(&self, level: usize, c: usize, inst: usize, b: usize) -> Block {
+        let lv = &self.levels[level];
+        let loc = lv.columns[c].blocks[inst][b];
         let seg = &self.segments[loc.seg as usize];
         let run = &seg.runs[loc.run as usize];
         let s = seg.segment();
@@ -321,7 +390,7 @@ impl HotVersion {
         let n = h.n as usize;
         let scale = abt_agg::exact::pow10((run.exponent as i32 - h.e as i32).max(0) as u32) as i64;
         let ints: Vec<i64> = (0..n).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect();
-        let floats: Vec<f64> = match self.manifest.columns[c].kind {
+        let floats: Vec<f64> = match lv.entries[c].kind {
             Kind::Tick | Kind::TickF32 => {
                 let mut raw = exceptions
                     .iter()
@@ -345,14 +414,22 @@ impl HotVersion {
     /// The block's hash (Proposition 7.1): BLAKE3 over its header, words
     /// and exceptions.
     pub fn block_hash(&self, c: usize, inst: usize, b: usize) -> blake3::Hash {
-        let loc = self.columns[c].blocks[inst][b];
+        self.block_hash_at(0, c, inst, b)
+    }
+
+    pub fn block_hash_at(&self, level: usize, c: usize, inst: usize, b: usize) -> blake3::Hash {
+        let loc = self.levels[level].columns[c].blocks[inst][b];
         let seg = &self.segments[loc.seg as usize];
         seg.segment().block_hash(&seg.runs[loc.run as usize], loc.block as usize)
     }
 
     /// The block as its encoder produced it (for a byte-for-byte copy).
     pub fn encoded(&self, c: usize, inst: usize, b: usize) -> abt_codec::tick::Encoded {
-        let loc = self.columns[c].blocks[inst][b];
+        self.encoded_at(0, c, inst, b)
+    }
+
+    pub fn encoded_at(&self, level: usize, c: usize, inst: usize, b: usize) -> abt_codec::tick::Encoded {
+        let loc = self.levels[level].columns[c].blocks[inst][b];
         let seg = &self.segments[loc.seg as usize];
         let s = seg.segment();
         let (h, packed, exceptions) = s.packed(&seg.runs[loc.run as usize], loc.block as usize);
@@ -373,14 +450,14 @@ impl HotVersion {
 
     /// The values of rows `[a, b)` of an instrument's column: integers and
     /// the source's values.
-    fn values(&self, c: usize, inst: usize, a: u64, b: u64) -> (Vec<i64>, Vec<f64>) {
+    fn values(&self, level: usize, c: usize, inst: usize, a: u64, b: u64) -> (Vec<i64>, Vec<f64>) {
         let mut ints = Vec::with_capacity((b - a) as usize);
         let mut floats = Vec::with_capacity((b - a) as usize);
         let mut k = a;
         while k < b {
             let blk = (k / BLOCK as u64) as usize;
             let lo = (k % BLOCK as u64) as usize;
-            let block = self.block(c, inst, blk);
+            let block = self.block_at(level, c, inst, blk);
             let hi = (block.ints.len() as u64).min(lo as u64 + (b - k)) as usize;
             ints.extend_from_slice(&block.ints[lo..hi]);
             floats.extend_from_slice(&block.floats[lo..hi]);
@@ -389,22 +466,27 @@ impl HotVersion {
         (ints, floats)
     }
 
-    /// A column of an instrument as the range rules read it.
+    /// A column of an instrument of the base as the range rules read it.
     pub fn column(&self, c: usize, inst: usize) -> ColumnView<'_> {
-        ColumnView { v: self, c, inst }
+        self.column_at(0, c, inst)
+    }
+
+    pub fn column_at(&self, level: usize, c: usize, inst: usize) -> ColumnView<'_> {
+        ColumnView { v: self, level, c, inst }
     }
 
     /// The instruments a filter names, as ordinals in order; every
     /// instrument when it names none.
-    fn ordinals(&self, f: &RowFilter) -> Vec<usize> {
+    fn ordinals(&self, level: usize, f: &RowFilter) -> Vec<usize> {
+        let p = &self.levels[level].presence;
         match &f.identity {
             Some(ids) => {
-                let mut o: Vec<usize> = ids.iter().filter_map(|&id| self.presence.ordinal(id).map(|o| o as usize)).collect();
+                let mut o: Vec<usize> = ids.iter().filter_map(|&id| p.ordinal(id).map(|o| o as usize)).collect();
                 o.sort_unstable();
                 o.dedup();
                 o
             }
-            None => (0..self.presence.instruments.len()).collect(),
+            None => (0..p.instruments.len()).collect(),
         }
     }
 
@@ -416,25 +498,34 @@ impl HotVersion {
         &rev[lo..hi]
     }
 
-    /// The filter's rows with labels in `[lo, hi)` (label indices), in
-    /// canonical (t, id, r) order (D-3.1).
+    /// The filter's rows of the base with labels in `[lo, hi)` (label
+    /// indices), in canonical (t, id, r) order (D-3.1).
     pub fn read(&self, f: &RowFilter, lo: u32, hi: u32) -> Result<Rows, DataError> {
-        let (flo, fhi) = self.presence.label_range(f.t0, f.t1);
+        self.read_at(0, f, lo, hi)
+    }
+
+    /// The filter's rows of a level: a ladder level's rows are its bars,
+    /// each at its bucket's label with the bucket's receipt and the
+    /// sequence of its last base row; revisions are the base's.
+    pub fn read_at(&self, level: usize, f: &RowFilter, lo: u32, hi: u32) -> Result<Rows, DataError> {
+        let lv = &self.levels[level];
+        let presence = &lv.presence;
+        let (flo, fhi) = presence.label_range(f.t0, f.t1);
         let (lo, hi) = (lo.max(flo), hi.min(fhi));
-        let ncols = self.value_columns();
+        let ncols = self.value_columns_of(level);
         let mut out = Rows::with_columns(ncols);
         if lo >= hi {
             return Ok(out);
         }
-        let residual = self.residual_column();
-        let has_revisions = !self.manifest.revisions.is_empty();
+        let residual = self.residual_column(level);
+        let has_revisions = level == 0 && !self.manifest.revisions.is_empty();
         // Per label, the rows: counted first so each instrument's rows go
         // to their places in (label, instrument) order without a sort.
         let labels = (hi - lo) as usize;
-        let ordinals = self.ordinals(f);
+        let ordinals = self.ordinals(level, f);
         let mut per_inst: Vec<(usize, u64, u64)> = Vec::new();
         for &o in &ordinals {
-            let inst = &self.presence.instruments[o];
+            let inst = &presence.instruments[o];
             let (a, b) = inst.rows_in(lo, hi - 1);
             if a < b {
                 per_inst.push((o, a, b));
@@ -445,17 +536,25 @@ impl HotVersion {
         let mut keys: Vec<(u32, u32, i64)> = Vec::with_capacity(total as usize);
         let mut extra = false;
         for &(o, a, b) in &per_inst {
-            let inst = &self.presence.instruments[o];
-            let (res, _) = self.values(residual, o, a, b);
-            let cols: Vec<(Vec<i64>, Vec<f64>)> = (0..ncols).map(|c| self.values(c, o, a, b)).collect();
+            let inst = &presence.instruments[o];
+            let (res, _) = self.values(level, residual, o, a, b);
+            let seqs: Option<Vec<i64>> = lv.level.map(|_| self.values(level, self.seq_column(level), o, a, b).0);
+            let cols: Vec<(Vec<i64>, Vec<f64>)> = (0..ncols).map(|c| self.values(level, c, o, a, b)).collect();
             let i0 = (lo.max(inst.first) - inst.first) as usize;
             let i1 = (hi.min(inst.last + 1) - inst.first) as usize;
             for (k, bit) in ones(inst.presence.words(), i0, i1).enumerate() {
                 let row = a + k as u64;
                 let label_ix = inst.first + bit as u32;
-                let t = self.presence.labels[label_ix as usize];
-                let r = t + res[k];
-                let seq = inst.seq_of(row);
+                let t = presence.labels[label_ix as usize];
+                // A bar's residual is from its bucket's start (A-D50).
+                let r = match lv.level {
+                    Some(l) => l.bucket_start(t) + res[k],
+                    None => t + res[k],
+                };
+                let seq = match &seqs {
+                    Some(s) => s[k] as u64,
+                    None => inst.seq_of(row),
+                };
                 let ints: Vec<i64> = cols.iter().map(|c| c.0[k]).collect();
                 let floats: Vec<f64> = cols.iter().map(|c| c.1[k]).collect();
                 let admitted = f.r_max.is_none_or(|m| r <= m) && f.as_of_seq.is_none_or(|n| seq <= n);
@@ -547,7 +646,7 @@ impl HotVersion {
     /// filter, the first with rows answers.
     pub fn read_newest(&self, f: &RowFilter) -> Result<Rows, DataError> {
         let latest = RowFilter { latest_only: true, ..f.clone() };
-        let (_, hi) = self.presence.label_range(None, f.t1);
+        let (_, hi) = self.presence().label_range(None, f.t1);
         for b in self.manifest.buckets.iter().rev() {
             if b.lo >= hi {
                 continue;
@@ -560,10 +659,55 @@ impl HotVersion {
         Ok(Rows::with_columns(self.value_columns()))
     }
 
-    /// The rows as a batch in the stored layout; tick columns as
-    /// `Decimal128(18, scale)` when `ticks` names a scale, else `Float64`.
-    pub fn to_batch(&self, rows: &Rows, stored: &SchemaRef, lay: &Layout, ticks: Option<u32>) -> Result<RecordBatch, DataError> {
+    /// The schema of a ladder level as a relation of its own
+    /// (`<relation>@<level>`): the instrument, the bar's label, the
+    /// value (the base column's type), the base rows it summarises, and
+    /// the receipt.
+    pub fn level_schema(&self, level: usize) -> RelationSchema {
         let s = &self.manifest.schema;
+        let lay = crate::rows::layout(s);
+        let lv = &self.levels[level];
+        let value = s
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i != lay.t && Some(*i) != lay.r && !lay.identity.contains(i))
+            .map(|(_, c)| c.clone())
+            .expect("a bar relation has a value column");
+        let col = |name: &str, ty: ColumnType, role: Role| ColumnSpec {
+            name: name.to_string(),
+            ty,
+            role,
+            dimension: None,
+        };
+        RelationSchema {
+            name: format!("{}@{}", s.name, lv.calendar),
+            class: s.class.clone(),
+            columns: vec![
+                s.columns[lay.identity[0]].clone(),
+                col(&s.columns[lay.t].name, ColumnType::Time, Role::EventTime),
+                value,
+                col("count", ColumnType::Count, Role::Value),
+                col("r", ColumnType::Time, Role::ReceiptTime),
+            ],
+            calendar: Some(lv.calendar.clone()),
+            constraints: None,
+            attributes: None,
+            schema_version: s.schema_version.clone(),
+        }
+    }
+
+    /// The rows as a batch in the stored layout of the base; tick columns
+    /// as `Decimal128(18, scale)` when `ticks` names a scale, else
+    /// `Float64`.
+    pub fn to_batch(&self, rows: &Rows, stored: &SchemaRef, lay: &Layout, ticks: Option<u32>) -> Result<RecordBatch, DataError> {
+        self.to_batch_at(0, &self.manifest.schema.clone(), rows, stored, lay, ticks)
+    }
+
+    /// The rows of a level as a batch in a stored layout (`schema` the
+    /// level's, `level_schema`, for a ladder level).
+    pub fn to_batch_at(&self, level: usize, s: &RelationSchema, rows: &Rows, stored: &SchemaRef, lay: &Layout, ticks: Option<u32>) -> Result<RecordBatch, DataError> {
+        let entries = &self.levels[level].entries;
         let mut cols: Vec<ArrayRef> = Vec::with_capacity(s.columns.len() + 1);
         let mut vc = 0usize;
         for (i, c) in s.columns.iter().enumerate() {
@@ -575,7 +719,7 @@ impl HotVersion {
                 Arc::new(UInt64Array::from(rows.id.clone()))
             } else {
                 let (ints, floats) = (&rows.ints[vc], &rows.floats[vc]);
-                let entry = &self.manifest.columns[vc];
+                let entry = &entries[vc];
                 vc += 1;
                 match c.ty {
                     ColumnType::Num => match ticks {
@@ -614,22 +758,23 @@ impl HotVersion {
 /// An instrument's column as the range rules read it.
 pub struct ColumnView<'a> {
     v: &'a HotVersion,
+    level: usize,
     c: usize,
     inst: usize,
 }
 
 impl ColumnView<'_> {
     fn loc(&self, b: usize) -> Loc {
-        self.v.columns[self.c].blocks[self.inst][b]
+        self.v.levels[self.level].columns[self.c].blocks[self.inst][b]
     }
 
     pub fn rows(&self) -> u64 {
-        self.v.presence.instruments[self.inst].rows
+        self.v.levels[self.level].presence.instruments[self.inst].rows
     }
 
     /// The number of blocks (the trait's `blocks`, reachable without it).
     pub fn blocks_len(&self) -> usize {
-        self.v.columns[self.c].blocks[self.inst].len()
+        self.v.levels[self.level].columns[self.c].blocks[self.inst].len()
     }
 
     /// Whether any block holds a value off its grid (no exact view).
@@ -644,16 +789,16 @@ impl ColumnView<'_> {
 
 impl Column for ColumnView<'_> {
     fn block(&self, b: usize) -> Vec<i64> {
-        self.v.block(self.c, self.inst, b).ints.clone()
+        self.v.block_at(self.level, self.c, self.inst, b).ints.clone()
     }
     fn len(&self, b: usize) -> usize {
         self.loc(b).n as usize
     }
     fn blocks(&self) -> usize {
-        self.v.columns[self.c].blocks[self.inst].len()
+        self.blocks_len()
     }
     fn cumulative(&self, boundary: usize) -> Cumulative {
-        let table = &self.v.columns[self.c].blocks[self.inst];
+        let table = &self.v.levels[self.level].columns[self.c].blocks[self.inst];
         if table.is_empty() {
             return Cumulative::ZERO;
         }
@@ -669,7 +814,7 @@ impl Column for ColumnView<'_> {
         seg.segment().summary(&seg.runs[l.run as usize], l.block as usize)
     }
     fn sparse(&self) -> &SparseTable {
-        &self.v.columns[self.c].sparse[self.inst]
+        &self.v.levels[self.level].columns[self.c].sparse[self.inst]
     }
 }
 
@@ -686,7 +831,7 @@ pub fn qualifies_rows(all: &RecordBatch, lay: &Layout) -> bool {
 /// Whether a relation's rows can be held hot: one entity column that is
 /// the whole key, an event time, and value columns of a kind the blocks
 /// hold (no bytes). Nulls in value columns are checked on the rows.
-pub fn qualifies(s: &abt_wire::generated::abt::wire::RelationSchema, lay: &Layout) -> bool {
+pub fn qualifies(s: &RelationSchema, lay: &Layout) -> bool {
     lay.identity.len() == 1
         && lay.key.len() == 1
         && s.columns[lay.identity[0]].ty == ColumnType::Entity

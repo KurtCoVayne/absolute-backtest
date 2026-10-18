@@ -53,6 +53,24 @@ fn close_rows(rows: &[(u64, i64, i64, f64)]) -> RecordBatch {
     .unwrap()
 }
 
+/// `(A, T, r, P)` rows with the value column named `name`.
+fn close_rows_named(rows: &[(u64, i64, i64, f64)], name: &str) -> RecordBatch {
+    let b = close_rows(rows);
+    let fields: Vec<Field> = b
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| {
+            if f.name() == "P" {
+                Field::new(name, f.data_type().clone(), f.is_nullable())
+            } else {
+                f.as_ref().clone()
+            }
+        })
+        .collect();
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), b.columns().to_vec()).unwrap()
+}
+
 /// `(A, T, r, V)` rows of `equity.volume` (a count column).
 fn volume_rows(rows: &[(u64, i64, i64, i64)]) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
@@ -323,7 +341,7 @@ fn the_hot_store_answers_every_read_as_the_parquet_store_does() {
     // instruments were copied byte for byte into new runs: the old
     // segments drop out, and the version id is a function of the blocks.
     let kept = h2
-        .presence
+        .presence()
         .instruments
         .iter()
         .filter(|i| i.id != 9 && i.id != 3 && i.id != 21 && i.id != rows[100].0 && i.id != ids[2])
@@ -331,12 +349,12 @@ fn the_hot_store_answers_every_read_as_the_parquet_store_does() {
     assert!(kept >= 3);
     let touched = [3u64, 21, 9, rows[100].0, ids[2]];
     let mut compared = 0;
-    for (o, inst) in h2.presence.instruments.iter().enumerate() {
+    for (o, inst) in h2.presence().instruments.iter().enumerate() {
         if touched.contains(&inst.id) {
             continue;
         }
-        let o1 = h1.presence.ordinal(inst.id).expect("a kept instrument was stored") as usize;
-        assert_eq!(inst.rows, h1.presence.instruments[o1].rows);
+        let o1 = h1.presence().ordinal(inst.id).expect("a kept instrument was stored") as usize;
+        assert_eq!(inst.rows, h1.presence().instruments[o1].rows);
         for b in 0..h2.column(0, o).blocks_len() {
             assert_eq!(h2.block_hash(0, o, b), h1.block_hash(0, o1, b), "instrument {} block {}", inst.id, b);
             compared += 1;
@@ -438,4 +456,108 @@ fn a_query_asking_for_ticks_answers_exact_decimals_that_view_as_the_floats() {
     let n = |b: &[RecordBatch]| b.iter().map(|x| x.num_rows()).sum::<usize>();
     assert_eq!(n(&f), n(&d));
     assert!(n(&f) > 0 && n(&f) < rows.len());
+}
+
+#[test]
+fn the_ladder_bars_equal_their_buckets_recomputed_from_base_rows() {
+    use abt_data::hot::ladder::{Level, Rule};
+    use abt_wire::scalar::NANOS_PER_MINUTE;
+    // A daily market: close (last), high (max) and volume (sum) relations.
+    let mut rng = Rng(5);
+    let ids = [11u64, 12, 13, 14];
+    let (start, days) = (19_700i64, 420i64);
+    let closes = market(&mut rng, &ids, start, days);
+    let highs: Vec<(u64, i64, i64, f64)> = closes.iter().map(|&(a, t, r, p)| (a, t, r, p + 0.5)).collect();
+    let volumes: Vec<(u64, i64, i64, i64)> = closes.iter().map(|&(a, t, r, p)| (a, t, r, (p * 10.0) as i64 + 1)).collect();
+    let mut s = Store::temporary("hot-ladder").unwrap();
+    let vc = s.ingest("equity.close", &[close_rows(&closes)], "test", hot()).unwrap();
+    let vh = s.ingest("equity.high", &[close_rows_named(&highs, "H")], "test", hot()).unwrap();
+    let vv = s.ingest("equity.volume", &[volume_rows(&volumes)], "test", hot()).unwrap();
+    let h = s.hot(&vc).unwrap();
+    assert_eq!(h.levels.iter().skip(1).map(|l| l.calendar.clone()).collect::<Vec<_>>(), vec!["1w", "1mo", "1q", "1y"]);
+    for (version, rows, rule, scale) in [(&vc, &closes, Rule::Last, 100.0), (&vh, &highs, Rule::Max, 100.0)] {
+        for level in Level::of_base("1d") {
+            let (schema, batches) = s.read_level(version, &level.name(), &RowFilter::default()).unwrap();
+            assert_eq!(schema.calendar.as_deref(), Some(level.name().as_str()));
+            let got = text(&batches);
+            // The direct recomputation: per instrument, per bucket of its
+            // base rows, the rule over the values in time order, the count,
+            // the label (the calendar's last trade date in the bucket), the
+            // receipt (the bucket's end: the label plus the last row's delay).
+            let base_labels: Vec<i64> = {
+                let mut l: Vec<i64> = rows.iter().map(|r| r.1).collect();
+                l.sort_unstable();
+                l.dedup();
+                l
+            };
+            let labels = level.labels(&base_labels);
+            let label_of = |key: i64| labels.iter().find(|l| l.0 == key).unwrap().1;
+            let mut expect: Vec<(i64, u64, f64, i64, i64)> = Vec::new();
+            for &id in &ids {
+                let mine: Vec<&(u64, i64, i64, f64)> = rows.iter().filter(|r| r.0 == id).collect();
+                let mut i = 0;
+                while i < mine.len() {
+                    let key = level.bucket_start(mine[i].1);
+                    let mut j = i;
+                    let mut acc = (mine[i].3 * scale).round() as i64;
+                    let mut max_r = i64::MIN;
+                    while j < mine.len() && level.bucket_start(mine[j].1) == key {
+                        acc = rule.fold(acc, (mine[j].3 * scale).round() as i64);
+                        max_r = max_r.max(mine[j].2);
+                        j += 1;
+                    }
+                    let last = mine[j - 1];
+                    let label = label_of(key);
+                    let r = (label + (last.2 - last.1)).max(max_r);
+                    expect.push((label, id, acc as f64 / scale, (j - i) as i64, r));
+                    i = j;
+                }
+            }
+            expect.sort_by_key(|e| (e.0, e.1));
+            let want = expect.iter().map(|e| format!("{} {} {:?} {} {}", e.1, e.0, e.2, e.3, e.4)).collect::<Vec<_>>().join("\n");
+            let got_rows: Vec<String> = got.lines().skip(1).map(|l| l.to_string()).collect();
+            assert_eq!(got_rows.join("\n"), want, "level {} of {}", level.name(), schema.name);
+        }
+    }
+    // Volume sums.
+    let (_, batches) = s.read_level(&vv, "1mo", &RowFilter::default()).unwrap();
+    let got = text(&batches);
+    assert!(got.lines().count() > 10);
+    let total_got: f64 = batches[0].column(2).as_primitive::<arrow::datatypes::Float64Type>().values().iter().sum();
+    let total: i64 = volumes.iter().map(|v| v.3).sum();
+    assert_eq!(total_got, total as f64, "the month sums add up to the volume");
+    // A minute market: the intraday levels nest and the day level is the
+    // trade date.
+    let minutes: Vec<(u64, i64, i64, f64)> = (0..3u64)
+        .flat_map(|a| {
+            (0..4i64).flat_map(move |d| {
+                (0..390i64).map(move |m| {
+                    let t = (start + d) * NANOS_PER_DAY + 14 * NANOS_PER_HOUR + (31 + m) * NANOS_PER_MINUTE;
+                    (20 + a, t, t + NANOS_PER_MINUTE, 50.0 + a as f64 + (m % 17) as f64 * 0.25)
+                })
+            })
+        })
+        .collect();
+    let mut m = Store::temporary("hot-ladder-m").unwrap();
+    let mut rows = close_rows(&minutes);
+    rows = rows.clone();
+    let vm = m.ingest("future.close", &[rows], "test", hot()).unwrap();
+    let hm = m.hot(&vm).unwrap();
+    assert_eq!(
+        hm.levels.iter().skip(1).map(|l| l.calendar.clone()).collect::<Vec<_>>(),
+        vec!["5m", "15m", "30m", "1h", "1d", "1w", "1mo"]
+    );
+    let (_, day) = m.read_level(&vm, "1d", &RowFilter::default()).unwrap();
+    assert_eq!(day[0].num_rows(), 12, "4 days of 3 instruments");
+    let counts = day[0].column(3).as_primitive::<arrow::datatypes::Int64Type>();
+    assert!(counts.values().iter().all(|&c| c == 390));
+    // Bars from 14:31 to 21:00: the first bucket (14:30) holds four, the
+    // last (21:00) one, 79 buckets a day.
+    let (_, five) = m.read_level(&vm, "5m", &RowFilter::default()).unwrap();
+    assert_eq!(five[0].num_rows(), 12 * 79);
+    let counts = five[0].column(3).as_primitive::<arrow::datatypes::Int64Type>();
+    assert_eq!(counts.values().iter().sum::<i64>(), 12 * 390);
+    // Rows come in (label, instrument) order: the day's last bucket of the
+    // first instrument is row 78 × 3.
+    assert_eq!((counts.value(0), counts.value(78 * 3)), (4, 1));
 }

@@ -187,7 +187,7 @@ Each level is a bar relation (open, high, low, close, volume, and the number of 
 
 **Proposition 5.2 [N] (exact ladder).** Every precomputed bar equals the bar computed from the base rows of its bucket. *Proof.* Open, high, low and close are first, max, min and last, which are exactly associative (they select one input value); volume and the row count are sums of integers, exact by Proposition 3.3; a coarser bucket is a union of finer buckets because the ladder's calendars are ordered by refinement (V-3.3, Prop. 3.3), so building from a finer level is a regrouping of the same inputs. ∎ Calendars outside the ladder are built on demand from the nearest finer level (ST-5.8).
 
-**Calendar rules.** Every bucket of the ladder is defined below; a different rule would give different bars without any error, so these are part of the format and change only with a new version.
+**Calendar rules.** Every bucket of the ladder is defined below; a different rule would give different bars without any error, so these are part of the format and change only with a new version. *Amended (iteration 1, E-89):* each level is stored as a relation of its own per bar column (the hot store holds one column per relation), its bars carrying the value, the base-row count, the sequence of the last base row and the receipt residual from the bucket's start; trade dates are UTC dates until the session table (iteration 3).
 
 | Level | Bucket | Label | Receipt |
 | --- | --- | --- | --- |

@@ -100,6 +100,7 @@ impl Store {
         {
             let v = HotVersion::open_manifest_at(&self.root, &built.staging_dir, built.manifest.clone(), true)?;
             build::verify_ranges(&v, &planned, 8, &mut verified)?;
+            build::verify_ladder(&v, &planned, &mut verified)?;
         }
         let t4 = t0.elapsed();
         build::publish(&self.root, &built)?;
@@ -212,6 +213,21 @@ impl Store {
         let every = super::RowFilter { latest_only: false, ..f.clone() };
         let rows = v.read(&every, b.lo, b.hi)?;
         v.to_batch(&rows, &stored, &layout(&m.schema), None)
+    }
+
+    /// A ladder level of a hot version (ST-5.3) as a relation of its own:
+    /// the level's schema (`<relation>@<level>`) and the filter's bars in
+    /// canonical order.
+    pub fn read_level(&self, version: &str, level: &str, f: &super::RowFilter) -> Result<(RelationSchema, Vec<RecordBatch>), DataError> {
+        let v = self.hot(version)?;
+        let li = v
+            .level_index(level)
+            .ok_or_else(|| DataError::NotFound(format!("`{}` has no level `{}` of its ladder", v.manifest.relation, level)))?;
+        let schema = v.level_schema(li);
+        let rows = v.read_at(li, f, 0, u32::MAX)?;
+        let stored = stored_schema(&schema);
+        let batch = v.to_batch_at(li, &schema, &rows, &stored, &layout(&schema), None)?;
+        Ok((schema, vec![batch]))
     }
 
     /// A hot version's rows with its tick columns as `Decimal128(18,
