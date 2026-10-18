@@ -1,0 +1,21 @@
+# proposition: ST-8.2 (Prop. 8.2, recovery: the torn journal record)
+# mutation: the journal is not truncated to its last good record
+# test: cargo test -p abt-data --test appends a_restart_answers_what_it_answered_before
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/append.rs b/crates/abt-data/src/hot/append.rs
+index b7695f3..89b9d91 100644
+--- a/crates/abt-data/src/hot/append.rs
++++ b/crates/abt-data/src/hot/append.rs
+@@ -513,11 +513,7 @@ impl Overlay {
+                 Err(_) => break,
+             }
+         }
+-        if good < bytes.len() {
+-            let f = fs::OpenOptions::new().write(true).open(&path)?;
+-            f.set_len(good as u64)?;
+-            f.sync_all()?;
+-        }
++        let _ = good;
+         // The append files end at their last journaled block.
+         for (fi, end) in file_ends {
+             let f = &mut self.files[fi];

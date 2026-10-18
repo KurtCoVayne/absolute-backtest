@@ -1,0 +1,26 @@
+# proposition: ST-3.2 (Prop. 3.2, lossless representation)
+# mutation: a value off the grid is rounded onto it and the reconstruction is not verified against the source bits (both guards dropped: either one alone keeps the block lossless)
+# test: cargo test -p abt-codec --test roundtrip
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-codec/src/tick.rs b/crates/abt-codec/src/tick.rs
+index d8671db..410651f 100644
+--- a/crates/abt-codec/src/tick.rs
++++ b/crates/abt-codec/src/tick.rs
+@@ -155,7 +155,7 @@ pub fn encode(values: &[f64], source: Source) -> Encoded {
+     // The exponent of the values on a grid; the others are exceptions.
+     let on_grid = |e: u8| values.iter().filter(|&&x| x.is_finite() && round_trips(x, e, source)).count();
+     let e = exponent(values, source).unwrap_or_else(|| (0..=MAX_EXPONENT).max_by_key(|&e| on_grid(e)).unwrap_or(0));
+-    let ints: Vec<Option<i64>> = values.iter().map(|&x| if x.is_finite() && round_trips(x, e, source) { scaled(x, e) } else { None }).collect();
++    let ints: Vec<Option<i64>> = values.iter().map(|&x| if x.is_finite() { scaled(x, e) } else { None }).collect();
+     let base = ints.iter().flatten().copied().min().unwrap_or(0);
+     let mut g = 0u64;
+     for i in ints.iter().flatten() {
+@@ -191,7 +191,7 @@ pub fn encode(values: &[f64], source: Source) -> Encoded {
+             Some(_) => {
+                 // Verified: the reader's formula gives the source's bits.
+                 let back = decode_value(base, g, e, recip_exact, f32, u);
+-                let same = back.to_bits() == x.to_bits();
++                let same = back.is_finite();
+                 if same {
+                     offsets.push(u);
+                 } else {

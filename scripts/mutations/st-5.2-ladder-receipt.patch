@@ -1,0 +1,17 @@
+# proposition: ST-5.2 (Prop. 5.2, the exact ladder: a bucket's receipt)
+# mutation: a bucket's receipt ignores a later receipt among its rows
+# test: cargo test -p abt-data --test hot the_ladder_bars_equal_their_buckets_recomputed_from_base_rows
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/ladder.rs b/crates/abt-data/src/hot/ladder.rs
+index f3ad7cb..547be46 100644
+--- a/crates/abt-data/src/hot/ladder.rs
++++ b/crates/abt-data/src/hot/ladder.rs
+@@ -258,7 +258,7 @@ pub fn build(level: Level, rule: Rule, source: &[Source]) -> Vec<Bar> {
+ /// bucket's label plus the receipt delay its last row carried, or the
+ /// latest receipt among its rows when that is later.
+ pub fn receipt(label: i64, last_row_label: i64, last_row_r: i64, max_r: i64) -> i64 {
+-    (label + (last_row_r - last_row_label)).max(max_r)
++    label + (last_row_r - last_row_label)
+ }
+ 
+ /// Per bucket key, the index of its label in the level's label list.

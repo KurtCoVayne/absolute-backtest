@@ -1,0 +1,17 @@
+# proposition: ST-5.1 (the shorter-edge rule)
+# mutation: the longer edge subtracts one row too few
+# test: cargo test -p abt-codec --test summary
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-codec/src/summary.rs b/crates/abt-codec/src/summary.rs
+index ac204d5..f0d0f5b 100644
+--- a/crates/abt-codec/src/summary.rs
++++ b/crates/abt-codec/src/summary.rs
+@@ -275,7 +275,7 @@ fn edge(col: &dyn Column, blk: usize, lo: usize, hi: usize) -> Cumulative {
+         Cumulative::ZERO.plus(&v[lo..hi], k0 + lo as u64)
+     } else {
+         let total = col.cumulative(blk + 1).minus(&col.cumulative(blk));
+-        let before = Cumulative::ZERO.plus(&v[..lo], k0);
++        let before = Cumulative::ZERO.plus(&v[..lo.saturating_sub(1)], k0);
+         let after = Cumulative::ZERO.plus(&v[hi..], k0 + hi as u64);
+         total.minus(&before).minus(&after)
+     }

@@ -259,3 +259,59 @@ fn integers_encode_at_exponent_zero_and_round_trip() {
         }
     }
 }
+
+#[test]
+fn sums_are_exact_across_quanta() {
+    // Proposition 3.3: blocks at different quanta (cents, sixteenths at
+    // exponent 4, whole volumes) sum to the exact integer at the finest
+    // exponent, over whole blocks and over row ranges; the `f64` of the
+    // sum is the one correctly rounded division; a sum beyond `i64` is
+    // exact in `i128`.
+    use abt_agg::exact::{pow10, Int};
+    use abt_codec::tick::{aligned, to_f64};
+    let mut r = Rng(0x5EED_0033);
+    for round in 0..40 {
+        let n = 1 + r.below(BLOCK as u64) as usize;
+        let (a, b) = {
+            let a = r.below(n as u64) as usize;
+            (a, a + 1 + r.below((n - a) as u64) as usize)
+        };
+        // (exponent, unit of the grid at that exponent, range of the base)
+        let kinds = [(2u8, 1i64, 1_000_000u64), (4, 625, 160), (0, 1, 10_000_000)];
+        let e_star = kinds.iter().map(|k| k.0).max().unwrap();
+        let (mut whole, mut range) = (Int::ZERO, Int::ZERO);
+        let (mut whole_ref, mut range_ref) = (0i128, 0i128);
+        for &(e, unit, base_range) in &kinds {
+            let base = r.below(base_range) as i64 * unit;
+            let ints: Vec<i64> = (0..n).map(|_| base + r.below(50_000) as i64 * unit).collect();
+            let values: Vec<f64> = ints.iter().map(|&i| i as f64 / pow10(e as u32) as f64).collect();
+            let enc = encode(&values, Source::F64);
+            assert!(enc.exact() && enc.e <= e, "round {round}: exponent {} for grid {e}", enc.e);
+            whole = whole.add(&aligned(enc.sum(0, n).unwrap(), enc.e, e_star));
+            range = range.add(&aligned(enc.sum(a, b).unwrap(), enc.e, e_star));
+            let scale = pow10((e_star - e) as u32) as i128;
+            whole_ref += ints.iter().map(|&i| i as i128 * scale).sum::<i128>();
+            range_ref += ints[a..b].iter().map(|&i| i as i128 * scale).sum::<i128>();
+        }
+        assert_eq!(whole, Int::from_i128(whole_ref), "round {round}: the whole blocks");
+        assert_eq!(range, Int::from_i128(range_ref), "round {round}: rows {a}..{b}");
+        // Below 2^53 the quotient of the two exact doubles is the correctly
+        // rounded value of the rational.
+        for (sum, reference) in [(&whole, whole_ref), (&range, range_ref)] {
+            assert!(reference.unsigned_abs() < 1 << 53);
+            let expected = reference as f64 / pow10(e_star as u32) as f64;
+            assert_eq!(to_f64(sum, e_star).to_bits(), expected.to_bits(), "round {round}");
+        }
+    }
+    // A block of large whole values whose sum exceeds i64: exact in i128,
+    // and its f64 the correctly rounded conversion.
+    let ints: Vec<i64> = (0..BLOCK).map(|k| (1i64 << 62) + (k as i64) * (1 << 11)).collect();
+    let values: Vec<f64> = ints.iter().map(|&i| i as f64).collect();
+    assert!(values.iter().zip(&ints).all(|(&v, &i)| v as i64 == i), "the values are exact in f64");
+    let enc = encode(&values, Source::F64);
+    assert!(enc.exact() && enc.e == 0);
+    let reference: i128 = ints.iter().map(|&i| i as i128).sum();
+    assert!(reference > i64::MAX as i128);
+    assert_eq!(enc.sum(0, BLOCK), Some(reference));
+    assert_eq!(to_f64(&Int::from_i128(reference), 0).to_bits(), (reference as f64).to_bits());
+}

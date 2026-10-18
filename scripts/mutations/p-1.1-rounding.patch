@@ -1,0 +1,17 @@
+# proposition: P-1.1 (one implementation, one answer: the correctly rounded division)
+# mutation: a quotient below the half-way point rounds up when any remainder is left
+# test: cargo test -p abt-agg --test exact
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-agg/src/exact.rs b/crates/abt-agg/src/exact.rs
+index cfeac9e..e9237de 100644
+--- a/crates/abt-agg/src/exact.rs
++++ b/crates/abt-agg/src/exact.rs
+@@ -327,7 +327,7 @@ pub fn ratio_to_f64(num: &Int, den: &Wide) -> f64 {
+     let sticky = !r.is_zero();
+     let round_up = match dropped.cmp(&half) {
+         Ordering::Greater => true,
+-        Ordering::Less => false,
++        Ordering::Less => sticky,
+         Ordering::Equal => sticky || (mantissa & 1 == 1),
+     };
+     let mantissa = mantissa + u64::from(round_up);

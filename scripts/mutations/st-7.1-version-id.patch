@@ -1,0 +1,16 @@
+# proposition: ST-7.1 (Prop. 7.1, the version id survives consolidation)
+# mutation: consolidation renames the version
+# test: cargo test -p abt-data --test appends consolidation_keeps_every_answer_and_the_version_id
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/consolidate.rs b/crates/abt-data/src/hot/consolidate.rs
+index 17f6632..0815108 100644
+--- a/crates/abt-data/src/hot/consolidate.rs
++++ b/crates/abt-data/src/hot/consolidate.rs
+@@ -318,6 +318,7 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>,
+     write_synced(&dir.join(&presence_file), &presence.to_bytes())?;
+     let folded_seq_max = folded.iter().flat_map(|(_, _, q)| q.iter().copied()).max().unwrap_or(v.manifest.seq_high);
+     let mut manifest = v.manifest.clone();
++    manifest.version = format!("{}0", manifest.version);
+     manifest.levels[0].segments = lists;
+     manifest.levels[0].presence = presence_file;
+     for (c, col) in manifest.columns.iter_mut().enumerate() {

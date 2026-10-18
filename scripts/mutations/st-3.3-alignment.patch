@@ -1,0 +1,17 @@
+# proposition: ST-3.3 (Prop. 3.3, exact sums across quanta)
+# mutation: a block's contribution to a sum is not aligned to the finest exponent (the factor 10^(e* - e) dropped)
+# test: cargo test -p abt-codec --test roundtrip sums_are_exact_across_quanta
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-codec/src/tick.rs b/crates/abt-codec/src/tick.rs
+index d8671db..19714f9 100644
+--- a/crates/abt-codec/src/tick.rs
++++ b/crates/abt-codec/src/tick.rs
+@@ -319,7 +319,7 @@ impl Encoded {
+ /// sum (Proposition 3.3).
+ pub fn aligned(integer: i128, e: u8, e_star: u8) -> Int {
+     debug_assert!(e_star >= e);
+-    Int::from_i128(integer).mul_u128(pow10((e_star - e) as u32))
++    Int::from_i128(integer)
+ }
+ 
+ /// The nearest `f64` of an exact integer at an exponent.

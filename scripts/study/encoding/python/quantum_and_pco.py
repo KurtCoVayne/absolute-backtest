@@ -90,6 +90,10 @@ for root in ("ES", "ZN", "ZT", "CL", "GC", "6J"):
     res[f"dbn_{root}_volume"] = {"for": mem_bpv(v, st), "pco": pco(v)}
     print(root, file=sys.stderr)
 
+if not glob.glob(f"{ROOT}/orats/*.parquet"):
+    print("orats: no samples under orats/ (ST-11 only): skipped", file=sys.stderr)
+    json.dump(res, open(f"{ROOT}/study2.json", "w"), indent=1)
+    sys.exit(0)
 # ORATS: one day, file order (the chains are ~24 rows: blocks of 1024 across chains).
 day = pq.read_table(sorted(glob.glob(f"{ROOT}/orats/*.parquet"))[0])
 day = day.sort_by([("ticker", "ascending"), ("expirDate", "ascending"), ("strike", "ascending")])
