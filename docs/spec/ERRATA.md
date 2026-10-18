@@ -2552,3 +2552,29 @@ batch driver agree on every corpus program. Each bless since:
   (it runs under the store's write lock); the extra-memory bound of the
   consolidation test row (one segment plus the append files) is by
   construction (one column at a time) and not measured.
+
+- **E-91 (ST-7.4, ST-9, ST-13, K-6.5, A-D49, A-D52; iteration 1, phases 3
+  to 5).** The falsification pass of `docs/spec/TRACE.md` is
+  `scripts/mutations/*.patch` run by `scripts/mutate.sh`: each patch breaks
+  one proposition's implementation and names the test that must then
+  fail; the pass fails when a patch does not apply, when its test passes
+  under the mutation, or when the tree is left changed. The vendor
+  adapters' bar relations are held hot as A-D49 states for every market:
+  `adapters::Fetched::ingest` merges `adapter::hot_bars` into the
+  per-relation attributes (a relation's own attributes come after), so
+  Norgate and Databento ingests stage through S1 to S5 like the synthetic
+  and bundle markets; the orats option relations stay in Parquet (ST-11).
+  G-ST2's harness is two commands rather than `abt data stage --measure`:
+  `abt data ingest --measure` prints every hot version's staging report
+  (S2 counts, S3 bytes per structure, S4 checks, the milliseconds of S1 to
+  S5) as JSON lines, and `abt data stats --measure` prints ST-9's lines of
+  each hot version from its files (every level's columns and presence,
+  the manifest, the directory's locators, the append files, the tails)
+  with bytes per row. A `live-sim` run takes the deployment document
+  (A-D52): `--session S` or the document's `recording stream S` names the
+  session, and the two must agree. `scripts/bench.sh` measures the
+  ingest's peak RSS only where `/usr/bin/time` exists; the encoding
+  study's scripts skip their ORATS sections when no ORATS sample is
+  present. Not built: the live feed's appends through the vendor adapters
+  (iteration 3); the Databento half of the sizing run on the full history
+  (the bucket's per-day objects; `docs/iterations/01-foundation.md`).

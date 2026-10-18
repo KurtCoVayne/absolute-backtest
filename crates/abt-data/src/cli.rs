@@ -97,7 +97,7 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--profile workstation|dedicated] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--base CAL] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--base CAL] [--days N] [--start DATE] [--symbols A,B,C] [--seed N]\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--ticks] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included; a hot version's line carries its segment and append bytes, tail rows and journal records)
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--profile workstation|dedicated] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...] [--measure]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--base CAL] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--base CAL] [--days N] [--start DATE] [--symbols A,B,C] [--seed N] [--measure]   (--measure: every hot version's staging report as a JSON line: S2 counts, S3 bytes per structure, S4 checks, the milliseconds of S1 to S5)\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--ticks] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json] [--measure]   (--json: each version's record, its attributes included; a hot version's line carries its segment and append bytes, tail rows and journal records; --measure: ST-9's lines of each hot version from its files, bytes per row)
   abt data consolidate [--store DIR] RELATION   (ST-8.7: the journaled appends folded into base segments under the same version id)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>\n  --ticks       a hot relation's price and quantity columns as exact decimals (Decimal128 at the finest scale, ST-10.4) instead of their f64 views
   --profile P   the memory profile (ST-9.2): workstation (the default: two kernels at a time) or dedicated (four); the served store is prefaulted and locked best effort, the shortfall reported by stats"
     );
@@ -214,6 +214,7 @@ pub fn main(args: &[String]) {
             for (r, s, v) in store.registry.currents() {
                 println!("{} {} {}", r, s, v);
             }
+            print_staging_reports(&a);
         }
         "catalog" => {
             if a.flags.iter().any(|f| f == "sources") {
@@ -305,6 +306,7 @@ pub fn main(args: &[String]) {
         }
         "stats" => {
             let store = open(&a);
+            let measure = a.flags.iter().any(|f| f == "measure");
             let current: std::collections::BTreeSet<String> = store.registry.currents().into_iter().map(|(_, _, v)| v).collect();
             for v in store.registry.versions().filter(|v| a.opts.get("relation").is_none_or(|r| *r == v.relation)) {
                 let hot = store.hot_figures(&v.version);
@@ -312,6 +314,11 @@ pub fn main(args: &[String]) {
                     let mut j = serde_json::json!({ "version": v, "current": current.contains(&v.version) });
                     if let Some(h) = hot {
                         j["hot"] = serde_json::json!({ "segment_bytes": h.segment_bytes, "append_bytes": h.append_bytes, "tail_rows": h.tail_rows, "journal_records": h.journal_records, "generation": h.generation });
+                    }
+                    if measure {
+                        if let Some(m) = store.measure(&v.version).unwrap_or_else(|e| fail(&e.to_string())) {
+                            j["measure"] = serde_json::json!(m);
+                        }
                     }
                     println!("{}", j);
                     continue;
@@ -331,6 +338,24 @@ pub fn main(args: &[String]) {
                     ))
                     .unwrap_or_default()
                 );
+                // --measure: ST-9's lines of a hot version from its files
+                // (ST-7.4, G-ST2's harness), bytes per row of each.
+                if measure {
+                    if let Some(m) = store.measure(&v.version).unwrap_or_else(|e| fail(&e.to_string())) {
+                        let total: u64 = m.iter().map(|x| x.bytes).sum();
+                        for x in &m {
+                            let per_row = if x.rows > 0 { x.bytes as f64 / x.rows as f64 } else { 0.0 };
+                            println!("  {:<52} {:>14} B {:>12} rows {:>9} blocks {:>9.3} B/row", x.structure, x.bytes, x.rows, x.blocks, per_row);
+                        }
+                        println!(
+                            "  {:<52} {:>14} B {:>12} rows {:>22.3} B/row",
+                            "total",
+                            total,
+                            v.rows,
+                            if v.rows > 0 { total as f64 / v.rows as f64 } else { 0.0 }
+                        );
+                    }
+                }
             }
         }
         "consolidate" => {
@@ -738,6 +763,19 @@ fn record(a: &Args, svc: &Arc<DataService>, source: &str, clock: Arc<dyn crate::
     svc.record(&session, "synthetic", Box::new(feed))
 }
 
+/// `--measure` (ST-7.4, G-ST2's harness): what staging counted, wrote,
+/// verified and timed for every hot version this ingest built, one JSON
+/// line each (`staging::Report`: the counts of S2, the bytes of S3 per
+/// structure, the checks of S4, the milliseconds of S1 to S5).
+fn print_staging_reports(a: &Args) {
+    if !a.flags.iter().any(|f| f == "measure") {
+        return;
+    }
+    for r in crate::staging::reports() {
+        println!("{}", serde_json::to_string(&r).unwrap_or_default());
+    }
+}
+
 /// A reviewer's statements of the versions an ingest writes: `--attributes
 /// reviewed=complete,receipt=recorded`.
 fn statements(a: &Args) -> BTreeMap<String, String> {
@@ -873,6 +911,7 @@ fn vendor_ingest(a: &Args, adapter: &str) {
     }
     let mut store = open(a);
     got.ingest(&mut store, vendor, &source, &statements(a)).unwrap_or_else(|e| fail(&e.to_string()));
+    print_staging_reports(a);
     for (r, s, v) in store.registry.currents() {
         println!("{} {} {}", r, s, v);
     }

@@ -92,8 +92,11 @@ if [ "$LAKE" != none ]; then
     store="$OUT/store-$rung" sock="$OUT/data-$rung.sock"
     limit=(); [ "$rung" != 0 ] && limit=(--limit "$rung")
     rm -rf "$store"; t=$(now)
+    # GNU or BSD time measures the ingest's peak RSS where it exists (a
+    # container without it reports the ingest without one).
     tflag=-v; [ "$(uname)" = Darwin ] && tflag=-l
-    /usr/bin/time $tflag "$ABT" data ingest --store "$store" --adapter norgate --from "$LAKE" --start "$FROM" ${limit[@]+"${limit[@]}"} \
+    timer=(); [ -x /usr/bin/time ] && timer=(/usr/bin/time "$tflag")
+    "${timer[@]}" "$ABT" data ingest --store "$store" --adapter norgate --from "$LAKE" --start "$FROM" ${limit[@]+"${limit[@]}"} \
       --exceptions "$EXCEPTIONS" --attributes reviewed=complete --report "$OUT/report-$rung.json" >"$OUT/ingest-$rung.log" 2>&1 \
       || { echo "ingest $rung failed: $(grep -v '^ ' "$OUT/ingest-$rung.log" | tail -1)" >&2; continue; }
     ingest_s=$(since "$t")

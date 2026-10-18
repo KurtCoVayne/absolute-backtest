@@ -100,7 +100,13 @@ impl Fetched {
             Keys::Vendor if self.ticker_columns.is_empty() => Cow::Borrowed(&self.relations),
             _ => Cow::Owned(self.by_ticker(store)?),
         };
-        ingest_keyed_with(store, vendor, &self.securities, &self.terms, &relations, source, &attributes, &self.relation_attributes)
+        // The bar relations of a market are held hot (A-D49), whichever
+        // adapter fetched them; a relation's own attributes come after.
+        let mut per = crate::adapter::hot_bars(&relations);
+        for (relation, own) in &self.relation_attributes {
+            per.entry(relation.clone()).or_default().extend(own.clone());
+        }
+        ingest_keyed_with(store, vendor, &self.securities, &self.terms, &relations, source, &attributes, &per)
     }
 
     /// The relations with their symbols replaced by the ids whose ticker

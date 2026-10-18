@@ -632,13 +632,18 @@ fn run_mode(args: &Args) -> ModeOptions {
         .map(|p| crate::live::Deployment::read(Path::new(p)).unwrap_or_else(|e| fail(format!("--deployment {}", e))));
     let mode = match args.opts.get("mode").map(String::as_str) {
         None | Some("replay-sim") => RunMode::ReplaySim,
-        Some("live-sim") => RunMode::LiveSim {
-            session: args
-                .opts
-                .get("session")
-                .cloned()
-                .unwrap_or_else(|| fail("--mode live-sim reads a live session: name it with --session S".into())),
-        },
+        Some("live-sim") => {
+            // The session: --session S, or the deployment document's
+            // recording stream (K-6.5, taken in every live mode; A-D52).
+            let named = args.opts.get("session").cloned();
+            let session = match &deployment {
+                Some(d) => crate::live::session_of(named, d).unwrap_or_else(|e| fail(format!("--session: {}", e))),
+                None => named,
+            };
+            RunMode::LiveSim {
+                session: session.unwrap_or_else(|| fail("--mode live-sim reads a live session: name it with --session S or a deployment document's `recording stream S`".into())),
+            }
+        }
         Some("live-broker") => {
             let Some(d) = &deployment else {
                 fail("--mode live-broker takes its deployment document: --deployment FILE (K-6.5)".into())

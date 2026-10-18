@@ -403,6 +403,8 @@ deployment {
 
 `flatten_all` emits closing decisions through the normal path so they are logged and limited like any decision; `halt_all` stops evaluation after the current barrier.
 
+In `live-sim` the same document serves the rehearsal (A-D52): its kill switch, deadlines and recording stream apply (`recording stream S` names the session `--session S` would, and the two must agree when both are given); its account, broker session, routing and reconciliation fields are hashed and logged with the run but not acted on, since the executor is `SimExecutor` (6.2) and no broker is connected.
+
 ---
 
 ## 7. State tables and the query service

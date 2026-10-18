@@ -698,3 +698,85 @@ fn tail_row(ov: &mut crate::hot::append::Overlay, o: usize, kinds: &[Kind], r: &
         floats,
     }
 }
+
+/// One line of ST-9's table for a hot version, measured from its files
+/// (ST-7.4, G-ST2's harness): a structure, its bytes, the rows it covers
+/// and the blocks it holds.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Measured {
+    pub structure: String,
+    pub bytes: u64,
+    pub rows: u64,
+    pub blocks: u64,
+}
+
+impl Store {
+    /// The lines of ST-9 for a hot version as its files measure them: each
+    /// level's columns (the segment bytes holding their blocks: the values,
+    /// a level's counts and sequences, the receipt residual) and its
+    /// presence file; the manifest; the directory (one locator per block,
+    /// in memory); the append files and the tails (ST-8). `None` for a
+    /// Parquet version.
+    pub fn measure(&self, version: &str) -> Result<Option<Vec<Measured>>, DataError> {
+        if !self.manifest(version)?.hot {
+            return Ok(None);
+        }
+        let v = self.hot(version)?;
+        let hm = &v.manifest;
+        let dir = self.root.join(crate::hot::manifest::HotManifest::dir(&hm.relation, &hm.version));
+        let size = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let mut out = Vec::new();
+        let mut locators = 0u64;
+        for (li, level) in hm.levels.iter().enumerate() {
+            let data = &v.levels[li];
+            let name = if li == 0 { "base".to_string() } else { format!("level {}", level.calendar) };
+            let rows: u64 = data.presence.instruments.iter().map(|i| i.rows).sum();
+            let cols = if li == 0 { &hm.columns } else { &level.columns };
+            for (ci, segs) in level.segments.iter().enumerate() {
+                let col = cols.get(ci).map(|c| c.name.as_str()).unwrap_or("?");
+                let blocks: u64 = data.columns.get(ci).map(|c| c.blocks.iter().map(|b| b.len() as u64).sum()).unwrap_or(0);
+                locators += blocks;
+                out.push(Measured {
+                    structure: format!("{}: column {}", name, col),
+                    bytes: segs.iter().map(|s| s.bytes).sum(),
+                    rows,
+                    blocks,
+                });
+            }
+            out.push(Measured {
+                structure: format!("{}: presence", name),
+                bytes: size(&dir.join(&level.presence)),
+                rows,
+                blocks: 0,
+            });
+        }
+        out.push(Measured {
+            structure: "manifest".into(),
+            bytes: size(&dir.join("manifest.json")),
+            rows: hm.rows,
+            blocks: 0,
+        });
+        out.push(Measured {
+            structure: "directory (one locator per block, in memory)".into(),
+            bytes: locators * std::mem::size_of::<crate::hot::version::Loc>() as u64,
+            rows: hm.rows,
+            blocks: locators,
+        });
+        let ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
+        let tail_rows: u64 = ov.instruments.iter().map(|i| i.tail.len() as u64).sum();
+        let values = v.value_columns() as u64;
+        out.push(Measured {
+            structure: "append files (sealed blocks)".into(),
+            bytes: ov.append_bytes(),
+            rows: ov.instruments.iter().map(|i| i.sealed.len() as u64).sum::<u64>() * abt_codec::BLOCK as u64,
+            blocks: ov.instruments.iter().map(|i| i.sealed.len() as u64).sum(),
+        });
+        out.push(Measured {
+            structure: "tails (rows in memory)".into(),
+            bytes: tail_rows * (std::mem::size_of::<TailRow>() as u64 + 16 * values),
+            rows: tail_rows,
+            blocks: 0,
+        });
+        Ok(Some(out))
+    }
+}
