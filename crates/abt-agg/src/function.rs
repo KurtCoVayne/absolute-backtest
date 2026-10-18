@@ -47,6 +47,10 @@ pub enum Mode {
     /// window, rebuilt exactly every N rows; every other window and
     /// function is reduced as in `TwoPass`.
     Running,
+    /// Tick columns reduced as exact integers (`exact::reduce_ticks`, D-6.3,
+    /// ST-3); a float column, which has no integer form, is reduced as in
+    /// `TwoPass`.
+    Exact,
 }
 
 impl Mode {
@@ -54,7 +58,18 @@ impl Mode {
         match self {
             Mode::TwoPass => "two_pass",
             Mode::Running => "running",
+            Mode::Exact => "exact",
         }
+    }
+
+    /// The mode a name denotes.
+    pub fn parse(name: &str) -> Option<Mode> {
+        Some(match name {
+            "two_pass" => Mode::TwoPass,
+            "running" => Mode::Running,
+            "exact" => Mode::Exact,
+            _ => return None,
+        })
     }
 }
 

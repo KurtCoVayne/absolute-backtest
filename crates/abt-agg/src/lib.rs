@@ -9,12 +9,14 @@
 //! window as rows enter and leave; `ShiftedSums` are the running sums of
 //! `numerics running`.
 
+pub mod exact;
 pub mod function;
 pub mod moments;
 pub mod order_stats;
 pub mod reduce;
 pub mod window;
 
+pub use exact::{reduce_ticks, ExactSums, Ticks};
 pub use function::{AggError, Class, Function, Mode};
 pub use moments::{checkpoint_period, Neumaier, ShiftedSums};
 pub use reduce::reduce;

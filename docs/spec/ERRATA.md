@@ -2357,3 +2357,22 @@ batch driver agree on every corpus program. Each bless since:
   gives a relation's column: a price or quantity column is `Num`, and crosses
   as ticks when a request asks for them (01 §2.1 as amended); the variant
   names the column's form on the wire.
+
+- **E-85 (P-1.2, D-6.3, A-D47; the exact numerics as built).** `abt-agg`
+  gains `Mode::Exact` and the module `exact`: tick columns (`Ticks`:
+  integer units at a scale, aligned to the window's finest exponent by the
+  caller) reduced as integers. Sums are `i128`; squares and cross products
+  are a 320-bit integer of the crate's own (`exact::Wide`, no dependency);
+  every `f64` is one correctly rounded division of the exact rational
+  (`exact::ratio_to_f64`: the quotient to 54 bits, the remainder as the
+  sticky bit, ties to even), which `crates/abt-agg/tests/exact.rs` holds
+  against an independent big-integer oracle on random ratios, ties and
+  near-ties. `ExactSums` slides a window by integer arithmetic alone, so
+  the exact mode needs no rebuild schedule (E-27 is `running`'s). Order
+  statistics select units; `median` of an even count is the rounded
+  rational; `quantile`'s interpolation is the two-pass formula over the
+  neighbours' views, as its level is a float. Over float columns `exact`
+  is `two_pass` (A-D47). The data layer's pass maps `Numerics::Exact` to
+  `Mode::Exact`; it reduces tick columns through `reduce_ticks` once the
+  hot store answers them (iteration 1, M-2). The kernel's `numerics exact`
+  is iteration 2's (K-2.2).

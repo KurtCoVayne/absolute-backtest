@@ -17,7 +17,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | A-D5 | `abt` is a thin front | `crates/abt/src/main.rs` | `abt/tests/cli.rs` | done | |
 | A-D6 | The data layer has no semantics | `crates/abt-data/src/{query,agg,stream}.rs` | `abt-data/tests/*.rs` | done | the standing event aggregates of ST-5.6 (a product per entity, requested by the kernel's library) are missing with A-D37 |
 | A-D7 | Two timestamps per tuple, nanoseconds | `crates/abt-data/src/registry.rs` (roles `event_time`, `receipt_time`), `crates/abt-kernel/src/kernel/time.rs` | `abt-data/tests/store.rs` | done | E-18 |
-| A-D8 | One implementation of every aggregate | `crates/abt-agg` | `abt-agg/tests/agg.rs`, `abt-tests/tests/pushdown.rs` | done | the `exact` mode (A-D35, D-6.3) is missing |
+| A-D8 | One implementation of every aggregate | `crates/abt-agg` | `abt-agg/tests/{agg,exact}.rs`, `abt-tests/tests/pushdown.rs` | done | the `exact` mode in `abt-agg/src/exact.rs` (E-85, A-D47) |
 | A-D9 | Explicit clock barriers | `crates/abt-data/src/stream.rs` | `abt-data/tests/stream.rs` | done | E-13, E-32 |
 | A-D10 | Canonical stream order | `stream.rs` (`Key`) | `abt-data/tests/stream.rs::the_merge_is_the_sort_of_every_event` | done | E-13, E-32 |
 | A-D11 | Determinism across processes | run ids and bindings in `crates/abt-kernel/src/kernel/mod.rs` | `abt-tests/tests/determinism.rs` | done | G3 |
@@ -44,8 +44,8 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | A-D32 | USD only | dimension system | `abt-tests/tests/checker.rs` | done | |
 | A-D33 | No MCP server | — | — | done | |
 | A-D34 | v1 retired by the migration | M-9 | — | done | E-78, E-79, E-80 |
-| A-D35 | Prices and quantities stored as integer ticks, floats as views | — | — | missing | iteration 1: `crates/abt-codec/src/tick.rs` |
-| A-D36 | Instrument-contiguous lane-interleaved blocks, memory-mapped | — | — | missing | iteration 1: `abt-codec/src/block.rs`, `abt-data/src/hot/segment.rs` |
+| A-D35 | Prices and quantities stored as integer ticks, floats as views | `crates/abt-codec/src/tick.rs` (the quantum, the verified reconstruction, exceptions, exact sums) | `abt-codec/tests/roundtrip.rs` | partial | the format; the store holds no tick column until M-2 |
+| A-D36 | Instrument-contiguous lane-interleaved blocks, memory-mapped | `crates/abt-codec/src/block.rs` (the layout, 65 width kernels, row ranges, extraction, patching, the horizontal tail) | `abt-codec/tests/roundtrip.rs` | partial | the layout; segments and mapping with M-2 |
 | A-D37 | Everything program-independent precomputed and hot | — | — | missing | iteration 1: `abt-data/src/hot/` |
 | A-D38 | A seven-stage staging pipeline | — | — | missing | iteration 1: `abt-data/src/staging/` |
 | A-D39 | Appends in place into tail blocks, visible by sequence | — | — | missing | iteration 1: `hot/append.rs` |
@@ -80,11 +80,11 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | Q-2.1 | The embargo is enforced | `abt-query/src/plan/holdout.rs` | `abt-tests/tests/plan_exec.rs::{a_block_hold_out_masks_its_blocks_and_a_reveal_reports_them, a_trailing_reveal_reports_the_embargoed_tail}` | done | — |
 | Q-2.2 | Every run is a counted trial | `plan/trials.rs` | `plan_exec.rs::every_run_is_a_trial_counted_once_and_pi_is_in_its_id` | done | — |
 | Q-5.2 | Claims change nothing | `abt-query/src/claims` | `abt-tests/tests/claims_exec.rs` | done | — |
-| P-1.1 | One implementation, one answer | `crates/abt-agg` | `abt-agg/tests/agg.rs`, `abt-tests/tests/pushdown.rs` | partial | holds for `two_pass` and `running`; `exact` missing (iteration 1) |
+| P-1.1 | One implementation, one answer | `crates/abt-agg` (`exact.rs` for `Mode::Exact`) | `abt-agg/tests/{agg,exact}.rs`, `abt-tests/tests/pushdown.rs` | partial | holds for `two_pass` and `running`; `exact` reduces ticks in `abt-agg` (E-85), the two callers meet on tick columns with the hot store (M-2) and the kernel's exact windows (iteration 2) |
 | P-5.1 | Transport invisibility | `abt-wire/src/{frame,rpc}.rs` | `abt-wire/tests/rpc.rs`, `abt-tests/tests/{determinism,fold}.rs`, `abt/tests/deployment.rs` | done | — |
 | X-2.1 | The aggregate pass is deterministic under parallelism | `abt-data/src/agg.rs` | `determinism.rs::the_aggregate_pass_on_one_thread_and_on_eight_gives_the_same_bits` | done | — |
 | X-3.1 | Bit identity under entity parallelism | — | — | missing | E-77: entity-parallel strata not built; iteration 3 decides |
-| ST-3.2 | Lossless blocks | — | — | missing | iteration 1 |
+| ST-3.2 | Lossless blocks | `abt-codec/src/tick.rs::encode` (verified by decoding; raw-bit exceptions) | `abt-codec/tests/roundtrip.rs::encode_then_decode_is_the_identity_with_and_without_exceptions` | done | — |
 | ST-3.3 | Exact sums across quanta | — | — | missing | iteration 1 |
 | ST-5.1 | Exact windows from cumulative summaries | — | — | missing | iteration 1 |
 | ST-5.2 | Exact ladder | — | — | missing | iteration 1 |
@@ -150,7 +150,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | Q-4.4 `ic`, `fama_macbeth`, `coactivation`, `effective_rules`, `cost_realism` | known answers | `known_answers_panels.rs` | done | E-61 |
 | Q-4.4 `psr`, `dsr`, `min_trl`, `pbo`, `bootstrap_sharpe`, `nw_mean`, `wfe` | known answers | `known_answers_samples.rs` | done | E-62 |
 | Q-4.4 `regression` | NIST StRD certified values | `known_answers_regression.rs` | done | E-24: NIST's difficulty classes as tolerances |
-| P-1.2 `tests/agg.rs` | every function and mode against a 128-bit rational reference | `abt-agg/tests/agg.rs` | done | `exact` to be added |
+| P-1.2 `tests/agg.rs` | every function and mode against a 128-bit rational reference | `abt-agg/tests/agg.rs`; `exact` in `abt-agg/tests/exact.rs` against an independent big-integer oracle (correct rounding, ties, order independence) | done | E-85 |
 | P-2 transport | the same exchange in process and over a socket; version refusal; flow control | `abt-wire/tests/{rpc,frame,schema}.rs` | done | E-64 |
 | ST-13 codec property tests | encode→decode identity at every width, with and without exceptions, `recip_exact` set and unset; extraction equals decoding | — | missing | iteration 1 |
 | ST-13 real-data round trip | every block of the staged store decodes bit for bit | — | missing | iteration 1, over the NDLake history fetched from S3 |

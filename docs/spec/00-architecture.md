@@ -4,7 +4,7 @@ Oct 12, 2026 · specification for implementation. This document and its seven co
 
 Tags on claims: **[E]** an established result, with a reference. **[N]** a new proposition, with a proof or proof sketch. **[C]** a conjecture, with what would settle it. **[D]** a design decision, with the alternative it rejects and why.
 
-Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D46` and are cited by the companions; A-D35 to A-D46 were added with `07-storage.md` (Oct 15, 2026).
+Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D47` and are cited by the companions; A-D35 to A-D46 were added with `07-storage.md` (Oct 15, 2026), A-D47 onward by the iterations that implement it (`docs/iterations/`).
 
 ---
 
@@ -80,6 +80,7 @@ Every decision below was taken in the design conversation of Oct 12, 2026 or fol
 | A-D44 | **Ticks cross the protocol as Arrow `Decimal128(18, s)`**, so `exact` aggregates agree bit for bit across layers (ST-10.4). | `Float64` only (`exact` could not cross layers); `Int64` with scale metadata (not a standard Arrow type). |
 | A-D45 | **Hot means locked**: the store is prefaulted and `mlock`ed; memory profiles (`dedicated`, `workstation`) and a fixed shedding order keep the peak inside the machine (ST-9.1, ST-9.2). | Relying on the page cache: a dropped page costs tens of microseconds and raises no error. |
 | A-D46 | **Futures calendars**: UTC-aligned intraday buckets, sessions and days by trade date, every receipt at its bucket's end, a Databento bar at its close (ST-5.3, ST-4.7). | Exchange-local alignment (identical for CME and ICE, but time-zone data on the hot path); UTC days (they cut every Globex session in two). |
+| A-D47 | **`exact` over what has no integer form is `two_pass`**: a float column or a derived series is reduced as `two_pass` under `numerics exact`, and `std`, `corr` and `ols_r` take their exact centred sums to `f64` before the square root (D-6.3; added in iteration 1, Oct 18, 2026). | Refusing such a request: a program that reads a tick column and a float series would need two numerics blocks; rounding the floats to a grid: a value the program never wrote. |
 
 ---
 
@@ -194,4 +195,4 @@ Reference machine: Apple M4, 10 cores, 16 GB (as `docs/assessment.md`). The owne
 
 - [E] Conjunctive-query evaluation for demand resolution (V-3.12); Kleene conjunction for order-independent bodies (V-5); the causality theorem (F-7.1); BLAKE3 (O'Connor, Aumasson, Neves, Wilcox-O'Hearn 2020).
 - [N] Reproduction across processes (4.2); mode invariance of decisions (4.3); replay equals live across the boundary (4.4); observation and queries change nothing across layers (4.6).
-- [D] A-D1 to A-D46.
+- [D] A-D1 to A-D47.
