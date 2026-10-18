@@ -2484,3 +2484,71 @@ batch driver agree on every corpus program. Each bless since:
   (the ladder's, ST-5.3), and the kernel's bar views over coarser
   calendars reach the ladder with M-8. `Store::read_level` answers a
   level's bars for tests and tools.
+
+- **E-90 (ST-8, ST-9, ST-10.2, A-D39, A-D41, A-D42, A-D45, A-D51; appends,
+  recovery, consolidation, residency and the map request as built).**
+  An append (a row after its instrument's last stored label, at a label
+  its tail does not hold) is logged, then pushed into its instrument's
+  tail in memory under the published version, with its own sequence
+  number (ST-8.2); the version id stands, and the version's partitions
+  (the stream's buckets) grow with the appended rows' spans and counts. A
+  tail of 1,024 rows is sealed: one block per column family (the value
+  columns, the receipt residual, the labels and the sequence numbers)
+  appended to the family's append file and synced, then a journal record
+  (BLAKE3-framed) synced; only then is the block visible (ST-8.3). Rather
+  than appending in place into the published tail block (A-D39), the
+  published blocks stay immutable in their content-addressed segments
+  (A-D48) and the tail is a structure of its own; the spec's in-place
+  append is deferred to the measurements of phase 4 (the live path's
+  figure of ST-8.5 is per-row work either way). A row at a label the tail
+  already holds is a revision, not an in-tail replacement: the presence
+  holds one row per label, and a superseded row belongs in the revision
+  table a version build maintains (S2 to S5), so ST-8.5's "inserted by
+  re-encoding the tail" covers a new label inside the tail's span only.
+  Restart (ST-8.8): the manifest, then the journal (bytes of the append
+  files past the last good record truncated), then the tails from the
+  log, from the manifest's `replay_from` (after a consolidation, the
+  least sequence number a tail held; else after the published
+  high-water): `crates/abt-data/tests/appends.rs` (a clean restart, a
+  torn journal, junk past a journaled block) and
+  `crates/abt-data/tests/recovery.rs` (a child process aborted at each
+  fault point of `src/fault.rs` or killed at a random moment; every
+  answer at every durable sequence equals a never-killed twin's; no
+  unjournaled block visible; the durable batches whole). Consolidation
+  (ST-8.7, `hot/consolidate.rs`; `abt data consolidate`, and on its own
+  past `CONSOLIDATE_BYTES` of append files): the sealed blocks folded into
+  base segments in instrument order, each copied as its encoder produced
+  it where it follows full blocks (its hash carries over, checked), the
+  rows from a partial published block on re-encoded into full blocks
+  (A-D51; checked by decoding), the presence and buckets extended, the
+  manifest renamed into place under the next journal generation (the old
+  journal and append files removed at the next open), the tails rebuilt
+  from the log; the version id is the published state's and is never
+  recomputed. The block hash excludes the header's exception locator (a
+  position in the run, not content). A relation a source holds hot stays
+  hot: a write without the `storage` attribute follows the current
+  version, and a write asking for Parquet is refused; an empty Parquet
+  version (a relation registered without rows) does not pin it. An
+  instrument appended to since publication is rebuilt by the next version
+  build (its runs are not reused). Residency (ST-9.1, `hot/residency.rs`):
+  `abt-data serve --profile workstation|dedicated` prefaults and locks
+  every current hot version's segments before binding the socket, best
+  effort; the bytes locked and refused, the major page faults, the
+  restart-to-serving time, the profile and its kernel limit are the
+  `_data` row of `stats` (a row under that relation, left out when stats
+  are asked for one relation); every version's row carries its storage
+  and, when hot, its segment and append bytes, tail rows and journal
+  records. The shedding order of ST-9.2 is not built: nothing is shed
+  until the sizing run says what must be. The `map` request (ST-10.2)
+  answers a table: one row per segment of the columns asked for (file,
+  bytes, codec version, hash), per append file (its journaled bytes) and
+  per tail (its instrument and the rows visible at the view's sequence),
+  restricted to an instrument range;
+  `tests/appends.rs::the_map_request_describes_what_a_reader_decodes_with_the_codec`
+  maps a segment and decodes a block with `abt-codec` to what a query
+  answers (ST-10.3). Not built: the live feed's minute barriers sealing
+  ladder buckets (the ladder is rebuilt at the next version, E-89); the
+  open ladder buckets of ST-8.4; consolidation as a background task
+  (it runs under the store's write lock); the extra-memory bound of the
+  consolidation test row (one segment plus the append files) is by
+  construction (one column at a time) and not measured.

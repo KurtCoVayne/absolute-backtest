@@ -449,7 +449,13 @@ impl<'a> Segment<'a> {
     pub fn block_hash(&self, run: &Run, b: usize) -> blake3::Hash {
         let mut h = blake3::Hasher::new();
         let at = run.headers as usize + b * HEADER_BYTES;
-        h.update(&self.bytes[at..at + HEADER_BYTES]);
+        // The header without its exception locator (a position in the
+        // run's exception area, not content: it differs between an append
+        // file and a base segment holding the same block, ST-8.7).
+        let mut header = [0u8; HEADER_BYTES];
+        header.copy_from_slice(&self.bytes[at..at + HEADER_BYTES]);
+        header[22..26].fill(0);
+        h.update(&header);
         h.update(self.words(run, b));
         let hd = self.header(run, b);
         if hd.exceptions != 0 {

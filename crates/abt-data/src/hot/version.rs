@@ -19,6 +19,7 @@ use abt_wire::generated::abt::wire::{ColumnSpec, ColumnType, RelationSchema, Rol
 use arrow::array::{ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, RecordBatch, TimestampNanosecondArray, UInt32Array, UInt64Array};
 use arrow::datatypes::SchemaRef;
 
+use super::append::{Overlay, TailRow};
 use super::ladder::Level;
 use super::manifest::{ColumnEntry, HotManifest, Kind, Revision};
 use super::presence::{Instrument, Presence};
@@ -38,6 +39,10 @@ pub struct Mapped {
 }
 
 impl Mapped {
+    pub fn map(&self) -> &memmap2::Mmap {
+        &self.mmap
+    }
+
     pub fn segment(&self) -> Segment<'_> {
         Segment {
             bytes: &self.mmap[..],
@@ -98,6 +103,9 @@ pub struct HotVersion {
     /// `levels[0]` is the base; the others the ladder's, in the
     /// manifest's order.
     pub levels: Vec<LevelData>,
+    /// What was appended since publication (ST-8): sealed blocks in the
+    /// append files and the tails.
+    pub overlay: Mutex<Overlay>,
     cache: Mutex<Cache>,
 }
 
@@ -155,7 +163,7 @@ impl Rows {
 }
 
 /// The set bits of `words` in `[from, to)`.
-fn ones(words: &[u64], from: usize, to: usize) -> impl Iterator<Item = usize> + '_ {
+pub(crate) fn ones(words: &[u64], from: usize, to: usize) -> impl Iterator<Item = usize> + '_ {
     let mut i = from;
     std::iter::from_fn(move || {
         while i < to {
@@ -296,10 +304,26 @@ impl HotVersion {
             });
         }
         let budget = std::env::var("ABT_BLOCK_CACHE").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(CACHE_BYTES);
+        // The overlay: the journaled blocks since publication; the tails
+        // come from the log (the store replays it, ST-8.8).
+        let base = &levels[0];
+        let ncols = manifest.columns.len() - 1;
+        let published: Vec<(u64, u64, Option<i64>, Vec<u8>)> = base
+            .presence
+            .instruments
+            .iter()
+            .map(|i| (i.id, i.rows, Some(base.presence.labels[i.last as usize]), i.exponents[..ncols].to_vec()))
+            .collect();
+        let value_names: Vec<String> = manifest.columns.iter().take(ncols).map(|c| c.name.clone()).collect();
+        let kinds: Vec<Kind> = manifest.columns.iter().take(ncols).map(|c| c.kind).collect();
+        Overlay::remove_earlier_generations(dir, manifest.generation)?;
+        let mut overlay = Overlay::new(dir, &value_names, &kinds, published, manifest.schema.calendar.clone(), manifest.generation);
+        overlay.replay_journal()?;
         Ok(HotVersion {
             manifest,
             segments,
             levels,
+            overlay: Mutex::new(overlay),
             cache: Mutex::new(Cache {
                 map: HashMap::new(),
                 order: VecDeque::new(),
@@ -459,6 +483,7 @@ impl HotVersion {
             let lo = (k % BLOCK as u64) as usize;
             let block = self.block_at(level, c, inst, blk);
             let hi = (block.ints.len() as u64).min(lo as u64 + (b - k)) as usize;
+            assert!(hi > lo, "a block of {} rows inside a run (every block but the last is full, ST-4.1)", block.ints.len());
             ints.extend_from_slice(&block.ints[lo..hi]);
             floats.extend_from_slice(&block.floats[lo..hi]);
             k += (hi - lo) as u64;
@@ -511,35 +536,81 @@ impl HotVersion {
         let lv = &self.levels[level];
         let presence = &lv.presence;
         let (flo, fhi) = presence.label_range(f.t0, f.t1);
+        // Label indices the caller bounds the read by, beyond the filter's.
+        let explicit = lo != 0 || hi != u32::MAX;
         let (lo, hi) = (lo.max(flo), hi.min(fhi));
         let ncols = self.value_columns_of(level);
         let mut out = Rows::with_columns(ncols);
-        if lo >= hi {
+        let overlay_rows = level == 0 && !self.overlay.lock().map(|ov| ov.is_empty()).unwrap_or(true);
+        if lo >= hi && !overlay_rows {
             return Ok(out);
         }
         let residual = self.residual_column(level);
         let has_revisions = level == 0 && !self.manifest.revisions.is_empty();
         // Per label, the rows: counted first so each instrument's rows go
         // to their places in (label, instrument) order without a sort.
-        let labels = (hi - lo) as usize;
+        let labels = hi.saturating_sub(lo) as usize;
         let ordinals = self.ordinals(level, f);
         let mut per_inst: Vec<(usize, u64, u64)> = Vec::new();
-        for &o in &ordinals {
-            let inst = &presence.instruments[o];
-            let (a, b) = inst.rows_in(lo, hi - 1);
-            if a < b {
-                per_inst.push((o, a, b));
+        if lo < hi {
+            for &o in &ordinals {
+                let inst = &presence.instruments[o];
+                let (a, b) = inst.rows_in(lo, hi - 1);
+                if a < b {
+                    per_inst.push((o, a, b));
+                }
             }
         }
         let total: u64 = per_inst.iter().map(|(_, a, b)| b - a).sum();
         let mut gathered = Rows::with_columns(ncols);
         let mut keys: Vec<(u32, u32, i64)> = Vec::with_capacity(total as usize);
         let mut extra = false;
+        // The overlay's rows (ST-8): the base level's appended rows, whose
+        // integers may sit at an exponent the appends raised.
+        let mut appended: Vec<(usize, u64, Vec<TailRow>)> = Vec::new();
+        let mut raised: Vec<Vec<i64>> = Vec::new();
+        if level == 0 {
+            let mut ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+            if !ov.is_empty() {
+                let (t0, t1) = if explicit { self.time_bounds(f, lo, hi) } else { (f.t0, f.t1) };
+                let mut wanted: Vec<usize> = match &f.identity {
+                    Some(ids) => ids.iter().filter_map(|id| ov.by_id.get(id).copied()).collect(),
+                    None => (0..ov.instruments.len()).collect(),
+                };
+                wanted.sort_unstable();
+                wanted.dedup();
+                for o in wanted {
+                    let rows = ov.rows_of(o, t0, t1)?;
+                    if !rows.is_empty() {
+                        appended.push((o, ov.instruments[o].id, rows));
+                    }
+                }
+                raised = (0..presence.instruments.len())
+                    .map(|o| {
+                        (0..ncols)
+                            .map(|c| {
+                                let e = presence.instruments[o].exponents[c];
+                                abt_agg::exact::pow10(ov.instruments[o].exponents[c].saturating_sub(e) as u32) as i64
+                            })
+                            .collect()
+                    })
+                    .collect();
+            }
+        }
         for &(o, a, b) in &per_inst {
             let inst = &presence.instruments[o];
             let (res, _) = self.values(level, residual, o, a, b);
             let seqs: Option<Vec<i64>> = lv.level.map(|_| self.values(level, self.seq_column(level), o, a, b).0);
-            let cols: Vec<(Vec<i64>, Vec<f64>)> = (0..ncols).map(|c| self.values(level, c, o, a, b)).collect();
+            let mut cols: Vec<(Vec<i64>, Vec<f64>)> = (0..ncols).map(|c| self.values(level, c, o, a, b)).collect();
+            if let Some(up) = raised.get(o) {
+                for (c, col) in cols.iter_mut().enumerate() {
+                    if up[c] != 1 {
+                        for v in col.0.iter_mut() {
+                            *v = v.wrapping_mul(up[c]);
+                        }
+                    }
+                }
+            }
             let i0 = (lo.max(inst.first) - inst.first) as usize;
             let i1 = (hi.min(inst.last + 1) - inst.first) as usize;
             for (k, bit) in ones(inst.presence.words(), i0, i1).enumerate() {
@@ -592,13 +663,25 @@ impl HotVersion {
                 }
             }
         }
+        // The appended rows, admitted by receipt and sequence; they sit
+        // beyond the published labels, so the rows are sorted after.
+        for (o, id, rows) in appended {
+            for r in rows {
+                if f.r_max.is_none_or(|m| r.r <= m) && f.as_of_seq.is_none_or(|n| r.seq <= n) {
+                    gathered.push(id, r.label, r.r, r.seq, &r.ints, &r.floats);
+                    keys.push((u32::MAX, o as u32, r.r));
+                    extra = true;
+                }
+            }
+        }
         // Into (label, instrument, r) order.
         if gathered.is_empty() {
             return Ok(out);
         }
         if extra {
+            // By time, then identity, receipt and sequence (D-3.1).
             let mut order: Vec<usize> = (0..gathered.len()).collect();
-            order.sort_by_key(|&i| (keys[i].0, keys[i].1, keys[i].2, gathered.seq[i]));
+            order.sort_by_key(|&i| (gathered.t[i], gathered.id[i], keys[i].2, gathered.seq[i]));
             return Ok(gathered.permuted(&order));
         }
         let mut count = vec![0usize; labels + 1];
@@ -616,6 +699,30 @@ impl HotVersion {
         }
         out = gathered.permuted(&place);
         Ok(out)
+    }
+
+    /// The time bounds a read over label indices `[lo, hi)` of the base
+    /// means for the overlay's rows: the filter's, narrowed to the labels'
+    /// span when the indices name a span inside the published labels.
+    fn time_bounds(&self, f: &RowFilter, lo: u32, hi: u32) -> (Option<i64>, Option<i64>) {
+        let labels = &self.levels[0].presence.labels;
+        let mut t0 = f.t0;
+        let mut t1 = f.t1;
+        if lo > 0 && (lo as usize) < labels.len() {
+            t0 = Some(t0.map_or(labels[lo as usize], |t| t.max(labels[lo as usize])));
+        }
+        if (hi as usize) < labels.len() {
+            // Up to the label before `hi`: strictly before the label at `hi`.
+            let bound = labels[hi as usize] - 1;
+            t1 = Some(t1.map_or(bound, |t| t.min(bound)));
+        }
+        (t0, t1)
+    }
+
+    /// The greatest sequence number the version holds, appends included.
+    pub fn seq_high(&self) -> u64 {
+        let ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+        self.manifest.seq_high.max(ov.seq_high)
     }
 
     /// A superseded row's values from its stored bits.
@@ -645,13 +752,31 @@ impl HotVersion {
     /// E-14): the buckets from the last backwards, each read with the
     /// filter, the first with rows answers.
     pub fn read_newest(&self, f: &RowFilter) -> Result<Rows, DataError> {
-        let latest = RowFilter { latest_only: true, ..f.clone() };
-        let (_, hi) = self.presence().label_range(None, f.t1);
-        for b in self.manifest.buckets.iter().rev() {
-            if b.lo >= hi {
+        // The buckets, published and opened by appends, newest first; each
+        // read over its time span (the appended rows come with it).
+        let calendar = self.manifest.schema.calendar.clone();
+        let mut buckets: Vec<(String, i64)> = self.manifest.buckets.iter().map(|b| (b.bucket.clone(), b.t_min)).collect();
+        {
+            let ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+            for (name, st) in &ov.buckets {
+                if !buckets.iter().any(|(n, _)| n == name) {
+                    buckets.push((name.clone(), st.t_min));
+                }
+            }
+        }
+        buckets.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, t) in &buckets {
+            let (_, from, to) = crate::store::bucket_span(calendar.as_deref(), *t);
+            if f.t1.is_some_and(|t1| from > t1) {
                 continue;
             }
-            let rows = self.read(&latest, b.lo, b.hi.min(hi))?;
+            let latest = RowFilter {
+                latest_only: true,
+                t0: Some(f.t0.map_or(from, |t0| t0.max(from))),
+                t1: Some(f.t1.map_or(to - 1, |t1| t1.min(to - 1))),
+                ..f.clone()
+            };
+            let rows = self.read(&latest, 0, u32::MAX)?;
             if !rows.is_empty() {
                 return Ok(rows);
             }

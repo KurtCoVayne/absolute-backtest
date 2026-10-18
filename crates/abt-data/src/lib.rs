@@ -11,6 +11,7 @@ pub mod agg;
 pub mod catalog;
 pub mod cli;
 pub mod error;
+pub mod fault;
 pub mod hot;
 pub mod live;
 pub mod options;

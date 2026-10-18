@@ -102,6 +102,15 @@ pub struct HotManifest {
     pub to: Option<i64>,
     pub seq_first: u64,
     pub seq_high: u64,
+    /// Where the log's replay into the tails starts (ST-8.8): after a
+    /// consolidation, the least sequence a tail held; else after
+    /// `seq_high`.
+    #[serde(default)]
+    pub replay_from: Option<u64>,
+    /// The journal generation (ST-8.7): each consolidation folds the
+    /// journal of generation `g` into the base and opens `g + 1`.
+    #[serde(default)]
+    pub generation: u64,
     pub buckets: Vec<Bucket>,
     pub revisions: Vec<Revision>,
     pub attributes: BTreeMap<String, String>,

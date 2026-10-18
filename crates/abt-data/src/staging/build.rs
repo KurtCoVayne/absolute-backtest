@@ -372,6 +372,8 @@ pub fn build(
         to: labels.last().copied(),
         seq_first: planned.iter().flat_map(|p| p.rows.iter().map(|r| r.seq)).min().unwrap_or(seq_high),
         seq_high,
+        replay_from: None,
+        generation: 0,
         buckets,
         revisions,
         attributes: attributes.clone(),
@@ -871,6 +873,7 @@ pub fn publish(root: &Path, built: &Built) -> Result<(), DataError> {
         return Ok(());
     }
     fs::create_dir_all(dir.parent().expect("a version sits under its relation"))?;
+    crate::fault::point("publish-before-rename");
     fs::rename(&built.staging_dir, &dir)?;
     Ok(())
 }

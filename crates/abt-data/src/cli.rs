@@ -13,7 +13,7 @@
 //! abt-data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100]
 //!                  [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]
 //! abt-data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class C [--base CAL] [--attributes K=V,...]
-//! abt-data ingest  [--store DIR] --adapter synthetic --class C [--base CAL] [--days N] [--symbols A,B] [--seed N]
+//! abt-data ingest  [--store DIR] --adapter synthetic --class C [--base CAL] [--days N] [--start DATE] [--symbols A,B] [--seed N]
 //! abt-data catalog [--store DIR] [--class C | --sources [--config FILE]]
 //! abt-data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
 //! abt-data query   [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use crate::adapters::{bundle, market, synthetic};
 use crate::catalog::{classes, render_class};
+use crate::hot::residency;
 use crate::query::{execute, explain, ResolvedView};
 use crate::service::{listen, DataService};
 use crate::Store;
@@ -96,7 +97,9 @@ fn fail(m: &str) -> ! {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--base CAL] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--base CAL] [--days N] [--symbols A,B,C] [--seed N]\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--ticks] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>\n  --ticks       a hot relation's price and quantity columns as exact decimals (Decimal128 at the finest scale, ST-10.4) instead of their f64 views"
+        "usage:\n  abt data serve   [--store DIR] [--socket PATH] [--config FILE] [--profile workstation|dedicated] [--clock-rate R [--clock-origin T]] [--grace 'CAL=SECONDS;...'] [--record synthetic --session S --start T --end T [--symbols A,B] [--bar 1m] [--delay MS] [--seed N]]   (a live session recorded while the service serves; abt run --mode live-sim --session S reads it)\n  abt data ingest  [--store DIR] --adapter norgate --from LAKE [--lists 'NAME=LABEL;...'] [--series 'TICKER=NAME;...'] [--start DATE] [--end DATE] [--limit N] [--scheme S] [--exceptions FILE] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter databento --from PATH|URL [--class future|equity] [--processing-delay S] [--roll volume|expiry] [--session-gap MIN] [--point-values 'ROOT=V;...'] [--settlement 'ROOT=cash;...'] [--commission C] [--start DATE] [--end DATE] [--dataset D --schema ohlcv-1m --symbols A,B --stype-in parent --key-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter orats --from PATH|URL [--tickers SPY,SPX] [--terms 'SPX=european:cash:am;...'] [--multiplier 100] [--snapshots true] [--start DATE] [--end DATE] [--token-env VAR] [--source NAME] [--report FILE] [--attributes K=V,...]   (the option class from ORATS strikes; the underlyings must be in the store)\n  abt data ingest  [--store DIR] --adapter bundle_v2 --from DIR --class CLASS [--base CAL] [--attributes K=V,...]\n  abt data ingest  [--store DIR] --adapter synthetic --class CLASS [--base CAL] [--days N] [--start DATE] [--symbols A,B,C] [--seed N]\n  abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]\n  abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]\n  abt data query   [--store DIR] 'REL [latest] [at T | over T0..T1] [for KEY,...] [where COL OP VALUE [and ...]] [r <= T]' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--ticks] [--parquet FILE]\n  abt data stats   [--store DIR] [--relation R] [--json]   (--json: each version's record, its attributes included; a hot version's line carries its segment and append bytes, tail rows and journal records)
+  abt data consolidate [--store DIR] RELATION   (ST-8.7: the journaled appends folded into base segments under the same version id)\n  abt data pin|unpin [--store DIR] VERSION | --binding B\n  abt data gc      [--store DIR] [--disk-budget BYTES]\n\n  --store DIR   the store (default $ABT_STORE, else ./abt-store)\n  --config FILE the source catalog (D-7.1): the sources beside the store, their offers, prices and quotas, as JSON; without it the store is the only source\n  --demand FILE a demand (D-7.2) as JSON, `-` for standard input; --dry-run plans it and buys nothing, --explain prints the plan's steps, costs and notes\n  --parquet F   write a query's answer to F as Parquet (labels and text as strings) instead of printing it; a run's outputs are kernel.<run>.<relation>\n  --ticks       a hot relation's price and quantity columns as exact decimals (Decimal128 at the finest scale, ST-10.4) instead of their f64 views
+  --profile P   the memory profile (ST-9.2): workstation (the default: two kernels at a time) or dedicated (four); the served store is prefaulted and locked best effort, the shortfall reported by stats"
     );
     exit(1)
 }
@@ -132,12 +135,37 @@ pub fn main(args: &[String]) {
     let a = parse(args);
     match a.cmd.as_str() {
         "serve" => {
+            let started = std::time::Instant::now();
             let path = a.opts.get("socket").map(PathBuf::from).unwrap_or_else(|| abt_wire::transport::default_socket("data"));
             let (clock, grace) = live_clock(&a);
-            let svc = DataService::with_clock(open(&a), sources(&a), clock.clone(), grace);
+            let profile = a
+                .opts
+                .get("profile")
+                .map(|p| residency::Profile::parse(p).unwrap_or_else(|| fail("--profile is workstation or dedicated (ST-9.2)")))
+                .unwrap_or(residency::Profile::Workstation);
+            let mut store = open(&a);
+            // ST-8.8: the current hot versions opened (their journals
+            // replayed, their tails rebuilt), prefaulted and locked best
+            // effort (ST-9.1), before the socket is bound.
+            store.set_residency(residency::Residency::with_profile(profile));
+            let opened = store.prefault_current().unwrap_or_else(|e| fail(&format!("{}: {}", store_dir(&a).display(), e)));
+            let (locked, shortfall, prefaulted) = store.residency().figures();
+            let svc = DataService::with_clock(store, sources(&a), clock.clone(), grace);
             let recording = a.opts.get("record").map(|source| record(&a, &svc, source, clock));
-            let handle = listen(&path, svc).unwrap_or_else(|e| fail(&format!("{}: {}", path.display(), e)));
-            eprintln!("serving {} on {}", store_dir(&a).display(), path.display());
+            let handle = listen(&path, svc.clone()).unwrap_or_else(|e| fail(&format!("{}: {}", path.display(), e)));
+            let millis = started.elapsed().as_millis() as u64;
+            svc.set_restart_millis(millis);
+            eprintln!(
+                "serving {} on {} ({} profile, {} hot versions, {} bytes prefaulted, {} locked, {} refused, {} ms to serving)",
+                store_dir(&a).display(),
+                path.display(),
+                profile.name(),
+                opened,
+                prefaulted,
+                locked,
+                shortfall,
+                millis
+            );
             if let Some(r) = recording {
                 match r.join() {
                     Ok(Ok(state)) => eprintln!("the session recorded {} batches, {} rows", state.batches, state.rows),
@@ -164,7 +192,10 @@ pub fn main(args: &[String]) {
                     m
                 }
                 Some("synthetic") => {
-                    let (names, days, start, seed) = synthetic::defaults(sub_daily);
+                    let (names, days, mut start, seed) = synthetic::defaults(sub_daily);
+                    if let Some(d) = a.opts.get("start") {
+                        start = civil_of(d);
+                    }
                     let syms: Vec<String> = a
                         .opts
                         .get("symbols")
@@ -276,20 +307,41 @@ pub fn main(args: &[String]) {
             let store = open(&a);
             let current: std::collections::BTreeSet<String> = store.registry.currents().into_iter().map(|(_, _, v)| v).collect();
             for v in store.registry.versions().filter(|v| a.opts.get("relation").is_none_or(|r| *r == v.relation)) {
+                let hot = store.hot_figures(&v.version);
                 if a.flags.iter().any(|f| f == "json") {
-                    println!("{}", serde_json::json!({ "version": v, "current": current.contains(&v.version) }));
+                    let mut j = serde_json::json!({ "version": v, "current": current.contains(&v.version) });
+                    if let Some(h) = hot {
+                        j["hot"] = serde_json::json!({ "segment_bytes": h.segment_bytes, "append_bytes": h.append_bytes, "tail_rows": h.tail_rows, "journal_records": h.journal_records, "generation": h.generation });
+                    }
+                    println!("{}", j);
                     continue;
                 }
                 println!(
-                    "{} {} {} rows {} {}..{}{}",
+                    "{} {} {} rows {} {}..{}{}{}",
                     v.relation,
                     v.source,
                     &v.version[..16],
                     v.rows,
                     v.from.map(|t| Time(t).iso()).unwrap_or_default(),
                     v.to.map(|t| Time(t).iso()).unwrap_or_default(),
-                    if current.contains(&v.version) { " current" } else { "" }
+                    if current.contains(&v.version) { " current" } else { "" },
+                    hot.map(|h| format!(
+                        " hot {} B segments, {} B appends, {} tail rows, {} journal records",
+                        h.segment_bytes, h.append_bytes, h.tail_rows, h.journal_records
+                    ))
+                    .unwrap_or_default()
                 );
+            }
+        }
+        "consolidate" => {
+            let mut store = open(&a);
+            let relation = a.positional.first().cloned().unwrap_or_else(|| fail("consolidate takes the relation"));
+            match store.consolidate(&relation).unwrap_or_else(|e| fail(&e.to_string())) {
+                Some((version, done)) => println!(
+                    "{} {} folded {} blocks, {} rows into {} segments (generation {})",
+                    relation, version, done.folded_blocks, done.folded_rows, done.segments_written, done.manifest.generation
+                ),
+                None => println!("{}: nothing sealed to fold", relation),
             }
         }
         "query" => {
@@ -636,6 +688,12 @@ fn live_clock(a: &Args) -> (Arc<dyn crate::live::Clock>, BTreeMap<String, i64>) 
 
 fn parse_time(t: &str) -> i64 {
     abt_wire::scalar::parse_timestamp(t).unwrap_or_else(|| fail(&format!("`{}` is not a date or a time", t)))
+}
+
+/// `YYYY-MM-DD` as a civil date.
+fn civil_of(d: &str) -> (i64, u32, u32) {
+    let days = parse_time(d).div_euclid(abt_wire::scalar::NANOS_PER_DAY);
+    abt_wire::scalar::civil_from_days(days)
 }
 
 /// The bar a recorded session plans (`--bar 1m`).

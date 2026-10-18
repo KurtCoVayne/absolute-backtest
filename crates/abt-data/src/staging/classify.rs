@@ -38,8 +38,11 @@ pub struct Planned {
 /// A stored instrument's rows and revisions, as rows.
 fn stored_rows(prev: &HotVersion, ordinal: usize) -> (Vec<Row>, Vec<Row>) {
     let inst = &prev.presence().instruments[ordinal];
+    // The current row of each label (the superseded ones come from the
+    // revision table, not from the read, or they would count twice).
     let f = crate::store::RowFilter {
         identity: Some(vec![inst.id]),
+        latest_only: true,
         ..crate::store::RowFilter::default()
     };
     let rows = prev.read(&f, 0, prev.presence().labels.len() as u32).expect("a stored instrument reads");
@@ -81,22 +84,33 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
     let mut counts = Counts::default();
     let mut seq = next_seq;
     let mut planned: BTreeMap<u64, Planned> = BTreeMap::new();
-    // Every stored instrument, kept unless the input touches it.
+    // Every stored instrument, kept unless the input touches it or it was
+    // appended to since publication (its rows are not all in its runs,
+    // ST-8): then it is rebuilt from its rows as read.
+    let appended = |p: &HotVersion, id: u64| -> bool {
+        let ov = p.overlay.lock().unwrap_or_else(|e| e.into_inner());
+        ov.by_id.get(&id).is_some_and(|&o| ov.instruments[o].rows() > 0)
+    };
     if let Some(p) = prev {
         for (o, inst) in p.presence().instruments.iter().enumerate() {
             if !input.by_id.contains_key(&inst.id) {
                 let (rows, _) = stored_rows(p, o);
                 let revisions = p.manifest.revisions.iter().filter(|x| x.id == inst.id).cloned().collect();
+                let rebuild = appended(p, inst.id);
                 planned.insert(
                     inst.id,
                     Planned {
                         id: inst.id,
                         rows,
                         revisions,
-                        rebuild: false,
+                        rebuild,
                     },
                 );
-                counts.instruments_kept += 1;
+                if rebuild {
+                    counts.instruments_rebuilt += 1;
+                } else {
+                    counts.instruments_kept += 1;
+                }
             }
         }
     }
@@ -107,6 +121,7 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
         };
         let fresh = stored.is_empty();
         let last_label = stored.last().map(|x| x.t);
+        let was_appended = prev.is_some_and(|p| appended(p, id));
         // Every row known of each label: stored current, stored superseded,
         // then the input's, numbered as they are accepted.
         let mut by_label: BTreeMap<i64, Vec<Row>> = BTreeMap::new();
@@ -150,6 +165,7 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
             final_rows.push(current);
         }
         revisions.sort_by_key(|x| (x.label, x.r, x.seq));
+        let changed = changed || was_appended;
         if fresh {
             counts.instruments_new += 1;
         } else if changed {

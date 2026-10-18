@@ -29,8 +29,10 @@ use serde::{Deserialize, Serialize};
 
 #[path = "store_hot.rs"]
 mod store_hot;
+pub use store_hot::HotFigures;
 
 use crate::error::DataError;
+use crate::hot::residency::Residency;
 use crate::hot::HotVersion;
 use crate::registry::{Registry, VersionRecord};
 use crate::resident::{self, GroupKey, Resident, ResidentStats};
@@ -38,6 +40,8 @@ use crate::rows::{self, layout, stored_schema, Layout};
 
 /// Rows per Parquet row group (X-2.1).
 const ROW_GROUP: usize = 65_536;
+/// Append files beyond which a relation is consolidated (ST-8.7).
+pub const CONSOLIDATE_BYTES: u64 = 512 << 20;
 
 /// A partition of a version: one bucket's rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,6 +138,10 @@ pub struct Store {
     manifests: Mutex<HashMap<String, Arc<Manifest>>>,
     /// The hot versions opened, by version.
     hot: Mutex<HashMap<String, Arc<HotVersion>>>,
+    /// What is done with a hot version's segments at open (ST-9.1).
+    residency: Residency,
+    /// Append files beyond which an append consolidates its relation.
+    consolidate_bytes: u64,
 }
 
 /// A partition file's row groups (their rows, in order) and its entity
@@ -157,6 +165,33 @@ pub fn reap_temporary() {
             let _ = fs::remove_dir_all(e.path());
         }
     }
+}
+
+/// Staging work a process that is no longer running left in flight
+/// (`hot/<relation>/.staging-<pid>-<seq>`, S0 to S4 of ST-8.8): discarded;
+/// the ingest that made it reruns.
+fn reap_staging(root: &Path) -> Result<(), DataError> {
+    let hot = root.join("hot");
+    if !hot.exists() {
+        return Ok(());
+    }
+    for rel in fs::read_dir(&hot)? {
+        let rel = rel?.path();
+        if !rel.is_dir() || rel.file_name().is_some_and(|n| n == "segments") {
+            continue;
+        }
+        for e in fs::read_dir(&rel)? {
+            let p = e?.path();
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let pid = name.strip_prefix(".staging-").and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok());
+            if let Some(pid) = pid {
+                if pid != std::process::id() && !process_alive(pid) {
+                    fs::remove_dir_all(&p)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether a process is running: Linux's `/proc`, else `kill -0` on a Unix;
@@ -187,6 +222,7 @@ impl Store {
     /// Opens (or creates) the store at `root`.
     pub fn open(root: &Path) -> Result<Store, DataError> {
         fs::create_dir_all(root)?;
+        reap_staging(root)?;
         let registry = Registry::open(&root.join("registry"))?;
         let ordinal = registry.versions().filter_map(|v| v.attributes.get("_ordinal").and_then(|o| o.parse::<u64>().ok())).max().unwrap_or(0);
         Ok(Store {
@@ -199,7 +235,31 @@ impl Store {
             files: Mutex::new(HashMap::new()),
             manifests: Mutex::new(HashMap::new()),
             hot: Mutex::new(HashMap::new()),
+            residency: Residency::off(),
+            consolidate_bytes: CONSOLIDATE_BYTES,
         })
+    }
+
+    /// Sets what happens to a hot version's segments when it is opened
+    /// (ST-9.1): a served store prefaults and locks them; what is open
+    /// already is prefaulted now.
+    pub fn set_residency(&mut self, residency: Residency) {
+        self.residency = residency;
+        if let Ok(h) = self.hot.lock() {
+            for v in h.values() {
+                self.residency.apply(v);
+            }
+        }
+    }
+
+    pub fn residency(&self) -> &Residency {
+        &self.residency
+    }
+
+    /// Sets the append bytes beyond which an append consolidates its
+    /// relation (ST-8.7; `CONSOLIDATE_BYTES` by default).
+    pub fn set_consolidate_bytes(&mut self, bytes: u64) {
+        self.consolidate_bytes = bytes;
     }
 
     /// Sets the resident budget in bytes (0 decodes every read from its
@@ -325,10 +385,34 @@ impl Store {
         // S1 to S5 into blocks instead of Parquet partitions. Rows the
         // blocks cannot hold (none, or a null value) stay in Parquet, and
         // the version says so.
+        // A relation a source holds hot stays hot: a write without the
+        // attribute follows the current version (the live path and the
+        // daily update, ST-8.5, ST-8.6).
+        let held_hot = !fresh && previous.as_ref().is_some_and(|v| self.manifest(v).map(|m| m.hot).unwrap_or(false));
+        match attributes.get("storage").map(String::as_str) {
+            Some("hot") => {}
+            None if held_hot => {
+                attributes.insert("storage".to_string(), "hot".to_string());
+            }
+            Some(other) if held_hot => {
+                return Err(DataError::Malformed(format!(
+                    "`{}` is held hot by `{}`; a write with storage = {} does not take it back to Parquet mid-history (ingest it under another source)",
+                    relation, source, other
+                )));
+            }
+            _ => {}
+        }
         if attributes.get("storage").is_some_and(|v| v == "hot") {
             let lay = layout(schema);
-            if crate::hot::version::qualifies(schema, &lay) && crate::hot::version::qualifies_rows(&all, &lay) {
+            let rows_qualify = crate::hot::version::qualifies_rows(&all, &lay) || (held_hot && all.num_rows() == 0);
+            if crate::hot::version::qualifies(schema, &lay) && rows_qualify {
                 return self.write_hot(schema, &stored, &all, source, attributes, first_seq, previous, fresh);
+            }
+            if held_hot {
+                return Err(DataError::Malformed(format!(
+                    "`{}` is held hot by `{}`; these rows cannot be held hot (a null, or a value off every grid) and the relation does not go back to Parquet mid-history",
+                    relation, source
+                )));
             }
             attributes.insert("storage".to_string(), "parquet".to_string());
         }
@@ -456,6 +540,9 @@ impl Store {
             let mut w = StreamWriter::try_new(std::io::BufWriter::new(f), schema)?;
             w.write(rows)?;
             w.finish()?;
+            // The segment's group commit (D-3.1, ST-8.8): durable before
+            // its name says it is in the log.
+            w.into_inner()?.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         }
         fs::rename(&tmp, &path)?;
         Ok(())
@@ -504,16 +591,25 @@ impl Store {
 
     pub fn manifest(&self, version: &str) -> Result<Manifest, DataError> {
         let rec = self.registry.version(version).ok_or_else(|| DataError::UnknownVersion(version.to_string()))?;
-        // A version is immutable (D-2.6): its manifest is read once.
+        // A version is immutable (D-2.6): its manifest is read once. A hot
+        // version's appends open buckets beyond its published ones, which
+        // its partitions gain (ST-8).
         if let Some(m) = self.manifests.lock().ok().and_then(|c| c.get(version).cloned()) {
-            return Ok((*m).clone());
+            return Ok(self.with_appends((*m).clone()));
         }
         let path = self.root.join("manifest").join(&rec.relation).join(format!("{}.json", version));
         let m: Manifest = serde_json::from_slice(&fs::read(&path)?)?;
         if let Ok(mut c) = self.manifests.lock() {
             c.insert(version.to_string(), Arc::new(m.clone()));
         }
-        Ok(m)
+        Ok(self.with_appends(m))
+    }
+
+    fn with_appends(&self, mut m: Manifest) -> Manifest {
+        if m.hot {
+            self.append_partitions(&mut m);
+        }
+        m
     }
 
     /// A partition's rows, `identity`'s only when its index names them:

@@ -52,6 +52,9 @@ pub struct DataService {
     /// A calendar's grace by its name, where it is not the default
     /// (`live::default_grace`).
     grace: BTreeMap<String, i64>,
+    /// Milliseconds from the process's start to serving (ST-8.8), set by
+    /// `serve`; 0 for a service that was not restarted into.
+    restart_millis: std::sync::atomic::AtomicU64,
 }
 
 /// A subscription's channel (D-5.6): the batches sent and not yet
@@ -117,6 +120,7 @@ impl DataService {
             clock: Arc::new(WallClock),
             sessions: Sessions::default(),
             grace: BTreeMap::new(),
+            restart_millis: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -137,7 +141,13 @@ impl DataService {
             clock,
             sessions: Sessions::default(),
             grace,
+            restart_millis: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Records the time from the process's start to serving (ST-8.8).
+    pub fn set_restart_millis(&self, millis: u64) {
+        self.restart_millis.store(millis, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The clock of the service's live streams.
@@ -255,22 +265,109 @@ impl DataService {
         Ok(out)
     }
 
+    /// The statistics (D-3; ST-8.8, ST-9.1, ST-9.2): one row per version
+    /// (its rows, span, whether current, and for a hot version its
+    /// storage figures), and, unless a relation is asked for, one row for
+    /// the process under the relation `_data`: bytes locked and refused,
+    /// major page faults, the restart time, the memory profile and the
+    /// kernel limit the plan executor reads.
     fn stats(&self, relation: Option<&str>) -> Result<RecordBatch, DataError> {
         let st = self.store();
         let current: std::collections::BTreeSet<String> = st.registry.currents().into_iter().map(|(_, _, v)| v).collect();
         let mut recs: Vec<_> = st.registry.versions().filter(|v| relation.is_none_or(|r| v.relation == r)).cloned().collect();
         recs.sort_by(|a, b| (&a.relation, &a.source, &a.version).cmp(&(&b.relation, &b.source, &b.version)));
-        let col = |f: &dyn Fn(&crate::registry::VersionRecord) -> String| -> ArrayRef { Arc::new(StringArray::from(recs.iter().map(f).collect::<Vec<_>>())) };
+        struct Row {
+            relation: String,
+            source: String,
+            version: String,
+            rows: u64,
+            from: Option<i64>,
+            to: Option<i64>,
+            current: bool,
+            storage: String,
+            hot_bytes: u64,
+            append_bytes: u64,
+            tail_rows: u64,
+            journal_records: u64,
+            locked_bytes: u64,
+            locked_shortfall: u64,
+            major_faults: u64,
+            restart_millis: u64,
+            profile: String,
+            kernel_limit: u32,
+        }
+        let mut rows: Vec<Row> = recs
+            .iter()
+            .map(|v| {
+                let hot = st.hot_figures(&v.version);
+                Row {
+                    relation: v.relation.clone(),
+                    source: v.source.clone(),
+                    version: v.version.clone(),
+                    rows: v.rows,
+                    from: v.from,
+                    to: v.to,
+                    current: current.contains(&v.version),
+                    storage: if hot.is_some() { "hot".into() } else { "parquet".into() },
+                    hot_bytes: hot.map_or(0, |h| h.segment_bytes),
+                    append_bytes: hot.map_or(0, |h| h.append_bytes),
+                    tail_rows: hot.map_or(0, |h| h.tail_rows),
+                    journal_records: hot.map_or(0, |h| h.journal_records),
+                    locked_bytes: 0,
+                    locked_shortfall: 0,
+                    major_faults: 0,
+                    restart_millis: 0,
+                    profile: String::new(),
+                    kernel_limit: 0,
+                }
+            })
+            .collect();
+        if relation.is_none() {
+            let (locked, shortfall, _) = st.residency().figures();
+            rows.push(Row {
+                relation: "_data".into(),
+                source: "process".into(),
+                version: String::new(),
+                rows: 0,
+                from: None,
+                to: None,
+                current: false,
+                storage: String::new(),
+                hot_bytes: 0,
+                append_bytes: 0,
+                tail_rows: 0,
+                journal_records: 0,
+                locked_bytes: locked,
+                locked_shortfall: shortfall,
+                major_faults: crate::hot::residency::major_faults(),
+                restart_millis: self.restart_millis.load(std::sync::atomic::Ordering::Relaxed),
+                profile: st.residency().profile.name().to_string(),
+                kernel_limit: st.residency().profile.kernel_limit(),
+            });
+        }
+        let text = |f: &dyn Fn(&Row) -> String| -> ArrayRef { Arc::new(StringArray::from(rows.iter().map(f).collect::<Vec<_>>())) };
+        let u64s = |f: &dyn Fn(&Row) -> u64| -> ArrayRef { Arc::new(UInt64Array::from(rows.iter().map(f).collect::<Vec<_>>())) };
         Ok(RecordBatch::try_from_iter(vec![
-            ("relation", col(&|v| v.relation.clone())),
-            ("source", col(&|v| v.source.clone())),
-            ("version", col(&|v| v.version.clone())),
-            ("rows", Arc::new(UInt64Array::from(recs.iter().map(|v| v.rows).collect::<Vec<_>>())) as ArrayRef),
-            ("from", Arc::new(TimestampNanosecondArray::from(recs.iter().map(|v| v.from).collect::<Vec<_>>())) as ArrayRef),
-            ("to", Arc::new(TimestampNanosecondArray::from(recs.iter().map(|v| v.to).collect::<Vec<_>>())) as ArrayRef),
+            ("relation", text(&|v| v.relation.clone())),
+            ("source", text(&|v| v.source.clone())),
+            ("version", text(&|v| v.version.clone())),
+            ("rows", u64s(&|v| v.rows)),
+            ("from", Arc::new(TimestampNanosecondArray::from(rows.iter().map(|v| v.from).collect::<Vec<_>>())) as ArrayRef),
+            ("to", Arc::new(TimestampNanosecondArray::from(rows.iter().map(|v| v.to).collect::<Vec<_>>())) as ArrayRef),
+            ("current", Arc::new(BooleanArray::from(rows.iter().map(|v| v.current).collect::<Vec<_>>())) as ArrayRef),
+            ("storage", text(&|v| v.storage.clone())),
+            ("hot_bytes", u64s(&|v| v.hot_bytes)),
+            ("append_bytes", u64s(&|v| v.append_bytes)),
+            ("tail_rows", u64s(&|v| v.tail_rows)),
+            ("journal_records", u64s(&|v| v.journal_records)),
+            ("locked_bytes", u64s(&|v| v.locked_bytes)),
+            ("locked_shortfall", u64s(&|v| v.locked_shortfall)),
+            ("major_faults", u64s(&|v| v.major_faults)),
+            ("restart_millis", u64s(&|v| v.restart_millis)),
+            ("profile", text(&|v| v.profile.clone())),
             (
-                "current",
-                Arc::new(BooleanArray::from(recs.iter().map(|v| current.contains(&v.version)).collect::<Vec<_>>())) as ArrayRef,
+                "kernel_limit",
+                Arc::new(arrow::array::UInt32Array::from(rows.iter().map(|v| v.kernel_limit).collect::<Vec<_>>())) as ArrayRef,
             ),
         ])?)
     }
@@ -580,12 +677,16 @@ impl Service for DataService {
                 let b = self.stats(r.relation.as_deref()).map_err(data)?;
                 out.table(&b.schema(), [b]).map_err(wire)
             }
-            // ST-10.2: the segments of a hot relation. Nothing is hot until
-            // the hot store lands (iteration 1, M-2); a known relation is
-            // answered as having no segments, an unknown one as unknown.
+            // ST-10.2: the segments of a hot relation at the view, for a
+            // reader on this machine to map read-only (a table of segment,
+            // append-file and tail descriptors).
             Message::MapRequest(r) => {
-                self.store().schema(&r.relation).map_err(data)?;
-                Err(error(ErrorCode::Malformed, format!("map: `{}` has no segments to map: no relation is held hot yet", r.relation)))
+                let st = self.store();
+                st.schema(&r.relation).map_err(data)?;
+                let view = ResolvedView::of(&st, r.view.as_deref()).map_err(data)?;
+                let b = st.map(&view, &r.relation, r.columns.as_deref(), r.level.as_deref(), r.from_entity, r.to_entity).map_err(data)?;
+                drop(st);
+                out.table(&b.schema(), [b]).map_err(wire)
             }
             _ => Err(error(ErrorCode::Malformed, "the data service does not take this request")),
         }
