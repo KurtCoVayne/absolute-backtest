@@ -27,7 +27,11 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
 use serde::{Deserialize, Serialize};
 
+#[path = "store_hot.rs"]
+mod store_hot;
+
 use crate::error::DataError;
+use crate::hot::HotVersion;
 use crate::registry::{Registry, VersionRecord};
 use crate::resident::{self, GroupKey, Resident, ResidentStats};
 use crate::rows::{self, layout, stored_schema, Layout};
@@ -63,6 +67,10 @@ pub struct Manifest {
     pub from: Option<i64>,
     pub to: Option<i64>,
     pub attributes: BTreeMap<String, String>,
+    /// Held in the hot store (07-storage.md): the partitions are the
+    /// buckets of its labels, read from its blocks.
+    #[serde(default)]
+    pub hot: bool,
 }
 
 /// What a read keeps (D-4): a time range, identities, the receipt filter
@@ -82,7 +90,7 @@ pub struct RowFilter {
 /// the instants it spans, `[from, to)`: a row whose
 /// time is in the span is in the bucket, so a run of rows in time order
 /// names its bucket once.
-fn bucket_span(calendar: Option<&str>, t: i64) -> (String, i64, i64) {
+pub(crate) fn bucket_span(calendar: Option<&str>, t: i64) -> (String, i64, i64) {
     let days = t.div_euclid(NANOS_PER_DAY);
     let (y, m, d) = civil_from_days(days);
     let day = |y: i64, m: u32, d: u32| abt_wire::scalar::days_from_civil(y, m, d) * NANOS_PER_DAY;
@@ -124,6 +132,8 @@ pub struct Store {
     files: Mutex<HashMap<PathBuf, Arc<FileInfo>>>,
     /// The manifests read, by version.
     manifests: Mutex<HashMap<String, Arc<Manifest>>>,
+    /// The hot versions opened, by version.
+    hot: Mutex<HashMap<String, Arc<HotVersion>>>,
 }
 
 /// A partition file's row groups (their rows, in order) and its entity
@@ -188,6 +198,7 @@ impl Store {
             resident: Resident::new(resident::default_budget()),
             files: Mutex::new(HashMap::new()),
             manifests: Mutex::new(HashMap::new()),
+            hot: Mutex::new(HashMap::new()),
         })
     }
 
@@ -310,6 +321,17 @@ impl Store {
         // A writer whose rows changed shape, or that replaces them, starts
         // the relation over: the new version holds this write's rows only
         // (its earlier versions stay readable by id).
+        // A relation a source holds hot (07-storage.md): staged through
+        // S1 to S5 into blocks instead of Parquet partitions. Rows the
+        // blocks cannot hold (none, or a null value) stay in Parquet, and
+        // the version says so.
+        if attributes.get("storage").is_some_and(|v| v == "hot") {
+            let lay = layout(schema);
+            if crate::hot::version::qualifies(schema, &lay) && crate::hot::version::qualifies_rows(&all, &lay) {
+                return self.write_hot(schema, &stored, &all, source, attributes, first_seq, previous, fresh);
+            }
+            attributes.insert("storage".to_string(), "parquet".to_string());
+        }
         let prev_manifest = match &previous {
             Some(v) if !fresh => Some(self.manifest(v)?).filter(|m| m.schema.columns == schema.columns),
             _ => None,
@@ -384,6 +406,7 @@ impl Store {
             from,
             to,
             attributes: attributes.clone(),
+            hot: false,
         };
         let mpath = self.root.join("manifest").join(&relation).join(format!("{}.json", version));
         fs::create_dir_all(mpath.parent().expect("a manifest sits in a directory"))?;
@@ -581,6 +604,9 @@ impl Store {
     /// The rows of a version the filter admits, in (t, identity, r) order.
     pub fn read(&self, version: &str, f: &RowFilter) -> Result<Vec<RecordBatch>, DataError> {
         let m = self.manifest(version)?;
+        if m.hot {
+            return self.read_hot(&m, f);
+        }
         let stored = stored_schema(&m.schema);
         let lay = layout(&m.schema);
         let mut out = Vec::new();
@@ -607,6 +633,9 @@ impl Store {
     /// that fixes the fact's key: no older bucket can hold a later fact of it.
     pub fn read_newest(&self, version: &str, f: &RowFilter) -> Result<Vec<RecordBatch>, DataError> {
         let m = self.manifest(version)?;
+        if m.hot {
+            return self.read_hot_newest(&m, f);
+        }
         let stored = stored_schema(&m.schema);
         let lay = layout(&m.schema);
         let mut buckets: BTreeMap<&str, Vec<&PartitionRef>> = BTreeMap::new();
@@ -641,6 +670,9 @@ impl Store {
     /// One partition's rows the filter admits, in the partition's order
     /// (what the stream opens partition by partition, E-14).
     pub fn read_partition_rows(&self, m: &Manifest, p: &PartitionRef, f: &RowFilter) -> Result<RecordBatch, DataError> {
+        if m.hot {
+            return self.read_hot_bucket(m, p, f);
+        }
         let stored = stored_schema(&m.schema);
         let lay = layout(&m.schema);
         let mut out = Vec::new();
@@ -720,6 +752,7 @@ impl Store {
                 used.insert(p.file);
             }
         }
+        self.remove_unreferenced_hot(relation)?;
         let dir = self.root.join("part").join(relation);
         if dir.exists() {
             for e in fs::read_dir(&dir)? {
@@ -735,6 +768,46 @@ impl Store {
                         fs::remove_file(&p)?;
                         let _ = fs::remove_file(p.with_extension("idx"));
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The hot versions of a relation the registry no longer names, and
+    /// the segments no version of any relation names (ST-7.5's collection).
+    fn remove_unreferenced_hot(&self, relation: &str) -> Result<(), DataError> {
+        let dir = self.root.join("hot").join(relation);
+        if dir.exists() {
+            for e in fs::read_dir(&dir)? {
+                let p = e?.path();
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if p.is_dir() && !name.starts_with('.') && self.registry.version(&name).is_none() {
+                    if let Ok(mut h) = self.hot.lock() {
+                        h.remove(&name);
+                    }
+                    fs::remove_dir_all(&p)?;
+                }
+            }
+        }
+        let segments = self.root.join("hot").join("segments");
+        if segments.exists() {
+            let mut used: BTreeSet<String> = BTreeSet::new();
+            for v in self.registry.versions() {
+                let m = self.manifest(&v.version)?;
+                if m.hot {
+                    if let Ok(h) = self.hot(&v.version) {
+                        for s in h.manifest.segments() {
+                            used.insert(s.file.clone());
+                        }
+                    }
+                }
+            }
+            for e in fs::read_dir(&segments)? {
+                let p = e?.path();
+                let rel = p.strip_prefix(&self.root).map(|r| r.to_string_lossy().to_string()).unwrap_or_default();
+                if p.extension().is_some_and(|x| x == "seg") && !used.contains(&rel) {
+                    fs::remove_file(&p)?;
                 }
             }
         }
@@ -758,6 +831,7 @@ impl Store {
         }
         let mut total = 0;
         walk(&self.root.join("part"), &mut total)?;
+        walk(&self.root.join("hot"), &mut total)?;
         Ok(total)
     }
 }

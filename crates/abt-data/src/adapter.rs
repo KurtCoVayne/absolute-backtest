@@ -192,6 +192,17 @@ pub fn ingest_keyed(
     ingest_keyed_with(store, vendor, securities, terms, relations, source, attributes, &BTreeMap::new())
 }
 
+/// The bar relations of a market held hot (07-storage.md; A-D49): the
+/// `per` entry of `ingest_keyed_with` naming `storage = hot` for the
+/// open, high, low, close and volume relations `relations` carries.
+pub fn hot_bars(relations: &[(String, RecordBatch)]) -> BTreeMap<String, BTreeMap<String, String>> {
+    relations
+        .iter()
+        .filter(|(name, _)| matches!(name.rsplit_once('.').map(|(_, s)| s).unwrap_or(name), "open" | "high" | "low" | "close" | "volume"))
+        .map(|(name, _)| (name.clone(), BTreeMap::from([("storage".to_string(), "hot".to_string())])))
+        .collect()
+}
+
 /// [`ingest_keyed`], with what the source states of some relations only:
 /// a relation's version carries `attributes` and then its own `per` entry.
 #[allow(clippy::too_many_arguments)]

@@ -14,6 +14,7 @@ license = "MIT"
 [workspace.dependencies]
 abt = { path = "crates/abt" }
 abt-agg = { path = "crates/abt-agg" }
+abt-codec = { path = "crates/abt-codec" }
 abt-data = { path = "crates/abt-data" }
 abt-kernel = { path = "crates/abt-kernel" }
 abt-query = { path = "crates/abt-query" }

@@ -103,3 +103,15 @@ fn the_directory_is_about_a_quarter_of_the_bits() {
     // Two words per 512-bit block: 128 bits per 512, 25 %.
     assert_eq!(b.directory_words() * 64, (1 << 20) / 4);
 }
+
+#[test]
+fn a_bitmap_rebuilt_from_its_words_is_the_same() {
+    let mut rng = Rng(17);
+    for &len in &LENGTHS {
+        let bits = random_bits(&mut rng, len, 0.4);
+        let b = Bitmap::from_bools(&bits);
+        let again = Bitmap::from_words(len, b.words());
+        assert_eq!(again, b);
+        check(&bits, &again);
+    }
+}

@@ -43,6 +43,33 @@ pub struct Packed {
     pub words: Words,
 }
 
+impl Packed {
+    /// The words as little-endian bytes (the segment's form).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match &self.words {
+            Words::W32(w) => w.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Words::W64(w) => w.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        }
+    }
+
+    /// A block's words from their little-endian bytes at `width`.
+    pub fn from_bytes(width: u8, bytes: &[u8]) -> Packed {
+        assert!(width <= 64);
+        let words = if width == 0 {
+            Words::W32(Vec::new())
+        } else if width <= 32 {
+            let n = LANES * width as usize;
+            assert!(bytes.len() >= n * 4, "{} bytes for width {}", bytes.len(), width);
+            Words::W32((0..n).map(|i| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())).collect())
+        } else {
+            let n = LANES * (width as usize).div_ceil(2);
+            assert!(bytes.len() >= n * 8, "{} bytes for width {}", bytes.len(), width);
+            Words::W64((0..n).map(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap())).collect())
+        };
+        Packed { width, words }
+    }
+}
+
 fn mask(width: u8) -> u64 {
     if width >= 64 {
         u64::MAX
@@ -351,6 +378,9 @@ pub const FLAG_RECIP_EXACT: u16 = 1;
 pub const FLAG_PATCHED: u16 = 2;
 pub const FLAG_PREDICTED: u16 = 4;
 pub const FLAG_F32: u16 = 8;
+/// The block holds raw-bit exceptions: values off any grid, so no exact
+/// integer view of the block exists.
+pub const FLAG_RAW: u16 = 16;
 
 impl Header {
     pub fn to_bytes(&self) -> [u8; HEADER_BYTES] {
@@ -394,6 +424,10 @@ impl Header {
         self.flags & FLAG_F32 != 0
     }
 
+    pub fn raw(&self) -> bool {
+        self.flags & FLAG_RAW != 0
+    }
+
     /// The header of an encoded block, its exception offset to be set by
     /// the segment writer.
     pub fn of(enc: &crate::tick::Encoded, predicted: bool) -> Header {
@@ -409,6 +443,9 @@ impl Header {
         }
         if enc.f32 {
             flags |= FLAG_F32;
+        }
+        if !enc.exact() {
+            flags |= FLAG_RAW;
         }
         Header {
             base: enc.base,

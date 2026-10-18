@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 pub mod query_cli;
 
-use abt_data::adapter::{ingest_empty, ingest_keyed, securities_of, terms_of};
+use abt_data::adapter::{hot_bars, ingest_empty, ingest_keyed_with, securities_of, terms_of};
 use abt_data::service::DataService;
 use abt_data::Store;
 use abt_kernel::check::Program;
@@ -96,7 +96,7 @@ pub fn ingest_dataset(store: &mut Store, ds: &Dataset, class: &str, attributes: 
     let (sec, terms, relations) = keyed_tables(ds, &|name| schema_in(&schemas, class, name))?;
     let securities = securities_of(&sec).map_err(|e| e.to_string())?;
     let terms = terms_of(&terms).map_err(|e| e.to_string())?;
-    ingest_keyed(store, SOURCE, &securities, &terms, &relations, SOURCE, attributes).map_err(|e| e.to_string())?;
+    ingest_keyed_with(store, SOURCE, &securities, &terms, &relations, SOURCE, attributes, &hot_bars(&relations)).map_err(|e| e.to_string())?;
     for s in schemas.iter().filter(|s| s.class == class || s.class == "series") {
         ingest_empty(store, &s.name, SOURCE, attributes).map_err(|e| e.to_string())?;
     }

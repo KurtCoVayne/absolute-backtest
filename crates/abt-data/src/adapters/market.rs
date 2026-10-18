@@ -12,7 +12,7 @@ use abt_wire::generated::abt::wire::{ColumnType, RelationSchema, Role};
 use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
-use crate::adapter::{ingest_empty, ingest_keyed, Ingested, Security, Terms};
+use crate::adapter::{hot_bars, ingest_empty, ingest_keyed_with, Ingested, Security, Terms};
 use crate::error::DataError;
 use crate::store::Store;
 
@@ -285,7 +285,7 @@ pub fn attributes(m: &Market, base: &str, extra: &BTreeMap<String, String>) -> B
 pub fn ingest(store: &mut Store, m: &Market, class: &str, attributes: &BTreeMap<String, String>) -> Result<Ingested, DataError> {
     let schemas = store.registry.schemas(None);
     let (securities, terms, relations) = tables_of(m, &|name| schema_in(&schemas, class, name))?;
-    let out = ingest_keyed(store, SOURCE, &securities, &terms, &relations, SOURCE, attributes)?;
+    let out = ingest_keyed_with(store, SOURCE, &securities, &terms, &relations, SOURCE, attributes, &hot_bars(&relations))?;
     for s in schemas.iter().filter(|s| s.class == class || s.class == "series") {
         ingest_empty(store, &s.name, SOURCE, attributes)?;
     }

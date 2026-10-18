@@ -44,6 +44,31 @@ impl Bitmap {
         b
     }
 
+    /// A bitmap of `len` bits from its stored words (bit `i` is bit `i mod
+    /// 64` of word `i div 64`); the directory is rebuilt.
+    pub fn from_words(len: usize, words: &[u64]) -> Bitmap {
+        assert!(words.len() >= len.div_ceil(64));
+        let mut b = Bitmap {
+            bits: words[..len.div_ceil(64)].to_vec(),
+            len,
+            cumulative: Vec::new(),
+            relative: Vec::new(),
+            ones: 0,
+        };
+        if !len.is_multiple_of(64) {
+            if let Some(last) = b.bits.last_mut() {
+                *last &= (1u64 << (len % 64)) - 1;
+            }
+        }
+        b.rebuild(0);
+        b
+    }
+
+    /// The stored words.
+    pub fn words(&self) -> &[u64] {
+        &self.bits
+    }
+
     /// The bits as a slice of bools (tests).
     pub fn from_bools(bits: &[bool]) -> Bitmap {
         Bitmap::of(bits.len(), bits.iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| i))

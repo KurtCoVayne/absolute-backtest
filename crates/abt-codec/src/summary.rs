@@ -231,8 +231,8 @@ pub trait Column {
     fn len(&self, b: usize) -> usize;
     fn blocks(&self) -> usize;
     /// The totals before block boundary `boundary` (0 to `blocks()`).
-    fn cumulative(&self, boundary: usize) -> &Cumulative;
-    fn summary(&self, b: usize) -> &BlockSummary;
+    fn cumulative(&self, boundary: usize) -> Cumulative;
+    fn summary(&self, b: usize) -> BlockSummary;
     fn sparse(&self) -> &SparseTable;
     /// The block holding row `r` and the row's index within it.
     fn locate(&self, r: u64) -> (usize, usize) {
@@ -260,7 +260,7 @@ pub fn moments(col: &dyn Column, a: u64, b: u64) -> Cumulative {
         }
         return direct(ba, ia, col.len(ba)).plus_totals(&direct(bb, 0, ib + 1));
     }
-    let whole = col.cumulative(bb).minus(col.cumulative(ba + 1));
+    let whole = col.cumulative(bb).minus(&col.cumulative(ba + 1));
     let head = edge(col, ba, ia, col.len(ba));
     let tail = edge(col, bb, 0, ib + 1);
     whole.plus_totals(&head).plus_totals(&tail)
@@ -274,7 +274,7 @@ fn edge(col: &dyn Column, blk: usize, lo: usize, hi: usize) -> Cumulative {
     if hi - lo <= n / 2 {
         Cumulative::ZERO.plus(&v[lo..hi], k0 + lo as u64)
     } else {
-        let total = col.cumulative(blk + 1).minus(col.cumulative(blk));
+        let total = col.cumulative(blk + 1).minus(&col.cumulative(blk));
         let before = Cumulative::ZERO.plus(&v[..lo], k0);
         let after = Cumulative::ZERO.plus(&v[hi..], k0 + hi as u64);
         total.minus(&before).minus(&after)
@@ -381,11 +381,11 @@ impl Column for Decoded {
     fn blocks(&self) -> usize {
         self.blocks.len()
     }
-    fn cumulative(&self, boundary: usize) -> &Cumulative {
-        &self.cumulatives[boundary]
+    fn cumulative(&self, boundary: usize) -> Cumulative {
+        self.cumulatives[boundary].clone()
     }
-    fn summary(&self, b: usize) -> &BlockSummary {
-        &self.summaries[b]
+    fn summary(&self, b: usize) -> BlockSummary {
+        self.summaries[b]
     }
     fn sparse(&self) -> &SparseTable {
         &self.sparse

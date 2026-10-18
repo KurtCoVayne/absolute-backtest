@@ -11,6 +11,7 @@ pub mod agg;
 pub mod catalog;
 pub mod cli;
 pub mod error;
+pub mod hot;
 pub mod live;
 pub mod options;
 pub mod query;
@@ -19,6 +20,7 @@ pub mod resident;
 pub mod resolver;
 pub mod rows;
 pub mod service;
+pub mod staging;
 pub mod store;
 pub mod stream;
 

@@ -2395,3 +2395,49 @@ batch driver agree on every corpus program. Each bless since:
   pieces; Criterion (no default features) is the bench harness, the rows
   of ST-2.4 under `cargo bench -p abt-codec`. The segment byte layout and
   the directory are the data layer's (M-2, A-D48).
+
+- **E-87 (ST-4 to ST-7, A-D36 to A-D38, A-D48 to A-D50; the hot store as
+  built, first part).** `crates/abt-data/src/hot/` holds a version of a
+  hot relation as `hot/<relation>/<version>/` (its manifest and its
+  presence file: labels, instruments in id order with their alive
+  intervals, sequence runs, exponents and bitmaps) over content-addressed
+  segments under `hot/segments/` (A-D48), mapped read-only and opened once
+  per process; the block tables and sparse tables are rebuilt at open from
+  the runs; a decoded-block cache (`ABT_BLOCK_CACHE`, 256 MB) backs the
+  range rules of `abt-codec`. `crates/abt-data/src/staging/` runs S1 to S5
+  on every ingest of a hot relation (`Store::write_hot`): S1 normalises the
+  conformed rows per instrument (identical rows merge, conflicts refuse);
+  S2 classifies them against the current version (appends, duplicates,
+  revisions, late rows, counted); S3 encodes every rebuilt instrument into
+  new segments and keeps the others' runs (a change of the id order copies
+  the kept blocks byte for byte, so the version's id is unaffected); S4
+  decodes every new block against its source, recomputes its summaries and
+  cumulatives, and checks random ranges and the presence of the opened
+  version; S5 renames the staging directory into place; the registry then
+  records the version as before. What differs from the documents or is
+  not yet built:
+  - A version's rows are the stream's unit through its buckets (the
+    partition calendar's, E-14): a bucket is a virtual partition that
+    `read_partition_rows` decodes and sorts by receipt. The per-instrument
+    cursors of ST-6.3's `subscribe` row are iteration 3's (M-8).
+  - A revision keeps the superseded row whole in the manifest (its values,
+    receipt, sequence and the receipt that superseded it), not one entry
+    per column (ST-5.9); a receipt-filtered read substitutes it, a read of
+    every revision emits it, and a revised instrument is rebuilt whole
+    (copy-on-write at the instrument, not the block).
+  - S0's landing log exists (`staging::land`) and no adapter writes it
+    yet; S1's batches stay in memory; S6's cold copy is not built. OHLC
+    prediction (ST-4.5), cross-moments, the ladder (ST-5.3), wavelet
+    matrices at staging (ST-5.7), the catalog structures and event-interval
+    summaries follow in the next commits of M-2; appends, tails, the seal
+    journal, consolidation, recovery and residency are M-2c's.
+  - The adapters switched: the dataset source (synthetic markets and
+    `bundle_v2` bundles, through both the data layer's CLI and the front)
+    stages its five bar relations hot; the golden runs are unchanged. The
+    vendor adapters follow, each in its own commit.
+  - `crates/abt-data/tests/hot.rs` holds the hot store against the
+    Parquet store on every read form of the store for the same rows,
+    through a second ingest with appends, a new instrument, a revision and
+    a late row: equal byte for byte but for the sequence numbers, whose
+    numbering differs by design (A-D50) and whose semantics (a snapshot is
+    exactly the rows with seq ≤ N) are checked per store.

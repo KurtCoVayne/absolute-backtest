@@ -44,16 +44,16 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | A-D32 | USD only | dimension system | `abt-tests/tests/checker.rs` | done | |
 | A-D33 | No MCP server | — | — | done | |
 | A-D34 | v1 retired by the migration | M-9 | — | done | E-78, E-79, E-80 |
-| A-D35 | Prices and quantities stored as integer ticks, floats as views | `crates/abt-codec/src/tick.rs` (the quantum, the verified reconstruction, exceptions, exact sums) | `abt-codec/tests/roundtrip.rs` | partial | the format; the store holds no tick column until M-2 |
-| A-D36 | Instrument-contiguous lane-interleaved blocks, memory-mapped | `crates/abt-codec/src/block.rs` (the layout, 65 width kernels, row ranges, extraction, patching, the horizontal tail) | `abt-codec/tests/roundtrip.rs` | partial | the layout; segments and mapping with M-2 |
-| A-D37 | Everything program-independent precomputed and hot | — | — | missing | iteration 1: `abt-data/src/hot/` |
-| A-D38 | A seven-stage staging pipeline | — | — | missing | iteration 1: `abt-data/src/staging/` |
+| A-D35 | Prices and quantities stored as integer ticks, floats as views | `crates/abt-codec/src/tick.rs`; `crates/abt-data/src/hot/` (the dataset source's bars as tick columns, their `f64` views reproduced bit for bit) | `abt-codec/tests/roundtrip.rs`; `abt-data/tests/hot.rs` | partial | the vendor adapters (norgate, databento) still write Parquet (E-87) |
+| A-D36 | Instrument-contiguous lane-interleaved blocks, memory-mapped | `crates/abt-codec/src/block.rs`; `crates/abt-data/src/hot/{segment,version}.rs` (segments mapped, the directory, the cache) | `abt-codec/tests/roundtrip.rs`; `abt-data/tests/hot.rs`; `hot/segment.rs` unit tests | partial | OHLC prediction not applied yet (E-87) |
+| A-D37 | Everything program-independent precomputed and hot | `crates/abt-data/src/hot/segment.rs` (block summaries, cumulatives), `hot/version.rs` (sparse tables, presence with rank) | `abt-data/tests/hot.rs`; S4 in `staging/build.rs::verify_ranges` | partial | the ladder, wavelet matrices, cross-moments, catalog structures and event-interval summaries are missing (E-87) |
+| A-D38 | A seven-stage staging pipeline | `crates/abt-data/src/staging/{normalise,classify,build}.rs`, `store_hot.rs::write_hot` (S1 to S5), `staging/mod.rs::land` (S0) | `abt-data/tests/hot.rs` (S4 refuses a corrupted segment; the hot store equals the Parquet store) | partial | no adapter lands objects yet; S6 missing (E-87) |
 | A-D39 | Appends in place into tail blocks, visible by sequence | — | — | missing | iteration 1: `hot/append.rs` |
 | A-D40 | ORATS not held hot | `adapters/orats.rs` writes the partition store | `abt-data/tests/options.rs` | done | the default stands (ST-14) |
 | A-D41 | Durability from the log and a seal journal | — | — | missing | iteration 1: `hot/{append,recover}.rs` |
-| A-D42 | Append segments; consolidation the only compaction; logical version ids | — | — | missing | iteration 1: `hot/consolidate.rs` |
+| A-D42 | Append segments; consolidation the only compaction; logical version ids | `staging/build.rs` (the id from block hashes; kept blocks copied byte for byte keep it) | `abt-data/tests/hot.rs` (sharing by hash, the same rows give the same id) | partial | append segments and consolidation are M-2c's |
 | A-D43 | Adjusted series as views over event-interval summaries | `crates/abt-codec/src/adjust.rs` (step functions, event-interval summaries, pieces, exact and ordered sums, extremes, counts) | `abt-codec/tests/adjust.rs` | partial | the arithmetic (E-86); the data layer's events and views with M-2 |
-| A-D44 | Ticks cross the protocol as `Decimal128(18, s)` | `abt-wire/schema/abt.fbs` (`ColumnType::Tick`, `QueryRequest.ticks`, `Numerics::Exact`, `MapRequest`; protocol 1.1), `abt-data/src/rows.rs` | `abt-wire/tests/schema.rs::the_storage_additions_round_trip` | partial | E-84: the types and the flag; no tick column is answered until the hot store (M-2) |
+| A-D44 | Ticks cross the protocol as `Decimal128(18, s)` | `abt-wire/schema/abt.fbs` (protocol 1.1), `abt-data/src/rows.rs`, `store_hot.rs::read_ticks` (a hot version's rows as `Decimal128` at the finest exponent) | `abt-wire/tests/schema.rs::the_storage_additions_round_trip` | partial | the query service does not pass `ticks` through yet; the aggregate pass reads floats (E-84, E-87) |
 | A-D45 | Hot means locked; memory profiles and a shedding order | — | — | missing | iteration 1: `hot/residency.rs`; locking needs a limit this VM lacks (8 MB) |
 | A-D46 | Futures calendars by trade date with UTC-aligned intraday buckets | — | — | missing | iteration 1: `hot/ladder.rs` |
 
@@ -89,7 +89,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | ST-5.1 | Exact windows from cumulative summaries | `abt-codec/src/summary.rs::{Cumulative, cumulatives, moments}` (the shorter-edge rule) | `abt-codec/tests/summary.rs` (random windows against a direct reduction) | partial | the codec's rule; over the store with M-2 |
 | ST-5.2 | Exact ladder | — | — | missing | iteration 1 |
 | ST-6.1 | Range closure | `abt-codec/src/{summary,adjust,wavelet,rank}.rs` (every range answered from the blocks it intersects and O(1) or O(log σ) entries) | `abt-codec/tests/adjust.rs::whole_pieces_come_from_the_summaries_and_only_the_ends_decode` (a counting column) | partial | the codec's structures; the store's directory with M-2 |
-| ST-7.1 | Versions immutable and cheap | — | — | missing | iteration 1 |
+| ST-7.1 | Versions immutable and cheap | `staging/build.rs` (segments content-addressed, never rewritten; the id from the blocks' hashes) | `abt-data/tests/hot.rs::the_hot_store_answers_every_read_as_the_parquet_store_does` (the first version reads as it did after the second; unchanged blocks' hashes shared) | partial | consolidation's layout change (M-2c) not yet exercised |
 | ST-8.1 | Snapshot exactness under appends | — | — | missing | iteration 1 |
 | ST-8.2 | Recovery | — | — | missing | iteration 1 |
 
@@ -156,9 +156,9 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | ST-13 real-data round trip | every block of the staged store decodes bit for bit | — | missing | iteration 1, over the NDLake history fetched from S3 |
 | ST-13 exact aggregates | sums, moments and windows against the rational reference | `abt-codec/tests/summary.rs` (windows from cumulatives against a direct `i128` reduction); `abt-agg/tests/exact.rs` | partial | over the store's blocks with M-2 |
 | ST-13 ladder | every precomputed bar equals its bucket recomputed from base rows | — | missing | iteration 1 |
-| ST-13 ranges | every query of ST-6.3 on random ranges, edges, exceptions, the tail, earlier sequences, receipt filters | — | missing | iteration 1 |
+| ST-13 ranges | every query of ST-6.3 on random ranges, edges, exceptions, the tail, earlier sequences, receipt filters | `staging/build.rs::verify_ranges` (S4: moments and extremes on random ranges of every rebuilt instrument); `abt-data/tests/hot.rs` (reads at earlier sequences and with receipt filters over revised rows) | partial | the tail (M-2c), order statistics and bars over the store, exceptions on real data (phase 3) |
 | ST-13 appends | interleaved appends and reads at random sequences (Prop. 8.1) | — | missing | iteration 1 |
-| ST-13 revisions | a revision shares unchanged segments by hash; old readers unaffected | — | missing | iteration 1 |
+| ST-13 revisions | a revision shares unchanged segments by hash; old readers unaffected | `abt-data/tests/hot.rs::the_hot_store_answers_every_read_as_the_parquet_store_does` | done | E-87 |
 | ST-13 performance | the encoding benches on the reference machine | — | missing | this VM's figures in iteration 1; the M4 is the owner's |
 | ST-13 parity | G1 through the new store in `two_pass` | — | missing | the owner's run after iteration 1 |
 | ST-13 recovery | kill at random points; every answer equal after restart; no unjournaled block visible | — | missing | iteration 1 |

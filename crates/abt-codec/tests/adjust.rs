@@ -223,10 +223,10 @@ fn whole_pieces_come_from_the_summaries_and_only_the_ends_decode() {
         fn blocks(&self) -> usize {
             self.0.blocks()
         }
-        fn cumulative(&self, boundary: usize) -> &abt_codec::summary::Cumulative {
+        fn cumulative(&self, boundary: usize) -> abt_codec::summary::Cumulative {
             self.0.cumulative(boundary)
         }
-        fn summary(&self, b: usize) -> &abt_codec::summary::BlockSummary {
+        fn summary(&self, b: usize) -> abt_codec::summary::BlockSummary {
             self.0.summary(b)
         }
         fn sparse(&self) -> &abt_codec::summary::SparseTable {

@@ -1,8 +1,9 @@
 //! The layering of the workspace (docs/spec/00-architecture.md, A-D2 and
-//! Definition 2.1): a layer depends on the shared crates `abt-wire` and
-//! `abt-agg` and on no other layer, as a normal, build or dev dependency; the
-//! shared crates depend on no layer; only the front and the cross-layer
-//! suites may name several layers.
+//! Definition 2.1): a layer depends on the shared crates `abt-wire`,
+//! `abt-agg` and `abt-codec` (04-protocol.md 1.3; 07-storage.md ST-10.1)
+//! and on no other layer, as a normal, build or dev dependency; the shared
+//! crates depend on no layer; only the front and the cross-layer suites may
+//! name several layers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -33,7 +34,7 @@ fn workspace_dependencies() -> BTreeMap<String, BTreeSet<String>> {
 #[test]
 fn no_layer_depends_on_another() {
     let deps = workspace_dependencies();
-    let shared: BTreeSet<&str> = ["abt-wire", "abt-agg"].into();
+    let shared: BTreeSet<&str> = ["abt-wire", "abt-agg", "abt-codec"].into();
     for layer in ["abt-data", "abt-kernel", "abt-query"] {
         let d = deps.get(layer).unwrap_or_else(|| panic!("{} is a workspace member", layer));
         let foreign: Vec<&String> = d.iter().filter(|n| !shared.contains(n.as_str())).collect();

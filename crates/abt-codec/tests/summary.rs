@@ -55,10 +55,10 @@ impl Column for Counting<'_> {
     fn blocks(&self) -> usize {
         self.inner.blocks()
     }
-    fn cumulative(&self, boundary: usize) -> &Cumulative {
+    fn cumulative(&self, boundary: usize) -> Cumulative {
         self.inner.cumulative(boundary)
     }
-    fn summary(&self, b: usize) -> &BlockSummary {
+    fn summary(&self, b: usize) -> BlockSummary {
         self.inner.summary(b)
     }
     fn sparse(&self) -> &SparseTable {

@@ -33,8 +33,10 @@ name = "abt-data"
 version = "0.2.0"
 dependencies = [
  "abt-agg",
+ "abt-codec",
  "abt-wire",
  "arrow",
+ "blake3",
  "memmap2",
  "parquet",
  "serde",

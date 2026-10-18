@@ -221,3 +221,41 @@ fn the_header_is_32_bytes_little_endian_and_round_trips() {
     assert!(!h.patched() && !h.predicted() && !h.f32());
     assert_eq!(h.recip_exact(), enc.recip_exact);
 }
+
+#[test]
+fn integers_encode_at_exponent_zero_and_round_trip() {
+    use abt_codec::block::{pack, unpack, Packed};
+    use abt_codec::tick::encode_integers;
+    let cases: Vec<Vec<i64>> = vec![
+        vec![],
+        vec![7],
+        vec![0, 0, 0],
+        (0..1024).map(|i| 1_000 + 25 * i).collect(),
+        (0..1000).map(|i| if i == 500 { 1 << 40 } else { 3 * (i % 7) - 9 }).collect(),
+        vec![i64::MIN, i64::MAX, 0, -1, 1],
+        (0..1024).map(|i| 1_700_000_000_000_000_000i64 + 60_000_000_000 * i).collect(),
+    ];
+    for values in cases {
+        let enc = encode_integers(&values);
+        assert_eq!(enc.e, 0);
+        assert!(enc.exact());
+        assert_eq!(enc.integers().as_deref(), Some(values.as_slice()));
+        // Through the packed words and back through bytes.
+        let packed = pack(&enc.offsets, enc.width);
+        let again = Packed::from_bytes(enc.width, &packed.to_bytes());
+        assert_eq!(again, packed);
+        if !values.is_empty() {
+            let mut out = [0u64; abt_codec::BLOCK];
+            unpack(&again, &mut out);
+            for (j, &v) in values.iter().enumerate() {
+                let u = match enc.offset(j) {
+                    Some(u) => u,
+                    None => unreachable!(),
+                };
+                let from_words = if enc.exceptions.iter().any(|x| x.position() as usize == j) { u } else { out[j] };
+                assert_eq!(from_words, u);
+                assert_eq!(enc.base.wrapping_add(enc.g.wrapping_mul(u) as i64), v);
+            }
+        }
+    }
+}

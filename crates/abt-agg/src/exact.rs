@@ -52,6 +52,15 @@ impl Wide {
         self.limbs[0] as u128 | ((self.limbs[1] as u128) << 64)
     }
 
+    /// The limbs, least significant first.
+    pub fn limbs(&self) -> &[u64; LIMBS] {
+        &self.limbs
+    }
+
+    pub fn from_limbs(limbs: [u64; LIMBS]) -> Wide {
+        Wide { limbs }
+    }
+
     /// `self + other`; panics on overflow (320 bits are never reached by the
     /// sums the callers form).
     pub fn add(&self, other: &Wide) -> Wide {

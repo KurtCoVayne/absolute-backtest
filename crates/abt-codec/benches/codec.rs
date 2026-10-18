@@ -101,11 +101,11 @@ impl Column for PackedColumn {
     fn blocks(&self) -> usize {
         self.packed.len()
     }
-    fn cumulative(&self, boundary: usize) -> &Cumulative {
-        &self.cumulatives[boundary]
+    fn cumulative(&self, boundary: usize) -> Cumulative {
+        self.cumulatives[boundary].clone()
     }
-    fn summary(&self, b: usize) -> &BlockSummary {
-        &self.summaries[b]
+    fn summary(&self, b: usize) -> BlockSummary {
+        self.summaries[b]
     }
     fn sparse(&self) -> &SparseTable {
         &self.sparse

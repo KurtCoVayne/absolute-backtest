@@ -75,6 +75,17 @@ fn scaled(x: f64, e: u8) -> Option<i64> {
     Some(s as i64)
 }
 
+/// The integer of `x` at exponent `e` when `x` is on that grid (it comes
+/// back from the integer bit for bit), else 0: the integer view of a
+/// stored `f64` that may be off any grid.
+pub fn scaled_or_zero(x: f64, e: u8) -> i64 {
+    if x.is_finite() && round_trips(x, e, Source::F64) {
+        scaled(x, e).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
 /// Whether `x` comes back from its integer at exponent `e`.
 fn round_trips(x: f64, e: u8, source: Source) -> bool {
     let Some(i) = scaled(x, e) else { return false };
@@ -206,6 +217,47 @@ pub fn encode(values: &[f64], source: Source) -> Encoded {
     }
 }
 
+/// Encodes up to 1,024 integers (a count, a label code, a receipt
+/// residual, a time) as a block at exponent 0: the base is the minimum,
+/// the quantum the GCD of the offsets, the width by ST-4.4. Every value is
+/// on the grid, so the block is exact and has no raw exception.
+pub fn encode_integers(values: &[i64]) -> Encoded {
+    assert!(values.len() <= crate::BLOCK, "a block holds at most {} values", crate::BLOCK);
+    let n = values.len();
+    let base = values.iter().copied().min().unwrap_or(0);
+    let mut g = 0u64;
+    for &v in values {
+        g = gcd(g, v.wrapping_sub(base) as u64);
+    }
+    if g == 0 {
+        g = 1;
+    }
+    let raw: Vec<u64> = values.iter().map(|&v| (v.wrapping_sub(base) as u64) / g).collect();
+    let width = best_width(&raw);
+    let limit = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+    let mut offsets = Vec::with_capacity(n);
+    let mut exceptions = Vec::new();
+    for (j, &u) in raw.iter().enumerate() {
+        if u > limit {
+            offsets.push(0);
+            exceptions.push(Exception::Offset { position: j as u16, offset: u });
+        } else {
+            offsets.push(u);
+        }
+    }
+    Encoded {
+        base,
+        g,
+        e: 0,
+        width,
+        n: n as u16,
+        recip_exact: true,
+        f32: false,
+        offsets,
+        exceptions,
+    }
+}
+
 impl Encoded {
     /// The offset of row `j`, exceptions patched.
     pub fn offset(&self, j: usize) -> Option<u64> {
@@ -221,7 +273,13 @@ impl Encoded {
     /// The integer `β + g·u` of row `j` at the block's exponent, or `None`
     /// for a value off the grid.
     pub fn integer(&self, j: usize) -> Option<i64> {
-        self.offset(j).map(|u| self.base + (self.g * u) as i64)
+        self.offset(j).map(|u| self.base.wrapping_add(self.g.wrapping_mul(u) as i64))
+    }
+
+    /// Every value as an integer at the block's exponent, or `None` when a
+    /// value is off the grid (a raw exception).
+    pub fn integers(&self) -> Option<Vec<i64>> {
+        (0..self.n as usize).map(|j| self.integer(j)).collect()
     }
 
     /// Every value as the source wrote it (Proposition 3.2).
