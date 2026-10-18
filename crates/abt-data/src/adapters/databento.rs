@@ -110,6 +110,18 @@ pub struct Options {
     /// The bars kept: those closing in `[from, to]`, in nanoseconds.
     pub from: Option<i64>,
     pub to: Option<i64>,
+    /// A bar whose instrument has no definition: refused (D-2.4, the
+    /// default) or dropped and counted (`dropped.no_definition`), for
+    /// files whose definitions do not cover every instrument they hold.
+    pub undefined: Undefined,
+}
+
+/// What a bar without a definition does to an ingest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Undefined {
+    #[default]
+    Refuse,
+    Drop,
 }
 
 impl Default for Options {
@@ -124,6 +136,7 @@ impl Default for Options {
             commission: None,
             from: None,
             to: None,
+            undefined: Undefined::Refuse,
         }
     }
 }
@@ -734,10 +747,20 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     let bars = window(raw, opts, &mut report);
     let mut by_root: BTreeMap<&str, Vec<&Bar>> = BTreeMap::new();
     for b in &bars {
-        let d = raw
-            .defs
-            .get(&b.id)
-            .ok_or_else(|| DataError::Identity(format!("the bar of instrument {} at {} has no definition: a future's root is its definition's (D-2.4)", b.id, iso(b.t))))?;
+        let d = match raw.defs.get(&b.id) {
+            Some(d) => d,
+            None if opts.undefined == Undefined::Drop => {
+                *report.dropped.entry("no_definition".into()).or_default() += 1;
+                continue;
+            }
+            None => {
+                return Err(DataError::Identity(format!(
+                    "the bar of instrument {} at {} has no definition: a future's root is its definition's (D-2.4; --undefined drop leaves such bars out and counts them)",
+                    b.id,
+                    iso(b.t)
+                )))
+            }
+        };
         if d.class != b'F' {
             *report.dropped.entry("not_an_outright_future".into()).or_default() += 1;
             continue;
@@ -1133,6 +1156,13 @@ impl Databento {
                 "key_env" => api.key_env = v.clone(),
                 "class" if v == "future" || v == "equity" => opts.class = v.clone(),
                 "class" => return Err(bad(k, v, "future or equity")),
+                "undefined" => {
+                    opts.undefined = match v.as_str() {
+                        "refuse" => Undefined::Refuse,
+                        "drop" => Undefined::Drop,
+                        _ => return Err(bad(k, v, "refuse or drop")),
+                    }
+                }
                 "processing_delay" => opts.processing_delay = (v.parse::<f64>().map_err(|_| bad(k, v, "a number of seconds"))? * SECOND as f64).round() as i64,
                 "roll" => {
                     opts.roll = match v.as_str() {
