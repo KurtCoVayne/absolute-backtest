@@ -1,0 +1,199 @@
+# Trace: every clause of the specification against this tree
+
+One row per decision (A-D1 to A-D46), per proposition marked [N], per gate, per test row of the documents and per target, each with where the code is, which test holds it and a status. Kept current at the start of every iteration (`docs/iterations/`): the verify phase rereads every row before new work starts.
+
+Status: **done** (implemented and tested as the row says), **partial** (part of it, the note says which part), **missing** (nothing yet), **contradicts** (the tree does something else; the note names the errata entry or the amendment). The falsification column of a proposition records the one time its test was shown to fail: what was broken, which test failed, and the commit that recorded it; a proposition without one is not yet proven falsifiable. Numbers in the target rows name the machine they were measured on and the command (`docs/assessment.md` holds the tables).
+
+Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<crate>/tests/x.rs`. The errata entries (E-n) are `docs/spec/ERRATA.md`.
+
+## Decisions
+
+| Id | Decision | Code | Test | Status | Note |
+| --- | --- | --- | --- | --- | --- |
+| A-D1 | The split lands the second formulation | `crates/abt-kernel/src/{syntax,check,compiler}`, `corpus-v2/` | `abt-tests/tests/corpus_v2.rs` | done | M-3 |
+| A-D2 | Three programs in one Cargo workspace | `crates/abt-{data,kernel,query}` as libraries; one binary `abt` with `data`, `kernel`, `query` subcommands | `abt/tests/deployment.rs` | contradicts | E-81: no `abt-data`, `abt-kernel`, `abt-query` binaries; iteration 1 (M-0) adds them and moves each layer's commands into its crate |
+| A-D3 | The protocol is the only boundary | `crates/abt-wire` (frames, FlatBuffers, in-process channel) | `abt-wire/tests/rpc.rs`, `abt-tests/tests/determinism.rs` | done | E-29, E-36 |
+| A-D4 | All Rust | the workspace; Python only in `scripts/parity`, `reference/`, `scripts/study` | — | done | E-19 (BLAKE3 pure Rust) |
+| A-D5 | `abt` is a thin front | `crates/abt/src/main.rs` | `abt/tests/cli.rs` | done | |
+| A-D6 | The data layer has no semantics | `crates/abt-data/src/{query,agg,stream}.rs` | `abt-data/tests/*.rs` | done | the standing event aggregates of ST-5.6 (a product per entity, requested by the kernel's library) are missing with A-D37 |
+| A-D7 | Two timestamps per tuple, nanoseconds | `crates/abt-data/src/registry.rs` (roles `event_time`, `receipt_time`), `crates/abt-kernel/src/kernel/time.rs` | `abt-data/tests/store.rs` | done | E-18 |
+| A-D8 | One implementation of every aggregate | `crates/abt-agg` | `abt-agg/tests/agg.rs`, `abt-tests/tests/pushdown.rs` | done | the `exact` mode (A-D35, D-6.3) is missing |
+| A-D9 | Explicit clock barriers | `crates/abt-data/src/stream.rs` | `abt-data/tests/stream.rs` | done | E-13, E-32 |
+| A-D10 | Canonical stream order | `stream.rs` (`Key`) | `abt-data/tests/stream.rs::the_merge_is_the_sort_of_every_event` | done | E-13, E-32 |
+| A-D11 | Determinism across processes | run ids and bindings in `crates/abt-kernel/src/kernel/mod.rs` | `abt-tests/tests/determinism.rs` | done | G3 |
+| A-D12 | The kernel owns the book | `crates/abt-kernel/src/kernel/events.rs` (`Book`), `sim/` | `abt-tests/tests/events.rs` | done | E-48, E-49 |
+| A-D13 | Decisions and execution events from the kernel; metrics in the query layer | `kernel/outputs.rs`; `crates/abt-query/src/metrics` | `abt-tests/tests/{outputs,metrics_store}.rs` | done | E-52, E-58 |
+| A-D14 | Contracts derived from the program's structure | `crates/abt-kernel/src/contract/` | `abt-tests/tests/contracts.rs` | done | E-50, G7 |
+| A-D15 | Deterministic in the kernel, statistical in the query layer | the two crates | — | done | |
+| A-D16 | The query language is the kernel's | `crates/abt-kernel/src/kernel/service.rs`, `query/` | `abt-tests/tests/{queries,kernel_service}.rs` | done | E-53, E-54 |
+| A-D17 | A study is a plan over the query layer | `crates/abt-query/src/plan/` | `abt-tests/tests/plan_exec.rs` | done | E-59 |
+| A-D18 | Claims live in the plan | `crates/abt-query/src/claims` | `abt-tests/tests/claims_exec.rs` | done | E-63 |
+| A-D19 | The test library is a framework the developer extends | `crates/abt-query/src/tests/` | `abt-query/tests/framework.rs` | done | E-21 |
+| A-D20 | The study database is the data layer | `put` under `query.<plan>.*` | `abt-tests/tests/plan_exec.rs` | done | |
+| A-D21 | The data layer resolves demands | `crates/abt-data/src/resolver/` | `abt-data/tests/resolver.rs` | done | E-67 |
+| A-D22 | Budgets default to zero money | `resolver/cost.rs` | `resolver.rs::a_demand_with_money_budget_zero_never_asks_a_vendor` | done | |
+| A-D23 | Static and dynamic demands | `resolver/prepass.rs` | `abt-data/tests/options.rs` | done | E-70 |
+| A-D24 | Vendors: Norgate, Databento (historical and live), ORATS | `crates/abt-data/src/adapters/{norgate,databento,databento_live,dbn,orats}.rs` | `abt-data/tests/{norgate,databento,dbn,live,options}.rs` on fixtures | partial | E-68: fixtures only here; a real session and the lake are the owner's; the hot staging of A-D38 is missing |
+| A-D25 | Options in scope | `crates/abt-kernel/src/sim/{option,combo,exercise,adjust}.rs`, `functions/` | `abt-tests/tests/options.rs`, `abt-kernel/tests/pricing.rs` | partial | E-71; the owner's options book (A-8) not supplied |
+| A-D26 | Margin not simplified: five models | `sim/margin/` | `abt-kernel/tests/margin.rs` | done | E-72 |
+| A-D27 | Three run modes, one evaluator | `kernel/mod.rs::RunMode`, `live/` | `abt-tests/tests/{replay,live_mock}.rs` | done | E-69, E-82 (the broker's reports are polled, not stream events) |
+| A-D28 | Deployment is separate | `live/deployment.rs` (hashed apart from the run id) | `live_mock.rs::the_deployment_document_parses_and_hashes_its_content` | done | |
+| A-D29 | One program per kernel instance | `kernel/service.rs` | `abt-tests/tests/kernel_service.rs` | done | |
+| A-D30 | A program over its memory budget is refused | `kernel/bind.rs` (bind-time state bound) | `abt-tests/tests/run_start.rs` | done | E-41 |
+| A-D31 | Scale and latency targets | `scripts/bench.sh` | `docs/assessment.md` | partial | measured on this VM; the M4 is the owner's (G10) |
+| A-D32 | USD only | dimension system | `abt-tests/tests/checker.rs` | done | |
+| A-D33 | No MCP server | — | — | done | |
+| A-D34 | v1 retired by the migration | M-9 | — | done | E-78, E-79, E-80 |
+| A-D35 | Prices and quantities stored as integer ticks, floats as views | — | — | missing | iteration 1: `crates/abt-codec/src/tick.rs` |
+| A-D36 | Instrument-contiguous lane-interleaved blocks, memory-mapped | — | — | missing | iteration 1: `abt-codec/src/block.rs`, `abt-data/src/hot/segment.rs` |
+| A-D37 | Everything program-independent precomputed and hot | — | — | missing | iteration 1: `abt-data/src/hot/` |
+| A-D38 | A seven-stage staging pipeline | — | — | missing | iteration 1: `abt-data/src/staging/` |
+| A-D39 | Appends in place into tail blocks, visible by sequence | — | — | missing | iteration 1: `hot/append.rs` |
+| A-D40 | ORATS not held hot | `adapters/orats.rs` writes the partition store | `abt-data/tests/options.rs` | done | the default stands (ST-14) |
+| A-D41 | Durability from the log and a seal journal | — | — | missing | iteration 1: `hot/{append,recover}.rs` |
+| A-D42 | Append segments; consolidation the only compaction; logical version ids | — | — | missing | iteration 1: `hot/consolidate.rs` |
+| A-D43 | Adjusted series as views over event-interval summaries | — | — | missing | iteration 1: `abt-codec/src/adjust.rs`, `hot/events.rs` |
+| A-D44 | Ticks cross the protocol as `Decimal128(18, s)` | — | — | missing | iteration 1: `abt-wire` |
+| A-D45 | Hot means locked; memory profiles and a shedding order | — | — | missing | iteration 1: `hot/residency.rs`; locking needs a limit this VM lacks (8 MB) |
+| A-D46 | Futures calendars by trade date with UTC-aligned intraday buckets | — | — | missing | iteration 1: `hot/ladder.rs` |
+
+## Propositions [N]
+
+| Id | Statement | Code | Test | Status | Falsification |
+| --- | --- | --- | --- | --- | --- |
+| A-4.2 | Reproduction: equal (H(P), β) give byte-identical outputs | `kernel/mod.rs` (run id, binding), `kernel/outputs.rs` | `abt-tests/tests/determinism.rs::in_process_socket_and_concurrent_kernels_agree`, `outputs.rs::the_same_run_writes_the_same_outputs` | done | — |
+| A-4.3 | Mode invariance of decisions | `live/executor.rs` | `abt-tests/tests/live_mock.rs::{on_a_stores_replay_the_broker_run_decides_as_the_simulation, a_rehearsal_of_a_recorded_live_session_decides_as_the_live_sim_run}` | done | — |
+| A-4.4 | Replay equals live | `abt-data/src/live.rs`, `kernel/mod.rs` | `abt-tests/tests/replay.rs::replay_of_a_live_session_equals_the_live_run` | done | — |
+| A-4.6 | Observation and queries change nothing | `kernel/service.rs` | `abt-tests/tests/queries.rs::queries_change_no_decision`, `claims_exec.rs` | done | — |
+| D-2.4 | Identity: an id denotes one instrument; attribution through a `vendor_id` interval | `abt-data/src/registry.rs` | `abt-tests/tests/identity.rs` | done | — |
+| D-2.7 | A binding read at two times returns the same rows in the same order | `abt-data/src/store.rs` (immutable versions) | none dedicated | partial | iteration 1 adds the test |
+| D-3.3 | Snapshot reads are exact and bounded | `store.rs::read` (per-row `seq`) | `abt-data/tests/store.rs::reads_equal_a_naive_store_over_random_interleavings` | done | — |
+| D-4.2 | Every query form is a deterministic function of (view, `as_of_seq`, filter, arguments) | `abt-data/src/query.rs` | none dedicated | partial | iteration 1 adds the test |
+| D-5.2 | Barriers partition the stream | `stream.rs` | `abt-data/tests/stream.rs::barriers_partition_the_stream_by_receipt_time` | done | — |
+| D-5.4 | Replayability of a recorded stream | `stream.rs`, `live.rs` | `stream.rs::a_subscription_replays_from_any_seq_and_stops_at_to_seq`, `abt-data/tests/live.rs` | done | — |
+| D-6.1 | Pushdown equality | `abt-data/src/agg.rs`, `abt-kernel/src/plan` | `abt-tests/tests/pushdown.rs`, `abt-data/tests/agg.rs` | done | — |
+| D-7.5 | Resolution is reproducible | `abt-data/src/resolver/` | `abt-data/tests/resolver.rs` (the D-7.5 cases) | done | — |
+| K-2.1 | The whole configuration is in the program hash | `check/config.rs`, `kernel/hash` | `abt-tests/tests/normalise.rs` | done | — |
+| K-3.2 | The contract is a function of the program | `contract/derive.rs` | `abt-tests/tests/contracts.rs` | done | — |
+| K-4.1 | Causality across the boundary | `kernel/fold.rs` | `abt-tests/tests/fold.rs::a_stream_truncated_at_a_decision_barrier_decides_as_the_whole_run` | done | — |
+| K-5.1 | The event log is sufficient | `kernel/events.rs` (`Book::apply`) | `abt-tests/tests/events.rs` | done | — |
+| Q-2.1 | The embargo is enforced | `abt-query/src/plan/holdout.rs` | `abt-tests/tests/plan_exec.rs::{a_block_hold_out_masks_its_blocks_and_a_reveal_reports_them, a_trailing_reveal_reports_the_embargoed_tail}` | done | — |
+| Q-2.2 | Every run is a counted trial | `plan/trials.rs` | `plan_exec.rs::every_run_is_a_trial_counted_once_and_pi_is_in_its_id` | done | — |
+| Q-5.2 | Claims change nothing | `abt-query/src/claims` | `abt-tests/tests/claims_exec.rs` | done | — |
+| P-1.1 | One implementation, one answer | `crates/abt-agg` | `abt-agg/tests/agg.rs`, `abt-tests/tests/pushdown.rs` | partial | holds for `two_pass` and `running`; `exact` missing (iteration 1) |
+| P-5.1 | Transport invisibility | `abt-wire/src/{frame,rpc}.rs` | `abt-wire/tests/rpc.rs`, `abt-tests/tests/{determinism,fold}.rs`, `abt/tests/deployment.rs` | done | — |
+| X-2.1 | The aggregate pass is deterministic under parallelism | `abt-data/src/agg.rs` | `determinism.rs::the_aggregate_pass_on_one_thread_and_on_eight_gives_the_same_bits` | done | — |
+| X-3.1 | Bit identity under entity parallelism | — | — | missing | E-77: entity-parallel strata not built; iteration 3 decides |
+| ST-3.2 | Lossless blocks | — | — | missing | iteration 1 |
+| ST-3.3 | Exact sums across quanta | — | — | missing | iteration 1 |
+| ST-5.1 | Exact windows from cumulative summaries | — | — | missing | iteration 1 |
+| ST-5.2 | Exact ladder | — | — | missing | iteration 1 |
+| ST-6.1 | Range closure | — | — | missing | iteration 1 |
+| ST-7.1 | Versions immutable and cheap | — | — | missing | iteration 1 |
+| ST-8.1 | Snapshot exactness under appends | — | — | missing | iteration 1 |
+| ST-8.2 | Recovery | — | — | missing | iteration 1 |
+
+## Gates
+
+| Gate | Statement | Where | Status | Evidence |
+| --- | --- | --- | --- | --- |
+| G1 | MW14 1,852/1,852 weeks to 8e-15; R8L 21,892/21,892 legs and 6,850/6,850 days | `scripts/parity/` | partial | E-1: the inputs (`~/data/ref`) are the owner's; the stand-in is `abt-tests/tests/tv_golden.rs` (every corpus program and both books rendered exactly) and G6; the owner runs the scripts |
+| G2 | The corpus checks clean; negatives give their code | `abt-tests/tests/corpus_v2.rs` | done | 6 tests |
+| G3 | Byte-identical runs in-process, over sockets, 1 and 8 data threads, 1 and 4 kernels | `abt-tests/tests/determinism.rs`, `fold.rs`, `plan_exec.rs::one_kernel_or_four_give_the_same_outcomes`, `ABT_TRANSPORT=socket` over the suite | done | |
+| G4 | A live-sim session replayed as replay-sim gives identical events | `abt-tests/tests/replay.rs`, `abt/tests/live.rs` | done | on recorded synthetic feeds; a Databento session is the owner's |
+| G5 | A run stopped at any barrier equals the truncated stream; resume from any checkpoint equals the unbroken run | `abt-tests/tests/{fold,fold_checkpoint,fold_availability}.rs` | done | |
+| G6 | Every daily corpus strategy and the action markets agree with `reference/engine.py` | `abt/tests/reference.rs` | done | pandas present here and in CI |
+| G7 | Every contract clause proven, checked or reported; every injected violation halts | `abt-tests/tests/contracts.rs` | done | |
+| G8 | The K-9.3 cases; the owner's options book | `abt-tests/tests/{options,futures,limits}.rs`, `abt-kernel/tests/{margin,pricing}.rs` | partial | the 25 cases below; the owner's book not supplied |
+| G9 | The starting set to its known answers | `abt-query/tests/known_answers_{samples,series,panels,regression}.rs` | done | E-60, E-61, E-62 record the tolerances |
+| G10 | The targets of A-7.3 on the reference machine | `scripts/bench.sh` | partial | measured on this VM (`docs/assessment.md`); the M4 is the owner's |
+| G-ST1 | The codec's figures on the M4 with the full store | `crates/abt-codec/benches` (iteration 1) | missing | the M4 is the owner's; this VM's figures are labelled |
+| G-ST2 | The sizing run over the full history | `abt data stage --measure` (iteration 1) | missing | NDLake in full here; Databento's full history needs a consolidated object per root |
+
+## Test rows of the documents
+
+| Row | Statement | Test | Status | Note |
+| --- | --- | --- | --- | --- |
+| D-9.2 `tests/data_store.rs` | snapshot exactness under random interleavings; revisions; late rows into compacted buckets; pins survive eviction | `abt-data/tests/store.rs` | done | |
+| D-9.2 `tests/data_stream.rs` | Propositions 5.2 and 5.4 with late tuples and gaps | `abt-data/tests/stream.rs`, `live.rs` | done | |
+| D-9.2 `tests/data_agg.rs` | Proposition 6.1 for every function and window form, both numerics | `abt-data/tests/agg.rs`, `abt-tests/tests/pushdown.rs` | done | `exact` to be added |
+| D-9.2 `tests/data_resolver.rs` | plans against a synthetic catalog; budget refusal names the cheapest plan; the pre-pass covers every chain query | `abt-data/tests/resolver.rs`, `options.rs` | done | |
+| D-9.2 `scripts/bench.sh` | the budgets of 9.1 | `abt-data/tests/budgets.rs` (ignored; BUDGETS=1) | done | measured here, see the targets |
+| K-9.3 case 1 | long call ITM at expiry, physical | `options.rs::a_long_call_in_the_money_at_expiry_is_exercised_physically` | done | |
+| K-9.3 case 2 | short put ITM at expiry, physical | `options.rs::a_short_put_in_the_money_at_expiry_is_assigned_the_underlying` | done | |
+| K-9.3 case 3 | long put, cash-settled index, AM settlement | `options.rs::a_long_put_on_a_cash_settled_index_is_exercised_at_the_am_print` | done | |
+| K-9.3 case 4 | OTM at expiry, both sides | `options.rs::an_option_out_of_the_money_at_expiry_expires_worthless_on_either_side` | done | |
+| K-9.3 case 5 | ATM within tolerance | `options.rs::an_option_at_the_money_within_the_tolerance_expires` | done | |
+| K-9.3 case 6 | early assignment before ex-dividend | `options.rs::a_short_call_is_assigned_early_before_the_ex_date_when_its_extrinsic_value_is_below_the_dividend` | done | |
+| K-9.3 case 7 | `early_short never` | `options.rs::with_early_short_never_the_call_is_assigned_at_expiry_only` | done | |
+| K-9.3 case 8 | `exercise(A, Q)` on a long | `options.rs::an_exercise_decision_on_a_long_exercises_at_that_bars_close` | done | |
+| K-9.3 case 9 | vertical spread combo, touch + 0.25 spread, limit better or worse | `options.rs::{a_combo_fills_every_leg_at_one_barrier_under_one_order_id, a_combo_limit_fills_at_or_better_than_its_net_and_otherwise_works_until_its_time_in_force}` | done | |
+| K-9.3 case 10 | a combo with one leg unquoted | `options.rs::a_combo_with_a_leg_unquoted_is_dropped_naming_the_leg` | done | |
+| K-9.3 case 11 | 2:1 split | `options.rs::a_two_for_one_split_doubles_the_contracts_and_halves_the_strike` | done | |
+| K-9.3 case 12 | 3:2 split | `options.rs::a_three_for_two_split_takes_the_multiplier_to_150_and_the_strike_to_two_thirds` | done | |
+| K-9.3 case 13 | special dividend 2.00 | `options.rs::a_special_dividend_lowers_the_strike_by_its_amount` | done | |
+| K-9.3 case 14 | naked short put under `reg_t` | `options.rs::a_naked_short_put_under_reg_t_needs_twenty_percent_of_the_underlying_less_otm_plus_the_premium`, `margin.rs::case_14_*` | done | |
+| K-9.3 case 15 | vertical spread under `reg_t` | `options.rs::a_vertical_spread_under_reg_t_needs_its_maximum_loss`, `margin.rs::case_15_*` | done | |
+| K-9.3 case 16 | `portfolio` on a straddle | `options.rs::a_straddle_under_portfolio_needs_its_worst_loss_over_the_grid_at_its_volatility`, `margin.rs::case_16_*` | done | |
+| K-9.3 case 17 | `published` present and absent | `options.rs::published_margins_price_the_contracts_they_cover_and_reg_t_the_rest`, `margin.rs::case_17_*` | done | |
+| K-9.3 case 18 | `approx 0.2` only, warned | `options.rs::approx_alone_is_a_fraction_of_the_underlyings_notional_warned_at_every_bar`, `margin.rs::case_18_approx_only` | done | |
+| K-9.3 case 19 | `greeks data` against `greeks model` | `options.rs::the_models_greeks_reproduce_the_datas_iv_and_are_absent_outside_the_bounds` | done | |
+| K-9.3 case 20 | futures daily settlement over three sessions | `futures.rs::daily_settlement_moves_the_variation_to_cash_and_leaves_the_nav_unchanged` | done | |
+| K-9.3 case 21 | futures roll | `futures.rs::a_roll_records_two_fills_and_two_commissions_and_carries_the_position` | done | |
+| K-9.3 case 22 | expiry without roll, cash-settled | `futures.rs::a_cash_settled_contract_held_at_its_last_trade_expires_at_its_final_settlement` | done | |
+| K-9.3 case 23 | margin call under `published`, `liquidate` | `futures.rs::a_futures_margin_call_liquidates_the_largest_requirement_first`, `margin.rs::liquidation_takes_the_largest_requirement_per_unit_first` | done | |
+| K-9.3 case 24 | `weight <= 0.1 per name reject` against `hold(A, 0.2)` | `limits.rs::a_weight_limit_of_a_tenth_against_a_hold_of_a_fifth_rejects_clamps_or_warns` | done | |
+| K-9.3 case 25 | `drawdown <= 0.1 reject` after a 12 % fall | `limits.rs::a_drawdown_limit_of_a_tenth_after_a_twelve_percent_fall_rejects_increases_and_passes_reductions` | done | |
+| K-9.3 pricing | Haug's tables; implied volatility round trips to 1e-10 | `abt-kernel/tests/pricing.rs` | done | |
+| Q-4.4 `jarque_bera`, `ks_normal`, `hill_tail` | known answers | `known_answers_samples.rs` | done | E-62 |
+| Q-4.4 `ljung_box`, `variance_ratio`, `arch_lm`, `adf`, `kpss`, `half_life`, `engle_granger`, `johansen` | known answers | `known_answers_series.rs` | done | E-60 |
+| Q-4.4 `ic`, `fama_macbeth`, `coactivation`, `effective_rules`, `cost_realism` | known answers | `known_answers_panels.rs` | done | E-61 |
+| Q-4.4 `psr`, `dsr`, `min_trl`, `pbo`, `bootstrap_sharpe`, `nw_mean`, `wfe` | known answers | `known_answers_samples.rs` | done | E-62 |
+| Q-4.4 `regression` | NIST StRD certified values | `known_answers_regression.rs` | done | E-24: NIST's difficulty classes as tolerances |
+| P-1.2 `tests/agg.rs` | every function and mode against a 128-bit rational reference | `abt-agg/tests/agg.rs` | done | `exact` to be added |
+| P-2 transport | the same exchange in process and over a socket; version refusal; flow control | `abt-wire/tests/{rpc,frame,schema}.rs` | done | E-64 |
+| ST-13 codec property tests | encode→decode identity at every width, with and without exceptions, `recip_exact` set and unset; extraction equals decoding | — | missing | iteration 1 |
+| ST-13 real-data round trip | every block of the staged store decodes bit for bit | — | missing | iteration 1, over the NDLake history fetched from S3 |
+| ST-13 exact aggregates | sums, moments and windows against the rational reference | — | missing | iteration 1 |
+| ST-13 ladder | every precomputed bar equals its bucket recomputed from base rows | — | missing | iteration 1 |
+| ST-13 ranges | every query of ST-6.3 on random ranges, edges, exceptions, the tail, earlier sequences, receipt filters | — | missing | iteration 1 |
+| ST-13 appends | interleaved appends and reads at random sequences (Prop. 8.1) | — | missing | iteration 1 |
+| ST-13 revisions | a revision shares unchanged segments by hash; old readers unaffected | — | missing | iteration 1 |
+| ST-13 performance | the encoding benches on the reference machine | — | missing | this VM's figures in iteration 1; the M4 is the owner's |
+| ST-13 parity | G1 through the new store in `two_pass` | — | missing | the owner's run after iteration 1 |
+| ST-13 recovery | kill at random points; every answer equal after restart; no unjournaled block visible | — | missing | iteration 1 |
+| ST-13 consolidation | identical answers, unchanged version id, bounded extra memory | — | missing | iteration 1 |
+| ST-13 adjusted ranges | split, total-return and continuous views over ranges crossing events, both layers | — | missing | iteration 1 (data layer; the kernel half via pushdown) |
+| ST-13 calendars | DST weeks, Sunday sessions, early closes, holidays, session-table changes | — | missing | iteration 1 |
+| ST-13 ticks on the wire | `Decimal128` round trip; the kernel's exact aggregates equal the data layer's | — | missing | iteration 1 (data layer); the kernel's exact windows in iteration 2 |
+| ST-13 residency | zero major faults through a G10 run with the store locked | — | missing | needs a memlock limit this VM lacks |
+| ST-13 G-ST1 | the codec on the M4 | — | missing | the owner's |
+| ST-13 G-ST2 | the sizing run | — | missing | iteration 1's harness; the Databento half needs the full history |
+
+## Targets
+
+| Target | Value | Measured | Status | Machine and command |
+| --- | --- | --- | --- | --- |
+| A-7.3 instruments live | 10,000 at @1m | not measured | missing | needs a live feed |
+| A-7.3 history resident | 30 years @1d; 5 years @1m; Norgate and Databento in full (ST-9) | not measured at that size | missing | iteration 1 measures the NDLake history and a Databento subset |
+| A-7.3 barrier to decision, live | < 50 ms | not measured | missing | needs a live feed |
+| A-7.3 sustained ingest | 200,000 rows/s | 2.93M rows/s | done | 4-core Xeon 2.8 GHz VM, `scripts/bench.sh none OUT` (BUDGETS=1), Oct 17 |
+| A-7.3 cross-section from the hot tail | < 1 ms | 308 µs at 2,000 names, resident | done | same |
+| A-7.3 point lookup, range scan | O(log n), O(log n + k) | 39 µs resident | done | same |
+| A-7.3 MW14 full replay | ≤ 60 s, ≤ 1.5 GB | the owner's data | missing | `scripts/bench.sh` part 4, the owner's machine |
+| A-7.3 R8L full replay | ≤ 3 s, ≤ 0.6 GB | the owner's data | missing | same |
+| A-7.3 storage per value, other sources | ≤ 16 B resident, ≤ 4 B on disk | 10.0 B resident, 3.05 B on disk | done | same |
+| A-7.3 storage per value, Norgate and Databento | ≤ 2 B resident with every structure; 6.8 to 7.2 GB locked | not measured | missing | iteration 1: `abt data stage --measure` |
+| A-7.3 peak by profile | ≈ 14 GB dedicated, ≈ 11 GB workstation | not measured | missing | iteration 1 |
+| A-7.3 restart to serving | ≤ 30 s | not measured | missing | iteration 1: the deployment test |
+| A-7.3 full-minute futures bundle | resident on the reference machine | not measured | missing | the owner's |
+| D-9.1 `point`, `latest` | ≤ 5 µs resident, ≤ 50 µs from disk | 40 µs resident, 721 µs from disk | partial | over both bounds; the hot store's point is the fix (ST-6.3). Same machine and command as above |
+| D-9.1 `section` | < 1 ms from the tail, < 5 ms resident at 10,000 | 303 µs at 2,000 resident | done | scaled |
+| D-9.1 `series` of 252 rows | < 100 µs resident | 158 µs | partial | 1.6× over; the hot store's series read is the fix |
+| D-9.1 ingest | ≥ 200,000 rows/s | 2.93M rows/s | done | |
+| D-9.1 barrier latency live | < 1 ms | not measured | missing | needs a live feed |
+| D-9.1 rolling 252-row mean, 10,000 × 30 years | < 10 s on 1 thread, < 2 s on 8 | 5.04M rows: 4.7 s on 8 threads (`running`); scaled to 75.6M rows about 70 s | partial | over; the pass over decoded blocks (X-2.2 as amended) is the fix |
+| D-9.1 resident footprint | ≤ 16 B per value | 8 B | done | |
+| ST-2.4 decode and sum | 0.18 to 0.38 ns per value, widths 5 to 27 | not measured in this tree | missing | iteration 1: `cargo bench -p abt-codec` on this VM; the M4 is the owner's |
+| ST-2.4 ranges | point 26 ns; series, range max, OHLCV bar, median, count as the table | not measured in this tree | missing | iteration 1 |
+| ST-9 store | ≈ 6.8 to 7.2 GB hot | not measured | missing | iteration 1: the sizing run |
