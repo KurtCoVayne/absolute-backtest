@@ -185,3 +185,39 @@ fn the_tail_appends_in_place_and_reads_its_visible_prefix() {
         }
     }
 }
+
+#[test]
+fn the_header_is_32_bytes_little_endian_and_round_trips() {
+    use abt_codec::block::{Header, FLAG_F32, FLAG_PATCHED, FLAG_PREDICTED, FLAG_RECIP_EXACT, HEADER_BYTES};
+    let h = Header {
+        base: -1_234_567_890_123,
+        g: 25,
+        e: 4,
+        width: 11,
+        n: 1024,
+        flags: FLAG_RECIP_EXACT | FLAG_PATCHED | FLAG_PREDICTED | FLAG_F32,
+        exceptions: 0xDEAD_BEEF,
+    };
+    let bytes = h.to_bytes();
+    assert_eq!(bytes.len(), HEADER_BYTES);
+    assert_eq!(&bytes[0..8], &(-1_234_567_890_123i64).to_le_bytes());
+    assert_eq!(&bytes[8..16], &25u64.to_le_bytes());
+    assert_eq!(bytes[16], 4);
+    assert_eq!(bytes[17], 11);
+    assert_eq!(&bytes[18..20], &1024u16.to_le_bytes());
+    assert_eq!(&bytes[20..22], &15u16.to_le_bytes());
+    assert_eq!(&bytes[22..26], &0xDEAD_BEEFu32.to_le_bytes());
+    assert_eq!(&bytes[26..32], &[0u8; 6]);
+    assert_eq!(Header::from_bytes(&bytes), h);
+    assert!(h.recip_exact() && h.patched() && h.predicted() && h.f32());
+    assert_eq!(h.words_bytes(), 32 * 11 * 4);
+    assert_eq!(Header { width: 33, ..h }.words_bytes(), 32 * 17 * 8);
+    assert_eq!(Header { width: 0, ..h }.words_bytes(), 0);
+    // Of an encoded block: the flags from its fields.
+    let values: Vec<f64> = (0..100).map(|i| 10.0 + 0.25 * i as f64).collect();
+    let enc = abt_codec::tick::encode(&values, abt_codec::tick::Source::F64);
+    let h = Header::of(&enc, false);
+    assert_eq!((h.base, h.g, h.e, h.width, h.n), (enc.base, enc.g, enc.e as i8, enc.width, enc.n));
+    assert!(!h.patched() && !h.predicted() && !h.f32());
+    assert_eq!(h.recip_exact(), enc.recip_exact);
+}

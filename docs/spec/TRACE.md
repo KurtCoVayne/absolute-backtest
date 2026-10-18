@@ -52,7 +52,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | A-D40 | ORATS not held hot | `adapters/orats.rs` writes the partition store | `abt-data/tests/options.rs` | done | the default stands (ST-14) |
 | A-D41 | Durability from the log and a seal journal | — | — | missing | iteration 1: `hot/{append,recover}.rs` |
 | A-D42 | Append segments; consolidation the only compaction; logical version ids | — | — | missing | iteration 1: `hot/consolidate.rs` |
-| A-D43 | Adjusted series as views over event-interval summaries | — | — | missing | iteration 1: `abt-codec/src/adjust.rs`, `hot/events.rs` |
+| A-D43 | Adjusted series as views over event-interval summaries | `crates/abt-codec/src/adjust.rs` (step functions, event-interval summaries, pieces, exact and ordered sums, extremes, counts) | `abt-codec/tests/adjust.rs` | partial | the arithmetic (E-86); the data layer's events and views with M-2 |
 | A-D44 | Ticks cross the protocol as `Decimal128(18, s)` | `abt-wire/schema/abt.fbs` (`ColumnType::Tick`, `QueryRequest.ticks`, `Numerics::Exact`, `MapRequest`; protocol 1.1), `abt-data/src/rows.rs` | `abt-wire/tests/schema.rs::the_storage_additions_round_trip` | partial | E-84: the types and the flag; no tick column is answered until the hot store (M-2) |
 | A-D45 | Hot means locked; memory profiles and a shedding order | — | — | missing | iteration 1: `hot/residency.rs`; locking needs a limit this VM lacks (8 MB) |
 | A-D46 | Futures calendars by trade date with UTC-aligned intraday buckets | — | — | missing | iteration 1: `hot/ladder.rs` |
@@ -85,10 +85,10 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | X-2.1 | The aggregate pass is deterministic under parallelism | `abt-data/src/agg.rs` | `determinism.rs::the_aggregate_pass_on_one_thread_and_on_eight_gives_the_same_bits` | done | — |
 | X-3.1 | Bit identity under entity parallelism | — | — | missing | E-77: entity-parallel strata not built; iteration 3 decides |
 | ST-3.2 | Lossless blocks | `abt-codec/src/tick.rs::encode` (verified by decoding; raw-bit exceptions) | `abt-codec/tests/roundtrip.rs::encode_then_decode_is_the_identity_with_and_without_exceptions` | done | — |
-| ST-3.3 | Exact sums across quanta | — | — | missing | iteration 1 |
-| ST-5.1 | Exact windows from cumulative summaries | — | — | missing | iteration 1 |
+| ST-3.3 | Exact sums across quanta | `abt-codec/src/tick.rs::{Encoded::sum, aligned, to_f64}` | `abt-codec/tests/roundtrip.rs::sums_are_exact_across_quanta` | partial | the codec's sums; the store's windows with M-2 |
+| ST-5.1 | Exact windows from cumulative summaries | `abt-codec/src/summary.rs::{Cumulative, cumulatives, moments}` (the shorter-edge rule) | `abt-codec/tests/summary.rs` (random windows against a direct reduction) | partial | the codec's rule; over the store with M-2 |
 | ST-5.2 | Exact ladder | — | — | missing | iteration 1 |
-| ST-6.1 | Range closure | — | — | missing | iteration 1 |
+| ST-6.1 | Range closure | `abt-codec/src/{summary,adjust,wavelet,rank}.rs` (every range answered from the blocks it intersects and O(1) or O(log σ) entries) | `abt-codec/tests/adjust.rs::whole_pieces_come_from_the_summaries_and_only_the_ends_decode` (a counting column) | partial | the codec's structures; the store's directory with M-2 |
 | ST-7.1 | Versions immutable and cheap | — | — | missing | iteration 1 |
 | ST-8.1 | Snapshot exactness under appends | — | — | missing | iteration 1 |
 | ST-8.2 | Recovery | — | — | missing | iteration 1 |
@@ -152,9 +152,9 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | Q-4.4 `regression` | NIST StRD certified values | `known_answers_regression.rs` | done | E-24: NIST's difficulty classes as tolerances |
 | P-1.2 `tests/agg.rs` | every function and mode against a 128-bit rational reference | `abt-agg/tests/agg.rs`; `exact` in `abt-agg/tests/exact.rs` against an independent big-integer oracle (correct rounding, ties, order independence) | done | E-85 |
 | P-2 transport | the same exchange in process and over a socket; version refusal; flow control | `abt-wire/tests/{rpc,frame,schema}.rs` | done | E-64 |
-| ST-13 codec property tests | encode→decode identity at every width, with and without exceptions, `recip_exact` set and unset; extraction equals decoding | — | missing | iteration 1 |
+| ST-13 codec property tests | encode→decode identity at every width, with and without exceptions, `recip_exact` set and unset; extraction equals decoding | `abt-codec/tests/roundtrip.rs` | done | E-86 |
 | ST-13 real-data round trip | every block of the staged store decodes bit for bit | — | missing | iteration 1, over the NDLake history fetched from S3 |
-| ST-13 exact aggregates | sums, moments and windows against the rational reference | — | missing | iteration 1 |
+| ST-13 exact aggregates | sums, moments and windows against the rational reference | `abt-codec/tests/summary.rs` (windows from cumulatives against a direct `i128` reduction); `abt-agg/tests/exact.rs` | partial | over the store's blocks with M-2 |
 | ST-13 ladder | every precomputed bar equals its bucket recomputed from base rows | — | missing | iteration 1 |
 | ST-13 ranges | every query of ST-6.3 on random ranges, edges, exceptions, the tail, earlier sequences, receipt filters | — | missing | iteration 1 |
 | ST-13 appends | interleaved appends and reads at random sequences (Prop. 8.1) | — | missing | iteration 1 |
@@ -163,7 +163,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | ST-13 parity | G1 through the new store in `two_pass` | — | missing | the owner's run after iteration 1 |
 | ST-13 recovery | kill at random points; every answer equal after restart; no unjournaled block visible | — | missing | iteration 1 |
 | ST-13 consolidation | identical answers, unchanged version id, bounded extra memory | — | missing | iteration 1 |
-| ST-13 adjusted ranges | split, total-return and continuous views over ranges crossing events, both layers | — | missing | iteration 1 (data layer; the kernel half via pushdown) |
+| ST-13 adjusted ranges | split, total-return and continuous views over ranges crossing events, both layers | `abt-codec/tests/adjust.rs` (sums exact for splits and shifts, the ordered definition for total return, extremes and counts against a direct reduction) | partial | the codec half; quantiles over adjusted ranges and the data layer's views with M-2; the kernel half via pushdown |
 | ST-13 calendars | DST weeks, Sunday sessions, early closes, holidays, session-table changes | — | missing | iteration 1 |
 | ST-13 ticks on the wire | `Decimal128` round trip; the kernel's exact aggregates equal the data layer's | — | missing | iteration 1 (data layer); the kernel's exact windows in iteration 2 |
 | ST-13 residency | zero major faults through a G10 run with the store locked | — | missing | needs a memlock limit this VM lacks |

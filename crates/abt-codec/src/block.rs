@@ -327,3 +327,109 @@ impl Horizontal {
         (0..n.min(self.n)).map(|j| self.get(j)).collect()
     }
 }
+
+/// A block's header as a segment stores it (ST-4.3): 32 bytes, little
+/// endian, kept apart from the packed words in a header array per column.
+/// `flags` carry `recip_exact`, `patched` (the block has exceptions),
+/// `predicted` (a residual column of ST-4.5) and `f32` (the source wrote
+/// `f32` values, so the view is the decoded value rounded to `f32`);
+/// `exceptions` is the offset of the block's exception list in its
+/// segment's exception area, 0 when it has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Header {
+    pub base: i64,
+    pub g: u64,
+    pub e: i8,
+    pub width: u8,
+    pub n: u16,
+    pub flags: u16,
+    pub exceptions: u32,
+}
+
+pub const HEADER_BYTES: usize = 32;
+pub const FLAG_RECIP_EXACT: u16 = 1;
+pub const FLAG_PATCHED: u16 = 2;
+pub const FLAG_PREDICTED: u16 = 4;
+pub const FLAG_F32: u16 = 8;
+
+impl Header {
+    pub fn to_bytes(&self) -> [u8; HEADER_BYTES] {
+        let mut b = [0u8; HEADER_BYTES];
+        b[0..8].copy_from_slice(&self.base.to_le_bytes());
+        b[8..16].copy_from_slice(&self.g.to_le_bytes());
+        b[16] = self.e as u8;
+        b[17] = self.width;
+        b[18..20].copy_from_slice(&self.n.to_le_bytes());
+        b[20..22].copy_from_slice(&self.flags.to_le_bytes());
+        b[22..26].copy_from_slice(&self.exceptions.to_le_bytes());
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Header {
+        assert!(b.len() >= HEADER_BYTES);
+        Header {
+            base: i64::from_le_bytes(b[0..8].try_into().unwrap()),
+            g: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            e: b[16] as i8,
+            width: b[17],
+            n: u16::from_le_bytes(b[18..20].try_into().unwrap()),
+            flags: u16::from_le_bytes(b[20..22].try_into().unwrap()),
+            exceptions: u32::from_le_bytes(b[22..26].try_into().unwrap()),
+        }
+    }
+
+    pub fn recip_exact(&self) -> bool {
+        self.flags & FLAG_RECIP_EXACT != 0
+    }
+
+    pub fn patched(&self) -> bool {
+        self.flags & FLAG_PATCHED != 0
+    }
+
+    pub fn predicted(&self) -> bool {
+        self.flags & FLAG_PREDICTED != 0
+    }
+
+    pub fn f32(&self) -> bool {
+        self.flags & FLAG_F32 != 0
+    }
+
+    /// The header of an encoded block, its exception offset to be set by
+    /// the segment writer.
+    pub fn of(enc: &crate::tick::Encoded, predicted: bool) -> Header {
+        let mut flags = 0u16;
+        if enc.recip_exact {
+            flags |= FLAG_RECIP_EXACT;
+        }
+        if !enc.exceptions.is_empty() {
+            flags |= FLAG_PATCHED;
+        }
+        if predicted {
+            flags |= FLAG_PREDICTED;
+        }
+        if enc.f32 {
+            flags |= FLAG_F32;
+        }
+        Header {
+            base: enc.base,
+            g: enc.g,
+            e: enc.e as i8,
+            width: enc.width,
+            n: enc.n,
+            flags,
+            exceptions: 0,
+        }
+    }
+
+    /// The packed words a block of this header takes, in bytes.
+    pub fn words_bytes(&self) -> usize {
+        let w = self.width as usize;
+        if w == 0 {
+            0
+        } else if w <= 32 {
+            LANES * w * 4
+        } else {
+            LANES * w.div_ceil(2) * 8
+        }
+    }
+}

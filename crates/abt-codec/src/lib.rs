@@ -16,10 +16,13 @@
 //! - `wavelet`: wavelet matrices for order statistics over ranges (ST-5.7).
 //! - `adjust`: adjusted views evaluated piecewise between events (ST-5.10).
 
+pub mod adjust;
 pub mod block;
 pub mod predict;
+pub mod rank;
 pub mod summary;
 pub mod tick;
+pub mod wavelet;
 
 /// The values a block holds at most (ST-4.1).
 pub const BLOCK: usize = 1024;
