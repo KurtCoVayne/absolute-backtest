@@ -327,6 +327,9 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     let mode = match request.numerics {
         Numerics::Running => Mode::Running,
         Numerics::TwoPass => Mode::TwoPass,
+        // The exact mode reduces tick columns (ST-3); it comes with the
+        // hot store's tick columns (iteration 1, M-1 and M-2).
+        Numerics::Exact => return Err(DataError::Malformed("numerics exact: the pass reduces no tick column yet (iteration 1)".into())),
     };
     let (t0, t1) = (request.t0.unwrap_or(i64::MIN), request.t1.unwrap_or(i64::MAX));
     // Per group, in parallel over disjoint ranges of groups; each group's

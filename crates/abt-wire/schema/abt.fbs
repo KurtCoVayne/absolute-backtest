@@ -48,7 +48,10 @@ table Error {
 // ---------------------------------------------------------------- schemas
 
 // D-2.1: the scalar types a column holds.
-enum ColumnType : ubyte { Entity = 0, Time = 1, Num = 2, Count = 3, Label = 4, Bool = 5, Bytes = 6 }
+// `Tick` is an exact decimal: `i64` units of 10^(-s), the scale `s` (at most
+// 9) carried by the batch's Arrow type `Decimal128(18, s)` (ST-10.4,
+// A-D44); a `Num` column crosses as ticks when a request asks for them.
+enum ColumnType : ubyte { Entity = 0, Time = 1, Num = 2, Count = 3, Label = 4, Bool = 5, Bytes = 6, Tick = 7 }
 
 // Definition D-2.1: a column's role. Exactly one EventTime, at most one
 // ReceiptTime; the identity of a relation is its Entity columns and t.
@@ -180,7 +183,9 @@ table Duration {
 
 enum WindowKind : ubyte { Rows = 0, PriorRows = 1, Span = 2, PriorSpan = 3, Bucket = 4 }
 enum Grouping : ubyte { PerEntity = 0, PerLabel = 1, Whole = 2 }
-enum Numerics : ubyte { TwoPass = 0, Running = 1 }
+// D-6.3: `Exact` reduces tick columns as integers in the instrument's finest
+// exponent (ST-3, Proposition 3.3), one correctly rounded division at the end.
+enum Numerics : ubyte { TwoPass = 0, Running = 1, Exact = 2 }
 
 // D-6.1. `calendar` names the calendar whose labels index the window's
 // checkpoints and the answer's rows (E-27); `bucket` the calendar of a
@@ -352,6 +357,9 @@ table QueryRequest {
   receipt_filter: ReceiptFilter;
   with_seq: bool;
   explain: bool;
+  // ST-10.4: price and quantity columns as `Decimal128(18, s)` ticks rather
+  // than their `Float64` view.
+  ticks: bool;
 }
 
 table ExplainResponse {
@@ -375,6 +383,20 @@ table SubscribeRequest {
 
 table SubscribeResponse { stream: string (required); }
 table StreamIndexRequest { spec: StreamSpec (required); }
+
+// ST-10.2: the segments of a hot relation at the view's sequence, for a
+// reader on the same machine to map read-only and decode with abt-codec.
+// The answer is a table (`TableFollows`): one row per segment (path, offset,
+// length, codec version, the block tables' location) and per tail (its
+// visible count at the view's sequence).
+table MapRequest {
+  view: View;
+  relation: string (required);
+  columns: [string];
+  level: string;
+  from_entity: ulong;
+  to_entity: ulong = null;
+}
 table AckMessage { seq: ulong; }
 
 // The rows follow as Arrow frames in the request's correlation.
@@ -517,6 +539,7 @@ union Message {
   SubscribeRequest,
   SubscribeResponse,
   StreamIndexRequest,
+  MapRequest,
   AckMessage,
   PutRequest,
   PutResponse,

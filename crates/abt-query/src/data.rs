@@ -151,6 +151,7 @@ impl Data {
                 receipt_filter: None,
                 with_seq: false,
                 explain: false,
+                ticks: false,
             })))
             .map(|(_, b)| b)
             .map_err(|e| match e {

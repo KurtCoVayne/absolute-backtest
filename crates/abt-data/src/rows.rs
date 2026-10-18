@@ -28,6 +28,8 @@ pub fn stored_type(ty: ColumnType) -> DataType {
         ColumnType::Label => DataType::UInt32,
         ColumnType::Bool => DataType::Boolean,
         ColumnType::Bytes => DataType::Binary,
+        // The finest scale; a batch may carry a coarser one (ST-10.4).
+        ColumnType::Tick => DataType::Decimal128(18, 9),
     }
 }
 
@@ -123,6 +125,11 @@ fn conform_column(name: &str, ty: ColumnType, col: &ArrayRef, reg: &mut Registry
             DataType::Utf8 => arrow::compute::cast(col, &DataType::Binary)?,
             _ => return Err(bad()),
         },
+        // A tick column keeps the scale its batch carries (ST-10.4).
+        ColumnType::Tick => match col.data_type() {
+            DataType::Decimal128(_, _) => col.clone(),
+            _ => return Err(bad()),
+        },
         ColumnType::Label => {
             let text = match col.data_type() {
                 DataType::Utf8 => col.clone(),
@@ -154,6 +161,7 @@ fn ty_name(ty: ColumnType) -> &'static str {
         ColumnType::Label => "Label",
         ColumnType::Bool => "Bool",
         ColumnType::Bytes => "Bytes",
+        ColumnType::Tick => "Tick",
     }
 }
 

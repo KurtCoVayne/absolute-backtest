@@ -195,6 +195,7 @@ fn availability_loads_from_parquet_and_truncation_follows_it() {
                 receipt_filter: Some(Box::new(ReceiptFilter { r_max })),
                 with_seq: false,
                 explain: false,
+                ticks: false,
             })))
             .unwrap();
         use arrow::array::AsArray;

@@ -580,6 +580,13 @@ impl Service for DataService {
                 let b = self.stats(r.relation.as_deref()).map_err(data)?;
                 out.table(&b.schema(), [b]).map_err(wire)
             }
+            // ST-10.2: the segments of a hot relation. Nothing is hot until
+            // the hot store lands (iteration 1, M-2); a known relation is
+            // answered as having no segments, an unknown one as unknown.
+            Message::MapRequest(r) => {
+                self.store().schema(&r.relation).map_err(data)?;
+                Err(error(ErrorCode::Malformed, format!("map: `{}` has no segments to map: no relation is held hot yet", r.relation)))
+            }
             _ => Err(error(ErrorCode::Malformed, "the data service does not take this request")),
         }
     }

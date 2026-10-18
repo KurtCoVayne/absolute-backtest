@@ -142,6 +142,12 @@ fn atom_mask(store: &Store, s: &RelationSchema, b: &RecordBatch, a: &Atom) -> Re
                             ColumnType::Count => col.as_primitive::<arrow::datatypes::Int64Type>().value(i) as i128,
                             ColumnType::Label => col.as_primitive::<arrow::datatypes::UInt32Type>().value(i) as i128,
                             ColumnType::Bool => col.as_boolean().value(i) as i128,
+                            ColumnType::Tick => {
+                                let DataType::Decimal128(_, scale) = col.data_type() else { return false };
+                                let x = col.as_primitive::<arrow::datatypes::Decimal128Type>().value(i);
+                                let c = if v.kind == ConstantKind::Num { v.num } else { v.int as f64 };
+                                return (x as f64 / 10f64.powi(*scale as i32)).partial_cmp(&c).is_some_and(cmp);
+                            }
                             ColumnType::Bytes | ColumnType::Num => return false,
                         };
                         constant_int(store, v).map(|c| x.cmp(&c))

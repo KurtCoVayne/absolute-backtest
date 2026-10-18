@@ -2340,3 +2340,20 @@ batch driver agree on every corpus program. Each bless since:
     the binary and refuse with the message naming `--data SOCKET`).
   - `crates/abt/tests/deployment.rs` runs the three programs, found beside
     the front's binary; `cargo test --workspace` builds them.
+
+- **E-84 (P-1.1, P-3.1, P-7, D-2.1, D-6.3, K-2.2, ST-10.2, ST-10.4; the
+  protocol's storage additions).** Protocol `1.1` (a minor version: a
+  client of 1.0 is served, the new fields absent). `abt.fbs` gains
+  `ColumnType::Tick` (an exact decimal, `i64` units of `10^(-s)`, carried
+  as Arrow `Decimal128(18, s)` with the scale per batch, A-D44),
+  `Numerics::Exact`, `QueryRequest.ticks` and the `MapRequest` of ST-10.2
+  (answered as a table of segment descriptors once a relation is held hot;
+  until the hot store lands, a known relation is answered as having no
+  segments). `Numerics::Exact` is refused by the aggregate pass until it
+  reduces tick columns (M-1, M-2 of iteration 1), with the message naming
+  the iteration. The stored form of a `Tick` column is `Decimal128(18, 9)`
+  (the finest scale); an answer may carry a coarser scale, which readers
+  take from the batch's type. `ColumnType::Tick` is not a type the registry
+  gives a relation's column: a price or quantity column is `Num`, and crosses
+  as ticks when a request asks for them (01 §2.1 as amended); the variant
+  names the column's form on the wire.

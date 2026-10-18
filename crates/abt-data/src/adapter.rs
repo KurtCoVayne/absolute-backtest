@@ -407,6 +407,7 @@ pub fn ingest_empty(store: &mut Store, relation: &str, source: &str, attributes:
         ColumnType::Label => DataType::Utf8,
         ColumnType::Bool => DataType::Boolean,
         ColumnType::Bytes => DataType::Binary,
+        ColumnType::Tick => DataType::Decimal128(18, 9),
     };
     let fields: Vec<Field> = s.columns.iter().filter(|c| c.role != Role::ReceiptTime).map(|c| Field::new(&c.name, input(c.ty), true)).collect();
     let empty = RecordBatch::new_empty(Arc::new(Schema::new(fields)));

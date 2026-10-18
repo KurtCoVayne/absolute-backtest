@@ -221,6 +221,7 @@ fn script(c: &Client) -> Vec<String> {
         receipt_filter: None,
         with_seq: true,
         explain: false,
+        ticks: false,
     };
     let (_, b) = c.request_table(Message::QueryRequest(Box::new(q.clone()))).unwrap();
     out.push(show(&b));
@@ -238,6 +239,7 @@ fn script(c: &Client) -> Vec<String> {
         receipt_filter: None,
         with_seq: false,
         explain: false,
+        ticks: false,
     };
     let (_, b) = c.request_table(Message::QueryRequest(Box::new(point))).unwrap();
     out.push(show(&b));
@@ -433,6 +435,7 @@ fn errors_carry_their_codes() {
         receipt_filter: None,
         with_seq: false,
         explain: false,
+        ticks: false,
     };
     match c.request_table(Message::QueryRequest(Box::new(q))) {
         Err(abt_wire::rpc::WireError::Remote(e)) => assert_eq!(e.code, abt_wire::ErrorCode::UnknownRelation),
@@ -453,6 +456,7 @@ fn errors_carry_their_codes() {
         receipt_filter: None,
         with_seq: false,
         explain: false,
+        ticks: false,
     };
     match c.request_table(Message::QueryRequest(Box::new(q))) {
         Err(abt_wire::rpc::WireError::Remote(e)) => assert_eq!(e.code, abt_wire::ErrorCode::NotFound),

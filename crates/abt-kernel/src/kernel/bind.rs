@@ -153,6 +153,7 @@ impl DataClient {
             receipt_filter: None,
             with_seq: false,
             explain: false,
+            ticks: false,
         })))
     }
 

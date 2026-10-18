@@ -97,6 +97,7 @@ fn exercise(client: &Client) -> Vec<String> {
         receipt_filter: None,
         with_seq: false,
         explain: false,
+        ticks: false,
     };
     let (schema, batches) = client.request_table(Message::QueryRequest(Box::new(q))).unwrap();
     log.push(format!("{:?} {:?}", schema.fields(), batches.iter().map(|b| b.num_rows()).collect::<Vec<_>>()));

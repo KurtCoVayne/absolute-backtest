@@ -4,6 +4,7 @@
 
 use abt_wire::canonical::Canonical;
 use abt_wire::convert::{decode, encode};
+use abt_wire::generated::abt::wire::{ColumnType, MapRequest, Numerics};
 use abt_wire::{ErrorCode, ErrorMessage, Hello, Layer, Message, PROTOCOL};
 
 fn hello() -> Hello {
@@ -46,9 +47,28 @@ fn a_damaged_payload_is_refused() {
 fn owned_types_have_a_canonical_form() {
     let h = hello();
     let text = h.canonical().unwrap();
-    assert_eq!(text, r#"{"capabilities":["query","contract"],"client":"abt test","layer":"Kernel","protocol":"1.0"}"#);
+    assert_eq!(text, r#"{"capabilities":["query","contract"],"client":"abt test","layer":"Kernel","protocol":"1.1"}"#);
     let json = serde_json::to_string(&h).unwrap();
     let back: Hello = serde_json::from_str(&json).unwrap();
     assert_eq!(back, h);
     assert_eq!(back.canonical_hash().unwrap(), h.canonical_hash().unwrap());
+}
+
+/// The additions of `07-storage.md` (protocol 1.1, P-7 a minor version):
+/// the `Tick` column type, the `Exact` numerics and the `map` request
+/// round trip, and a request's `ticks` flag is in its canonical form.
+#[test]
+fn the_storage_additions_round_trip() {
+    let m = Message::MapRequest(Box::new(MapRequest {
+        view: None,
+        relation: "equity.close".into(),
+        columns: Some(vec!["close".into(), "volume".into()]),
+        level: Some("1d".into()),
+        from_entity: 1,
+        to_entity: Some(1_000),
+    }));
+    assert_eq!(decode(&encode(m.clone())).unwrap(), m);
+    assert_eq!(serde_json::to_string(&ColumnType::Tick).unwrap(), "\"Tick\"");
+    assert_eq!(serde_json::to_string(&Numerics::Exact).unwrap(), "\"Exact\"");
+    assert!(PROTOCOL.starts_with("1."), "a minor version: {}", PROTOCOL);
 }

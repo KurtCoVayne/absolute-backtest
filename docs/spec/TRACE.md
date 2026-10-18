@@ -53,7 +53,7 @@ Paths are relative to the repository; `tests/x.rs` under a crate means `crates/<
 | A-D41 | Durability from the log and a seal journal | — | — | missing | iteration 1: `hot/{append,recover}.rs` |
 | A-D42 | Append segments; consolidation the only compaction; logical version ids | — | — | missing | iteration 1: `hot/consolidate.rs` |
 | A-D43 | Adjusted series as views over event-interval summaries | — | — | missing | iteration 1: `abt-codec/src/adjust.rs`, `hot/events.rs` |
-| A-D44 | Ticks cross the protocol as `Decimal128(18, s)` | — | — | missing | iteration 1: `abt-wire` |
+| A-D44 | Ticks cross the protocol as `Decimal128(18, s)` | `abt-wire/schema/abt.fbs` (`ColumnType::Tick`, `QueryRequest.ticks`, `Numerics::Exact`, `MapRequest`; protocol 1.1), `abt-data/src/rows.rs` | `abt-wire/tests/schema.rs::the_storage_additions_round_trip` | partial | E-84: the types and the flag; no tick column is answered until the hot store (M-2) |
 | A-D45 | Hot means locked; memory profiles and a shedding order | — | — | missing | iteration 1: `hot/residency.rs`; locking needs a limit this VM lacks (8 MB) |
 | A-D46 | Futures calendars by trade date with UTC-aligned intraday buckets | — | — | missing | iteration 1: `hot/ladder.rs` |
 
