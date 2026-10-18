@@ -178,7 +178,18 @@ The study's 1.6 to 1.7 B per value for NDLake closes against the store's 4.46 is
 
 Two comparisons on one machine, the study's bench against the crate: the decode + sum kernel runs at 0.25 ns per value in `lanes-bench` and 0.46 in `abt-codec` at width 11 (the study's kernel is a const-generic width, the crate's a dispatch over generated kernels; best of 9 against a Criterion median), and the random window sum from cumulatives takes 0.7 µs in the study's bench and 4 to 24 µs in the crate, whose `summary` path decodes whole edge blocks. Both are iteration 2's (the crate's row-range decode exists in `block::unpack_rows` and is not yet what `summary` uses); neither changes an answer.
 
-{{PHASE4_BENCH_SH}}
+**`scripts/bench.sh` (G10, A-7.3), release binary of f4794c2.** Part 2 (the synthetic ladder, `momentum_12_1`, n a tenth of the names) and part 3 (the data layer's budgets, `crates/abt-data/tests/budgets.rs` in release):
+
+| Names | Bars | Load | Run | Bars per s | Peak RSS | At M-8 (`docs/assessment.md`) | At phase 1 (c06733f) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 2,520 | 0.50 s | 12.45 s | 202 | 904 MB | 14.8 s, 0.80 GB | 12.10 s, 801 MB |
+| 300 | 2,520 | 1.42 s | 40.75 s (reruns 40.12 s, 38.50 s) | 62 | 2,553 MB | 46.5 s, 2.35 GB | 36.34 s, 2,339 MB |
+
+Log-log slope against names: 1.08 in run time, 0.95 in memory. Against the M-8 rows of `docs/assessment.md` the cells are 16 % and 12 to 17 % faster, so no regression blocks the pull request; the 300-name cell's four runs today and at phase 1 spread from 36.3 to 40.7 s (the synthetic market now stages hot, A-D49, and the kernel reads blocks through the stream), inside this VM's run-to-run variance (the raw `u32` scan of the codec bench spreads 12.3 to 16.7 ms between runs). Peak RSS at 300 names is 9 % above phase 1's single run and 9 % below M-8's.
+
+The budgets (D-9.1; 2,000 entities × 2,520 days, one numeric column, synthetic): ingest 5.04M rows in 1.63 s (3,101,253 rows per s); 3.05 B per value on disk (61.6 MB for 20.2M values); point 652 µs from disk, 41 µs on first touch, 35 µs resident; latest 36 µs resident; a series of 252 rows 125 µs resident; a section of 2,000 entities 384 µs resident; the resident layer 84 row groups, 202 MB, 1,136 hits, 84 misses; the rolling 252-row mean over 5.04M rows 6.96 s (`two_pass`, one thread), 4.90 s (eight threads), 4.60 s (`running`, one thread), 4.14 s (eight threads). The targets of A-7.3 the script states: sustained ingest 200,000 rows per s (measured 3.1M, within); cross-section of one bar under 1 ms (384 µs at 2,000 names, within); storage at most 16 B resident and 4 B on disk per value (10.0 and 3.05, within); point lookup O(log n) (35 µs resident); the books' replays, the live instruments, the resident history and the futures bundle are not measured by the script (the owner's data and machine).
+
+{{PHASE4_LAKE}}
 
 ### Phase 5 · Deploy
 
