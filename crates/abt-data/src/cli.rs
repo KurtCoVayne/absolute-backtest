@@ -62,7 +62,7 @@ struct Args {
     flags: Vec<String>,
 }
 
-const FLAGS: [&str; 4] = ["json", "explain", "dry-run", "sources"];
+const FLAGS: [&str; 5] = ["json", "explain", "dry-run", "sources", "measure"];
 
 fn parse(args: &[String]) -> Args {
     let mut out = Args {
