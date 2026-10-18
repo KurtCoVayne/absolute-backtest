@@ -189,7 +189,22 @@ Log-log slope against names: 1.08 in run time, 0.95 in memory. Against the M-8 r
 
 The budgets (D-9.1; 2,000 entities × 2,520 days, one numeric column, synthetic): ingest 5.04M rows in 1.63 s (3,101,253 rows per s); 3.05 B per value on disk (61.6 MB for 20.2M values); point 652 µs from disk, 41 µs on first touch, 35 µs resident; latest 36 µs resident; a series of 252 rows 125 µs resident; a section of 2,000 entities 384 µs resident; the resident layer 84 row groups, 202 MB, 1,136 hits, 84 misses; the rolling 252-row mean over 5.04M rows 6.96 s (`two_pass`, one thread), 4.90 s (eight threads), 4.60 s (`running`, one thread), 4.14 s (eight threads). The targets of A-7.3 the script states: sustained ingest 200,000 rows per s (measured 3.1M, within); cross-section of one bar under 1 ms (384 µs at 2,000 names, within); storage at most 16 B resident and 4 B on disk per value (10.0 and 3.05, within); point lookup O(log n) (35 µs resident); the books' replays, the live instruments, the resident history and the futures bundle are not measured by the script (the owner's data and machine).
 
-{{PHASE4_LAKE}}
+Part 1, the ladder on the real point-in-time S&P 500 lake (`data/vendor/ndlake`, members since 2014-01-01 with the reviewed exceptions of `scripts/reviewed/norgate-spx-2014.parquet`; each rung ingested hot into its own store and served over a socket, every run through `abt run --data SOCKET --timing` with n a tenth of the names, at most 50, 20 for the long-only book). The first run of these rows failed on the socket path (the scratch directory's name made it longer than the 108 bytes a Unix socket allows); the rows below are the rerun with `/tmp/abt-b` as the output directory. No earlier lake rows exist on this VM: `docs/assessment.md` ran the lake on the owner's machine.
+
+| Names | Bars | Price rows | Ingest | Strategy | Run | Bars per s | Peak RSS |
+| ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| 100 | 3,215 | 287,142 | 69.3 s | momentum_12_1 | 9.88 s | 326 | 467 MB |
+| | | | | low_volatility | 8.31 s | 387 | 461 MB |
+| | | | | total_return_momentum | 14.25 s | 226 | 690 MB |
+| 250 | 3,215 | 722,519 | 75.0 s | momentum_12_1 | 24.14 s | 133 | 1,079 MB |
+| | | | | low_volatility | 20.98 s | 153 | 1,051 MB |
+| | | | | total_return_momentum | 33.05 s | 97 | 1,501 MB |
+| 500 | 3,215 | 1,431,921 | 86.0 s | momentum_12_1 | 48.81 s | 66 | 2,089 MB |
+| | | | | low_volatility | 44.76 s | 72 | 2,068 MB |
+| | | | | total_return_momentum | 65.64 s | 49 | 2,636 MB |
+
+The ingest time is the Norgate adapter's read of the lake since 2014 (thirteen year files, the registry, the membership and the classification) before staging, 69 s at 100 names and 86 s at 500: the adapter reads every bar of the span whatever the limit, and the limit selects afterwards. The runs scale linearly in names (momentum_12_1: 9.9, 24.1, 48.8 s) with memory likewise (467 MB to 2.1 GB). The lake rows at 100 names are faster than the synthetic rows at 100 names (9.9 s against 12.5 s for 3,215 against 2,520 bars) because the synthetic generator's names trade every day while the lake's point-in-time members do not.
+
 
 ### Phase 5 · Deploy
 
