@@ -79,13 +79,14 @@ errata:
 
 | Document | What it fixes |
 | --- | --- |
-| `docs/spec/00-architecture.md` | The three programs, the decisions record A-D1 to A-D34, the cross-layer invariants, the modes, the identifiers, the gates G1 to G10 and the targets of A-7.3 |
+| `docs/spec/00-architecture.md` | The three programs, the decisions record A-D1 to A-D46, the cross-layer invariants, the modes, the identifiers, the gates G1 to G10 and the targets of A-7.3 |
 | `docs/spec/01-data.md` | The data layer (D): the data model and its registries, the storage engine, the query interface, streams, aggregates, the resolver, the data-side checks |
 | `docs/spec/02-kernel.md` | The kernel (K): the program form, contracts derived from structure, the pipeline and the fold, market simulation for equities, futures and options with their margin and cost models, the executor modes, the state tables and the query service |
 | `docs/spec/03-query.md` | The query layer (Q): plans, metrics, the test framework and its starting set, claims, feed and activation statistics, reports |
 | `docs/spec/04-protocol.md` | The protocol (P): the shared crates, the transport, the services' requests, the Arrow schemas, ordering and determinism, canonical forms and hashing |
 | `docs/spec/05-migration.md` | The order of landing, M-0 to M-10, each step gated |
 | `docs/spec/06-performance.md` | The algorithms and structures of each layer and how the targets are reached (X), written after the six |
+| `docs/spec/07-storage.md` | The hot store for Norgate and Databento (ST), decided from measurements on the company's data (Oct 15, 2026): integer ticks with a per-block quantum, lane-interleaved blocks, every program-independent structure precomputed and hot, every encoding and structure answering ranges, the staging pipeline, appends, consolidation, recovery, adjusted series, futures calendars, residency and memory profiles. Its implementation is iteration 1 of `docs/iterations/` (`docs/spec/TRACE.md` has the row of every clause) |
 | `docs/spec/ERRATA.md` | Where the implementation settles what the documents leave open, one entry per decision (E-1 onwards), and the changes the golden runs were blessed for |
 
 The design documents it builds on, cited by the letters in brackets:

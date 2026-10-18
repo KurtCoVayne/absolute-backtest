@@ -1,0 +1,1837 @@
+{
+ "ndlake_1995": {
+  "rows_all": 3063078,
+  "rows_equity": 2576860,
+  "assets": 13989,
+  "close": {
+   "rows": 2576860,
+   "actual_parquet_bpv": 1.99,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.141801,
+    "1": 0.172272,
+    "2": 0.36839,
+    "3": 0.289535,
+    "4": 0.020213,
+    "5": 0.007459,
+    "6": 0.000111,
+    "7": 0.000113,
+    "8": 0.000106
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    3,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 1.202,
+   "parquet_f64_plain_zstd_bpv": 1.244,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 2.191,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    125,
+    1000,
+    25000,
+    125000,
+    29000000
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 13989,
+    "mean_block_len": 184.2,
+    "for_bpv": 1.626,
+    "delta_bpv": 1.512,
+    "pfor_bpv": 1.622,
+    "pdelta_bpv": 1.454,
+    "for_w_p50_p95": [
+     13,
+     17
+    ],
+    "delta_w_p50_p95": [
+     12,
+     16
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 4.397,
+    "delta_bpv": 4.514,
+    "pfor_bpv": 4.17,
+    "pdelta_bpv": 4.303
+   }
+  },
+  "open": {
+   "rows": 2576860,
+   "actual_parquet_bpv": 1.991,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.141407,
+    "1": 0.171858,
+    "2": 0.37278,
+    "3": 0.285968,
+    "4": 0.020147,
+    "5": 0.007513,
+    "6": 0.000116,
+    "7": 0.000116,
+    "8": 9.6e-05
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    3,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 1.199,
+   "parquet_f64_plain_zstd_bpv": 1.248,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 2.177,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    125,
+    1000,
+    18750,
+    112500,
+    16235000
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 13989,
+    "mean_block_len": 184.2,
+    "for_bpv": 1.641,
+    "delta_bpv": 1.524,
+    "pfor_bpv": 1.635,
+    "pdelta_bpv": 1.468,
+    "for_w_p50_p95": [
+     13,
+     16
+    ],
+    "delta_w_p50_p95": [
+     12,
+     16
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 4.397,
+    "delta_bpv": 4.514,
+    "pfor_bpv": 4.17,
+    "pdelta_bpv": 4.303
+   }
+  },
+  "high": {
+   "rows": 2576860,
+   "actual_parquet_bpv": 1.98,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.138747,
+    "1": 0.172364,
+    "2": 0.374545,
+    "3": 0.286462,
+    "4": 0.02025,
+    "5": 0.007303,
+    "6": 0.000113,
+    "7": 0.000114,
+    "8": 0.000102
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    3,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 1.162,
+   "parquet_f64_plain_zstd_bpv": 1.183,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 2.071,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    125,
+    875,
+    15625,
+    125000,
+    16250000
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 13989,
+    "mean_block_len": 184.2,
+    "for_bpv": 1.64,
+    "delta_bpv": 1.523,
+    "pfor_bpv": 1.634,
+    "pdelta_bpv": 1.463,
+    "for_w_p50_p95": [
+     13,
+     16
+    ],
+    "delta_w_p50_p95": [
+     12,
+     16
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 4.398,
+    "delta_bpv": 4.516,
+    "pfor_bpv": 4.172,
+    "pdelta_bpv": 4.305
+   }
+  },
+  "low": {
+   "rows": 2576860,
+   "actual_parquet_bpv": 1.974,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.137272,
+    "1": 0.17471,
+    "2": 0.375276,
+    "3": 0.28469,
+    "4": 0.020152,
+    "5": 0.007572,
+    "6": 0.000113,
+    "7": 0.00011,
+    "8": 0.000105
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    3,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 1.132,
+   "parquet_f64_plain_zstd_bpv": 1.148,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 2.024,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    40,
+    750,
+    12500,
+    100000,
+    13074524
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 13989,
+    "mean_block_len": 184.2,
+    "for_bpv": 1.631,
+    "delta_bpv": 1.512,
+    "pfor_bpv": 1.626,
+    "pdelta_bpv": 1.45,
+    "for_w_p50_p95": [
+     13,
+     16
+    ],
+    "delta_w_p50_p95": [
+     11,
+     16
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 4.396,
+    "delta_bpv": 4.512,
+    "pfor_bpv": 4.168,
+    "pdelta_bpv": 4.302
+   }
+  },
+  "turnover": {
+   "rows": 0
+  },
+  "volume": {
+   "rows": 2576860,
+   "actual_parquet_bpv": 2.366,
+   "range": [
+    0,
+    578249984
+   ],
+   "parquet_int64_delta_zstd_bpv": 2.555,
+   "mem_instrument_contiguous": {
+    "blocks": 13989,
+    "mean_block_len": 184.2,
+    "for_bpv": 2.481,
+    "delta_bpv": 2.584,
+    "pfor_bpv": 2.399,
+    "pdelta_bpv": 2.521,
+    "for_w_p50_p95": [
+     19,
+     22
+    ],
+    "delta_w_p50_p95": [
+     20,
+     23
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.876,
+    "delta_bpv": 3.0,
+    "pfor_bpv": 2.653,
+    "pdelta_bpv": 2.84
+   }
+  }
+ },
+ "ndlake_2024": {
+  "rows_all": 5430756,
+  "rows_equity": 4186707,
+  "assets": 20905,
+  "close": {
+   "rows": 4186707,
+   "actual_parquet_bpv": 3.271,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.014358,
+    "1": 0.084557,
+    "2": 0.65506,
+    "3": 0.124982,
+    "4": 0.115855,
+    "5": 0.002196,
+    "6": 0.002991
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    3,
+    6
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.599,
+   "parquet_f64_plain_zstd_bpv": 2.677,
+   "parquet_decimal_e": 6,
+   "parquet_int64_delta_zstd_bpv": 2.841,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    100,
+    4190,
+    105000,
+    729999,
+    45030000
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 20905,
+    "mean_block_len": 200.3,
+    "for_bpv": 1.714,
+    "delta_bpv": 1.601,
+    "pfor_bpv": 1.707,
+    "pdelta_bpv": 1.541,
+    "for_w_p50_p95": [
+     12,
+     19
+    ],
+    "delta_w_p50_p95": [
+     11,
+     19
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.849,
+    "delta_bpv": 3.971,
+    "pfor_bpv": 3.55,
+    "pdelta_bpv": 3.713
+   }
+  },
+  "open": {
+   "rows": 4186707,
+   "actual_parquet_bpv": 3.175,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.02161,
+    "1": 0.099517,
+    "2": 0.692711,
+    "3": 0.116017,
+    "4": 0.06599,
+    "5": 0.001601,
+    "6": 0.002554
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    3,
+    6
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.556,
+   "parquet_f64_plain_zstd_bpv": 2.596,
+   "parquet_decimal_e": 6,
+   "parquet_int64_delta_zstd_bpv": 2.842,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    114,
+    5900,
+    190000,
+    950001,
+    55949996
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 20905,
+    "mean_block_len": 200.3,
+    "for_bpv": 1.736,
+    "delta_bpv": 1.627,
+    "pfor_bpv": 1.728,
+    "pdelta_bpv": 1.57,
+    "for_w_p50_p95": [
+     12,
+     20
+    ],
+    "delta_w_p50_p95": [
+     12,
+     19
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.849,
+    "delta_bpv": 3.972,
+    "pfor_bpv": 3.55,
+    "pdelta_bpv": 3.713
+   }
+  },
+  "high": {
+   "rows": 4186707,
+   "actual_parquet_bpv": 3.307,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.016331,
+    "1": 0.085633,
+    "2": 0.614055,
+    "3": 0.156696,
+    "4": 0.121731,
+    "5": 0.002081,
+    "6": 0.003472
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    4,
+    6
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.588,
+   "parquet_f64_plain_zstd_bpv": 2.707,
+   "parquet_decimal_e": 6,
+   "parquet_int64_delta_zstd_bpv": 2.831,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    600,
+    27300,
+    480000,
+    2169740,
+    155240013
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 20905,
+    "mean_block_len": 200.3,
+    "for_bpv": 1.979,
+    "delta_bpv": 1.874,
+    "pfor_bpv": 1.97,
+    "pdelta_bpv": 1.81,
+    "for_w_p50_p95": [
+     15,
+     23
+    ],
+    "delta_w_p50_p95": [
+     14,
+     22
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.852,
+    "delta_bpv": 3.974,
+    "pfor_bpv": 3.552,
+    "pdelta_bpv": 3.715
+   }
+  },
+  "low": {
+   "rows": 4186707,
+   "actual_parquet_bpv": 3.296,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.016103,
+    "1": 0.085936,
+    "2": 0.614831,
+    "3": 0.157997,
+    "4": 0.120118,
+    "5": 0.001716,
+    "6": 0.003299
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    4,
+    6
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.576,
+   "parquet_f64_plain_zstd_bpv": 2.688,
+   "parquet_decimal_e": 6,
+   "parquet_int64_delta_zstd_bpv": 2.826,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    600,
+    23500,
+    410697,
+    1760002,
+    243340011
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 20905,
+    "mean_block_len": 200.3,
+    "for_bpv": 1.966,
+    "delta_bpv": 1.854,
+    "pfor_bpv": 1.961,
+    "pdelta_bpv": 1.793,
+    "for_w_p50_p95": [
+     15,
+     22
+    ],
+    "delta_w_p50_p95": [
+     14,
+     22
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.847,
+    "delta_bpv": 3.969,
+    "pfor_bpv": 3.548,
+    "pdelta_bpv": 3.711
+   }
+  },
+  "turnover": {
+   "rows": 0
+  },
+  "volume": {
+   "rows": 4186707,
+   "actual_parquet_bpv": 2.835,
+   "range": [
+    0,
+    3116165376
+   ],
+   "parquet_int64_delta_zstd_bpv": 2.803,
+   "mem_instrument_contiguous": {
+    "blocks": 20905,
+    "mean_block_len": 200.3,
+    "for_bpv": 2.689,
+    "delta_bpv": 2.792,
+    "pfor_bpv": 2.572,
+    "pdelta_bpv": 2.702,
+    "for_w_p50_p95": [
+     20,
+     26
+    ],
+    "delta_w_p50_p95": [
+     21,
+     27
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.374,
+    "delta_bpv": 3.498,
+    "pfor_bpv": 3.034,
+    "pdelta_bpv": 3.248
+   }
+  }
+ },
+ "databento": {
+  "ES": {
+   "rows": 5856,
+   "instruments": 7,
+   "spread_rows_share": 0.2145,
+   "ticks_seen": [
+    0.25
+   ],
+   "close_on_definition_tick_share": 1.0,
+   "close_is_f32_share": 0.836236,
+   "close": {
+    "rows": 5856,
+    "actual_parquet_bpv": 2.362,
+    "exponent_share": {
+     "0": 0.233948,
+     "1": 0.290301,
+     "2": 0.475751
+    },
+    "roundtrip_exact_share": 1.0,
+    "exceptions": 0,
+    "block_exponent_p50_max": [
+     2,
+     2
+    ],
+    "parquet_f32_bss_zstd_bpv": 1.171,
+    "parquet_f64_plain_zstd_bpv": 1.784,
+    "parquet_decimal_e": 2,
+    "parquet_int64_delta_zstd_bpv": 1.465,
+    "abs_step_quantiles_p50_p90_p99_p999_max": [
+     75,
+     425,
+     1137,
+     2611,
+     3000
+    ],
+    "mem_instrument_contiguous": {
+     "blocks": 11,
+     "mean_block_len": 532.4,
+     "for_bpv": 1.648,
+     "delta_bpv": 1.394,
+     "pfor_bpv": 1.648,
+     "pdelta_bpv": 1.322,
+     "for_w_p50_p95": [
+      13,
+      15
+     ],
+     "delta_w_p50_p95": [
+      11,
+      13
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 2.516,
+     "delta_bpv": 2.641,
+     "pfor_bpv": 2.516,
+     "pdelta_bpv": 2.641
+    }
+   },
+   "volume": {
+    "rows": 5856,
+    "actual_parquet_bpv": 2.73,
+    "range": [
+     1,
+     68467
+    ],
+    "parquet_int64_delta_zstd_bpv": 1.452,
+    "mem_instrument_contiguous": {
+     "blocks": 11,
+     "mean_block_len": 532.4,
+     "for_bpv": 1.567,
+     "delta_bpv": 1.657,
+     "pfor_bpv": 1.388,
+     "pdelta_bpv": 1.449,
+     "for_w_p50_p95": [
+      10,
+      16
+     ],
+     "delta_w_p50_p95": [
+      10,
+      17
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.798,
+     "delta_bpv": 1.923,
+     "pfor_bpv": 1.656,
+     "pdelta_bpv": 1.804
+    }
+   }
+  },
+  "ZN": {
+   "rows": 4414,
+   "instruments": 5,
+   "spread_rows_share": 0.0616,
+   "ticks_seen": [
+    0.015625
+   ],
+   "close_on_definition_tick_share": 1.0,
+   "close_is_f32_share": 1.0,
+   "close": {
+    "rows": 4414,
+    "actual_parquet_bpv": 0.995,
+    "exponent_share": {
+     "0": 0.029905,
+     "1": 0.010195,
+     "2": 0.029905,
+     "3": 0.041232,
+     "4": 0.120752,
+     "5": 0.252605,
+     "6": 0.483235,
+     "7": 0.03217
+    },
+    "roundtrip_exact_share": 1.0,
+    "exceptions": 0,
+    "block_exponent_p50_max": [
+     6,
+     7
+    ],
+    "parquet_f32_bss_zstd_bpv": 0.68,
+    "parquet_f64_plain_zstd_bpv": 0.714,
+    "parquet_decimal_e": 7,
+    "parquet_int64_delta_zstd_bpv": 1.118,
+    "abs_step_quantiles_p50_p90_p99_p999_max": [
+     15625,
+     31250,
+     109375,
+     390625,
+     1015625
+    ],
+    "mem_instrument_contiguous": {
+     "blocks": 8,
+     "mean_block_len": 551.8,
+     "for_bpv": 2.541,
+     "delta_bpv": 2.308,
+     "pfor_bpv": 2.5,
+     "pdelta_bpv": 2.199,
+     "for_w_p50_p95": [
+      20,
+      21
+     ],
+     "delta_w_p50_p95": [
+      18,
+      20
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 3.893,
+     "delta_bpv": 4.018,
+     "pfor_bpv": 3.893,
+     "pdelta_bpv": 3.592
+    }
+   },
+   "volume": {
+    "rows": 4414,
+    "actual_parquet_bpv": 3.489,
+    "range": [
+     1,
+     43264
+    ],
+    "parquet_int64_delta_zstd_bpv": 1.763,
+    "mem_instrument_contiguous": {
+     "blocks": 8,
+     "mean_block_len": 551.8,
+     "for_bpv": 1.716,
+     "delta_bpv": 1.841,
+     "pfor_bpv": 1.563,
+     "pdelta_bpv": 1.669,
+     "for_w_p50_p95": [
+      11,
+      15
+     ],
+     "delta_w_p50_p95": [
+      12,
+      16
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.922,
+     "delta_bpv": 2.047,
+     "pfor_bpv": 1.748,
+     "pdelta_bpv": 1.906
+    }
+   }
+  },
+  "ZT": {
+   "rows": 2932,
+   "instruments": 4,
+   "spread_rows_share": 0.042,
+   "ticks_seen": [
+    0.00390625
+   ],
+   "close_on_definition_tick_share": 1.0,
+   "close_is_f32_share": 1.0,
+   "close": {
+    "rows": 2932,
+    "actual_parquet_bpv": 1.239,
+    "exponent_share": {
+     "1": 0.005457,
+     "2": 0.007844,
+     "3": 0.005457,
+     "4": 0.025921,
+     "5": 0.053206,
+     "6": 0.136426,
+     "7": 0.263984,
+     "8": 0.501705
+    },
+    "roundtrip_exact_share": 1.0,
+    "exceptions": 0,
+    "block_exponent_p50_max": [
+     8,
+     8
+    ],
+    "parquet_f32_bss_zstd_bpv": 0.793,
+    "parquet_f64_plain_zstd_bpv": 0.949,
+    "parquet_decimal_e": 8,
+    "parquet_int64_delta_zstd_bpv": 1.344,
+    "abs_step_quantiles_p50_p90_p99_p999_max": [
+     390625,
+     781250,
+     1953125,
+     5916406,
+     8593750
+    ],
+    "mem_instrument_contiguous": {
+     "blocks": 6,
+     "mean_block_len": 488.7,
+     "for_bpv": 3.103,
+     "delta_bpv": 2.928,
+     "pfor_bpv": 3.103,
+     "pdelta_bpv": 2.819,
+     "for_w_p50_p95": [
+      24,
+      25
+     ],
+     "delta_w_p50_p95": [
+      23,
+      24
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 4.266,
+     "delta_bpv": 4.391,
+     "pfor_bpv": 4.266,
+     "pdelta_bpv": 3.915
+    }
+   },
+   "volume": {
+    "rows": 2932,
+    "actual_parquet_bpv": 3.623,
+    "range": [
+     1,
+     19221
+    ],
+    "parquet_int64_delta_zstd_bpv": 1.853,
+    "mem_instrument_contiguous": {
+     "blocks": 6,
+     "mean_block_len": 488.7,
+     "for_bpv": 1.725,
+     "delta_bpv": 1.828,
+     "pfor_bpv": 1.624,
+     "pdelta_bpv": 1.739,
+     "for_w_p50_p95": [
+      11,
+      14
+     ],
+     "delta_w_p50_p95": [
+      12,
+      15
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.804,
+     "delta_bpv": 1.891,
+     "pfor_bpv": 1.686,
+     "pdelta_bpv": 1.826
+    }
+   }
+  },
+  "CL": {
+   "rows": 67310,
+   "instruments": 237,
+   "spread_rows_share": 0.7646,
+   "ticks_seen": [
+    0.01
+   ],
+   "close_on_definition_tick_share": 1.0,
+   "close_is_f32_share": 0.038984,
+   "close": {
+    "rows": 67310,
+    "actual_parquet_bpv": 1.597,
+    "exponent_share": {
+     "0": 0.01144,
+     "1": 0.087639,
+     "2": 0.896212,
+     "4": 0.00471
+    },
+    "roundtrip_exact_share": 1.0,
+    "exceptions": 0,
+    "block_exponent_p50_max": [
+     2,
+     4
+    ],
+    "parquet_f32_bss_zstd_bpv": 1.666,
+    "parquet_f64_plain_zstd_bpv": 1.128,
+    "parquet_decimal_e": 4,
+    "parquet_int64_delta_zstd_bpv": 1.065,
+    "abs_step_quantiles_p50_p90_p99_p999_max": [
+     1,
+     4,
+     13,
+     50,
+     89
+    ],
+    "mem_instrument_contiguous": {
+     "blocks": 257,
+     "mean_block_len": 261.9,
+     "for_bpv": 0.832,
+     "delta_bpv": 0.637,
+     "pfor_bpv": 0.827,
+     "pdelta_bpv": 0.566,
+     "for_w_p50_p95": [
+      5,
+      8
+     ],
+     "delta_w_p50_p95": [
+      4,
+      7
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 2.516,
+     "delta_bpv": 2.641,
+     "pfor_bpv": 2.516,
+     "pdelta_bpv": 2.641
+    }
+   },
+   "volume": {
+    "rows": 67310,
+    "actual_parquet_bpv": 1.199,
+    "range": [
+     1,
+     5719
+    ],
+    "parquet_int64_delta_zstd_bpv": 1.102,
+    "mem_instrument_contiguous": {
+     "blocks": 257,
+     "mean_block_len": 261.9,
+     "for_bpv": 1.133,
+     "delta_bpv": 1.243,
+     "pfor_bpv": 1.007,
+     "pdelta_bpv": 1.137,
+     "for_w_p50_p95": [
+      6,
+      10
+     ],
+     "delta_w_p50_p95": [
+      7,
+      11
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.299,
+     "delta_bpv": 1.423,
+     "pfor_bpv": 1.128,
+     "pdelta_bpv": 1.301
+    }
+   }
+  },
+  "GC": {
+   "rows": 8017,
+   "instruments": 34,
+   "spread_rows_share": 0.398,
+   "ticks_seen": [
+    0.1
+   ],
+   "close_on_definition_tick_share": 1.0,
+   "close_is_f32_share": 0.220781,
+   "close": {
+    "rows": 8017,
+    "actual_parquet_bpv": 2.089,
+    "exponent_share": {
+     "0": 0.140576,
+     "1": 0.859424
+    },
+    "roundtrip_exact_share": 1.0,
+    "exceptions": 0,
+    "block_exponent_p50_max": [
+     1,
+     1
+    ],
+    "parquet_f32_bss_zstd_bpv": 1.311,
+    "parquet_f64_plain_zstd_bpv": 1.479,
+    "parquet_decimal_e": 1,
+    "parquet_int64_delta_zstd_bpv": 0.904,
+    "abs_step_quantiles_p50_p90_p99_p999_max": [
+     2,
+     13,
+     49,
+     124,
+     504
+    ],
+    "mem_instrument_contiguous": {
+     "blocks": 38,
+     "mean_block_len": 211.0,
+     "for_bpv": 0.946,
+     "delta_bpv": 0.784,
+     "pfor_bpv": 0.939,
+     "pdelta_bpv": 0.728,
+     "for_w_p50_p95": [
+      4,
+      10
+     ],
+     "delta_w_p50_p95": [
+      4,
+      10
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.891,
+     "delta_bpv": 2.016,
+     "pfor_bpv": 1.891,
+     "pdelta_bpv": 2.016
+    }
+   },
+   "volume": {
+    "rows": 8017,
+    "actual_parquet_bpv": 1.513,
+    "range": [
+     1,
+     2457
+    ],
+    "parquet_int64_delta_zstd_bpv": 1.196,
+    "mem_instrument_contiguous": {
+     "blocks": 38,
+     "mean_block_len": 211.0,
+     "for_bpv": 1.261,
+     "delta_bpv": 1.356,
+     "pfor_bpv": 1.071,
+     "pdelta_bpv": 1.224,
+     "for_w_p50_p95": [
+      5,
+      11
+     ],
+     "delta_w_p50_p95": [
+      5,
+      12
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.346,
+     "delta_bpv": 1.471,
+     "pfor_bpv": 1.203,
+     "pdelta_bpv": 1.368
+    }
+   }
+  },
+  "6J": {
+   "rows": 6240,
+   "instruments": 15,
+   "spread_rows_share": 0.2005,
+   "ticks_seen": [
+    5e-07
+   ],
+   "close_on_definition_tick_share": 1.0,
+   "close_is_f32_share": 0.0,
+   "close": {
+    "rows": 6240,
+    "actual_parquet_bpv": 2.02,
+    "exponent_share": {
+     "4": 0.005609,
+     "5": 0.04375,
+     "6": 0.383333,
+     "7": 0.567308
+    },
+    "roundtrip_exact_share": 1.0,
+    "exceptions": 0,
+    "block_exponent_p50_max": [
+     7,
+     7
+    ],
+    "parquet_f32_bss_zstd_bpv": 1.919,
+    "parquet_f64_plain_zstd_bpv": 1.661,
+    "parquet_decimal_e": 7,
+    "parquet_int64_delta_zstd_bpv": 1.08,
+    "abs_step_quantiles_p50_p90_p99_p999_max": [
+     5,
+     25,
+     85,
+     303,
+     760
+    ],
+    "mem_instrument_contiguous": {
+     "blocks": 18,
+     "mean_block_len": 346.7,
+     "for_bpv": 1.19,
+     "delta_bpv": 0.96,
+     "pfor_bpv": 1.19,
+     "pdelta_bpv": 0.9,
+     "for_w_p50_p95": [
+      7,
+      11
+     ],
+     "delta_w_p50_p95": [
+      7,
+      10
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 2.143,
+     "delta_bpv": 2.268,
+     "pfor_bpv": 2.143,
+     "pdelta_bpv": 2.268
+    }
+   },
+   "volume": {
+    "rows": 6240,
+    "actual_parquet_bpv": 1.728,
+    "range": [
+     1,
+     4434
+    ],
+    "parquet_int64_delta_zstd_bpv": 1.326,
+    "mem_instrument_contiguous": {
+     "blocks": 18,
+     "mean_block_len": 346.7,
+     "for_bpv": 1.318,
+     "delta_bpv": 1.408,
+     "pfor_bpv": 1.15,
+     "pdelta_bpv": 1.283,
+     "for_w_p50_p95": [
+      7,
+      12
+     ],
+     "delta_w_p50_p95": [
+      8,
+      13
+     ]
+    },
+    "mem_file_order": {
+     "for_bpv": 1.432,
+     "delta_bpv": 1.557,
+     "pfor_bpv": 1.262,
+     "pdelta_bpv": 1.417
+    }
+   }
+  }
+ },
+ "orats": {
+  "rows_per_day": 756689,
+  "chains": 31953,
+  "stkPx": {
+   "rows": 756689,
+   "actual_parquet_bpv": 0.053,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.016295,
+    "1": 0.104688,
+    "2": 0.870199,
+    "3": 0.008077,
+    "4": 0.000741
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    2,
+    4
+   ],
+   "parquet_f32_bss_zstd_bpv": 0.063,
+   "parquet_f64_plain_zstd_bpv": 0.052,
+   "parquet_decimal_e": 4,
+   "parquet_int64_delta_zstd_bpv": 0.137,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    0,
+    0,
+    0,
+    20,
+    20
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 0.678,
+    "delta_bpv": 0.679,
+    "pfor_bpv": 0.678,
+    "pdelta_bpv": 0.679,
+    "for_w_p50_p95": [
+     0,
+     0
+    ],
+    "delta_w_p50_p95": [
+     0,
+     0
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.57,
+    "delta_bpv": 2.666,
+    "pfor_bpv": 2.564,
+    "pdelta_bpv": 0.1
+   }
+  },
+  "strike": {
+   "rows": 756689,
+   "actual_parquet_bpv": 0.214,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.887869,
+    "1": 0.106283,
+    "2": 0.005848
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    0,
+    2
+   ],
+   "parquet_f32_bss_zstd_bpv": 0.318,
+   "parquet_f64_plain_zstd_bpv": 0.566,
+   "parquet_decimal_e": 2,
+   "parquet_int64_delta_zstd_bpv": 0.453,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    5,
+    25,
+    100,
+    500,
+    1000
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 1.696,
+    "delta_bpv": 1.309,
+    "pfor_bpv": 1.696,
+    "pdelta_bpv": 1.306,
+    "for_w_p50_p95": [
+     7,
+     11
+    ],
+    "delta_w_p50_p95": [
+     5,
+     7
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.002,
+    "delta_bpv": 2.095,
+    "pfor_bpv": 1.99,
+    "pdelta_bpv": 1.71
+   }
+  },
+  "yte": {
+   "rows": 756689,
+   "actual_parquet_bpv": 0.217,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.002068,
+    "1": 0.000348,
+    "4": 0.00564,
+    "5": 0.991944
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    5,
+    5
+   ],
+   "parquet_f32_bss_zstd_bpv": 0.327,
+   "parquet_f64_plain_zstd_bpv": 0.153,
+   "parquet_decimal_e": 5,
+   "parquet_int64_delta_zstd_bpv": 0.236,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 0.676,
+    "delta_bpv": 0.676,
+    "pfor_bpv": 0.676,
+    "pdelta_bpv": 0.676,
+    "for_w_p50_p95": [
+     0,
+     0
+    ],
+    "delta_w_p50_p95": [
+     0,
+     0
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.226,
+    "delta_bpv": 2.333,
+    "pfor_bpv": 2.223,
+    "pdelta_bpv": 0.406
+   }
+  },
+  "cBidPx": {
+   "rows": 756689,
+   "actual_parquet_bpv": 1.63,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.310589,
+    "1": 0.43294,
+    "2": 0.256471
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    2,
+    2
+   ],
+   "parquet_f32_bss_zstd_bpv": 1.867,
+   "parquet_f64_plain_zstd_bpv": 1.891,
+   "parquet_decimal_e": 2,
+   "parquet_int64_delta_zstd_bpv": 1.327,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    50,
+    470,
+    1590,
+    9930,
+    352390
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 2.154,
+    "delta_bpv": 1.871,
+    "pfor_bpv": 2.153,
+    "pdelta_bpv": 1.869,
+    "for_w_p50_p95": [
+     10,
+     14
+    ],
+    "delta_w_p50_p95": [
+     9,
+     11
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 1.799,
+    "delta_bpv": 1.922,
+    "pfor_bpv": 1.773,
+    "pdelta_bpv": 1.607
+   }
+  },
+  "cAskPx": {
+   "rows": 756689,
+   "actual_parquet_bpv": 1.805,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.091139,
+    "1": 0.553018,
+    "2": 0.355842
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    2,
+    2
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.077,
+   "parquet_f64_plain_zstd_bpv": 2.163,
+   "parquet_decimal_e": 2,
+   "parquet_int64_delta_zstd_bpv": 1.47,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    60,
+    470,
+    1020,
+    9890,
+    24800
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 2.169,
+    "delta_bpv": 1.89,
+    "pfor_bpv": 2.168,
+    "pdelta_bpv": 1.887,
+    "for_w_p50_p95": [
+     11,
+     14
+    ],
+    "delta_w_p50_p95": [
+     9,
+     11
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 1.807,
+    "delta_bpv": 1.929,
+    "pfor_bpv": 1.781,
+    "pdelta_bpv": 1.624
+   }
+  },
+  "cValue": {
+   "rows": 756689,
+   "actual_parquet_bpv": 2.113,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.103511,
+    "1": 0.081446,
+    "2": 0.815043
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    2,
+    2
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.484,
+   "parquet_f64_plain_zstd_bpv": 2.513,
+   "parquet_decimal_e": 2,
+   "parquet_int64_delta_zstd_bpv": 1.421,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    66,
+    490,
+    1989,
+    10117,
+    143496
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 2.208,
+    "delta_bpv": 1.883,
+    "pfor_bpv": 2.207,
+    "pdelta_bpv": 1.88,
+    "for_w_p50_p95": [
+     11,
+     14
+    ],
+    "delta_w_p50_p95": [
+     9,
+     11
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 1.804,
+    "delta_bpv": 1.927,
+    "pfor_bpv": 1.777,
+    "pdelta_bpv": 1.6
+   }
+  },
+  "cMidIv": {
+   "rows": 756689,
+   "actual_parquet_bpv": 3.052,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.01446,
+    "1": 9.6e-05,
+    "2": 0.000965,
+    "3": 0.009322,
+    "4": 0.092568,
+    "5": 0.882588
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    5,
+    5
+   ],
+   "parquet_f32_bss_zstd_bpv": 3.107,
+   "parquet_f64_plain_zstd_bpv": 3.901,
+   "parquet_decimal_e": 5,
+   "parquet_int64_delta_zstd_bpv": 2.227,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    1621,
+    18318,
+    113183,
+    345590,
+    672499
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 2.674,
+    "delta_bpv": 2.662,
+    "pfor_bpv": 2.673,
+    "pdelta_bpv": 2.638,
+    "for_w_p50_p95": [
+     16,
+     19
+    ],
+    "delta_w_p50_p95": [
+     16,
+     19
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.348,
+    "delta_bpv": 2.461,
+    "pfor_bpv": 2.292,
+    "pdelta_bpv": 2.31
+   }
+  },
+  "smoothSmvVol": {
+   "rows": 756689,
+   "actual_parquet_bpv": 2.653,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "1": 7e-06,
+    "2": 8.7e-05,
+    "3": 0.000925,
+    "4": 0.00884,
+    "5": 0.090558,
+    "6": 0.899584
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    6,
+    6
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.796,
+   "parquet_f64_plain_zstd_bpv": 3.495,
+   "parquet_decimal_e": 6,
+   "parquet_int64_delta_zstd_bpv": 2.33,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    2511,
+    16597,
+    64308,
+    188189,
+    1327297
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 2.784,
+    "delta_bpv": 2.591,
+    "pfor_bpv": 2.783,
+    "pdelta_bpv": 2.586,
+    "for_w_p50_p95": [
+     17,
+     19
+    ],
+    "delta_w_p50_p95": [
+     16,
+     18
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.588,
+    "delta_bpv": 2.668,
+    "pfor_bpv": 2.557,
+    "pdelta_bpv": 2.365
+   }
+  },
+  "delta": {
+   "rows": 756689,
+   "actual_parquet_bpv": 2.826,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.092767,
+    "1": 7e-06,
+    "2": 9e-05,
+    "3": 0.000728,
+    "4": 0.008198,
+    "5": 0.080743,
+    "6": 0.817468
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    6,
+    6
+   ],
+   "parquet_f32_bss_zstd_bpv": 2.981,
+   "parquet_f64_plain_zstd_bpv": 3.642,
+   "parquet_decimal_e": 6,
+   "parquet_int64_delta_zstd_bpv": 2.536,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    18900,
+    92926,
+    308812,
+    687664,
+    999999
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 3.163,
+    "delta_bpv": 2.897,
+    "pfor_bpv": 3.163,
+    "pdelta_bpv": 2.893,
+    "for_w_p50_p95": [
+     20,
+     20
+    ],
+    "delta_w_p50_p95": [
+     18,
+     21
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 2.516,
+    "delta_bpv": 2.641,
+    "pfor_bpv": 2.516,
+    "pdelta_bpv": 2.585
+   }
+  },
+  "gamma": {
+   "rows": 756689,
+   "actual_parquet_bpv": 3.03,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.079654,
+    "3": 5e-06,
+    "4": 7.8e-05,
+    "5": 0.000866,
+    "6": 0.008468,
+    "7": 0.086653,
+    "8": 0.824277
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    8,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 3.155,
+   "parquet_f64_plain_zstd_bpv": 3.833,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 2.846,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    79298,
+    1691735,
+    15872151,
+    62762239,
+    364120039644
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 3.404,
+    "delta_bpv": 3.211,
+    "pfor_bpv": 3.397,
+    "pdelta_bpv": 3.204,
+    "for_w_p50_p95": [
+     23,
+     26
+    ],
+    "delta_w_p50_p95": [
+     22,
+     26
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.222,
+    "delta_bpv": 3.279,
+    "pfor_bpv": 3.089,
+    "pdelta_bpv": 3.058
+   }
+  },
+  "vega": {
+   "rows": 756689,
+   "actual_parquet_bpv": 3.014,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 1e-06,
+    "1": 1e-06,
+    "2": 4e-06,
+    "3": 4.2e-05,
+    "4": 0.000392,
+    "5": 0.087584,
+    "6": 0.031983,
+    "7": 0.157871,
+    "8": 0.722121
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    8,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 3.099,
+   "parquet_f64_plain_zstd_bpv": 3.794,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 3.045,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    466939,
+    3638884,
+    16861329,
+    96652163,
+    1648029286399999
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 3.676,
+    "delta_bpv": 3.504,
+    "pfor_bpv": 3.67,
+    "pdelta_bpv": 3.499,
+    "for_w_p50_p95": [
+     23,
+     26
+    ],
+    "delta_w_p50_p95": [
+     22,
+     25
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.389,
+    "delta_bpv": 3.367,
+    "pfor_bpv": 3.369,
+    "pdelta_bpv": 3.118
+   }
+  },
+  "theta": {
+   "rows": 756689,
+   "actual_parquet_bpv": 3.016,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "0": 0.084932,
+    "1": 3e-06,
+    "2": 3e-06,
+    "3": 1.2e-05,
+    "4": 0.000136,
+    "5": 0.001779,
+    "6": 0.015374,
+    "7": 0.103099,
+    "8": 0.794663
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    8,
+    8
+   ],
+   "parquet_f32_bss_zstd_bpv": 3.135,
+   "parquet_f64_plain_zstd_bpv": 3.832,
+   "parquet_decimal_e": 8,
+   "parquet_int64_delta_zstd_bpv": 2.81,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    126869,
+    1022786,
+    7187362,
+    31106212,
+    587390900
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 3.46,
+    "delta_bpv": 3.276,
+    "pfor_bpv": 3.46,
+    "pdelta_bpv": 3.269,
+    "for_w_p50_p95": [
+     21,
+     24
+    ],
+    "delta_w_p50_p95": [
+     20,
+     23
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 3.18,
+    "delta_bpv": 3.058,
+    "pfor_bpv": 3.178,
+    "pdelta_bpv": 2.93
+   }
+  },
+  "iRate": {
+   "rows": 756689,
+   "actual_parquet_bpv": 0.121,
+   "is_f32_share": 1.0,
+   "exponent_share": {
+    "4": 1.0
+   },
+   "roundtrip_exact_share": 1.0,
+   "exceptions": 0,
+   "block_exponent_p50_max": [
+    4,
+    4
+   ],
+   "parquet_f32_bss_zstd_bpv": 0.19,
+   "parquet_f64_plain_zstd_bpv": 0.1,
+   "parquet_decimal_e": 4,
+   "parquet_int64_delta_zstd_bpv": 0.104,
+   "abs_step_quantiles_p50_p90_p99_p999_max": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 0.676,
+    "delta_bpv": 0.676,
+    "pfor_bpv": 0.676,
+    "pdelta_bpv": 0.676,
+    "for_w_p50_p95": [
+     0,
+     0
+    ],
+    "delta_w_p50_p95": [
+     0,
+     0
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 0.625,
+    "delta_bpv": 0.741,
+    "pfor_bpv": 0.624,
+    "pdelta_bpv": 0.293
+   }
+  },
+  "cVolu": {
+   "rows": 756689,
+   "actual_parquet_bpv": 0.383,
+   "range": [
+    0,
+    294872
+   ],
+   "parquet_int64_delta_zstd_bpv": 0.556,
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 1.263,
+    "delta_bpv": 1.349,
+    "pfor_bpv": 1.219,
+    "pdelta_bpv": 1.328,
+    "for_w_p50_p95": [
+     2,
+     10
+    ],
+    "delta_w_p50_p95": [
+     3,
+     11
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 1.404,
+    "delta_bpv": 1.519,
+    "pfor_bpv": 0.957,
+    "pdelta_bpv": 1.157
+   }
+  },
+  "cOi": {
+   "rows": 756689,
+   "actual_parquet_bpv": 0.988,
+   "range": [
+    0,
+    380827
+   ],
+   "parquet_int64_delta_zstd_bpv": 1.238,
+   "mem_instrument_contiguous": {
+    "blocks": 31953,
+    "mean_block_len": 23.7,
+    "for_bpv": 1.699,
+    "delta_bpv": 1.797,
+    "pfor_bpv": 1.672,
+    "pdelta_bpv": 1.786,
+    "for_w_p50_p95": [
+     8,
+     13
+    ],
+    "delta_w_p50_p95": [
+     8,
+     14
+    ]
+   },
+   "mem_file_order": {
+    "for_bpv": 1.769,
+    "delta_bpv": 1.881,
+    "pfor_bpv": 1.514,
+    "pdelta_bpv": 1.675
+   }
+  },
+  "cBidPx_contract_history_3d": {
+   "blocks": 772537,
+   "mean_block_len": 3.0,
+   "for_bpv": 5.944,
+   "delta_bpv": 6.013,
+   "pfor_bpv": 5.944,
+   "pdelta_bpv": 6.013,
+   "for_w_p50_p95": [
+    4,
+    9
+   ],
+   "delta_w_p50_p95": [
+    5,
+    10
+   ]
+  },
+  "cOi_contract_history_3d": {
+   "blocks": 772537,
+   "mean_block_len": 3.0,
+   "for_bpv": 5.53,
+   "delta_bpv": 5.554,
+   "pfor_bpv": 5.53,
+   "pdelta_bpv": 5.554,
+   "for_w_p50_p95": [
+    0,
+    6
+   ],
+   "delta_w_p50_p95": [
+    0,
+    7
+   ]
+  },
+  "cMidIv_contract_history_3d": {
+   "blocks": 772537,
+   "mean_block_len": 3.0,
+   "for_bpv": 6.926,
+   "delta_bpv": 7.025,
+   "pfor_bpv": 6.926,
+   "pdelta_bpv": 7.025,
+   "for_w_p50_p95": [
+    12,
+    16
+   ],
+   "delta_w_p50_p95": [
+    13,
+    17
+   ]
+  }
+ }
+}
