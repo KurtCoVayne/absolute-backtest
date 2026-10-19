@@ -1180,6 +1180,7 @@ fn need_relations(word: &str) -> &'static [&'static str] {
         "series" => &["value"],
         "sessions" => &["session"],
         "point_value" => &["point_value"],
+        "tick" => &["tick"],
         "commission" => &["commission"],
         _ => &[],
     }
@@ -1250,6 +1251,9 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>, s
     }
     if d.point_value {
         need("point_value", "point_value".into(), None, None, false);
+    }
+    if d.tick {
+        need("tick", "tick".into(), None, None, false);
     }
     if d.commission {
         need("commission", "commission".into(), None, None, false);

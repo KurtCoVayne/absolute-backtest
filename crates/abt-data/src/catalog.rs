@@ -218,6 +218,12 @@ pub fn classes() -> Vec<ClassDef> {
                             Some("one per root and session, labelled at the session's close"),
                         ),
                         rel("point_value", vec![arg("A", "Future"), at("T"), arg("V", "Scalar")], true, Some("currency per point per contract")),
+                        rel(
+                            "tick",
+                            vec![arg("A", "Future"), at("T"), arg("Size", "Price<USD>")],
+                            true,
+                            Some("the minimum price increment of the contract the series holds, in price units"),
+                        ),
                         rel("commission", vec![arg("A", "Future"), at("T"), arg("C", "Notional<USD>")], true, Some("per contract per side")),
                         rel("member", vec![arg("A", "Future"), at("T"), arg("List", "Label")], true, None),
                         rel("usable", vec![arg("A", "Future"), at("T")], true, Some("a research-defined availability, from the bundle's review")),

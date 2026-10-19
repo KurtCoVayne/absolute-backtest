@@ -2450,6 +2450,21 @@ batch driver agree on every corpus program. Each bless since:
   contract: the series holds one contract at a time and the roll was
   decided on the session before; going back to H5 for a day would roll
   twice and put an expiring contract's prices in the series.
+- **E-102 (D-2.3, D-7.2, K-2.1; a future's tick, and the need that admits
+  it).** The future class exposed `point_value` but not the tick, so the
+  house sizing floor `ATR$ = point_value x max(ATR20, 10 x tick)` could not
+  be written. A relation `tick(A: Future, @T, Size: Price<USD>) complete`
+  holds the minimum price increment of the contract the root's series holds
+  (the definition's `min_price_increment`, which A-D53 reads for the grid),
+  stated at each session's day like `point_value`, through the roll and
+  through a session without a bar of the held contract (E-101). It is
+  admitted by a need of its own, `need tick`. [D] Rejected: bringing it with
+  `need point_value`, since every class relation is a primitive of every
+  program of the class, so every program writing `need point_value` would
+  demand `future.tick` and fail to bind on a store staged before this
+  erratum. With it, the checker's `need_for` admits E-98's `industry` under
+  `need lists` as it admits `classification` (a program reading it was
+  refused for a missing need).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

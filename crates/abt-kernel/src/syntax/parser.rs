@@ -402,6 +402,8 @@ impl Parser {
                         NeedKind::Sessions
                     } else if self.eat_kw("point_value") {
                         NeedKind::PointValue
+                    } else if self.eat_kw("tick") {
+                        NeedKind::Tick
                     } else if self.eat_kw("commission") {
                         NeedKind::Commission
                     } else if self.eat_kw("lists") {
@@ -446,7 +448,7 @@ impl Parser {
                         NeedKind::Instruments { attr, value }
                     } else {
                         return self.err(format!(
-                            "expected a need (bars, actions, listing, lists, series, sessions, point_value, commission, instruments, chain), found {}",
+                            "expected a need (bars, actions, listing, lists, series, sessions, point_value, tick, commission, instruments, chain), found {}",
                             self.peek()
                         ));
                     };

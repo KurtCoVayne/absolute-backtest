@@ -785,6 +785,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     let mut cont = Rows::default();
     let mut sessions_rows = Rows::default();
     let mut point_rows = Rows::default();
+    let mut tick_rows = Rows::default();
     let mut commission_rows = Rows::default();
     let mut settle_rows = Rows::default();
     let mut oi_rows = Rows::default();
@@ -995,6 +996,14 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 point_rows.r.push(day);
                 point_rows.nums.push(vec![pv]);
             }
+            // The held contract's minimum price increment (E-102), stated
+            // like the point value at the session's day.
+            if let Some(tk) = raw.defs[&c].tick.filter(|x| x.is_finite() && *x > 0.0) {
+                tick_rows.keys.push(root_key.clone());
+                tick_rows.t.push(day);
+                tick_rows.r.push(day);
+                tick_rows.nums.push(vec![tk]);
+            }
             if let Some(cm) = opts.commission {
                 commission_rows.keys.push(root_key.clone());
                 commission_rows.t.push(day);
@@ -1039,6 +1048,10 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     relations.push((
         "future.point_value".to_string(),
         keyed("T", point_rows.keys.clone(), point_rows.t.clone(), vec![("V", col(&point_rows, 0))], point_rows.r.clone())?,
+    ));
+    relations.push((
+        "future.tick".to_string(),
+        keyed("T", tick_rows.keys.clone(), tick_rows.t.clone(), vec![("Size", col(&tick_rows, 0))], tick_rows.r.clone())?,
     ));
     if !settle_rows.keys.is_empty() {
         relations.push((
@@ -1267,7 +1280,7 @@ impl Databento {
 }
 
 /// The future relations the adapter provides.
-pub const FUTURE_RELATIONS: [&str; 7] = ["open", "high", "low", "close", "volume", "session", "point_value"];
+pub const FUTURE_RELATIONS: [&str; 8] = ["open", "high", "low", "close", "volume", "session", "point_value", "tick"];
 /// The equity relations.
 pub const EQUITY_RELATIONS: [&str; 5] = ["open", "high", "low", "close", "volume"];
 

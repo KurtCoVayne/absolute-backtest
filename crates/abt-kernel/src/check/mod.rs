@@ -327,6 +327,8 @@ pub struct Demand {
     pub series_complete: bool,
     pub sessions: bool,
     pub point_value: bool,
+    /// `need tick`: a future's minimum price increment (E-102).
+    pub tick: bool,
     pub commission: bool,
     pub usable: bool,
     pub instruments_where: Vec<(String, String)>,
@@ -378,8 +380,10 @@ impl Demand {
             "value" => "series",
             "session" => "sessions",
             "point_value" => "point_value",
+            "tick" => "tick",
             "commission" => "commission",
-            "classification" => "classification",
+            // `industry` is the classification's deeper levels (E-98).
+            "classification" | "industry" => "classification",
             "usable" => "usable",
             _ => "",
         }
@@ -393,6 +397,7 @@ impl Demand {
             "series" => !self.series.is_empty(),
             "sessions" => self.sessions,
             "point_value" => self.point_value,
+            "tick" => self.tick,
             "commission" => self.commission,
             "classification" => self.classification,
             "usable" => self.usable,
@@ -674,7 +679,7 @@ struct ClassStrategy {
 fn class_strategy_source(ws: &Workspace, cls: &ast::Class, base: Option<Resolution>, parts: &ClassStrategy) -> String {
     let class = &cls.name;
     let mut needs: Vec<String> = vec![format!("need bars{}", base.map(|r| format!(" {}", r)).unwrap_or_default())];
-    for word in ["actions", "listing", "sessions", "point_value", "commission"] {
+    for word in ["actions", "listing", "sessions", "point_value", "tick", "commission"] {
         if cls.rels.iter().any(|r| Demand::need_for(&r.name) == word) {
             needs.push(format!("need {}", word));
         }
@@ -1228,6 +1233,7 @@ impl<'a> Checker<'a> {
                             NeedKind::Series(_) => self.demand.series.is_empty(),
                             NeedKind::Sessions => !self.demand.sessions,
                             NeedKind::PointValue => !self.demand.point_value,
+                            NeedKind::Tick => !self.demand.tick,
                             NeedKind::Commission => !self.demand.commission,
                             NeedKind::Instruments { .. } => false,
                             NeedKind::Chain(_) => self.demand.chains.is_empty(),
@@ -1241,6 +1247,7 @@ impl<'a> Checker<'a> {
                                 NeedKind::Series(_) => "series",
                                 NeedKind::Sessions => "sessions",
                                 NeedKind::PointValue => "point_value",
+                                NeedKind::Tick => "tick",
                                 NeedKind::Commission => "commission",
                                 NeedKind::Instruments { .. } => "instruments",
                                 NeedKind::Chain(_) => "chain",
@@ -1609,6 +1616,7 @@ impl<'a> Checker<'a> {
                 }
                 NeedKind::Sessions => d.sessions = true,
                 NeedKind::PointValue => d.point_value = true,
+                NeedKind::Tick => d.tick = true,
                 NeedKind::Commission => d.commission = true,
                 NeedKind::Instruments { attr, value } => d.instruments_where.push((attr.clone(), value.clone())),
                 NeedKind::Chain(c) => {
@@ -1677,7 +1685,7 @@ impl<'a> Checker<'a> {
                 Code::Q,
                 data.span,
                 format!(
-                    "the data block of `{}` has no `need`: a demand is a conjunctive query over the catalog with at least one need (bars, actions, listing, lists, series, sessions, point_value, commission)",
+                    "the data block of `{}` has no `need`: a demand is a conjunctive query over the catalog with at least one need (bars, actions, listing, lists, series, sessions, point_value, tick, commission)",
                     root_name
                 ),
             );

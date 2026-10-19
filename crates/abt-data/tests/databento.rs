@@ -345,6 +345,43 @@ fn a_session_without_the_held_contract_does_not_end_the_series() {
     assert_eq!(relation(&f, "future.session").num_rows(), 5);
 }
 
+/// E-102: `future.tick` is the minimum price increment of the contract the
+/// series holds, at each session's day, beside `point_value`: it follows
+/// the roll, and a session without a bar of the held contract still states
+/// it.
+#[test]
+fn the_tick_is_the_held_contracts_minimum_increment() {
+    let mut records = vec![def_of(1, "SOLH5", "SOL", b'F', "2025-03-28T15:00:00", 0.5), def_of(2, "SOLJ5", "SOL", b'F', "2025-04-25T15:00:00", 1.0)];
+    let days = ["2025-03-20", "2025-03-21", "2025-03-24", "2025-03-25"];
+    for (d, day) in days.iter().enumerate() {
+        for m in 0..3 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            let (v1, v2) = match d {
+                0 => (Some(900), Some(10)),
+                1 => (Some(100), Some(800)),
+                2 => (Some(50), Some(900)),
+                _ => (Some(40), None),
+            };
+            if let Some(v) = v1 {
+                records.push(bar(1, start, 130.0 + d as f64, v));
+            }
+            if let Some(v) = v2 {
+                records.push(bar(2, start, 131.0 + d as f64, v));
+            }
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "sol").unwrap();
+    let (f, _) = futures(&raw, &Options::default()).unwrap();
+    let tick = relation(&f, "future.tick");
+    // Four sessions: H5 held on the first two, J5 from the roll on the third,
+    // and on the fourth (no bar of J5) still J5's.
+    assert_eq!(column(tick, "Size"), vec![0.5, 0.5, 1.0, 1.0]);
+    assert_eq!(times(tick, "T"), days.iter().map(|d| t(d)).collect::<Vec<_>>());
+    assert!(strings(tick, "A").iter().all(|k| k == "SOL.v.0"));
+    assert_eq!(times(tick, "T"), times(relation(&f, "future.point_value"), "T"), "stated where the point value is");
+}
+
 #[test]
 fn a_futures_bar_without_its_definition_is_refused_naming_it() {
     let records = vec![
