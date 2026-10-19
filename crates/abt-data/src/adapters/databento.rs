@@ -24,12 +24,13 @@
 //!   entity of the class's bars, keyed by Databento's continuous symbol
 //!   (`ES.v.0` rolled by volume, `ES.c.0` by expiry):
 //!   - the root's sessions are its bars' runs, a gap longer than
-//!     `session_gap` (45 minutes: CME Globex's daily break is an hour)
-//!     ending one when it holds the middle of the venue's daily break
-//!     (`session_break`, 17:30 in New York: CME's break is 17:00 to 18:00
-//!     there, US daylight saving applied), as every gap between two trade
-//!     dates does, so a thin night's gaps stay inside the trade date
-//!     (E-104); a session is
+//!     `session_gap` (20 minutes from close to close) ending one when it
+//!     holds the middle of the venue's daily break (`session_break`, 17:45
+//!     in New York, US daylight saving applied: CME Globex's break is
+//!     17:00 to 18:00 there, and was 17:30 to 18:00 for the equity indexes
+//!     until 2012-11 and 17:15 to 18:00 after, E-108), as every gap between
+//!     two trade dates does, so a thin night's gaps stay inside the trade
+//!     date (E-104); a session is
 //!     labelled at its last bar's close and opens at its first bar's start
 //!     (`session(A, S, Open)`);
 //!   - by volume, a session holds the contract that traded the most in the
@@ -104,11 +105,14 @@ pub struct Options {
     /// Added to every row's receipt time (B-10), in nanoseconds.
     pub processing_delay: i64,
     pub roll: Roll,
-    /// The longest gap within a session, in nanoseconds.
+    /// The longest gap within a session, from a bar's close to the next
+    /// one's, in nanoseconds: below the shortest daily break (CME's equity
+    /// indexes' 30 minutes until 2012-11, 31 from close to close, E-108).
     pub session_gap: i64,
     /// The middle of the venue's daily break, in New York local time, in
     /// nanoseconds after midnight: a gap ends a session only when it holds
-    /// that instant of some day (E-104).
+    /// that instant of some day (E-104); 17:45, inside every break CME
+    /// Globex has had since 2010 (E-108).
     pub session_break: i64,
     /// A root's currency per point, where its contracts' size is not it.
     pub point_values: BTreeMap<String, f64>,
@@ -151,8 +155,8 @@ impl Default for Options {
             class: "future".into(),
             processing_delay: 0,
             roll: Roll::Volume,
-            session_gap: 45 * MINUTE,
-            session_break: (17 * 60 + 30) * MINUTE,
+            session_gap: 20 * MINUTE,
+            session_break: (17 * 60 + 45) * MINUTE,
             point_values: BTreeMap::new(),
             settlement: BTreeMap::new(),
             commission: None,

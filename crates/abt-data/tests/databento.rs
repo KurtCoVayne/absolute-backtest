@@ -445,8 +445,8 @@ fn a_far_contract_alone_in_a_session_does_not_take_the_series() {
 }
 
 /// E-104: a session ends at a gap that holds the middle of the venue's daily
-/// break (17:30 in New York by default: CME's 17:00 to 18:00, 21:30 UTC in
-/// June), not at any gap over `session_gap`: RB's thin nights (an hour
+/// break (17:45 in New York by default, E-108: CME's 17:00 to 18:00, 21:45
+/// UTC in June), not at any gap over `session_gap`: RB's thin nights (an hour
 /// without a trade at 04:00) split each trade date into fragments. A long
 /// gap inside a trade date (an illiquid root's afternoon) stays in it.
 #[test]
@@ -480,6 +480,49 @@ fn a_thin_nights_gaps_stay_inside_the_trade_date() {
     )
     .unwrap();
     assert_eq!(r2.roots["RB"].sessions, 3, "{:?}", r2.roots["RB"]);
+}
+
+/// E-108: one session per trade date in each era of CME Globex's hours for
+/// the equity indexes. Until 2012-11 ES traded 18:00 to 16:15 New York with a
+/// halt to 16:30, then to 17:30, its break 17:30 to 18:00 (30 minutes, 31
+/// from close to close); then to 17:15, a print in the break's first minute
+/// on some days (2013-07-08's last bar closes at 17:16, 45 minutes from the
+/// reopening's close); since 2015 to 17:00. A break starting at 17:30 does
+/// not hold 17:30, and 31 or 45 minutes are not over 45: the defaults before
+/// merged 2010-06 to 2012-11 into weekly sessions.
+#[test]
+fn the_daily_break_ends_a_session_in_every_era_of_cme_hours() {
+    let mut records = vec![def(1, "ESU0", b'F', "2010-09-17T13:30:00"), def(2, "ESU3", b'F', "2013-09-20T13:30:00"), def(3, "ESH6", b'F', "2016-03-18T13:30:00")];
+    // (contract, trade dates, the evening's open and the minutes after it
+    // that print, in UTC): New York is four hours behind in June and July,
+    // five in March.
+    let eras: [(u32, [&str; 3], i64, &[i64]); 3] = [
+        // 22:00 open; 20:14 the last bar before the halt (16:15), 20:30 to
+        // 21:29 after it, nothing from 21:30 (17:30 New York) to 22:00.
+        (1, ["2010-06-06", "2010-06-07", "2010-06-08"], 22 * 60, &[0, 1, 10 * 60, 22 * 60 + 14, 22 * 60 + 30, 23 * 60 + 29]),
+        // 22:00 open; the last bar 21:14 (17:14), and on the first day one
+        // in the break's first minute, 21:15.
+        (2, ["2013-07-07", "2013-07-08", "2013-07-09"], 22 * 60, &[0, 1, 10 * 60, 23 * 60 + 14]),
+        // 23:00 open (18:00 EST); the last bar 21:59 (16:59).
+        (3, ["2016-02-28", "2016-02-29", "2016-03-01"], 23 * 60, &[0, 1, 10 * 60, 22 * 60 + 59]),
+    ];
+    for &(id, days, open, minutes) in &eras {
+        for (d, day) in days.iter().enumerate() {
+            let eve = t(day) + open * MIN;
+            for (k, m) in minutes.iter().enumerate() {
+                records.push(bar(id, eve + m * MIN, 1000.0 + d as f64 + k as f64 * 0.25, 10));
+            }
+            if id == 2 && d == 0 {
+                records.push(bar(id, eve + (23 * 60 + 15) * MIN, 1000.0, 1));
+            }
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "es").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    assert_eq!(report.roots["ES"].sessions, 9, "{:?}", report.roots["ES"]);
+    let opens: Vec<i64> = eras.iter().flat_map(|&(_, days, open, _)| days.map(|day| t(day) + open * MIN)).collect();
+    assert_eq!(times(relation(&f, "future.session"), "Open"), opens);
 }
 
 #[test]

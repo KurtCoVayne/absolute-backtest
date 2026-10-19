@@ -2557,6 +2557,30 @@ batch driver agree on every corpus program. Each bless since:
   as the rule reading it then has no solution at that bar.
   `abt-tests/tests/session_window.rs`: the window is empty at minute 3 and
   read at minute 12, over minute bars the Databento adapter writes.
+- **E-108 (D-2.4, D-7.7; the daily break in CME's earlier hours).**
+  E-104's defaults, a gap over `session_gap` (45 minutes, from close to
+  close) that holds `session_break` (17:30 in New York), fit CME Globex's
+  break since 2015, 17:00 to 18:00. ES's minutes show the earlier ones:
+  until 2012-11-16 the equity indexes broke 17:30 to 18:00, the 17:29
+  bar's close 31 minutes before the reopening's, a gap neither over 45
+  minutes nor holding 17:30, where it starts; until 2015 they broke 17:15
+  to 18:00, and a bar printing in its first minute (2013-07-08) left 45.
+  ES's session bars over 2010-06-07 to 2026-09-30 were 3,693 sessions,
+  weekly to 2012-11 (34, 58 and 81 in 2010 to 2012) and 16 of two days
+  from 2012-12 to 2015-08; a volume roll then came a week late, the
+  series holding the expiring contract through its expiry (ESM0 to ESU0
+  on 2010-06-25, a week after ESM0's last day). The defaults are now
+  17:45, inside every break since 2010, and 20 minutes, under the
+  shortest's 31: ES has 4,200 sessions, one per trade date of the
+  bucket's files (149 in 2010 from June, 250 to 259 a year after), none
+  over 30 hours; its ten rolls to 2012-09 move to the Monday of the roll
+  week (2010-06-14), the 56 after keep their dates. NQ and NKD have 4,200
+  sessions too, GC 4,195, ZN 4,204 and RTY 2,385 from 2017-07, none over
+  30 hours. The rule is unchanged, so an ingest by an earlier binary
+  given `--session-break 17:45 --session-gap 20` stages the same
+  sessions. [D] Rejected: a gap starting at the break's middle counted
+  as holding it (17:30 would then serve 2010's break with no room, and
+  the 45-minute gap would still keep 2013's print).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
