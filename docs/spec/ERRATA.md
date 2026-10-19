@@ -1794,8 +1794,13 @@ batch driver agree on every corpus program. Each bless since:
   the other instruments' blocks; a Parquet partition reads through its
   entity index; a relation keyed by no entity is read whole), and the
   barrier index counts the same tuples, so `to_seq` (a hold-out's
-  truncation) numbers the scoped stream. Pushed-down aggregate answers of
-  other instruments are dropped by the kernel; the data layer still
+  truncation) numbers the scoped stream. The binding reads what it loads
+  per instrument (the base bars' times, the sessions, the prints a
+  session-offset clock needs, a root's `continuous` rows) as one series per
+  named instrument, which a hot version answers from that instrument's
+  blocks, and names are resolved within the program's class first (a
+  futures root and a stock can share a ticker: ES, CL). Pushed-down
+  aggregate answers of other instruments are dropped by the kernel; the data layer still
   computes them (an `AggregateRequest` has no instrument filter yet). An
   unscoped stream's canonical form, hence its id, is unchanged; a live
   session carries every instrument it records. [D] The scope from the
