@@ -21,7 +21,7 @@ pub enum ProgramRef {
     Name(String),
 }
 
-/// The hold-out policy (Q-2.3; the forms of E-93).
+/// The hold-out policy (Q-2.3; the forms of E-97).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Holdout {
     None,

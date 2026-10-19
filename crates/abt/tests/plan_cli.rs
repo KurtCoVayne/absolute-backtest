@@ -177,7 +177,7 @@ fn a_plan_check_prints_the_after_and_percentage_hold_outs() {
         a.extend(["--store", store.as_str()]);
         abt(&a)
     };
-    // The forms of E-93, each in the normal form as one text.
+    // The forms of E-97, each in the normal form as one text.
     for (written, shown) in [
         ("after 2023-01-02", "holdout after 2023-01-02"),
         ("after 2023-01-02T09:30:00.000000001", "holdout after 2023-01-02T09:30:00.000000001"),

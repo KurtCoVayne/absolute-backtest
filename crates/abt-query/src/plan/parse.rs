@@ -398,7 +398,7 @@ fn months(s: &str) -> Result<u32, String> {
 }
 
 /// `none`, `trailing:Ny`, `trailing:Nmo`, `trailing:N%`, `after TIME` or
-/// `blocks:K:Nmo[:seed]` (Q-2.1, E-93).
+/// `blocks:K:Nmo[:seed]` (Q-2.1, E-97).
 pub fn holdout(s: &str) -> Result<Holdout, String> {
     let s = s.trim();
     if s == "none" {

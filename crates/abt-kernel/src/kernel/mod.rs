@@ -3936,7 +3936,7 @@ pub enum Next {
 /// calendar's bars, the sample a plan places its hold-out and its
 /// walk-forward folds in (Q-2.3). With `received_by`, the first decision
 /// bar whose barrier closes after that receipt time (`embargo_from`, where
-/// a `holdout after TIME` begins; E-93), null when none does.
+/// a `holdout after TIME` begins; E-97), null when none does.
 pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig, received_by: Option<i64>) -> Result<serde_json::Value, RunError> {
     let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides), None)?;
     let probe = Kernel::build(prog, &bound, cfg.clone())?;
@@ -4072,7 +4072,7 @@ pub fn replay_observed<'p>(
         }
         // `holdout after TIME`: the last decision barrier whose instant is
         // at or before the receipt time, so nothing received after it is
-        // read (Q-2.3, E-93).
+        // read (Q-2.3, E-97).
         if let Some(rb) = opts.received_by {
             cut(index.iter().rfind(|r| r.calendar == dcal && r.at <= rb));
         }

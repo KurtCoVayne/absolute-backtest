@@ -2394,7 +2394,7 @@ batch driver agree on every corpus program. Each bless since:
     - K-9.3 puts every case in `tests/options.rs`. The futures and the
       limits have their own files, as the migration's plan lists them
       (M-7).
-- **E-93 (Q-2.1, Q-2.3, P-3.4, A-4.1; the hold-out forms the pipeline
+- **E-97 (Q-2.1, Q-2.3, P-3.4, A-4.1; the hold-out forms the pipeline
   needs: `after TIME`, `trailing:N%`, `trailing:Nmo`).** The pipeline
   design (`absolute-pipeline/docs/design/pipeline.md`, PL-6.6 item 2)
   asks for a forward hold-out on everything received after a time and a

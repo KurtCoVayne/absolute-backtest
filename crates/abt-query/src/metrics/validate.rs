@@ -65,7 +65,7 @@ pub fn trailing_embargo(last: i64, years: u32) -> Embargo {
 }
 
 /// A trailing embargo of `months` months before `last` (`trailing:Nmo`;
-/// E-93).
+/// E-97).
 pub fn trailing_months_embargo(last: i64, months: u32) -> Embargo {
     Embargo {
         intervals: vec![(add_months(last, -(months as i64)), i64::MAX)],
@@ -74,7 +74,7 @@ pub fn trailing_months_embargo(last: i64, months: u32) -> Embargo {
 }
 
 /// A trailing embargo of the last `percent` of the span `[first, last]`
-/// (`trailing:N%`; E-93): the embargo begins `percent` of the span before
+/// (`trailing:N%`; E-97): the embargo begins `percent` of the span before
 /// its end, the tail rounded up to the nanosecond.
 pub fn trailing_share_embargo(first: i64, last: i64, percent: u32) -> Embargo {
     let span = (last - first).max(0) as i128;
@@ -85,7 +85,7 @@ pub fn trailing_share_embargo(first: i64, last: i64, percent: u32) -> Embargo {
     }
 }
 
-/// The embargo of `holdout after TIME` (E-93): every bar from `from`, the
+/// The embargo of `holdout after TIME` (E-97): every bar from `from`, the
 /// first decision bar whose barrier closes after the time, on; none when
 /// no bar does.
 pub fn after_embargo(from: Option<i64>) -> Embargo {

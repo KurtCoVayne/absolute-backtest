@@ -452,7 +452,7 @@ table KernelRequest {
   horizon: long = null;
   // `run`: stop after the last decision barrier whose instant is at or
   // before this receipt time, the stream truncated at that barrier's seq
-  // (`holdout after TIME`, Q-2.3; E-93); `show binding`: the answer names
+  // (`holdout after TIME`, Q-2.3; E-97); `show binding`: the answer names
   // the first decision bar after it (`embargo_from`).
   received_by: long = null;
   // `run`: π, the plan step that asks for the run (Q-2.5), as canonical

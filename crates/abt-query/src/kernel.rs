@@ -47,7 +47,7 @@ pub struct Sample {
     pub first: Option<i64>,
     pub last: Option<i64>,
     /// With a receipt time asked for: the first decision bar whose barrier
-    /// closes after it, where a `holdout after TIME` begins (E-93).
+    /// closes after it, where a `holdout after TIME` begins (E-97).
     pub embargo_from: Option<i64>,
 }
 
@@ -177,7 +177,7 @@ impl Kernel {
     }
 
     /// `sample`, and, given a receipt time, the first decision bar after it
-    /// (`holdout after TIME`, E-93).
+    /// (`holdout after TIME`, E-97).
     pub fn sample_received_by(&self, prog: &Program, at: &Point, received_by: Option<i64>) -> Result<Sample, Error> {
         let mut r = Self::of(prog, KernelOp::Show);
         r.what = Some("binding".into());

@@ -427,7 +427,7 @@ pub fn received_by(holdout: &Holdout) -> Option<i64> {
 }
 
 /// The embargo of a hold-out over the sample's decision bars (Q-2.3,
-/// E-93): a trailing hold-out counts back from the sample's last bar; a
+/// E-97): a trailing hold-out counts back from the sample's last bar; a
 /// percentage is of the span between the first and last decision bars of
 /// the plan's window (the sample's when the plan has none); `after TIME`
 /// begins at the first bar whose barrier closes after the time, which the

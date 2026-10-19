@@ -1,4 +1,4 @@
-//! The hold-out forms of Q-2.1 beyond `trailing:Ny` (ERRATA E-93): `after
+//! The hold-out forms of Q-2.1 beyond `trailing:Ny` (ERRATA E-97): `after
 //! TIME` truncates every run at the last barrier closed by the time, so no
 //! non-reveal run reads a bar received after it, and a reveal reports
 //! exactly the bars after it (Proposition Q-2.1 unchanged); `trailing:N%`
