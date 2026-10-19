@@ -2578,3 +2578,35 @@ batch driver agree on every corpus program. Each bless since:
   present. Not built: the live feed's appends through the vendor adapters
   (iteration 3); the Databento half of the sizing run on the full history
   (the bucket's per-day objects; `docs/iterations/01-foundation.md`).
+- **E-92 (ST-3.2, ST-5.1, ST-13, D-2.4, K-6.5, A-D52, A-D53, A-D54;
+  iteration 1, phase 5).** Three findings of the phase 4 and 5 runs, each
+  fixed with its test. The kernel service's `live-sim` arm took the
+  session from the request alone, so a run whose session the deployment's
+  `recording stream` names was refused (phase 5's rehearsal went through
+  the front, which resolved it): `kernel/service.rs` now derives it with
+  `live::session_of` as the `live-broker` arm does, and
+  `kernel_service.rs::the_live_modes_refuse_what_they_cannot_do` covers
+  the three cases (the name and the stream agree, they differ, neither is
+  given). The Databento subset failed S4 ("moments over [1026, 3544)
+  differ from the direct reduction"): the adapter back-adjusted prices in
+  `f64`, so cent-grid prices (CL) came out an ulp off every decimal grid
+  after a roll and their blocks held them as raw exceptions, and for such
+  a position the writer's summaries counted 0 (`staging/build.rs`:
+  `Encoded::integer` is `None`) while both readers decoded the block's
+  base (`hot/version.rs::decode`, `hot/segment.rs::integers`: `patch`
+  restores offset exceptions only). A-D54 states the rule: a raw position
+  is 0 in the decoded integers too (`abt_codec::block::zero_raw`, called
+  by both readers), the `f64` view keeps the bits, and a `ticks` read of a
+  relation whose tick column holds one is refused naming the column, as
+  `numerics exact` already was (`store_hot.rs::read_ticks`);
+  `tests/hot.rs::a_value_off_every_grid_keeps_its_bits_counts_as_zero_and_has_no_tick_view`
+  and the mutation `scripts/mutations/st-3.2-raw.patch`. A-D53 removes
+  the cause: `adapters/databento.rs::futures` computes the roll gaps, the
+  sessions' adjustments and the adjusted prices as integers at the decimal
+  exponent of the root's tick size, divided once, so the stored series
+  stays on the vendor's grid
+  (`tests/databento.rs::back_adjustment_in_tick_units_keeps_cent_prices_on_the_grid`).
+  The `--undefined refuse|drop` option of the Databento adapter leaves
+  bars without a definition out and counts them, since the subset's
+  definitions do not cover every contract that traded; `refuse` stays the
+  default (D-2.4).

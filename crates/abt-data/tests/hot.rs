@@ -201,6 +201,70 @@ fn a_query_asking_for_ticks_answers_exact_decimals_that_view_as_the_floats() {
     assert!(n(&f) > 0 && n(&f) < rows.len());
 }
 
+/// ST-3.2 and A-D54: a value off every decimal grid keeps its bits in the
+/// `f64` view, counts as 0 in the decoded integers as in the summaries (so
+/// S4's range checks and every window through the cumulatives hold across
+/// its block), and its column has no tick view.
+#[test]
+fn a_value_off_every_grid_keeps_its_bits_counts_as_zero_and_has_no_tick_view() {
+    use abt_codec::summary::{self, Column, Cumulative};
+    use abt_codec::tick::{exponent, Source};
+    use abt_data::query::{execute, ResolvedView};
+    use abt_wire::generated::abt::wire::{Constant, ConstantKind, Identity, QueryForm, Series};
+    let mut rng = Rng(9);
+    let mut rows = market(&mut rng, &[7u64], 21_000, 8_000);
+    assert!(rows.len() > 3 * 1024, "{} rows", rows.len());
+    // One quotient among the cents, in the second block.
+    let k = 1_500;
+    let off = 0.1 + 0.2;
+    assert!(exponent(&[off], Source::F64).is_none());
+    rows[k].3 = off;
+    let mut a = Store::temporary("hot-raw").unwrap();
+    // S4 passes: the summaries and the decoded integers agree.
+    let va = a.ingest("equity.close", &[close_rows(&rows)], "test", hot()).unwrap();
+    let h = a.hot(&va).unwrap();
+    assert!(h.manifest.columns[0].raw, "the manifest flags the column");
+    let col = h.column(0, 0);
+    assert!(col.blocks() >= 3);
+    let whole: Vec<i64> = (0..col.blocks()).flat_map(|b| col.block(b)).collect();
+    assert_eq!(whole.len(), rows.len());
+    assert_eq!(whole[k], 0, "the raw position counts as 0");
+    // The raw block is encoded at exponent 9 (every grid holds its other
+    // values alike), so the instrument's integers are at that scale.
+    let e = h.manifest.columns[0].exponent;
+    assert_eq!(
+        whole[k + 1],
+        (rows[k + 1].3 * abt_agg::exact::pow10(e as u32) as f64).round() as i64,
+        "its neighbours are the cents at exponent {}",
+        e
+    );
+    for (lo, hi) in [(10u64, 2_900u64), (1_024, 2_048), (1_499, 1_501), (0, rows.len() as u64), (1_400, 3_100)] {
+        let direct = Cumulative::ZERO.plus(&whole[lo as usize..hi as usize], lo);
+        assert_eq!(summary::moments(&col, lo, hi), direct, "moments over [{}, {})", lo, hi);
+    }
+    // The f64 view returns the bits; the tick view is refused naming the column.
+    let series = QueryForm::Series(Box::new(Series {
+        relation: "equity.close".into(),
+        identity: Some(Box::new(Identity {
+            values: vec![Constant {
+                kind: ConstantKind::Entity,
+                num: 0.0,
+                int: 7,
+                text: None,
+            }],
+        })),
+        t0: rows[k].1,
+        t1: rows[k].1 + NANOS_PER_HOUR,
+    }));
+    let (schema, floats) = execute(&a, &ResolvedView::default(), &series, None, false, false).unwrap();
+    let p = schema.index_of("P").unwrap();
+    let f = floats[0].column(p).as_primitive::<arrow::datatypes::Float64Type>();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f.value(0).to_bits(), off.to_bits());
+    let err = execute(&a, &ResolvedView::default(), &series, None, false, true).expect_err("no tick view");
+    assert!(err.to_string().contains("`equity.close`.`P` holds values off any decimal grid"), "{}", err);
+}
+
 #[test]
 fn the_ladder_bars_equal_their_buckets_recomputed_from_base_rows() {
     use abt_data::hot::ladder::{Level, Rule};

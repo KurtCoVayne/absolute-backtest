@@ -595,6 +595,14 @@ impl Store {
             return Err(DataError::Malformed(format!("`{}` is not held hot: it has no tick columns to read (A-D44)", m.relation)));
         }
         let v = self.hot(version)?;
+        // A column holding a value off every decimal grid has no exact
+        // view (A-D54): the `f64` view answers.
+        if let Some(c) = v.manifest.columns.iter().find(|c| matches!(c.kind, Kind::Tick | Kind::TickF32) && c.raw) {
+            return Err(DataError::Malformed(format!(
+                "`{}`.`{}` holds values off any decimal grid: it has no tick view (ST-3.2, A-D54); read the `f64` view",
+                m.relation, c.name
+            )));
+        }
         let mut scale = v
             .manifest
             .columns

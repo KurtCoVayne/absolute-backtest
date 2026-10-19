@@ -288,6 +288,24 @@ pub fn patch(exceptions: &[Exception], a: usize, b: usize, out: &mut [u64]) {
     }
 }
 
+/// The integer view of rows `[a, b)` with every raw exception (a value off
+/// any grid, kept as its bits) set to 0: the number the block's summaries
+/// and cumulatives count for it (A-D54), so that a decoded block and the
+/// structures over it agree. `ints` holds the rows' integers as the
+/// header's formula gives them (the packed 0 of such a row is the base).
+pub fn zero_raw(exceptions: &[Exception], a: usize, b: usize, ints: &mut [i64]) {
+    let start = exceptions.partition_point(|x| (x.position() as usize) < a);
+    for x in &exceptions[start..] {
+        let pos = x.position() as usize;
+        if pos >= b {
+            break;
+        }
+        if let Exception::Raw { .. } = x {
+            ints[pos - a] = 0;
+        }
+    }
+}
+
 /// The tail block (ST-8.3): up to 1,023 values packed horizontally, value
 /// `j` at bits `[j·W, (j+1)·W)` of one stream, so that a value on the grid
 /// and below the width is appended in place.

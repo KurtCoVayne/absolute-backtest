@@ -413,7 +413,9 @@ impl HotVersion {
         patch(&exceptions, 0, BLOCK, &mut out);
         let n = h.n as usize;
         let scale = abt_agg::exact::pow10((run.exponent as i32 - h.e as i32).max(0) as u32) as i64;
-        let ints: Vec<i64> = (0..n).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect();
+        let mut ints: Vec<i64> = (0..n).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect();
+        // A value off any grid counts as 0, as the summaries count it (A-D54).
+        abt_codec::block::zero_raw(&exceptions, 0, n, &mut ints);
         let floats: Vec<f64> = match lv.entries[c].kind {
             Kind::Tick | Kind::TickF32 => {
                 let mut raw = exceptions

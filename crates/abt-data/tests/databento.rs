@@ -82,6 +82,10 @@ fn bar(id: u32, start: i64, close: f64, volume: u64) -> Decoded {
 }
 
 fn def(id: u32, symbol: &str, class: u8, expiration: &str) -> Decoded {
+    def_of(id, symbol, "ES", class, expiration, 0.25)
+}
+
+fn def_of(id: u32, symbol: &str, asset: &str, class: u8, expiration: &str, tick: f64) -> Decoded {
     rec(Record::InstrumentDef(Box::new(InstrumentDef {
         hd: Header {
             rtype: rtype::INSTRUMENT_DEF,
@@ -91,15 +95,55 @@ fn def(id: u32, symbol: &str, class: u8, expiration: &str) -> Decoded {
         },
         ts_recv: t("2024-03-01") as u64,
         raw_symbol: symbol.into(),
-        asset: "ES".into(),
+        asset: asset.into(),
         instrument_class: class,
         expiration: t(expiration) as u64,
         activation: t("2023-06-16") as u64,
-        min_price_increment: fixed(0.25),
+        min_price_increment: fixed(tick),
         unit_of_measure_qty: fixed(50.0),
         currency: "USD".into(),
         ..InstrumentDef::default()
     })))
+}
+
+/// A bar at cent prices around `close` (the open a cent below, the high
+/// two above, the low two below), as a contract with a 0.01 tick trades.
+fn cent_bar(id: u32, start: i64, close: f64, volume: u64) -> Decoded {
+    rec(Record::Ohlcv {
+        hd: Header {
+            rtype: rtype::OHLCV_1M,
+            publisher_id: 1,
+            instrument_id: id,
+            ts_event: start as u64,
+        },
+        open: fixed(close - 0.01),
+        high: fixed(close + 0.02),
+        low: fixed(close - 0.02),
+        close: fixed(close),
+        volume,
+    })
+}
+
+/// Three sessions of a cent-tick root (as CL trades): H4 (id 11) trades
+/// most in the first two sessions and M4 (id 12) in the second, so the
+/// third session rolls to M4 with a gap of 1.15 that `f64` arithmetic
+/// cannot keep on the cent grid.
+fn cent_stream() -> Vec<u8> {
+    let mut records = vec![def_of(11, "CLH4", "CL", b'F', "2024-03-20T18:30:00", 0.01), def_of(12, "CLM4", "CL", b'F', "2024-05-20T18:30:00", 0.01)];
+    for (d, day) in ["2024-03-11", "2024-03-12", "2024-03-13"].iter().enumerate() {
+        for m in 0..5 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            let (vh, vm) = match d {
+                0 => (900, 100),
+                1 => (300, 800),
+                _ => (50, 1000),
+            };
+            // `fixed` rounds to the cent: the DBN prices are exact ticks.
+            records.push(cent_bar(11, start, 70.01 + d as f64 * 0.10 + m as f64 * 0.01, vh));
+            records.push(cent_bar(12, start, 71.16 + d as f64 * 0.10 + m as f64 * 0.01, vm));
+        }
+    }
+    dbn::encode(&meta(Some(6), vec![]), &records)
 }
 
 /// Three sessions of ES (2024-03-11 to 13, 14:30 to 14:34 UTC): H4 (id 1)
@@ -144,6 +188,41 @@ fn strings(b: &RecordBatch, name: &str) -> Vec<String> {
 
 fn relation<'a>(f: &'a Fetched, name: &str) -> &'a RecordBatch {
     &f.relations.iter().find(|(r, _)| r == name).unwrap_or_else(|| panic!("no {}", name)).1
+}
+
+/// A-D53: the back-adjustment is computed in the contract's tick units,
+/// so every adjusted price stays on the vendor's grid where `f64`
+/// addition would leave it an ulp off.
+#[test]
+fn back_adjustment_in_tick_units_keeps_cent_prices_on_the_grid() {
+    use abt_codec::tick::{exponent, Source};
+    // The teeth: the gap and the adjusted first close, in `f64`, are off
+    // the cent grid.
+    let naive_gap = 71.30f64 - 70.15f64;
+    let naive = 70.01f64 + naive_gap;
+    assert_ne!(exponent(&[naive_gap, naive], Source::F64), Some(2), "{} {}", naive_gap, naive);
+    let mut raw = Raw::default();
+    raw.add_dbn(&cent_stream(), "cl").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    let cl = &report.roots["CL"];
+    assert_eq!((cl.contracts, cl.sessions), (2, 3));
+    assert_eq!(cl.rolls.len(), 1, "{:?}", cl.rolls);
+    assert!(cl.rolls[0].starts_with("2024-03-13 CLH4 -> CLM4, gap 1.15"), "{:?}", cl.rolls);
+    for name in ["open", "high", "low", "close"] {
+        let rel = relation(&f, &format!("future.{}", name));
+        let p = column(rel, rel.schema().field(rel.num_columns() - 2).name());
+        assert_eq!(p.len(), 15);
+        assert_eq!(exponent(&p, Source::F64), Some(2), "{}: {:?}", name, p);
+    }
+    let p = column(relation(&f, "future.close"), "P");
+    // H4's closes shifted by the gap, exactly: (7001 + 115) / 100.
+    assert_eq!(p[0], 71.16);
+    assert_eq!(p[9], 71.30);
+    // M4's own from the third session.
+    assert_eq!(p[10], 71.36);
+    let cont = relation(&f, "continuous");
+    assert_eq!(column(cont, "adjustment")[0], 1.15);
+    assert_eq!(column(cont, "adjustment")[14], 0.0);
 }
 
 #[test]

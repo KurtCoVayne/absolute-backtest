@@ -850,8 +850,22 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
             }
         }
         let sessions = &sessions[..held.len()];
-        // The gaps at the rolls, and each session's adjustment.
+        // The root's grid (A-D53): the decimal exponent of the held
+        // contracts' tick sizes, at which the gaps, the adjustments and the
+        // adjusted prices are integers; a root without one, or a price off
+        // it, takes the `f64` arithmetic (and such values are raw
+        // exceptions in their blocks, A-D54).
+        let grid: Option<u8> = {
+            let held_set: BTreeSet<u32> = held.iter().copied().collect();
+            let ticks: Option<Vec<f64>> = held_set.iter().map(|c| raw.defs[c].tick.filter(|t| *t > 0.0)).collect();
+            ticks.filter(|t| !t.is_empty()).and_then(|t| abt_codec::tick::exponent(&t, abt_codec::tick::Source::F64))
+        };
+        let p10 = grid.map_or(1.0, |e| abt_agg::exact::pow10(e as u32) as f64);
+        let on = |x: f64| -> Option<i64> { grid.and_then(|e| abt_codec::tick::on_grid(x, e)) };
+        // The gaps at the rolls, and each session's adjustment: integers on
+        // the grid where the prices are, else `f64`.
         let mut gaps = vec![0.0; held.len()];
+        let mut gaps_i: Vec<Option<i64>> = vec![Some(0); held.len()];
         let mut rolls = Vec::new();
         for s in 1..held.len() {
             let (o, n) = (held[s - 1], held[s]);
@@ -859,17 +873,41 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 continue;
             }
             let o_last = per[s - 1][&o].last().map(|b| b.close).unwrap_or(f64::NAN);
-            let gap = match per[s - 1].get(&n).and_then(|v| v.last()) {
-                Some(nb) => nb.close - o_last,
-                None => per[s][&n][0].open - o_last,
+            let n_at = match per[s - 1].get(&n).and_then(|v| v.last()) {
+                Some(nb) => nb.close,
+                None => per[s][&n][0].open,
             };
-            gaps[s] = gap;
-            rolls.push(format!("{} {} -> {}, gap {}", day_of(sessions[s].close), raw.defs[&o].raw_symbol, raw.defs[&n].raw_symbol, gap));
+            gaps_i[s] = match (on(n_at), on(o_last)) {
+                (Some(a), Some(b)) => Some(a - b),
+                _ => None,
+            };
+            gaps[s] = match gaps_i[s] {
+                Some(g) => g as f64 / p10,
+                None => n_at - o_last,
+            };
+            rolls.push(format!("{} {} -> {}, gap {}", day_of(sessions[s].close), raw.defs[&o].raw_symbol, raw.defs[&n].raw_symbol, gaps[s]));
         }
         let mut adjustment = vec![0.0; held.len()];
+        let mut adjustment_i: Vec<Option<i64>> = vec![Some(0); held.len()];
         for s in (0..held.len().saturating_sub(1)).rev() {
-            adjustment[s] = adjustment[s + 1] + gaps[s + 1];
+            adjustment_i[s] = match (adjustment_i[s + 1], gaps_i[s + 1]) {
+                (Some(a), Some(g)) => Some(a + g),
+                _ => None,
+            };
+            adjustment[s] = match adjustment_i[s] {
+                Some(a) => a as f64 / p10,
+                None => adjustment[s + 1] + gaps[s + 1],
+            };
         }
+        // A price shifted by a session's adjustment: on the grid when both
+        // are, divided once.
+        let adjusted = |x: f64, s: usize| -> f64 {
+            match (adjustment_i[s], on(x)) {
+                (Some(0), _) => x,
+                (Some(a), Some(xi)) => (xi + a) as f64 / p10,
+                _ => x + adjustment[s],
+            }
+        };
         let root_key = format!("{}.{}.0", root, roll.code());
         let contracts: BTreeSet<u32> = rbars.iter().map(|b| b.id).collect();
         let point_of = |id: u32| -> Option<f64> { opts.point_values.get(root).copied().or(raw.defs[&id].size) };
@@ -919,7 +957,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 series.keys.push(root_key.clone());
                 series.t.push(b.t);
                 series.r.push(r);
-                series.nums.push(vec![b.open + adj, b.high + adj, b.low + adj, b.close + adj, b.volume]);
+                series.nums.push(vec![adjusted(b.open, s), adjusted(b.high, s), adjusted(b.low, s), adjusted(b.close, s), b.volume]);
                 cont.keys.push(root_key.clone());
                 cont.t.push(b.t);
                 cont.r.push(r);
@@ -935,12 +973,12 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
             // The venue's statistics of the contract held, for the
             // session's day: the settlement back-adjusted as the bars, the
             // open interest as published; the last received of each.
-            for (kind, rows, shift) in [(STAT_SETTLEMENT, &mut settle_rows, adj), (STAT_OPEN_INTEREST, &mut oi_rows, 0.0)] {
+            for (kind, rows, shifted) in [(STAT_SETTLEMENT, &mut settle_rows, true), (STAT_OPEN_INTEREST, &mut oi_rows, false)] {
                 if let Some(st) = raw.stats.iter().filter(|x| x.id == c && x.kind == kind && x.day == day).max_by_key(|x| x.recv) {
                     rows.keys.push(root_key.clone());
                     rows.t.push(sess.close);
                     rows.r.push(st.recv.max(sess.close));
-                    rows.nums.push(vec![st.value + shift]);
+                    rows.nums.push(vec![if shifted { adjusted(st.value, s) } else { st.value }]);
                 }
             }
             if let Some(pv) = point_of(c) {

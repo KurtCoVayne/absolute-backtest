@@ -76,14 +76,20 @@ fn scaled(x: f64, e: u8) -> Option<i64> {
 }
 
 /// The integer of `x` at exponent `e` when `x` is on that grid (it comes
-/// back from the integer bit for bit), else 0: the integer view of a
-/// stored `f64` that may be off any grid.
-pub fn scaled_or_zero(x: f64, e: u8) -> i64 {
+/// back from the integer bit for bit, an `f64` source), else `None`.
+pub fn on_grid(x: f64, e: u8) -> Option<i64> {
     if x.is_finite() && round_trips(x, e, Source::F64) {
-        scaled(x, e).unwrap_or(0)
+        scaled(x, e)
     } else {
-        0
+        None
     }
+}
+
+/// The integer of `x` at exponent `e` when `x` is on that grid, else 0:
+/// the integer view of a stored `f64` that may be off any grid (A-D54: a
+/// raw exception counts as 0 in every exact structure, `block::zero_raw`).
+pub fn scaled_or_zero(x: f64, e: u8) -> i64 {
+    on_grid(x, e).unwrap_or(0)
 }
 
 /// Whether `x` comes back from its integer at exponent `e`.

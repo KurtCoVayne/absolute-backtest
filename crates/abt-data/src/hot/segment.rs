@@ -421,7 +421,10 @@ impl<'a> Segment<'a> {
         unpack(&packed, &mut out);
         abt_codec::block::patch(&exceptions, 0, BLOCK, &mut out);
         let scale = abt_agg::exact::pow10((run.exponent as i32 - h.e as i32).max(0) as u32) as i64;
-        (0..h.n as usize).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect()
+        let n = h.n as usize;
+        let mut ints: Vec<i64> = (0..n).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect();
+        abt_codec::block::zero_raw(&exceptions, 0, n, &mut ints);
+        ints
     }
 
     /// The block's values as the source wrote them (Proposition 3.2).
