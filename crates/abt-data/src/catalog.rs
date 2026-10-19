@@ -330,6 +330,90 @@ pub fn classes() -> Vec<ClassDef> {
                 values: vec![("SPXTR", Some("1d")), ("VIX", Some("1w")), ("VIX_MA4", Some("1w"))],
             }],
         },
+        // The pipeline's provenance (absolute-pipeline PL-7.2; ERRATA E-94):
+        // written by its gateway alone through `put` (P-3.1), like the
+        // other layers' namespaces, and read with scan, series and catalog;
+        // no program reads it. Ids are labels, since a row's identity is its
+        // label columns with its time (D-2.2).
+        ClassDef {
+            name: "pipeline",
+            header: vec![
+                "The pipeline class (PL-7.2): the provenance of what the agents submit, from",
+                "the document a hypothesis came from to the forward reveals of its",
+                "submission, and the gateway's audit. Written by the gateway alone through",
+                "`put`, like the kernel's and the query layer's namespaces; no program reads",
+                "it. Ids are labels: a row's identity is its labels with its time (D-2.2).",
+            ],
+            base: None,
+            unit: None,
+            entity_sort: "Label",
+            groups: vec![
+                Group {
+                    comment: Some("A document, the hypotheses it led to, and the submissions that test them."),
+                    relations: vec![
+                        rel(
+                            "document",
+                            vec![arg("DocId", "Label"), arg("Source", "Label"), arg("Author", "Label"), at("P"), arg("Size", "Count")],
+                            true,
+                            Some("published at P, Size bytes; the text stays in the ingest store"),
+                        ),
+                        rel(
+                            "hypothesis",
+                            vec![arg("Id", "Label"), arg("DocIds", "Label"), at("H"), arg("Agent", "Label")],
+                            true,
+                            Some("DocIds is the JSON list of its documents; H its horizon"),
+                        ),
+                        rel(
+                            "submission",
+                            vec![
+                                arg("Id", "Label"),
+                                arg("HypothesisId", "Label"),
+                                arg("ProgramHash", "Label"),
+                                arg("PlanHash", "Label"),
+                                arg("Lineage", "Label"),
+                                at("H"),
+                            ],
+                            true,
+                            Some("written once, at submit (PL-6.6): H(P), H(Π), the lineage and H"),
+                        ),
+                    ],
+                },
+                Group {
+                    comment: Some("The forward reveals of a submission, and the gateway's audit (PL-7.1)."),
+                    relations: vec![
+                        rel(
+                            "outcome",
+                            vec![
+                                arg("SubmissionId", "Label"),
+                                at("T"),
+                                arg("Reveal", "Count"),
+                                arg("ForwardFrom", "Timestamp"),
+                                arg("ForwardTo", "Timestamp"),
+                                arg("Status", "Label"),
+                            ],
+                            true,
+                            Some("the Reveal-th reveal, at T, over (ForwardFrom, ForwardTo]; Status insample_only, forward or retired"),
+                        ),
+                        rel(
+                            "audit",
+                            vec![
+                                arg("Job", "Label"),
+                                at("T"),
+                                arg("Kind", "Label"),
+                                arg("Subject", "Label"),
+                                arg("Bytes", "Count"),
+                                arg("DurationNs", "Count"),
+                                arg("Outcome", "Label"),
+                            ],
+                            true,
+                            Some("one per request at T: its kind, the relation or plan, the bytes, the time it took"),
+                        ),
+                    ],
+                },
+            ],
+            vocabulary_comment: None,
+            vocabularies: vec![],
+        },
     ]
 }
 

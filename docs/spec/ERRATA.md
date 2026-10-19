@@ -1735,6 +1735,59 @@ batch driver agree on every corpus program. Each bless since:
     (`running`) and 5.3 s (`two_pass`), from 5.6 s and 6.1 s. Writing the
     answer's log segment is 1.3 s of it: this VM's first write of fresh
     pages runs at about 190 MB/s.
+- **E-94 (D-2.3, D-2.2, D-3.6, P-3.1; the `pipeline` class).** The
+  pipeline design (`absolute-pipeline/docs/design/pipeline.md`, PL-7.2)
+  puts the provenance of what its agents submit in the data layer
+  (A-D20): a class `pipeline` joins the `kernel` and `query` namespaces
+  of D-2.3, and, unlike them, is a class of the registry (`catalog.rs`
+  `classes()`, `corpus-v2/catalog/pipeline.dsl` its rendering, `abt data
+  catalog --class pipeline`), so a fresh store holds its five schemas
+  and the gateway writes against them rather than making its own up.
+  The relations, each with the receipt time `r` every stored row carries
+  (D-4.2; a put without it is received at its event time):
+  `document(DocId, Source, Author, @P, Size: Count)`;
+  `hypothesis(Id, DocIds, @H, Agent)`; `submission(Id, HypothesisId,
+  ProgramHash, PlanHash, Lineage, @H)`; `outcome(SubmissionId, @T,
+  Reveal: Count, ForwardFrom, ForwardTo: Timestamp, Status)`;
+  `audit(Job, @T, Kind, Subject, Bytes, DurationNs: Count, Outcome)`.
+  They are written only through `put` (D-3.6, P-3.1) like `kernel.*`
+  and read with `scan`, `series` and `catalog`; no program reads them,
+  and the class has no base calendar and no unit, like `series`.
+  - **Ids are labels, not bytes.** PL-7.2 leaves the ids' type open
+    (the task named `Bytes` or `Label`, whichever the put path keys
+    by). A row's identity is its entity and label columns with its time
+    (D-2.2): a label id keys the row, as `query.trials.trial_id` and
+    `query.plans.hash` already do, while a bytes column is a value
+    outside the identity, outside every predicate of the query forms
+    (`query.rs`) and never held hot. The class file is also read by the
+    kernel's checker, which has no bytes type (`Ty::parse`). `DocIds`,
+    the JSON list of a hypothesis's documents, is a label for the same
+    reason; its texts are as many as the hypotheses, as the trial ids
+    are as many as the runs. Rejected: a `Bytes` id (no identity, so a
+    second put of the same row would not be the same row), and a
+    numeric entity id (the ids are content hashes and ULIDs of the
+    pipeline, not the registry's instruments).
+  - **Event times.** Every relation needs one (`validate_schema`):
+    `document`'s is its publication `P`, `hypothesis`'s and
+    `submission`'s their horizon `H`, `outcome`'s and `audit`'s the
+    reveal's and the request's instant `T`, beside the listed columns.
+    The names are the class file's (`DocId`, `ForwardFrom`), as the
+    market classes' columns are (`A`, `T`, `P`, `BidSize`): D-2.3's
+    table writes them in lower case for every class.
+  - **The statuses** `insample_only`, `forward` and `retired` (PL-7.3)
+    are the `outcome` relation's note rather than a vocabulary: the
+    kernel's class grammar admits its own vocabularies only (`lists`,
+    `reasons`, `names`, ...), and no program checks a label against
+    them.
+  - **Tests.** `abt-tests/tests/pipeline_class.rs` (the class and its
+    five schemas in the catalog and the file; a row of each relation
+    put and read back in process and over a socket; a put without `r`),
+    `abt/tests/data_cli.rs::the_pipeline_class_file_renders_from_the_registry`,
+    `abt-data/tests/store.rs::the_class_files_render_from_the_registry`
+    (the file equals the rendering), and the corpus library check
+    (the kernel reads the file). Falsified by
+    `scripts/mutations/d-2.3-pipeline-schemas.patch` (the class is
+    rendered but its schemas are not registered with a fresh store).
 
 ## Aggregates
 

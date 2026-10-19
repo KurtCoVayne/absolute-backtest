@@ -1,0 +1,17 @@
+# proposition: D-2.3 (the pipeline class of E-94: its schemas are the registry's, held by every store)
+# mutation: the class is rendered, but its schemas are left out of the built-in ones a fresh store registers
+# test: cargo test -p abt-tests --test pipeline_class a_row_of_each_pipeline_relation_is_put_and_read_in_process_and_over_a_socket
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/catalog.rs b/crates/abt-data/src/catalog.rs
+index 399daf7..4a8b2e6 100644
+--- a/crates/abt-data/src/catalog.rs
++++ b/crates/abt-data/src/catalog.rs
+@@ -575,7 +575,7 @@ pub fn qualified(class: &str, relation: &str) -> String {
+ /// Every schema the built-in classes define.
+ pub fn builtin_schemas() -> Vec<RelationSchema> {
+     let mut out = Vec::new();
+-    for c in classes() {
++    for c in classes().into_iter().filter(|c| c.name != "pipeline") {
+         for g in &c.groups {
+             for r in g.relations.iter().filter(|r| r.of.is_none()) {
+                 out.push(relation_schema(&c, r));
