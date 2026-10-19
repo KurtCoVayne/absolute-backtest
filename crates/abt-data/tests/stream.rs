@@ -131,6 +131,12 @@ fn read(store: &Store, spec: &StreamSpec, from: u64, to: Option<u64>, max: usize
 /// partition bucket than its event time); the daily calendar's barriers at
 /// each day's last instant and a weekly calendar's on the last day.
 fn store() -> (Store, StreamSpec) {
+    store_as(BTreeMap::new())
+}
+
+/// The same store, with the close's version under `attributes` (a hot one
+/// under `storage = hot`, A-D49).
+fn store_as(attributes: BTreeMap<String, String>) -> (Store, StreamSpec) {
     let mut s = Store::temporary("stream").unwrap();
     let mut rows = Vec::new();
     for d in 0..5 {
@@ -140,7 +146,7 @@ fn store() -> (Store, StreamSpec) {
     }
     rows.push((2, T0 + DAY, T0 + 3 * DAY + 5, 99.0));
     rows.push((3, T0 + 2 * DAY, T0 + 40 * DAY, 77.0));
-    let close = s.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+    let close = s.ingest("equity.close", &[close_rows(&rows)], "test", attributes).unwrap();
     let mut cal = Vec::new();
     for d in 0..5 {
         cal.push(("1d", T0 + d * DAY, T0 + d * DAY + DAY - 1));
@@ -158,6 +164,7 @@ fn store() -> (Store, StreamSpec) {
         receipt_filter: None,
         clock: abt_wire::generated::abt::wire::ClockSource::Replay,
         session: None,
+        entities: None,
     };
     (s, spec)
 }
@@ -326,6 +333,7 @@ fn the_merge_is_the_sort_of_every_event() {
             receipt_filter: None,
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
             session: None,
+            entities: None,
         };
         // The naive order: every row by (r, entity, t, seq), every barrier by
         // its instant, tuples first.
@@ -366,4 +374,48 @@ fn a_stream_without_calendars_carries_tuples_only() {
     let _ = st.schema().field_with_name("relation").unwrap().data_type().clone();
     assert!(!st.id.is_empty());
     let _: &dyn Array = &UInt64Array::from(vec![1u64]);
+}
+
+/// The same three instruments with the close held hot (A-D49).
+fn store_hot() -> (Store, StreamSpec) {
+    store_as(BTreeMap::from([("storage".to_string(), "hot".to_string())]))
+}
+
+/// E-99: a stream scoped to named instruments is the unscoped stream's
+/// tuples of those instruments, in the same order, with every barrier and
+/// gap-free sequence numbers; its barrier index numbers the scoped stream
+/// (what a hold-out's truncation reads). Held for a Parquet version and a
+/// hot one.
+#[test]
+fn a_scoped_stream_is_the_unscoped_one_restricted_to_its_instruments() {
+    for (name, (s, mut spec)) in [("parquet", store()), ("hot", store_hot())] {
+        let all = read(&s, &spec, 1, None, 1024);
+        spec.entities = Some(vec![3, 1, 3]);
+        let scoped = read(&s, &spec, 1, None, 1024);
+        let unnumbered = |ev: &[E], keep: &dyn Fn(u64) -> bool| -> Vec<E> {
+            ev.iter()
+                .filter(|e| !matches!(e, E::Tuple { entity, .. } if !keep(*entity)))
+                .map(|e| match e.clone() {
+                    E::Tuple { entity, t, r, p, .. } => E::Tuple { seq: 0, entity, t, r, p },
+                    E::Barrier { calendar, label, at, .. } => E::Barrier { seq: 0, calendar, label, at },
+                })
+                .collect()
+        };
+        assert_eq!(unnumbered(&scoped, &|_| true), unnumbered(&all, &|a| a == 1 || a == 3), "{}", name);
+        assert!(scoped.iter().any(|e| matches!(e, E::Tuple { entity: 3, .. })), "{}", name);
+        assert!(!scoped.iter().any(|e| matches!(e, E::Tuple { entity: 2, .. })), "{}", name);
+        assert_eq!(scoped.iter().map(|e| e.seq()).collect::<Vec<_>>(), (1..=scoped.len() as u64).collect::<Vec<_>>(), "{}", name);
+        let res = resolve(&s, &spec).unwrap();
+        for (cal, b, seq) in index(&s, &res).unwrap() {
+            let at = scoped
+                .iter()
+                .find(|e| matches!(e, E::Barrier { calendar, label, .. } if *calendar == cal && *label == b.label))
+                .unwrap_or_else(|| panic!("{}: no {} barrier at {}", name, cal, b.label));
+            assert_eq!(at.seq(), seq, "{}: the index of {} at {}", name, cal, b.label);
+        }
+        // An unscoped stream keeps its identity: no `entities` in its canonical form.
+        spec.entities = None;
+        let plain = resolve(&s, &spec).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("entities"));
+    }
 }

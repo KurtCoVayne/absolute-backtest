@@ -47,7 +47,7 @@ fn a_damaged_payload_is_refused() {
 fn owned_types_have_a_canonical_form() {
     let h = hello();
     let text = h.canonical().unwrap();
-    assert_eq!(text, r#"{"capabilities":["query","contract"],"client":"abt test","layer":"Kernel","protocol":"1.1"}"#);
+    assert_eq!(text, r#"{"capabilities":["query","contract"],"client":"abt test","layer":"Kernel","protocol":"1.2"}"#);
     let json = serde_json::to_string(&h).unwrap();
     let back: Hello = serde_json::from_str(&json).unwrap();
     assert_eq!(back, h);

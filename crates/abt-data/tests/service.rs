@@ -255,6 +255,7 @@ fn script(c: &Client) -> Vec<String> {
         receipt_filter: None,
         clock: abt_wire::generated::abt::wire::ClockSource::Replay,
         session: None,
+        entities: None,
     };
     let mut reply = c
         .call(Message::SubscribeRequest(Box::new(SubscribeRequest {

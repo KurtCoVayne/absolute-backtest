@@ -511,6 +511,9 @@ impl DataService {
                 clocks: vec![],
                 calendars: calendars.clone(),
                 r_max: None,
+                // A live session carries every instrument it records (E-99
+                // scopes replayed streams only).
+                entities: None,
             };
             Stream::open(&st, res).map_err(data)?.schema()
         };
@@ -539,6 +542,7 @@ impl DataService {
                 clocks: vec![version],
                 calendars: calendars.clone(),
                 r_max: None,
+                entities: None,
             };
             let last = stream::index(&self.store(), &res).map_err(data)?.last().map_or(0, |(_, _, seq)| *seq);
             let mut s = Stream::open(&self.store(), res).map_err(data)?;

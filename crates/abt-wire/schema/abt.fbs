@@ -228,6 +228,11 @@ table StreamSpec {
   receipt_filter: ReceiptFilter;
   clock: ClockSource;
   session: string;
+  // The instruments whose tuples the stream carries (data-layer ids), when
+  // the program names them (its universe's `instruments` table, or `need
+  // instruments where root = "…"`); absent: every instrument of the bound
+  // versions. Barriers are unaffected (ERRATA E-99; protocol 1.2).
+  entities: [ulong];
 }
 
 // ---------------------------------------------------------- demands, bindings

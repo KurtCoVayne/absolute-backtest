@@ -913,8 +913,44 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
 /// numerics; its answer is held by (instrument, label) for the evaluator. A
 /// literal the layer cannot answer is evaluated here; the result says which
 /// and why.
+/// The instruments a program names (ERRATA E-99): the rows of its
+/// universe's `instruments` table and the values of its `need instruments
+/// where root | symbol | ticker = "…"`, as the data layer's ids, each
+/// futures root with the contracts its continuous series holds. `None`
+/// when it names none: the run reads every instrument the binding holds.
+/// A named instrument the data does not hold names nothing.
+pub fn scope_entities(prog: &Program, bound: &Bound) -> Option<Vec<u64>> {
+    let mut names: Vec<&str> = prog.instruments.iter().map(|(s, _)| s.as_str()).collect();
+    for (attr, value) in &prog.demand.instruments_where {
+        if matches!(attr.as_str(), "root" | "symbol" | "ticker") {
+            names.push(value.as_str());
+        }
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let mut out = BTreeSet::new();
+    for n in names {
+        let Some(sym) = bound.resolve_ticker(n, None).ok().or_else(|| bound.symbols.get(n)) else {
+            continue;
+        };
+        if let Some(&id) = bound.ids.get(sym as usize) {
+            out.insert(id);
+        }
+        for r in bound.rolls.get(&sym).into_iter().flatten() {
+            if let Some(&id) = bound.ids.get(r.contract as usize) {
+                out.insert(id);
+            }
+        }
+    }
+    Some(out.into_iter().collect())
+}
+
 pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &StreamSpec) -> Result<Vec<String>, RunError> {
     let mut notes = Vec::new();
+    // A scoped run keeps the answers of its instruments only, as its stream
+    // carries their tuples only (E-99).
+    let scope: Option<BTreeSet<u64>> = spec.entities.as_ref().map(|e| e.iter().copied().collect());
     if !k.cfg.pushdown {
         return Ok(notes);
     }
@@ -1016,6 +1052,9 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
             let error = col(b, "error")?.clone();
             for i in 0..b.num_rows() {
                 let (Some(t), Some(r)) = (ts[i], rs[i]) else { continue };
+                if scope.as_ref().is_some_and(|s| !s.contains(&ids.value(i))) {
+                    continue;
+                }
                 let Some(&sym) = by_id.get(&ids.value(i)) else {
                     unmapped = true;
                     continue;
@@ -1390,6 +1429,7 @@ pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) ->
             receipt_filter: None,
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
             session: None,
+            entities: scope_entities(k.prog, bound),
         },
         cal_of,
     ))

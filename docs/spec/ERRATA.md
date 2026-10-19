@@ -1779,6 +1779,31 @@ batch driver agree on every corpus program. Each bless since:
     (`running`) and 5.3 s (`two_pass`), from 5.6 s and 6.1 s. Writing the
     answer's log segment is 1.3 s of it: this VM's first write of fresh
     pages runs at about 190 MB/s.
+- **E-99 (D-7.2, D-5.1, P-3.1, K-4.5; a demand scoped to the instruments
+  a program names; protocol 1.2).** A futures run streamed every staged
+  root's minute bars whatever its universe: one root over eight years held
+  14.5 GB and the pipeline's machine killed its data service. `StreamSpec`
+  gains `entities` (optional, a minor change: protocol 1.2), the
+  instruments whose tuples the stream carries. The kernel fills it from
+  the program: the rows of its universe's `instruments` table and the
+  values of `need instruments where root | symbol | ticker = "…"`
+  (parsed since V-3.11, used nowhere until now), resolved through the
+  binding's ticker table to the data layer's ids, each futures root with
+  the contracts its continuous series holds. The data layer reads each
+  partition with those ids as the identity filter (a hot version skips
+  the other instruments' blocks; a Parquet partition reads through its
+  entity index; a relation keyed by no entity is read whole), and the
+  barrier index counts the same tuples, so `to_seq` (a hold-out's
+  truncation) numbers the scoped stream. Pushed-down aggregate answers of
+  other instruments are dropped by the kernel; the data layer still
+  computes them (an `AggregateRequest` has no instrument filter yet). An
+  unscoped stream's canonical form, hence its id, is unchanged; a live
+  session carries every instrument it records. [D] The scope from the
+  program's own text rather than a run option: a program that names its
+  instruments reads only them, so its hash already fixes what it reads,
+  and a rule reading another instrument finds no rows, as a universe
+  outside the table would. Rejected: a scope in the binding (the binding
+  pins versions, not rows, and its id would change for every universe).
 - **E-94 (D-2.3, D-2.2, D-3.6, P-3.1; the `pipeline` class).** The
   pipeline design (`absolute-pipeline/docs/design/pipeline.md`, PL-7.2)
   puts the provenance of what its agents submit in the data layer
