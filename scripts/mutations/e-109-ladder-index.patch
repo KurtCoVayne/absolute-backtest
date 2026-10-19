@@ -1,0 +1,17 @@
+# proposition: E-109 (a ladder level's index is built once, not per bar of the level above)
+# mutation: label_of rebuilds the source level's index for every bar again
+# test: cargo test -p abt-data --test ladder_index
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/staging/build.rs b/crates/abt-data/src/staging/build.rs
+index a543fea..56dbcde 100644
+--- a/crates/abt-data/src/staging/build.rs
++++ b/crates/abt-data/src/staging/build.rs
+@@ -476,7 +476,7 @@ fn build_ladder(
+     for level in Level::of_base(calendar) {
+         let labels = level.labels(base_labels);
+         let index = ladder::index_of(&labels);
+-        let label_of = |lv: Level, key: i64| -> i64 { labels_of[&lv][*indexes[&lv].get(&key).expect("a bucket of the source level") as usize].1 };
++        let label_of = |lv: Level, key: i64| -> i64 { labels_of[&lv][*ladder::index_of(&labels_of[&lv]).get(&key).expect("a bucket of the source level") as usize].1 };
+         let mut per_inst: Vec<Vec<Bar>> = Vec::with_capacity(planned.len());
+         for (o, p) in planned.iter().enumerate() {
+             let e = exponents[o][0];
