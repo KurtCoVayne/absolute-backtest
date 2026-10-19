@@ -2523,6 +2523,32 @@ batch driver agree on every corpus program. Each bless since:
   fragment's volumes still name the far month); a UTC window for the
   break (21:00 to 23:00 covers both offsets, and in summer its second
   hour is the evening's trading).
+- **E-105 (D-7.2, D-7.4, A-D46, V-3.3; a daily futures program reads session
+  bars).** A daily futures program (a `decide on session` clock, `@session`
+  views, windows over sessions) streamed every minute bar of its roots,
+  which made a house-universe plan of fifteen runs take most of an hour.
+  The hot store's 1d ladder level cannot stand in: its buckets are UTC
+  dates (E-89) and a CME session runs from about 22:00 UTC the evening
+  before to 21:00 UTC, so a UTC day holds parts of two trade dates and
+  `@session` views would change. What stands in exactly is the session's
+  bar: the Databento adapter's `level session` (`--level session`) writes
+  one bar per root and session from the held contract's bars (the first
+  open, the highest high, the lowest low, the last close, the summed
+  volume, back-adjusted as the minutes are), labelled at the session's
+  close and received with its last bar, which is what a `@session` view of
+  the minutes computes; its versions say `calendar = 1d` and `bars =
+  session` (a day being the trade date's session, A-D46), under a source
+  of their own beside the minutes. The resolver now orders a need's fitting
+  versions coarsest first (the finest under `prefer base finest`), so
+  `need bars @1d` binds the session bars and `need bars @1m` the minutes.
+  `abt-tests/tests/session_level.rs`: Connors' Double Seven on two roots
+  over forty sessions decides, fills and ends with the same cash, bit for
+  bit, on either level, reading one close a session against eight. A
+  finding the test makes visible and does not fix: no run over
+  adapter-ingested contracts emits a roll (K-5.4's two fills and
+  commissions), on either level. [D] Rejected: the UTC-day ladder level
+  (not the session); building session bars in the kernel from the minutes
+  (the stream would still carry every minute).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

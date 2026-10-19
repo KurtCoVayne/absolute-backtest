@@ -123,6 +123,18 @@ pub struct Options {
     /// default) or dropped and counted (`dropped.no_definition`), for
     /// files whose definitions do not cover every instrument they hold.
     pub undefined: Undefined,
+    /// The bars written: the vendor's or one per session (E-105).
+    pub level: Level,
+}
+
+/// The bars a futures read writes (E-105): the vendor's (each minute), or one
+/// per root and session from the held contract's bars, which a daily
+/// program reads as it would read the minutes' `@session` view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Level {
+    #[default]
+    Bars,
+    Session,
 }
 
 /// What a bar without a definition does to an ingest.
@@ -147,6 +159,7 @@ impl Default for Options {
             from: None,
             to: None,
             undefined: Undefined::Refuse,
+            level: Level::Bars,
         }
     }
 }
@@ -1043,7 +1056,29 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
         for (s, sess) in sessions.iter().enumerate() {
             let c = held[s];
             let adj = adjustment[s];
-            for b in per[s].get(&c).into_iter().flatten() {
+            let held_bars: &[&Bar] = per[s].get(&c).map(|v| v.as_slice()).unwrap_or(&[]);
+            if opts.level == Level::Session {
+                // One bar for the session (E-105): the held contract's first
+                // open, highest high, lowest low, last close and summed
+                // volume, labelled at the session's close and received with
+                // its last bar, as the minutes' `@session` view is.
+                if let (Some(first), Some(last)) = (held_bars.first(), held_bars.last()) {
+                    let r = held_bars.iter().map(|b| received(b, opts.processing_delay)).max().unwrap_or(sess.close);
+                    let high = held_bars.iter().map(|b| adjusted(b.high, s)).fold(f64::NEG_INFINITY, f64::max);
+                    let low = held_bars.iter().map(|b| adjusted(b.low, s)).fold(f64::INFINITY, f64::min);
+                    let volume: f64 = held_bars.iter().map(|b| b.volume).sum();
+                    series.keys.push(root_key.clone());
+                    series.t.push(sess.close);
+                    series.r.push(r);
+                    series.nums.push(vec![adjusted(first.open, s), high, low, adjusted(last.close, s), volume]);
+                    cont.keys.push(root_key.clone());
+                    cont.t.push(sess.close);
+                    cont.r.push(r);
+                    cont.others.push(c.to_string());
+                    cont.nums.push(vec![adj]);
+                }
+            }
+            for b in held_bars.iter().filter(|_| opts.level == Level::Bars) {
                 let r = received(b, opts.processing_delay);
                 series.keys.push(root_key.clone());
                 series.t.push(b.t);
@@ -1212,6 +1247,12 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     if let Some(i) = intervals.iter().next() {
         attributes.insert("calendar".to_string(), calendar_of(*i));
     }
+    if opts.level == Level::Session {
+        // A day's bar is the trade date's session (A-D46), so a need of
+        // `bars @1d` binds it (E-105).
+        attributes.insert("calendar".to_string(), "1d".to_string());
+        attributes.insert("bars".to_string(), "session".to_string());
+    }
     if let Some(d) = &raw.dataset {
         attributes.insert("dataset".to_string(), d.clone());
     }
@@ -1313,6 +1354,13 @@ impl Databento {
                     }
                 }
                 "session_gap" => opts.session_gap = v.parse::<i64>().map_err(|_| bad(k, v, "a number of minutes"))? * MINUTE,
+                "level" => {
+                    opts.level = match v.as_str() {
+                        "bars" | "minute" => Level::Bars,
+                        "session" => Level::Session,
+                        _ => return Err(bad(k, v, "bars or session")),
+                    }
+                }
                 "session_break" => {
                     let hm = |x: &str| -> Option<i64> {
                         let (h, m) = x.trim().split_once(':')?;
