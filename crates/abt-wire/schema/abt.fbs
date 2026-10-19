@@ -450,6 +450,11 @@ table KernelRequest {
   // `run`: stop after the decision at this bar, the stream truncated at that
   // barrier's seq (a trailing hold-out, a walk-forward window; Q-2.3).
   horizon: long = null;
+  // `run`: stop after the last decision barrier whose instant is at or
+  // before this receipt time, the stream truncated at that barrier's seq
+  // (`holdout after TIME`, Q-2.3; E-93); `show binding`: the answer names
+  // the first decision bar after it (`embargo_from`).
+  received_by: long = null;
   // `run`: π, the plan step that asks for the run (Q-2.5), as canonical
   // JSON; part of the run's id (A-4.1).
   plan_step: string;

@@ -555,10 +555,10 @@ fn plan_on(cmd: &str, a: &Args, reveal: Option<String>, p: Plan, prog: Program, 
     let normal = plan::normal_form(&p, &checked.program_hash)?;
     match cmd {
         "check" => {
-            let sample = kernel.sample(&prog, &p.params).map_err(|e| e.to_string())?;
+            let sample = kernel.sample_received_by(&prog, &p.params, exec::received_by(&p.holdout)).map_err(|e| e.to_string())?;
             let folds = match (&p.walk_forward, sample.first, sample.last) {
                 (Some(wf), Some(first), Some(last)) => {
-                    let e = exec::embargo(&p.holdout, first, last);
+                    let e = exec::embargo(&p.holdout, &sample, &p.window);
                     let end = if e.truncates { e.start().map_or(last, |s| (s - 1).min(last)) } else { last };
                     Some(wf.folds(first, end).len())
                 }

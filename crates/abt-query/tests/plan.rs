@@ -52,7 +52,7 @@ fn a_study_parses_to_its_plan() {
     assert_eq!(p.grid.len(), 2);
     assert_eq!(p.grid_points().len(), 6);
     assert!(p.grid_points().iter().all(|q| q.len() == 2), "{:?}", p.grid_points());
-    assert_eq!(p.holdout, Holdout::Trailing { years: 2 });
+    assert_eq!(p.holdout, Holdout::Trailing { months: 24 });
     assert_eq!(p.walk_forward.as_ref().map(|w| (w.anchored, w.train_months, w.test_months)), Some((false, 24, 6)));
     assert_eq!(p.window.as_ref().map(|w| w.describe()), Some("2005-01-03 .. 2020-12-31".into()));
     assert_eq!(p.objective, "calmar");
@@ -160,9 +160,9 @@ study long = sweep(PROG = a.dsl, LB = 100, YEARS = 3y)
     assert_eq!(units.len(), 3);
     let s = plan::plan(&units, "short").unwrap();
     assert_eq!(s.grid, vec![("lookback".to_string(), vec!["10".to_string()])]);
-    assert_eq!(s.holdout, Holdout::Trailing { years: 1 });
+    assert_eq!(s.holdout, Holdout::Trailing { months: 12 });
     let l = plan::plan(&units, "long").unwrap();
-    assert_eq!(l.holdout, Holdout::Trailing { years: 3 });
+    assert_eq!(l.holdout, Holdout::Trailing { months: 36 });
     // A template is not a plan.
     assert!(plan::plan(&units, "sweep").is_err_and(|e| e.contains("no study `sweep`")));
     let missing = "template t(A, B) { program A }\nstudy x = t(A = p.dsl)";

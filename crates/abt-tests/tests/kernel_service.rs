@@ -66,6 +66,7 @@ fn request(op: KernelOp) -> KernelRequest {
         checkpoint_every: None,
         from_checkpoint: None,
         horizon: None,
+        received_by: None,
         plan_step: None,
         embargo_mask: None,
         observe: None,

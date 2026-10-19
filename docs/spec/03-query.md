@@ -23,7 +23,7 @@ study NAME {
   program    PATH | NAME                       # the strategy; its normal form fixes the lineage
   params     { k = v; ... }                    # the base point (overrides the program's defaults within their ranges)
   grid       { k = v1, v2, ...; ... }          # axes; the Cartesian product is the set of points
-  holdout    none | trailing:Ny | blocks:K:Nmo[:seed]
+  holdout    none | trailing:Ny | trailing:Nmo | trailing:N% | after TIME | blocks:K:Nmo[:seed]
   walk_forward anchored:TRAIN:TEST | rolling:TRAIN:TEST       # optional
   window     DATE .. DATE                      # the report window of every run (overrides the program's report block)
   budget     { money X; bytes Y; requests Z }  # what the plan's demands may spend (D-7.2)
@@ -59,7 +59,7 @@ A step's inputs name earlier steps; the steps form a DAG and are executed in top
 
 ### 2.3 Hold-out and embargo
 
-A `trailing:Ny` hold-out truncates every run's stream at the last barrier before the embargo (`--to SEQ` on the kernel, D-5.5), so the kernel never sees the embargoed bars: the embargo is enforced by data, not by discipline. A `blocks` hold-out lets runs cross the blocks (the book's state must) and withholds every metric, test input and ledger row inside them: the query layer applies the block mask to every table it reads from the run, and the kernel's observation ledgers for the run are written only outside the blocks (the kernel is told the mask with the run request, P-3.4). A `reveal` lifts the embargo for one committed point and is logged as a reveal.
+A `trailing:Ny` hold-out truncates every run's stream at the last barrier before the embargo (`--to SEQ` on the kernel, D-5.5), so the kernel never sees the embargoed bars: the embargo is enforced by data, not by discipline. A `trailing:Nmo` hold-out counts months, a `trailing:N%` hold-out embargoes the last N % of the span between the first and last decision bars of the plan's window, and `after TIME` (an ISO-8601 date or datetime, UTC, nanoseconds admitted) begins the embargo at the last barrier whose receipt time is at or before TIME, so that no non-reveal run reads anything received after it and a reveal reports the bars after it (E-93). A `blocks` hold-out lets runs cross the blocks (the book's state must) and withholds every metric, test input and ledger row inside them: the query layer applies the block mask to every table it reads from the run, and the kernel's observation ledgers for the run are written only outside the blocks (the kernel is told the mask with the run request, P-3.4). A `reveal` lifts the embargo for one committed point and is logged as a reveal.
 
 **Proposition 2.1 [N] (the embargo is enforced).** Under `trailing`, no decision, fill, ledger row or metric of a non-reveal run depends on embargoed data. *Proof.* The stream is truncated at the embargo's first barrier (D-5.5); by K-4.1 every output depends on events at or before the barriers consumed. ∎ Under `blocks` the book crosses the blocks by design, and what is withheld is every statistic over them; the proposition does not hold and the report says so, which is the honest status of a block hold-out.
 

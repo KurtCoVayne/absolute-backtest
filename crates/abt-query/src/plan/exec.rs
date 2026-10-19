@@ -247,6 +247,8 @@ struct Ask {
     start: Option<i64>,
     end: Option<i64>,
     horizon: Option<i64>,
+    /// Nothing received after this time is read (`holdout after TIME`).
+    received_by: Option<i64>,
     mask: Vec<(i64, i64)>,
     observe: Vec<String>,
     keep: Keep,
@@ -325,6 +327,7 @@ impl<'a> Executor<'a> {
             start: a.start,
             end: a.end,
             horizon: a.horizon,
+            received_by: a.received_by,
             plan_step: Some(self.pi(a)),
             mask: a.mask.clone(),
             observe: a.observe.clone(),
@@ -410,12 +413,33 @@ impl<'a> Executor<'a> {
     }
 }
 
-/// The embargo of a hold-out over the sample's decision bars `[first,
-/// last]`.
-pub fn embargo(holdout: &Holdout, first: i64, last: i64) -> Embargo {
+/// The receipt time a hold-out truncates every run at (`after TIME`), what
+/// the kernel's `show binding` is asked for the embargo's first bar with.
+pub fn received_by(holdout: &Holdout) -> Option<i64> {
+    match holdout {
+        Holdout::After { time } => Some(*time),
+        _ => None,
+    }
+}
+
+/// The embargo of a hold-out over the sample's decision bars (Q-2.3,
+/// E-93): a trailing hold-out counts back from the sample's last bar; a
+/// percentage is of the span between the first and last decision bars of
+/// the plan's window (the sample's when the plan has none); `after TIME`
+/// begins at the first bar whose barrier closes after the time, which the
+/// kernel named in the sample.
+pub fn embargo(holdout: &Holdout, sample: &Sample, window: &Option<super::Window>) -> Embargo {
+    let (Some(first), Some(last)) = (sample.first, sample.last) else { return Embargo::none() };
     match holdout {
         Holdout::None => Embargo::none(),
-        Holdout::Trailing { years } => validate::trailing_embargo(last, *years),
+        Holdout::Trailing { months } => validate::trailing_months_embargo(last, *months),
+        Holdout::TrailingShare { percent } => {
+            let (from, to) = window_of(window);
+            let first = from.map_or(first, |f| f.max(first));
+            let last = to.map_or(last, |t| t.min(last));
+            validate::trailing_share_embargo(first, last, *percent)
+        }
+        Holdout::After { .. } => validate::after_embargo(sample.embargo_from),
         Holdout::Blocks { count, months, seed } => validate::block_embargo(first, last, *count, *months, *seed),
     }
 }
@@ -442,14 +466,18 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
             return Err(Error::Malformed(format!("study {}: claim `{}` (block) failed, so nothing is revealed", plan.name, c.name)));
         }
     }
-    let sample: Sample = kernel.sample(prog, &plan.params)?;
+    let sample: Sample = kernel.sample_received_by(prog, &plan.params, received_by(&plan.holdout))?;
     let (Some(first), Some(last)) = (sample.first, sample.last) else {
         return Err(Error::Missing(format!("strategy `{}`'s binding {} has no decision bar", prog.strategy, sample.binding)));
     };
-    let embargo = embargo(&plan.holdout, first, last);
-    // A trailing embargo truncates every run before its first bar; a block
-    // embargo is a mask the kernel applies to the ledgers.
-    let horizon = if embargo.truncates { embargo.start().map(|h| h - 1) } else { None };
+    let embargo = embargo(&plan.holdout, &sample, &plan.window);
+    // A trailing embargo truncates every run before its first bar; an
+    // `after` hold-out truncates at the last barrier closed by its time,
+    // which the kernel finds by receipt (the embargo's first bar is its
+    // answer, read back for the masks); a block embargo is a mask the
+    // kernel applies to the ledgers.
+    let received = received_by(&plan.holdout);
+    let horizon = if embargo.truncates && received.is_none() { embargo.start().map(|h| h - 1) } else { None };
     let mask: Vec<(i64, i64)> = if embargo.truncates { vec![] } else { embargo.intervals.clone() };
     let opened = super::lineage::open(ends.data, &checked, &prog.strategy, opts.now)?;
     let ex = Executor {
@@ -499,6 +527,7 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
             start: s,
             end: e,
             horizon: if kind == Kind::Reveal { None } else { horizon },
+            received_by: if kind == Kind::Reveal { None } else { received },
             mask: if kind == Kind::Reveal { vec![] } else { mask.clone() },
             observe,
             keep,

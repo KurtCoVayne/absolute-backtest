@@ -185,6 +185,7 @@ impl KernelService {
             write_outputs: true,
             to_seq: r.to_seq,
             horizon: r.horizon,
+            received_by: r.received_by,
             plan_step: match &r.plan_step {
                 Some(t) => Some(serde_json::from_str(t).map_err(|e| refused(format!("plan_step is not JSON: {}", e)))?),
                 None => None,
@@ -359,7 +360,7 @@ impl Service for KernelService {
                     let cfg = Self::config(&prog, &r)?;
                     let client = (self.connect)().map_err(run_error)?;
                     let mut m = response(KernelOp::Show);
-                    m.text = Some(super::sample(&prog, &client, &cfg).map_err(run_error)?.to_string());
+                    m.text = Some(super::sample(&prog, &client, &cfg, r.received_by).map_err(run_error)?.to_string());
                     return respond(m);
                 }
                 let text = match crate::query::parse(&format!("show {}", what)).map_err(refused)? {

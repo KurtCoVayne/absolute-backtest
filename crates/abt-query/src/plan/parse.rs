@@ -397,18 +397,32 @@ fn months(s: &str) -> Result<u32, String> {
         .map_err(|_| format!("`{}` is not a number of months (6mo) or years (2y)", s))
 }
 
-/// `none`, `trailing:Ny` or `blocks:K:Nmo[:seed]`.
+/// `none`, `trailing:Ny`, `trailing:Nmo`, `trailing:N%`, `after TIME` or
+/// `blocks:K:Nmo[:seed]` (Q-2.1, E-93).
 pub fn holdout(s: &str) -> Result<Holdout, String> {
     let s = s.trim();
     if s == "none" {
         return Ok(Holdout::None);
     }
     if let Some(r) = s.strip_prefix("trailing:") {
-        let years: u32 = r.trim_end_matches('y').parse().map_err(|_| format!("`{}` is not a number of years (trailing:2y)", r))?;
-        if years == 0 {
-            return Err("a trailing hold-out needs at least one year".into());
+        let r = r.trim();
+        if let Some(p) = r.strip_suffix('%') {
+            let percent: u32 = p.parse().map_err(|_| format!("`{}` is not a percentage of the window (trailing:20%)", r))?;
+            if percent == 0 || percent >= 100 {
+                return Err(format!("`{}`: a trailing hold-out takes between 1 % and 99 % of the window", r));
+            }
+            return Ok(Holdout::TrailingShare { percent });
         }
-        return Ok(Holdout::Trailing { years });
+        let months = months(r).map_err(|_| format!("`{}` is not a number of years (trailing:2y), months (trailing:6mo) or a percentage (trailing:20%)", r))?;
+        if months == 0 {
+            return Err("a trailing hold-out needs at least one month".into());
+        }
+        return Ok(Holdout::Trailing { months });
+    }
+    if let Some(r) = s.strip_prefix("after ").or_else(|| s.strip_prefix("after\t")) {
+        let r = r.trim();
+        let time = parse_timestamp(r).ok_or_else(|| format!("`{}` is not a time (after YYYY-MM-DD[THH:MM[:SS[.NNNNNNNNN]]], UTC)", r))?;
+        return Ok(Holdout::After { time });
     }
     if let Some(r) = s.strip_prefix("blocks:") {
         let parts: Vec<&str> = r.split(':').collect();
@@ -425,7 +439,7 @@ pub fn holdout(s: &str) -> Result<Holdout, String> {
         }
         return Ok(Holdout::Blocks { count, months, seed });
     }
-    Err(format!("`{}` is not a hold-out: none, trailing:Ny or blocks:K:Nmo[:seed]", s))
+    Err(format!("`{}` is not a hold-out: none, trailing:Ny, trailing:Nmo, trailing:N%, after TIME or blocks:K:Nmo[:seed]", s))
 }
 
 fn walk_forward(s: &str) -> Result<WalkForward, String> {

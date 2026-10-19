@@ -3872,6 +3872,10 @@ pub struct Replay {
     /// Stop after the decision at this bar: what the data received by its
     /// barrier decides (the stream truncated at that barrier's seq).
     pub horizon: Option<i64>,
+    /// Stop after the last decision barrier whose instant is at or before
+    /// this receipt time (`holdout after TIME`, Q-2.3): the run reads
+    /// nothing received after it.
+    pub received_by: Option<i64>,
     pub checkpoint_every: Option<CheckpointEvery>,
     pub from: Option<Checkpoint>,
     /// Record the windowed groups' summaries (the `summary` state table).
@@ -3930,11 +3934,14 @@ pub enum Next {
 /// What a run of the program would read now, without a run (P-3.4's `show
 /// binding`, E-59): the binding, its relations' versions, and the decision
 /// calendar's bars, the sample a plan places its hold-out and its
-/// walk-forward folds in (Q-2.3).
-pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig) -> Result<serde_json::Value, RunError> {
+/// walk-forward folds in (Q-2.3). With `received_by`, the first decision
+/// bar whose barrier closes after that receipt time (`embargo_from`, where
+/// a `holdout after TIME` begins; E-93), null when none does.
+pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig, received_by: Option<i64>) -> Result<serde_json::Value, RunError> {
     let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides), None)?;
     let probe = Kernel::build(prog, &bound, cfg.clone())?;
     let labels: Vec<i64> = bind::calendars(&probe).pop().map(|(_, l)| l).unwrap_or_default();
+    let embargo_from = received_by.and_then(|rb| labels.iter().copied().find(|&l| bind::barrier_at(prog, l) > rb));
     let relations: Vec<serde_json::Value> = bound
         .binding
         .pairs
@@ -3951,6 +3958,7 @@ pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig) -> Result<s
         "bars": labels.len(),
         "first": labels.first(),
         "last": labels.last(),
+        "embargo_from": embargo_from,
     }))
 }
 
@@ -3991,7 +3999,7 @@ pub fn replay_observed<'p>(
         return Err(RunError::Config("a live-broker run takes its deployment document (K-6.5)".into()));
     }
     if let Some(session) = opts.mode.session() {
-        if opts.horizon.is_some() || opts.to_seq.is_some() || opts.from.is_some() {
+        if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() || opts.from.is_some() {
             return Err(RunError::Config(format!(
                 "a {} run reads its session from now on: no horizon, truncation or resumption",
                 opts.mode.name()
@@ -4030,7 +4038,15 @@ pub fn replay_observed<'p>(
     let run = bind::run_id(
         &identity.program_hash,
         &identity.binding_id,
-        &bind::plan_step(opts.plan_step.as_ref(), &cfg, opts.to_seq, opts.horizon, opts.mode.session(), opts.replay_of.as_deref()),
+        &bind::plan_step(
+            opts.plan_step.as_ref(),
+            &cfg,
+            opts.to_seq,
+            opts.horizon,
+            opts.received_by,
+            opts.mode.session(),
+            opts.replay_of.as_deref(),
+        ),
         &identity.mode,
     );
     let identity = Identity { run_id: run.clone(), ..identity };
@@ -4044,12 +4060,21 @@ pub fn replay_observed<'p>(
     }
     let mut to_seq = opts.to_seq;
     let mut end_label: Option<i64> = None;
-    if opts.horizon.is_some() || opts.to_seq.is_some() {
+    if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() {
         let dcal = prog.decision_cal.to_string();
         let index = client.stream_index(spec.clone())?;
+        let mut cut = |at: Option<&bind::IndexRow>| {
+            let seq = at.map(|r| r.seq).unwrap_or(0);
+            to_seq = Some(to_seq.map_or(seq, |s| s.min(seq)));
+        };
         if let Some(h) = opts.horizon {
-            let at = index.iter().rfind(|r| r.calendar == dcal && r.label <= h);
-            to_seq = Some(to_seq.map_or(at.map(|r| r.seq).unwrap_or(0), |s| s.min(at.map(|r| r.seq).unwrap_or(0))));
+            cut(index.iter().rfind(|r| r.calendar == dcal && r.label <= h));
+        }
+        // `holdout after TIME`: the last decision barrier whose instant is
+        // at or before the receipt time, so nothing received after it is
+        // read (Q-2.3, E-93).
+        if let Some(rb) = opts.received_by {
+            cut(index.iter().rfind(|r| r.calendar == dcal && r.at <= rb));
         }
         end_label = index.iter().filter(|r| to_seq.is_none_or(|s| r.seq <= s)).map(|r| r.label).max();
     }

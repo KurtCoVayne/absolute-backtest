@@ -1,0 +1,17 @@
+# proposition: Q-2.1 (Prop. Q-2.1, the embargo is enforced; the `after TIME` form of E-93)
+# mutation: an `after` hold-out truncates at the last barrier whose label, not whose instant, is at or before the time
+# test: cargo test -p abt-tests --test plan_holdout an_after_hold_out_truncates_every_run_at_its_time_and_a_reveal_reports_the_bars_after_it
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+index 248ebc8..b908d9c 100644
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -4066,7 +4066,7 @@ pub fn replay_observed<'p>(
+         // at or before the receipt time, so nothing received after it is
+         // read (Q-2.3, E-93).
+         if let Some(rb) = opts.received_by {
+-            cut(index.iter().rfind(|r| r.calendar == dcal && r.at <= rb));
++            cut(index.iter().rfind(|r| r.calendar == dcal && r.label <= rb));
+         }
+         end_label = index.iter().filter(|r| to_seq.is_none_or(|s| r.seq <= s)).map(|r| r.label).max();
+     }

@@ -2297,6 +2297,60 @@ batch driver agree on every corpus program. Each bless since:
     - K-9.3 puts every case in `tests/options.rs`. The futures and the
       limits have their own files, as the migration's plan lists them
       (M-7).
+- **E-93 (Q-2.1, Q-2.3, P-3.4, A-4.1; the hold-out forms the pipeline
+  needs: `after TIME`, `trailing:N%`, `trailing:Nmo`).** The pipeline
+  design (`absolute-pipeline/docs/design/pipeline.md`, PL-6.6 item 2)
+  asks for a forward hold-out on everything received after a time and a
+  trailing hold-out sized from the window. Q-2.1's grammar gains
+  `holdout after TIME`, `trailing:N%` and `trailing:Nmo` beside
+  `trailing:Ny` (`plan::Holdout::{After, TrailingShare, Trailing}`,
+  `parse::holdout`); Proposition Q-2.1 holds unchanged, since every form
+  but `blocks` truncates the stream.
+  - **`after TIME`.** TIME is an ISO-8601 date or datetime, UTC, with
+    optional nanoseconds (`abt_wire::scalar::parse_timestamp`), written
+    back as the kernel prints a time, so one instant has one text in the
+    normal form. The embargo begins at the last barrier whose receipt
+    time is at or before TIME: the kernel's run request (P-3.4) gains
+    `received_by`, which it turns into `to_seq` through `stream_index`
+    (the last decision barrier whose `at` is ≤ TIME; `kernel/mod.rs`),
+    exactly as `horizon` is turned into one, taking the earlier seq when
+    a request gives both; the query layer sends an `after` plan's runs
+    `received_by` alone, so the receipt is what truncates them.
+    `received_by` is in π (`bind::run_step`), so a run truncated by
+    receipt is its own run (A-4.1). `show binding` takes
+    `received_by` too and answers `embargo_from`, the first decision bar
+    whose barrier closes after TIME (`bind::barrier_at`, E-13), which is
+    where the query layer's embargo begins (`validate::after_embargo`):
+    its masks, its reveal (`Keep::Inside`) and its claims read the same
+    boundary the kernel truncates at. A daily bar labelled at midnight
+    closes at its day's end, so `after 2023-09-15` embargoes the bar of
+    the 15th. A TIME after the sample embargoes nothing (a reveal is
+    refused: nothing to reveal); one before it leaves no bar to read.
+    Rejected: computing the boundary in the query layer from the labels
+    (it does not know the calendars' bucket rule, which the kernel and
+    the data layer share), and truncating by the label alone (a bar
+    received after TIME would be read when its label precedes it).
+  - **`trailing:N%`.** N is between 1 and 99. The embargo is the last N
+    % of the span between the first and last decision bars of the plan's
+    window (`validate::trailing_share_embargo`, the tail rounded up to
+    the nanosecond): the window's ends clipped to the sample's when the
+    plan has one, the sample's otherwise. `trailing:Ny` and `trailing:Nmo`
+    keep counting back from the sample's last bar, as E-59 built them,
+    so no existing plan's embargo moves. Rejected: a percentage of the
+    sample whatever the window (the guideline sizes the hold-out from
+    the span before H, which is the window).
+  - **`trailing:Nmo`.** Months, as `blocks` and `walk_forward` already
+    count them (`validate::trailing_months_embargo`); `Holdout::Trailing`
+    holds months, and a whole number of years is still written
+    `trailing:Ny` (`describe`), so `trailing:24mo` and `trailing:2y` are
+    one plan and every existing normal form is unchanged.
+  - **Tests.** `abt-tests/tests/plan_holdout.rs` (every run under `after`
+    reads no bar received after TIME and the reveal reports exactly the
+    bars after it; the percentage embargoes its share of the sample and
+    of the window; the forms parse, round-trip and the malformed are
+    refused) and `abt/tests/plan_cli.rs` (`abt plan check` prints each
+    form). Falsified by `scripts/mutations/q-2.1-after-receipt.patch`
+    (the kernel cuts by the label rather than the barrier's instant).
 
 ## Layout
 

@@ -32,7 +32,7 @@ fn embargoes_are_month_aligned_and_seeded() {
     // The seed decides the blocks.
     assert_eq!(b.intervals, block_embargo(ts("2022-01-03"), ts("2024-12-31"), 3, 2, 7).intervals);
     assert_ne!(b.intervals, block_embargo(ts("2022-01-03"), ts("2024-12-31"), 3, 2, 8).intervals);
-    assert_eq!(holdout("trailing:2y"), Ok(Holdout::Trailing { years: 2 }));
+    assert_eq!(holdout("trailing:2y"), Ok(Holdout::Trailing { months: 24 }));
     assert!(holdout("trailing:0y").is_err());
     assert!(holdout("blocks:4:3mo").is_ok());
     assert!(holdout("blocks:0:3mo").is_err());
