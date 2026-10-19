@@ -1,0 +1,24 @@
+[package]
+name = "abt-data"
+description = "The data layer (docs/spec/01-data.md): the store, the query engine, the stream with clock barriers and the resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "abt-data"
+path = "src/bin/abt-data.rs"
+
+[dependencies]
+abt-agg.workspace = true
+abt-wire.workspace = true
+arrow.workspace = true
+abt-codec.workspace = true
+blake3.workspace = true
+memmap2.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zstd.workspace = true

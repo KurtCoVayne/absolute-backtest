@@ -4,7 +4,7 @@
 # this demand, so the relation is not closed even though `count` fires on an
 # empty group.
 strategy bad_negation_over_aggregate {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

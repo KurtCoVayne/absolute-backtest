@@ -3,7 +3,7 @@
 # base: a base relation is read at a daily label only through its bar view,
 # `close@daily` (WF-16).
 strategy bad_calendar_mix {
-  data { class equity   need bars @1m   need listing   require tested   prefer latest }
+  data { class equity   need bars @1m   need listing   require reviewed   prefer latest }
   uses calendar, book
   calendars { daily = days }
   clock { decide on daily }

@@ -86,6 +86,168 @@ latches (`cumf`, `row`, `lp`, about a fifth) and the rolling features of
   per-instrument work is independent and can be split over threads.
 
 
+## Data layer budgets (D-9.1), measured at M-2, Oct 15, 2026
+
+The data layer of `docs/spec` (`crates/abt-data`) measured against the
+budgets of D-9.1 at the end of migration step M-2. These numbers are not the
+reference machine's: they come from a 4-core Intel Xeon at 2.8 GHz with
+15 GB in a cloud container, in a release build. G10 asserts the budgets on
+the owner's M4, after M-8.
+
+The measurements come from `crates/abt-data/tests/budgets.rs`, an ignored
+test, run with
+`cargo test -p abt-data --release --test budgets -- --ignored --nocapture`.
+The data:
+
+- 2,000 entities × 2,520 days of one numeric column, synthetic.
+- Ingested as ten yearly versions into monthly partitions.
+- Every query read from disk. M-2 has no resident layer: mmap, the CSR
+  index and the resident LRU come at M-8.
+
+| Operation | D-9.1 bound | Measured | |
+| --- | --- | ---: | --- |
+| Ingest | ≥ 200,000 rows/s | 2.70M rows/s | within, 13× |
+| Footprint | ≤ 16 B per value resident | 3.05 B per value **on disk** | resident not measurable yet |
+| `point` | ≤ 50 µs from disk | 847 µs median | 17× over |
+| `latest` | ≤ 50 µs from disk | 810 µs median | 16× over |
+| `series` of 252 rows | < 100 µs resident | 6.25 ms median from disk, 12 partitions | not comparable: from disk |
+| `section` | < 5 ms at 10,000 entities from a resident partition | 1.76 ms median at 2,000 entities from disk | |
+| Rolling 252-row mean, 10,000 × 7,560 | < 10 s on 1 thread, < 2 s on 8 | about 94 s on 1 thread, 80 s on 8 (`running`); 130 s and 89 s (`two_pass`) | 9–45× over |
+
+The rolling rows are scaled linearly from 2,000 × 2,520 (5.04M rows). That
+size took 6.3 s on one thread and 5.4 s on eight with `running`, and 8.5 s
+and 5.9 s with `two_pass`. "Eight threads" is eight threads on four cores.
+The barrier latency is a live budget and waits for M-6.
+
+**Where the time goes.** At M-2 `latest` read every partition from the start
+of the data up to `t_max`, and took 27 ms. It now reads back from `t_max` and
+stops at the first bucket that holds the entity's rows, when the identity
+fixes the fact's key. That leaves `point` and `latest` dominated by one
+partition's open: the manifest's JSON, the Parquet footer, the offset index
+and one row group's decode. A resident layer and mmap (M-8) remove all of
+that.
+
+The aggregate pass on 5.04M rows with `running` on one thread spends:
+
+| Stage | Share | Notes |
+| --- | ---: | --- |
+| Writing the answer as a cache object | 42% (2.7 s) | through the general `put` path: a bucket string formatted per row, a lexicographic sort of rows already in order, deduplication, the log and zstd Parquet |
+| The windows themselves | 23% (1.5 s) | 3.5 s with `two_pass`; the only stage that is parallel, 3.4× on four cores |
+| The output's sort into (t, entity) | 13% (0.8 s) | a comparison sort where a counting sort over the labels would do |
+| Reading and grouping the rows | 16% (1.1 s) | |
+| Building the answer batch | 5% (0.3 s) | |
+
+The pass is therefore bounded by its serial stages, not by the arithmetic.
+M-8's list:
+
+- a put path for rows already sorted;
+- bucket keys computed once per bucket;
+- a counting sort of the output;
+- columnar grouping instead of a map of row vectors.
+
+**At M-8 (Oct 17): the resident layer.** Reads go through the resident
+cache of decoded row groups, with manifests read once per version
+(ERRATA E-74). Same data, same machine:
+
+| Operation | D-9.1 bound | From disk | Resident | |
+| --- | --- | ---: | ---: | --- |
+| `point` | ≤ 50 µs | 721 µs | 40 µs | within |
+| `latest` | ≤ 50 µs | 689 µs | 41 µs | within |
+| `series` of 252 rows | < 100 µs resident | 6.1 ms | 158 µs | 1.6× over |
+| `section` | < 5 ms at 10,000 names | 1.6 ms at 2,000 | 303 µs at 2,000 | within, scaled |
+| Resident footprint | ≤ 16 B per value | | 8 B per value | within |
+
+M-2's list for the aggregate pass is partly done: dense slots, a columnar
+answer in (t, group) order without a sort, bucket names once per span, and
+no sort of rows already sorted. The rolling mean of 5.04M rows on eight
+threads now takes 4.7 s (`running`), from 5.6 s, and 5.3 s (`two_pass`),
+from 6.1 s. Of that, 1.3 s is the answer's log segment, written at this
+VM's 190 MB/s for fresh pages, and about 1 s is the Parquet encoding.
+
+**At M-8 (Oct 17): the kernel's evaluator.** `momentum_12_1` over 100
+synthetic names and 2,520 days, in release on the same machine. The table
+gives the kernel's run time (`--timing`'s `run_s`) and the window bars it
+solves:
+
+| Kernel | Set evaluator | Tuple evaluator | Window bars solved |
+| --- | ---: | ---: | ---: |
+| M-8a | 43.2 s | 43.7 s | 62.7M |
+| `dividend_at`'s rows served from the window cache (ERRATA E-75) | 19.1 s | | 0.98M |
+| the cache read in order into the aggregate's columns, the literal analysed once | 15.0 s | 15.1 s | 0.98M |
+
+The cache was the gain. `dividend_at` tests `Ex = T` inside a year's
+window, which made every call's rows its own: each call solved its whole
+window again.
+
+The set evaluator itself gains little here. The time is in two places:
+
+- **The window's per-bar solves.** They are nested in the aggregation and
+  still one environment at a time (E-75).
+- **The stream's insertion into the stored tables.** Each tuple was
+  checked against its bar's whole block for a revision. That was 12% of the
+  kernel's time at 200 names, and it grew with the square of the names.
+  M-8b searches only the rows received at earlier instants: at 300 names
+  the run takes 42.1 s, from 52.2 s.
+
+The whole corpus was also timed: the 24 programs and the two books, each on
+its seeded market, the faster of three runs (`tests/eval_set.rs`). It
+takes 11.4 s with the tuple evaluator and 11.2 s with the set evaluator.
+Those runs are short, 0.26 s to 1.2 s each, and mostly data setup. The
+longest, `r8l`, takes 1.23 s against 1.05 s.
+
+**Memory at M-8.** The same run peaks at 878 MB at 100 names and 2.6 GB at
+300. Valgrind's massif, on a smaller run, puts the live heap at about a
+third of that:
+
+- the stored tuples, about 80 B each;
+- the stream's batches in flight, bounded by its flow-control window. Each
+  batch row carries every relation's columns, mostly null;
+- the data layer's resident cache, about 45 MB here.
+
+The rest is glibc's per-thread arenas. The data service allocates on its
+threads what the kernel frees on its own:
+
+| Allocator | Run time | Peak |
+| --- | ---: | ---: |
+| glibc, default arenas | 14.8 s | 878 MB |
+| glibc, `MALLOC_ARENA_MAX=1` | 15.7 s | 649 MB |
+| glibc, `MALLOC_ARENA_MAX=2` | 15.2 s | 781 MB |
+| jemalloc (`LD_PRELOAD`) | 14.9 s | 763 MB |
+
+The owner's machine runs macOS, whose allocator is not glibc's, so nothing
+is changed for Linux alone. A Linux run can set `MALLOC_ARENA_MAX`.
+
+M-8b then stores a key's tuples row-major in one buffer, with no allocation
+per tuple (ERRATA E-76). Measured back to back with the M-8c binary (at 100
+names the faster of two runs):
+
+| Names | M-8c | M-8b |
+| ---: | ---: | ---: |
+| 100 | 14.5 s, 957 MB | 13.8 s, 791 MB |
+| 300 | 54.2 s, 2.77 GB | 44.0 s, 2.21 GB |
+
+The rows still hold 16 B values with the key's time in each. 3.1's typed
+columns would take a close to 12 B.
+
+**At M-8: the targets of A-7.3.** `scripts/bench.sh none OUT` runs the
+synthetic ladder and the data layer's budgets here; with the lake and the
+books' stores it runs the rest on the owner's machine:
+
+| Target | Value | Measured here | |
+| --- | --- | --- | --- |
+| Sustained ingest | 200,000 rows/s | 2.93M rows/s | within |
+| Cross-section of one bar | < 1 ms | 308 µs at 2,000 names, resident | within |
+| Point lookup | O(log n) | 39 µs, resident | |
+| Storage per stored value | ≤ 16 B resident, ≤ 4 B on disk | 10.0 B resident, 3.05 B on disk | within |
+| MW14 full replay | ≤ 60 s, ≤ 1.5 GB | the owner's data | |
+| R8L full replay | ≤ 3 s, ≤ 0.6 GB | the owner's data | |
+| Barrier to decision, live | < 50 ms | a live feed | |
+
+The synthetic ladder runs `momentum_12_1` with n a tenth of the names:
+14.8 s and 0.80 GB at 100 names, 46.5 s and 2.35 GB at 300. The log-log
+slopes against names are 1.04 for run time and 0.98 for memory: both
+linear.
+
 **Correctness carries over to real data.** The path from the company's
 Norgate lake to a tested bundle works:
 

@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""MW14 parity: abt's weekly returns (abt run ... --returns FILE) against the
-Python book's canonical weekly returns (_canon_wkret_mw14_full.npy, 1,852
-decision weeks from week_end 1991-01-04), scored with the book's own
-`run_mw1_core.stats` (52 weeks a year, risk-free 0, population deviation,
-CAGR and drawdown compounded on the fixed-base returns) and its dollar P&L
-on the fixed $1M.
+"""MW14 parity: abt's weekly returns, from the run's book in the data layer's
+store (K-9.1: `kernel.<run>.book`, the NAV at every decision barrier, and the
+fixed base the run's report states), against the Python book's canonical
+weekly returns (_canon_wkret_mw14_full.npy, 1,852 decision weeks from
+week_end 1991-01-04), scored with the book's own `run_mw1_core.stats` (52
+weeks a year, risk-free 0, population deviation, CAGR and drawdown
+compounded on the fixed-base returns) and its dollar P&L on the fixed $1M.
 
 abt's return at bar k+1 (the NAV change from week k to week k+1 over the base)
 is the book's wk_ret of decision week k: the trade at week k's close and the
 following week's return. The book's last week (no forward return, cost only)
 has no abt counterpart.
 
-  python scripts/parity/mw14_compare.py ABT_RETURNS.parquet CANON.npy [--weeks N]
+  abt data ingest --store STORE --adapter bundle_v2 --from BUNDLE --class equity corpus-v2/catalog corpus-v2/lib
+  abt data serve --store STORE --socket SOCKET &
+  abt run --strategy mw14 --data SOCKET corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
+      (prints `run RUN: the outputs are kernel.RUN.{...}`)
+  python scripts/parity/mw14_compare.py STORE RUN CANON.npy [--weeks N]
 """
 import argparse
 import sys
 
 import numpy as np
 import pandas as pd
+
+import abt_store
 
 
 def stats(r: np.ndarray) -> dict:
@@ -34,12 +41,15 @@ def stats(r: np.ndarray) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("abt")
+    ap.add_argument("store")
+    ap.add_argument("run")
     ap.add_argument("canon")
     ap.add_argument("--weeks", type=int, default=None, help="compare the first N weeks only")
     ap.add_argument("--worst", type=int, default=10)
     args = ap.parse_args()
-    a = pd.read_parquet(args.abt)
+    # The return per decision bar: the report's calendar is the decision clock.
+    base = abt_store.report(args.store, args.run).get("base_capital")
+    a = abt_store.bar_returns(abt_store.relation(args.store, args.run, "book"), base)
     canon = np.load(args.canon)
     n = min(len(a), len(canon))
     if args.weeks:

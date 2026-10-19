@@ -4,7 +4,7 @@
 # `need bars @1d complete` the demand would require a reviewed store, where a
 # missing bar means the name did not trade, and the negation would be admitted.
 strategy bad_negation_incomplete_primitive {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T). }

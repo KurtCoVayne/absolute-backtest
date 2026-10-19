@@ -4,8 +4,8 @@ strategy momentum_top_n {
   data {
     class   equity
     need    bars @1d
-    need    listing
-    require tested
+    need    actions, listing
+    require reviewed
     prefer  latest
   }
   uses  calendar, bars, book

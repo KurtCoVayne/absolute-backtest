@@ -6,8 +6,8 @@ strategy opening_gap {
   data {
     class   equity
     need    bars @1m
-    need    listing
-    require tested
+    need    actions, listing
+    require reviewed
     prefer  latest
   }
   uses  calendar, book

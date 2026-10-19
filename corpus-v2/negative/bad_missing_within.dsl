@@ -2,7 +2,7 @@
 # A rank names its group in `within (...)`; without it the grouping is the
 # silent one of the first formulation, which made every rank 1 in MW14 (R6).
 strategy bad_missing_within {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, bars, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

@@ -64,6 +64,9 @@ for root in ("ES", "CL", "ZN", "GC"):
     v = t["volume"].to_numpy().astype(np.int64)
     print(f"  databento {root}: OHLC independent {raw:.3f} -> predicted {pred:.3f} B/v; volume {packed_bpv(v, st):.3f} B/v")
 
+if len(sorted(glob.glob(f"{ROOT}/orats/*.parquet"))) < 3:
+    print("== ORATS: no samples under orats/ (ST-11 only): skipped")
+    sys.exit(0)
 print("== ORATS: previous day of the same contract, ask from bid, sparse integers")
 cols = ["ticker", "expirDate", "strike", "cBidPx", "cAskPx", "pBidPx", "pAskPx", "cVolu", "pVolu", "cOi", "pOi", "cMidIv", "smoothSmvVol", "delta", "gamma", "vega", "theta", "cValue"]
 days = [pq.read_table(f, columns=cols).sort_by([("ticker", "ascending"), ("expirDate", "ascending"), ("strike", "ascending")]) for f in sorted(glob.glob(f"{ROOT}/orats/*.parquet"))]

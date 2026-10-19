@@ -1,0 +1,29 @@
+[package]
+name = "abt"
+description = "The front binary (docs/spec/00-architecture.md, Definition 2.2): argument parsing and dispatch to the three layers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "abt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "abt"
+path = "src/main.rs"
+
+[dependencies]
+abt-data.workspace = true
+abt-kernel.workspace = true
+abt-query.workspace = true
+abt-wire.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+abt-tests.workspace = true
+abt-wire.workspace = true
+serde_json.workspace = true

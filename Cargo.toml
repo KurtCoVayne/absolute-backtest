@@ -1,27 +1,60 @@
-[package]
-name = "absolute-backtest"
-version = "0.1.0"
+# The three programs of docs/spec/ (00-architecture.md, A-D2): the data
+# layer, the kernel and the query layer, the two crates they share (the wire
+# types and the aggregate kernels), the front binary `abt`, and the suites
+# that span layers.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2021"
-description = "Strategy DSL v1: typed IR, well-formedness checker, and backtesting kernel"
 license = "MIT"
 
-[lib]
-name = "absolute_backtest"
-path = "src/lib.rs"
-
-[[bin]]
-name = "abt"
-path = "src/bin/abt.rs"
-
-[dependencies]
-# The bundle format (docs/data-bundle.md, section 2 "Storage"): a manifest in
-# JSON and an append-only log of Parquet partitions.
+[workspace.dependencies]
+abt = { path = "crates/abt" }
+abt-agg = { path = "crates/abt-agg" }
+abt-codec = { path = "crates/abt-codec" }
+abt-data = { path = "crates/abt-data" }
+abt-kernel = { path = "crates/abt-kernel" }
+abt-query = { path = "crates/abt-query" }
+abt-tests = { path = "crates/abt-tests" }
+abt-wire = { path = "crates/abt-wire" }
+# The bundle format (docs/data-bundle.md, section 2) and the tables every
+# layer exchanges (P-4): Arrow IPC and Parquet.
+arrow = { version = "60", default-features = false, features = ["ipc"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
+# BLAKE3 without C or assembly (A-D4; docs/spec/ERRATA.md, E-19).
+blake3 = { version = "1.8", default-features = false, features = ["std", "pure"] }
+# FlatBuffers control frames compiled from crates/abt-wire/schema/abt.fbs (P-1.1).
+planus = "1.3.0"
+planus-codegen = "1.3.0"
+planus-translation = "1.3.0"
+# The entity offset index of a partition, memory-mapped (D-3.2).
+memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-arrow = { version = "60", default-features = false }
-parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
+# The live gateway's challenge response (Databento's CRAM: SHA-256 of the
+# challenge and the key) and the Zstandard frames of DBN files and the
+# historical API, the one Parquet already links.
+sha2 = { version = "0.10", default-features = false }
+zstd = { version = "0.14", default-features = false }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# The test suite runs whole programs over years of synthetic bars: the
+# workspace's own code at O1 and its dependencies at O2 keep `cargo test`
+# fast without the release profile's link time.
+[profile.dev]
+opt-level = 1
+# Line tables keep panics' locations in the workspace's crates; the
+# dependencies carry none, since every one of the eighty test binaries links
+# Arrow and Parquet (full debug info would make each hundreds of megabytes).
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

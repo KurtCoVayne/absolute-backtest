@@ -2,24 +2,30 @@
 contract of `docs/semantic-model.md` section 6, written in plain Python over
 pandas frames, deliberately slow, sharing nothing with the kernel.
 
-It replays the decisions of a kernel dump (`abt run --dump DIR`) through its
-own book and produces fills, the book at every bar, dropped decisions,
-actions and the final state, for `diff.py` to compare. Where the model
-leaves an operational detail open (the order of orders within a bar, which
-price a liquidation uses, when funding accrues), the choice taken here is
-the one the model's text states, and a disagreement with the kernel is a
-bug in one of the two with the model as referee.
+It replays the decisions of a run, read back from the store it ran over
+(`store.py`), through its own book and produces fills, the book at every
+bar, dropped decisions, actions and the final state, for `diff.py` to
+compare. Where the model leaves an operational detail open (the order of
+orders within a bar, which price a liquidation uses, when funding
+accrues), the choice taken here is the one the model's text states, and a
+disagreement with the kernel is a bug in one of the two with the model as
+referee.
 
 Conventions of the contract, in the order the bar runs them:
 
-1. At every bar T (the decision resolution's time domain, in order):
+1. At every bar T (the decision calendar's time domain, in order):
    the decisions of the previous bar are filled at T (step 2), then the
-   bar is opened (step 3): corporate actions, mark to market, margin call,
-   the book recorded; then the strategy decides at T.
+   bar is opened (step 3): delistings, mark to market, margin call, the
+   book recorded; then the strategy decides at T.
 2. Filling at T (every bar after the first, whether or not the previous
-   bar decided anything): funding accrues over the calendar time since the
-   previous bar (cash rate on positive cash, margin rate on a debit, borrow
-   fee by ADV bucket and rebate on short notional); the book is marked at T;
+   bar decided anything): interest accrues over the calendar time since
+   the previous bar on the cash held over it (cash rate on positive cash,
+   margin rate on a debit); then T's corporate actions, once a bar: splits
+   multiply the position at the ex-date (a whole-lot remainder is cashed at
+   the price) and dividends going ex are receivables paid at the pay date,
+   so the borrow fee and the orders see the post-split book; then the
+   borrow fee by ADV bucket and the rebate on short notional; the book is
+   marked at T;
    orders that reduce a position go first (symbol order within each
    group), decisions on an instrument supersede its open target, other
    open targets re-issue; ruin halts; each order is sized (a bought long
@@ -28,11 +34,13 @@ Conventions of the contract, in the order the bar runs them:
    known price for a liquidation, moved by slippage and impact, charged
    commission and fee, checked for borrow and leverage (a bar's costs are
    never leverage), and applied.
-3. Opening T: splits multiply the position at the ex-date (a whole-lot
-   remainder is cashed at the price), dividends going ex are receivables
-   paid at the pay date, a delisted name is force-closed at its last trade
-   less the haircut for the reason; then the mark, the maintenance check
-   (halt, liquidate pro rata to the level, or allow), and the NAV record.
+3. Opening T: the corporate actions if no fill step ran them (the first
+   bar), a delisted name force-closed at its last trade less the haircut
+   for the reason; then the mark, the maintenance check (halt, liquidate
+   pro rata to the level, or allow), and the NAV record. The NAV is cash,
+   the marked positions and the receivables (dividends gone ex and not yet
+   paid), in that order (K-5.1); it is what sizing, the leverage check and
+   the maintenance check read.
 4. A decision at the last bar has no bar to fill at and is dropped.
 """
 
@@ -49,12 +57,12 @@ DAY = 86_400
 
 
 def epoch(s: str) -> int:
-    """Seconds since the epoch of a dump timestamp (UTC)."""
+    """Seconds since the epoch of an exported timestamp (UTC)."""
     return int(pd.Timestamp(s, tz="UTC").timestamp())
 
 
 def stamp(t: int) -> str:
-    """A dump timestamp of epoch seconds: the date, with a time when not midnight."""
+    """An exported timestamp of epoch seconds: the date, with a time when not midnight."""
     ts = pd.Timestamp(t, unit="s", tz="UTC")
     if t % DAY == 0:
         return ts.strftime("%Y-%m-%d")
@@ -129,7 +137,7 @@ def _stamp(t) -> str:
 
 
 def read_rows(path: str) -> pd.DataFrame:
-    """A Parquet table of the dump as text cells: timestamps formatted as the
+    """A Parquet table of the export as text cells: timestamps formatted as the
     kernel formats them, booleans as `true`/`false`, nulls as empty."""
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -151,7 +159,7 @@ _rows = read_rows
 
 @dataclass
 class Data:
-    """The dataset of a dump: prices and volumes by (symbol, bar), the
+    """The dataset of an export: prices and volumes by (symbol, bar), the
     actions by bar."""
 
     price: dict = field(default_factory=dict)  # (sym, t) -> price
@@ -220,6 +228,7 @@ class Reference:
         self.open_targets: dict[str, tuple] = {}
         self.receivables: list[tuple] = []
         self.delisted_done: set[str] = set()
+        self.corporate_done: set[int] = set()
         self.seen: list[int] = []
         # The record.
         self.fills: list[Fill] = []
@@ -307,7 +316,8 @@ class Reference:
 
     def open_bar(self, t: int):
         self.seen.append(t)
-        self.actions_at(t)
+        self.corporate_actions_at(t)
+        self.delistings_at(t)
         equity = self.cash
         gross = 0.0
         net = 0.0
@@ -317,6 +327,9 @@ class Reference:
                 equity += q * p
                 gross += abs(q) * p
                 net += q * p
+        # The NAV counts the dividends gone ex and not yet paid.
+        for r in self.receivables:
+            equity += r[2]
         mm = float(self.cfg.maintenance_margin)
         if gross > 0.0 and equity > 0.0 and equity < mm * gross - 1e-9 * gross:
             policy = self.cfg.policy("on_margin_call")
@@ -346,7 +359,10 @@ class Reference:
                     )
         self.nav.append({"t": t, "equity": equity, "cash": self.cash, "gross": gross, "net": net, "leverage": gross / equity if equity > 0.0 else 0.0})
 
-    def actions_at(self, t: int):
+    def corporate_actions_at(self, t: int):
+        if t in self.corporate_done:
+            return
+        self.corporate_done.add(t)
         for sym, factor in self.data.splits.get(t, []):
             pos = self.positions.get(sym)
             if pos is None or factor <= 0.0 or factor == 1.0:
@@ -369,6 +385,8 @@ class Reference:
         for _, sym, amount_cash, amount, shares in due:
             self.cash += amount_cash
             self.actions.append((t, sym, "dividend", f"{amount} x {shares}", amount_cash))
+
+    def delistings_at(self, t: int):
         for sym, reason in self.data.delisted.get(t, []):
             if sym in self.delisted_done:
                 continue
@@ -401,6 +419,10 @@ class Reference:
             self.cash += self.cash * float(cfg.cash_rate) * dt
         elif self.cash < 0.0:
             self.cash -= -self.cash * float(cfg.margin_rate) * dt
+        # The bar's corporate actions after the interest on the cash held
+        # over the interval: the borrow fee and the orders are sized against
+        # the post-split book at the bar's prices.
+        self.corporate_actions_at(tn)
         for sym, q in self.sorted_positions():
             if q >= 0.0:
                 continue
@@ -418,6 +440,8 @@ class Reference:
             p = self.price_at(sym, tn)
             if p is not None:
                 equity_next += q * p
+        for r in self.receivables:
+            equity_next += r[2]
         # Group the bar's decisions by instrument (symbol order), then the
         # open targets of the instruments without a decision.
         by_equity: dict[str, list] = {}
@@ -440,13 +464,11 @@ class Reference:
         def reducing(d) -> bool:
             sym, ctor, amount = d[0], d[1], d[2]
             pos = self.positions.get(sym, 0.0)
-            if ctor in ("sell", "cover"):
-                return pos != 0.0
-            if ctor in ("buy", "short"):
-                return False
-            if ctor == "target_quantity":
+            if ctor == "trade":
+                return pos != 0.0 and amount * pos < 0.0
+            if ctor == "hold_quantity":
                 return pos != 0.0 and abs(amount) < abs(pos) and amount * pos >= 0.0
-            # target_weight
+            # hold_weight
             base = max(equity_next, 0.0) if cfg.compounding else float(cfg.initial_cash)
             return pos != 0.0 and (amount == 0.0 or amount * pos < 0.0 or abs(amount) * base < abs(pos) * marks.get(sym, 0.0))
 
@@ -458,7 +480,7 @@ class Reference:
         sizing_equity = max(equity_next, 0.0) if cfg.compounding else float(cfg.initial_cash)
         bar_costs = 0.0
         for sym, ctor, amount, rule, reissued in pending:
-            is_target = ctor in ("target_weight", "target_quantity")
+            is_target = ctor in ("hold_weight", "hold_quantity")
             pos = self.positions.get(sym, 0.0)
             bar_price = self.bar_price(sym, tn)
             vol = self.realized_vol(sym, bars, end)
@@ -467,11 +489,9 @@ class Reference:
             def slipped(p, buying):
                 return p * (1.0 + slip) if buying else p * (1.0 - slip)
 
-            if ctor in ("buy", "cover"):
+            if ctor == "trade":
                 qty = self.rnd(amount)
-            elif ctor in ("sell", "short"):
-                qty = -self.rnd(amount)
-            elif ctor == "target_quantity":
+            elif ctor == "hold_quantity":
                 qty = self.rnd(amount) - pos
             elif bar_price is not None:
                 target = self.rnd(amount * sizing_equity / bar_price)
@@ -487,7 +507,7 @@ class Reference:
             if qty == 0.0:
                 self.open_targets.pop(sym, None)
                 continue
-            crosses = ctor in ("sell", "cover") and pos != 0.0 and (pos + qty) * pos < 0.0
+            crosses = ctor == "trade" and pos != 0.0 and (pos + qty) * pos < 0.0
             if crosses:
                 policy = cfg.policy("on_oversize")
                 if policy == "halt":
@@ -549,10 +569,17 @@ class Reference:
                 if sym not in self.positions:
                     gross += abs(qty) * p
                     net += qty * p
+                for r in self.receivables:
+                    net += r[2]
                 tol = 1e-9 * (1.0 + abs(net)) + allowance
                 max_gross = max(float(cfg.max_gross), 1.0)
+                # A receivable is a claim to cash: the borrowing it covers
+                # until it is paid is not leverage.
+                liquid = new_cash
+                for r in self.receivables:
+                    liquid += r[2]
                 if cfg.compounding:
-                    breach = new_cash < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol
+                    breach = liquid < -(max_gross - 1.0) * max(net, 0.0) - tol or gross > max_gross * net + tol
                 else:
                     # On a fixed base leverage is gross against the capital; cash may go negative.
                     breach = gross > max_gross * float(cfg.initial_cash) + tol
@@ -604,14 +631,14 @@ class Reference:
         return fills, nav, final
 
 
-def run_dump(directory: str) -> Reference:
+def run_export(directory: str) -> Reference:
     return Reference(directory).run()
 
 
 if __name__ == "__main__":
     import sys
 
-    ref = run_dump(sys.argv[1])
+    ref = run_export(sys.argv[1])
     fills, nav, final = ref.frames()
     print(fills.to_string())
     print(nav.tail().to_string())

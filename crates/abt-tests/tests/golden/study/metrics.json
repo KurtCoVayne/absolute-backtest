@@ -1,0 +1,1628 @@
+{
+  "breakout_52w": {
+    "capacity": 1821841762093.9993,
+    "convention": {
+      "annual_return": -0.0002912991871913207,
+      "cagr": -0.00029185433701928165,
+      "max_drawdown": 0.0014940196084382018,
+      "max_drawdown_additive": 0.0014948273762456373,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.8833887166658092,
+      "profit_factor_trades": 0.5523772748198394,
+      "sharpe": -0.26612179349062337,
+      "sharpe_population": -0.2664559076127757,
+      "total_pnl": -461.2237130529247,
+      "trades": 3,
+      "volatility_population": 0.001093235987151196,
+      "win_rate": 0.6666666666666666
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.21016952098656447,
+      "cagr": -0.00029185433701917063,
+      "cvar_5": 0.0001824066106780431,
+      "kurtosis": 19.529881970591315,
+      "max_drawdown": 0.0014940196084380908,
+      "max_drawdown_duration": 160,
+      "n": 399,
+      "sharpe": -0.26612179349081977,
+      "sharpe_lo": -0.32843246501719464,
+      "sharpe_period": -0.016764097238838014,
+      "sharpe_se": 0.9808666569437683,
+      "skew": 0.16933262878342786,
+      "sortino": -0.3788033871473456,
+      "t_stat": -0.33568524604883065,
+      "total_return": -0.0004620633625714854,
+      "volatility": 0.0010946085375813748,
+      "worst_month": -0.0010302917172313464
+    },
+    "subperiods": [
+      [
+        2022,
+        -1.0865298957148082
+      ],
+      [
+        2023,
+        0.7552993686617342
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.0011547439656195155,
+      "avg_net": 0.0011547439656195155,
+      "avg_participation": 0.00009139248313360606,
+      "cost_drag": 0.0001296571647789073,
+      "decisions": 6,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 6,
+      "impact_drag": 0.00003704372723937442,
+      "max_leverage": 0.012018243896115133,
+      "max_participation": 0.00011785989993694495,
+      "turnover": 0.03900837756807977
+    }
+  },
+  "cash_buffer": {
+    "capacity": 50148911724.231285,
+    "convention": {
+      "annual_return": 0.00030924396109642327,
+      "cagr": 0.00030405556549051305,
+      "max_drawdown": 0.0039421736834892585,
+      "max_drawdown_additive": 0.003947324939214507,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.017122280782672,
+      "profit_factor_trades": 1.1643854419443913,
+      "sharpe": 0.09545698739578432,
+      "sharpe_population": 0.09557683300154517,
+      "total_pnl": 489.6362717360025,
+      "trades": 25,
+      "volatility_population": 0.0032355535477035925,
+      "win_rate": 0.48
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.01320713660184726,
+      "cagr": 0.0003040555654914012,
+      "cvar_5": 0.0004512246874348702,
+      "kurtosis": 1.1434166398867465,
+      "max_drawdown": 0.003942173683488259,
+      "max_drawdown_duration": 158,
+      "n": 399,
+      "sharpe": 0.09545698739581208,
+      "sharpe_lo": 0.10127653963023046,
+      "sharpe_period": 0.006013224989351093,
+      "sharpe_se": 0.8431772468239564,
+      "skew": -0.042743797384084084,
+      "sortino": 0.1354311800871874,
+      "t_stat": 0.11266884504445135,
+      "total_return": 0.0004814640040504692,
+      "volatility": 0.0032396157634247994,
+      "worst_month": -0.0017826293980331975
+    },
+    "subperiods": [
+      [
+        2022,
+        0.43329211480546087
+      ],
+      [
+        2023,
+        -0.38237528191612036
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.010683910742684688,
+      "avg_net": 0.010683910742684688,
+      "avg_participation": 0.00010466588744423386,
+      "cost_drag": 0.0008155742644360862,
+      "decisions": 51,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 51,
+      "impact_drag": 0.00022327456293293652,
+      "max_leverage": 0.022385342141194843,
+      "max_participation": 0.00016494001956188632,
+      "turnover": 0.23583635937750178
+    }
+  },
+  "dividend_capture": {
+    "capacity": 3085266619368.076,
+    "convention": {
+      "annual_return": -0.00040241390151910385,
+      "cagr": -0.00040235983952907617,
+      "max_drawdown": 0.0007479553566720476,
+      "max_drawdown_additive": 0.0007482054642763687,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.4776375469430911,
+      "profit_factor_trades": 0.0,
+      "sharpe": -1.7430093326984437,
+      "sharpe_population": -1.745197669194524,
+      "total_pnl": -637.1553440719144,
+      "trades": 6,
+      "volatility_population": 0.00023058356576010868,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.18898165525412625,
+      "cagr": -0.0004023598395296313,
+      "cvar_5": 0.00004983960872235737,
+      "kurtosis": 20.598674669161234,
+      "max_drawdown": 0.0007479553566726027,
+      "max_drawdown_duration": 389,
+      "n": 399,
+      "sharpe": -1.7430093326997997,
+      "sharpe_lo": -1.075044944094977,
+      "sharpe_period": -0.10979926731400744,
+      "sharpe_se": 0.49163834971611603,
+      "skew": -2.605802282358758,
+      "sortino": -2.000463226035685,
+      "t_stat": -1.654659857986096,
+      "total_return": -0.0006369949784531537,
+      "volatility": 0.0002308730618762367,
+      "worst_month": -0.0004207657680509458
+    },
+    "subperiods": [
+      [
+        2022,
+        -2.565143987573444
+      ],
+      [
+        2023,
+        0.1427329161320296
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.0005732966106555336,
+      "avg_net": 0.0005732966106555336,
+      "avg_participation": 0.00011031937151978573,
+      "cost_drag": 0.00006645311266981305,
+      "decisions": 12,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 12,
+      "impact_drag": 0.00002846581707104003,
+      "max_leverage": 0.00491805329643221,
+      "max_participation": 0.00016217496083474695,
+      "turnover": 0.02906625238423851
+    }
+  },
+  "long_short_quantile": {
+    "capacity": 109675.3032544139,
+    "convention": {
+      "annual_return": 0.10582437867921235,
+      "cagr": 0.09045557160757767,
+      "max_drawdown": 0.1438625744183264,
+      "max_drawdown_additive": 0.14593917606868334,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.1120473780620173,
+      "profit_factor_trades": 2.1657101028393417,
+      "sharpe": 0.5392135704546513,
+      "sharpe_population": 0.5398905494663362,
+      "total_pnl": 167555.2662420862,
+      "trades": 20,
+      "volatility_population": 0.1960108003072405,
+      "win_rate": 0.5
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.056233887286099106,
+      "cagr": 0.09045557160757678,
+      "cvar_5": 0.02923104577338336,
+      "kurtosis": 1.8499948902044672,
+      "max_drawdown": 0.14386257441832684,
+      "max_drawdown_duration": 118,
+      "n": 399,
+      "sharpe": 0.5392135704546459,
+      "sharpe_lo": 0.6915110212773222,
+      "sharpe_period": 0.033967262166052344,
+      "sharpe_se": 1.0194768035722723,
+      "skew": -0.03484753243641454,
+      "sortino": 0.7797273961414798,
+      "t_stat": 0.7184749615025746,
+      "total_return": 0.14695389804649084,
+      "volatility": 0.19625689054892284,
+      "worst_month": -0.059255215937957795
+    },
+    "subperiods": [
+      [
+        2022,
+        0.6199335300542351
+      ],
+      [
+        2023,
+        0.44272385652198337
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.6449885258812147,
+      "avg_net": -0.0018886758157771334,
+      "avg_participation": 0.0010335210678387244,
+      "cost_drag": 0.19607805081497612,
+      "decisions": 564,
+      "dropped": 3,
+      "fill_ratio": 1.0,
+      "fills": 558,
+      "impact_drag": 0.15097866551929204,
+      "max_leverage": 1.0862079537618168,
+      "max_participation": 0.043236128157041566,
+      "turnover": 18.398058504727103
+    }
+  },
+  "low_vol_portfolio": {
+    "capacity": 9422722.953495828,
+    "convention": {
+      "annual_return": -0.14379956011941425,
+      "cagr": -0.1399263482179317,
+      "max_drawdown": 0.24809546054165754,
+      "max_drawdown_additive": 0.2767008504501191,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.8191578649507758,
+      "profit_factor_trades": 0.4865950228003437,
+      "sharpe": -1.2228292710993214,
+      "sharpe_population": -1.2243645250260913,
+      "total_pnl": -227682.63685573917,
+      "trades": 3,
+      "volatility_population": 0.11744832293009295,
+      "win_rate": 0.3333333333333333
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.11681056821090029,
+      "cagr": -0.13992634821793126,
+      "cvar_5": 0.014651430568054647,
+      "kurtosis": -0.13852451152580558,
+      "max_drawdown": 0.24809546054165688,
+      "max_drawdown_duration": 267,
+      "n": 399,
+      "sharpe": -1.2228292710993351,
+      "sharpe_lo": -1.3754343536359361,
+      "sharpe_period": -0.0770310035052196,
+      "sharpe_se": 0.8952228558063386,
+      "skew": 0.2589463345035564,
+      "sortino": -1.6901156178482089,
+      "t_stat": -1.4627063764915704,
+      "total_return": -0.21232311319597197,
+      "volatility": 0.1175957785097331,
+      "worst_month": -0.04641823525158628
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.6136847039560009
+      ],
+      [
+        2023,
+        -2.2404599162216896
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.9689621020185054,
+      "avg_net": 0.9689621020185054,
+      "avg_participation": 0.0016358482282660001,
+      "cost_drag": 0.027210950044481434,
+      "decisions": 55,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 55,
+      "impact_drag": 0.016288526293500652,
+      "max_leverage": 1.2584609146794692,
+      "max_participation": 0.009632527214380099,
+      "turnover": 2.792220666421136
+    }
+  },
+  "low_volatility": {
+    "capacity": 1483096.4602348178,
+    "convention": {
+      "annual_return": 0.044932672859532924,
+      "cagr": -0.006345839108326867,
+      "max_drawdown": 0.32883890993194564,
+      "max_drawdown_additive": 0.3869684818610934,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.0435420762437395,
+      "profit_factor_trades": 1.526925233593193,
+      "sharpe": 0.12855872447086591,
+      "sharpe_population": 0.12872012908492703,
+      "total_pnl": 71143.39869426051,
+      "trades": 9,
+      "volatility_population": 0.3490726211895517,
+      "win_rate": 0.4444444444444444
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.001896348315134155,
+      "cagr": -0.006345839108326312,
+      "cvar_5": 0.025686818308223707,
+      "kurtosis": 245.21681754504783,
+      "max_drawdown": 0.3288389099319454,
+      "max_drawdown_duration": 258,
+      "n": 399,
+      "sharpe": 0.12855872447086647,
+      "sharpe_lo": 0.12120378239685288,
+      "sharpe_period": 0.008098438424228247,
+      "sharpe_se": 0.7492651989381582,
+      "skew": 13.893218036509063,
+      "sortino": 0.35422888397592395,
+      "t_stat": 0.15613522038494465,
+      "total_return": -0.010028965401502665,
+      "volatility": 0.34951087951806503,
+      "worst_month": -0.14566619132440728
+    },
+    "subperiods": [
+      [
+        2022,
+        -1.6711714324991895
+      ],
+      [
+        2023,
+        1.1318897481287655
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.7783009484317539,
+      "avg_net": 0.000409896850619358,
+      "avg_participation": 0.0034994026111787083,
+      "cost_drag": 0.05484976017716961,
+      "decisions": 42,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 43,
+      "impact_drag": 0.04105681966989147,
+      "max_leverage": 1.3094757031594233,
+      "max_participation": 0.013188410246962858,
+      "turnover": 5.693781718065089
+    }
+  },
+  "mean_reversion_zscore": {
+    "capacity": 37340698804.32485,
+    "convention": {
+      "annual_return": 0.0011585655135527794,
+      "cagr": 0.0011576131378085996,
+      "max_drawdown": 0.0017083160688551313,
+      "max_drawdown_additive": 0.0017093796194858153,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.146167220639141,
+      "profit_factor_trades": 1.5917804442661907,
+      "sharpe": 0.6429747632824896,
+      "sharpe_population": 0.6437820137740123,
+      "total_pnl": 1834.3953964585671,
+      "trades": 36,
+      "volatility_population": 0.001799623923571546,
+      "win_rate": 0.6388888888888888
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.044906880041812015,
+      "cagr": 0.0011576131378088217,
+      "cvar_5": 0.00024965266176630305,
+      "kurtosis": 3.7151280702540834,
+      "max_drawdown": 0.0017083160688552423,
+      "max_drawdown_duration": 126,
+      "n": 399,
+      "sharpe": 0.6429747632820869,
+      "sharpe_lo": 0.7363877060445965,
+      "sharpe_period": 0.04050360292702443,
+      "sharpe_se": 0.9105514100523664,
+      "skew": 0.6402922186777268,
+      "sortino": 1.0224160334301484,
+      "t_stat": 0.8347913045893851,
+      "total_return": 0.0018335062196683793,
+      "volatility": 0.0018018833393056931,
+      "worst_month": -0.0010852149052280602
+    },
+    "subperiods": [
+      [
+        2022,
+        1.1864012950330756
+      ],
+      [
+        2023,
+        -0.3541026442596506
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.0056418737777984,
+      "avg_net": 0.0056418737777984,
+      "avg_participation": 0.00010721255975010261,
+      "cost_drag": 0.0008619704551752686,
+      "decisions": 74,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 74,
+      "impact_drag": 0.00025874906178839635,
+      "max_leverage": 0.01937946908577229,
+      "max_participation": 0.0002144266232095377,
+      "turnover": 0.2711874050337775
+    }
+  },
+  "momentum_12_1": {
+    "capacity": 2486013.5527736526,
+    "convention": {
+      "annual_return": -0.3594244528094132,
+      "cagr": -0.3535081186998579,
+      "max_drawdown": 0.614874650108583,
+      "max_drawdown_additive": 0.837390971953666,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.6498448727007547,
+      "profit_factor_trades": 0.0,
+      "sharpe": -1.0459594379441937,
+      "sharpe_population": -1.0472726329848245,
+      "total_pnl": -569088.7169482382,
+      "trades": 4,
+      "volatility_population": 0.34320046326907266,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.043366056067571,
+      "cagr": -0.3535081186998579,
+      "cvar_5": 0.043619989014661624,
+      "kurtosis": 254.21558805764346,
+      "max_drawdown": 0.6148746501085829,
+      "max_drawdown_duration": 229,
+      "n": 399,
+      "sharpe": -1.045959437944192,
+      "sharpe_lo": -1.0621009336328024,
+      "sharpe_period": -0.06588925129193401,
+      "sharpe_se": 0.8078590975766237,
+      "skew": -14.374177317861454,
+      "sortino": -1.091626092064957,
+      "t_stat": -1.2960622038204346,
+      "total_return": -0.4987455945115452,
+      "volatility": 0.343631349142805,
+      "worst_month": -0.40320483725887046
+    },
+    "subperiods": [
+      [
+        2022,
+        -1.6885767698921714
+      ],
+      [
+        2023,
+        -1.0708048313669196
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.8846988563902515,
+      "avg_net": -0.01798607536061597,
+      "avg_participation": 0.00401853172916344,
+      "cost_drag": 0.04295733395277153,
+      "decisions": 28,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 29,
+      "impact_drag": 0.031711607564031435,
+      "max_leverage": 3.47196722457443,
+      "max_participation": 0.016630315354466293,
+      "turnover": 4.079640490445876
+    }
+  },
+  "momentum_top_n": {
+    "capacity": 16556434.21607246,
+    "convention": {
+      "annual_return": -0.26086988109939513,
+      "cagr": -0.27081419087554703,
+      "max_drawdown": 0.39556548543175307,
+      "max_drawdown_additive": 0.41757714245875366,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.5999954146621237,
+      "profit_factor_trades": 0.0,
+      "sharpe": -0.8852486951071298,
+      "sharpe_population": -0.8863601188908516,
+      "total_pnl": -413043.9784073755,
+      "trades": 2,
+      "volatility_population": 0.2943159056229145,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.06578811628549114,
+      "cagr": -0.27081419087554703,
+      "cvar_5": 0.0349406588627759,
+      "kurtosis": 286.96631839071136,
+      "max_drawdown": 0.3955654854317532,
+      "max_drawdown_duration": 133,
+      "n": 399,
+      "sharpe": -0.8852486951071298,
+      "sharpe_lo": -1.1343656596114864,
+      "sharpe_period": -0.05576542608804539,
+      "sharpe_se": 1.0191520354176302,
+      "skew": -15.680637193663495,
+      "sortino": -0.9194986360076488,
+      "t_stat": -1.2468200225735755,
+      "total_return": -0.3935050865205466,
+      "volatility": 0.2946854172632534,
+      "worst_month": -0.29406561226420747
+    },
+    "subperiods": [
+      [
+        2022,
+        0.0
+      ],
+      [
+        2023,
+        -1.4953128078960165
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.460292281215694,
+      "avg_net": 0.460292281215694,
+      "avg_participation": 0.00018130728656660607,
+      "cost_drag": 0.02202883298634189,
+      "decisions": 418,
+      "dropped": 4,
+      "fill_ratio": 1.0,
+      "fills": 412,
+      "impact_drag": 0.012288152724757693,
+      "max_leverage": 1.7088395213960457,
+      "max_participation": 0.009395028254706218,
+      "turnover": 2.7162542757934274
+    }
+  },
+  "monthly_rebalance": {
+    "capacity": 3433975.725185316,
+    "convention": {
+      "annual_return": -0.1721967806768989,
+      "cagr": -0.2053799338790212,
+      "max_drawdown": 0.3876855536945919,
+      "max_drawdown_additive": 0.41482360706828386,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.8127568513546322,
+      "profit_factor_trades": 0.0,
+      "sharpe": -0.5632463761382819,
+      "sharpe_population": -0.5639535281758904,
+      "total_pnl": -272644.9027384233,
+      "trades": 4,
+      "volatility_population": 0.30533859985568307,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.06330839986250784,
+      "cagr": -0.20537993387902076,
+      "cvar_5": 0.036177908826752286,
+      "kurtosis": 236.0547686258204,
+      "max_drawdown": 0.38768555369459157,
+      "max_drawdown_duration": 80,
+      "n": 399,
+      "sharpe": -0.5632463761382809,
+      "sharpe_lo": -0.6680874093116047,
+      "sharpe_period": -0.03548118662191038,
+      "sharpe_se": 0.9429427928370523,
+      "skew": -13.535917131373216,
+      "sortino": -0.6020841105561695,
+      "t_stat": -0.7638043112411668,
+      "total_return": -0.30510489494305193,
+      "volatility": 0.30572195041450756,
+      "worst_month": -0.2964780767406541
+    },
+    "subperiods": [
+      [
+        2022,
+        0.22169857845326446
+      ],
+      [
+        2023,
+        -1.1076791235801635
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.6781588394735634,
+      "avg_net": 0.6781588394735634,
+      "avg_participation": 0.0030145672805154183,
+      "cost_drag": 0.03616154679911685,
+      "decisions": 41,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 42,
+      "impact_drag": 0.026981829519284357,
+      "max_leverage": 1.4103954914603445,
+      "max_participation": 0.015254095422192112,
+      "turnover": 3.542141720433949
+    }
+  },
+  "mw14": {
+    "capacity": null,
+    "convention": {
+      "annual_return": 0.023047598337307088,
+      "cagr": 0.022373120888444342,
+      "max_drawdown": 0.04839164317209932,
+      "max_drawdown_additive": 0.04901239959931607,
+      "periods": 79,
+      "periods_per_year": 52.0,
+      "profit_factor": 1.485074389937855,
+      "profit_factor_trades": 1.559412795874459,
+      "sharpe": 0.5358198737730843,
+      "sharpe_population": 0.5392436777714584,
+      "total_pnl": 35014.62055090885,
+      "trades": 8,
+      "volatility_population": 0.04274060000583833,
+      "win_rate": 0.375
+    },
+    "periods_per_year": 52.0,
+    "returns": {
+      "autocorrelation_1": -0.1294024185011413,
+      "cagr": 0.022373120888443898,
+      "cvar_5": 0.014958013379703178,
+      "kurtosis": 11.757579039527275,
+      "max_drawdown": 0.04839164317209954,
+      "max_drawdown_duration": 11,
+      "n": 79,
+      "sharpe": 0.5358198737730835,
+      "sharpe_lo": 0.5539750860456668,
+      "sharpe_period": 0.07430484728082673,
+      "sharpe_se": 0.839959166534459,
+      "skew": -0.8789449295494844,
+      "sortino": 0.783536327145978,
+      "t_stat": 0.658336555804874,
+      "total_return": 0.034186658940509096,
+      "volatility": 0.04301370566009954,
+      "worst_month": -0.04839164317209943
+    },
+    "subperiods": [
+      [
+        2022,
+        0.0
+      ],
+      [
+        2023,
+        0.8940165015470543
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.12005634406199679,
+      "avg_net": 0.12005634406199679,
+      "avg_participation": 0.00044389145742437336,
+      "cost_drag": 0.0020664102202074897,
+      "decisions": 28,
+      "dropped": 4,
+      "fill_ratio": 1.0,
+      "fills": 24,
+      "impact_drag": 0.0,
+      "max_leverage": 0.6195973741262621,
+      "max_participation": 0.0008716302813938079,
+      "turnover": 2.0664102202074903
+    }
+  },
+  "opening_gap": {
+    "capacity": 945373065051.0128,
+    "convention": {
+      "annual_return": -0.00864653558257045,
+      "cagr": -0.008610113343760162,
+      "max_drawdown": 0.0010289220250055964,
+      "max_drawdown_additive": 0.00102934947411553,
+      "periods": 30,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.16004647479780093,
+      "profit_factor_trades": 0.1313401352034411,
+      "sharpe": -7.131612993233227,
+      "sharpe_population": -7.253529738989125,
+      "total_pnl": -1029.34947411553,
+      "trades": 13,
+      "volatility_population": 0.0011920452377955592,
+      "win_rate": 0.23076923076923078
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.09475088017165376,
+      "cagr": -0.00014419096599938008,
+      "cvar_5": 0.000018870549712381013,
+      "kurtosis": 329.9208754116804,
+      "max_drawdown": 0.0010349033257508466,
+      "max_drawdown_duration": 1697,
+      "n": 1799,
+      "sharpe": -0.9194815493496483,
+      "sharpe_lo": -0.9088823495690722,
+      "sharpe_period": -0.057921893206941265,
+      "sharpe_se": 0.37026553818232905,
+      "skew": -13.944839367658169,
+      "sortino": -0.9960789979894195,
+      "t_stat": -2.313170660273796,
+      "total_return": -0.0010289078156174858,
+      "volatility": 0.00015681557884030545,
+      "worst_month": -0.0007323043331508572
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.9194815493496483
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.0026584288128796794,
+      "avg_net": 0.0026584288128796794,
+      "avg_participation": 0.03325572412418488,
+      "cost_drag": 0.0000662117594375605,
+      "decisions": 26,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 26,
+      "impact_drag": 0.00005142430040206671,
+      "max_leverage": 0.014329048705881668,
+      "max_participation": 0.05293806246691371,
+      "turnover": 0.022258840619519337
+    }
+  },
+  "pairs_trading": {
+    "capacity": 91292620557.37561,
+    "convention": {
+      "annual_return": -0.0007609068365619566,
+      "cagr": -0.0007607592221969828,
+      "max_drawdown": 0.0012719673931466113,
+      "max_drawdown_additive": 0.0012725561570160792,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.44200523852621887,
+      "profit_factor_trades": 0.32554150282255734,
+      "sharpe": -1.4323643123772771,
+      "sharpe_population": -1.4341626361393225,
+      "total_pnl": -1204.7691578897648,
+      "trades": 32,
+      "volatility_population": 0.0005305582626321037,
+      "win_rate": 0.3125
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.13864559562404152,
+      "cagr": -0.0007607592221966497,
+      "cvar_5": 0.00009714165893294213,
+      "kurtosis": 44.16374929487371,
+      "max_drawdown": 0.0012719673931461672,
+      "max_drawdown_duration": 302,
+      "n": 399,
+      "sharpe": -1.432364312377265,
+      "sharpe_lo": -2.6424156399764476,
+      "sharpe_period": -0.0902304704141495,
+      "sharpe_se": 1.469073834748013,
+      "skew": -4.50277749571558,
+      "sortino": -1.6165645788760605,
+      "t_stat": -2.0571155095875384,
+      "total_return": -0.0012042681348098938,
+      "volatility": 0.0005312243749629954,
+      "worst_month": -0.00035728733484663433
+    },
+    "subperiods": [
+      [
+        2022,
+        -1.7310915785216212
+      ],
+      [
+        2023,
+        -0.6547513998953612
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.000633582975140406,
+      "avg_net": 0.00003309806730620499,
+      "avg_participation": 0.00010062601052934651,
+      "cost_drag": 0.00047954130797566087,
+      "decisions": 64,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 64,
+      "impact_drag": 0.00016548253588735936,
+      "max_leverage": 0.010883016632228194,
+      "max_participation": 0.0002144266232095377,
+      "turnover": 0.17375907383319794
+    }
+  },
+  "price_floor": {
+    "capacity": 1428235125567.75,
+    "convention": {
+      "annual_return": -0.003682008930312373,
+      "cagr": -0.0037037130238586347,
+      "max_drawdown": 0.009588571042006055,
+      "max_drawdown_additive": 0.009602,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.8735563095928356,
+      "profit_factor_trades": 0.0,
+      "sharpe": -0.4875685160384544,
+      "sharpe_population": -0.48818065503161456,
+      "total_pnl": -5829.847472994588,
+      "trades": 4,
+      "volatility_population": 0.007542308144254359,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.04894207198446864,
+      "cagr": -0.0037037130238584126,
+      "cvar_5": 0.0009000500000000078,
+      "kurtosis": 200.68030678209303,
+      "max_drawdown": 0.009588571042006055,
+      "max_drawdown_duration": 186,
+      "n": 399,
+      "sharpe": -0.487568516038485,
+      "sharpe_lo": -0.5901768550199904,
+      "sharpe_period": -0.030713929536729488,
+      "sharpe_se": 0.9621942131200081,
+      "skew": -12.01218297857646,
+      "sortino": -0.5291638931135685,
+      "t_stat": -0.6532251543464112,
+      "total_return": -0.005857874211671055,
+      "volatility": 0.007551777461410134,
+      "worst_month": -0.006125919472409813
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.18772689642798923
+      ],
+      [
+        2023,
+        -0.7862271172066224
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.01668294584311046,
+      "avg_net": 0.01668294584311046,
+      "avg_participation": 0.0001289623302072154,
+      "cost_drag": 0.0002113588580380055,
+      "decisions": 10,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 11,
+      "impact_drag": 0.000041837926193650474,
+      "max_leverage": 0.02948445461479357,
+      "max_participation": 0.00022846959640845794,
+      "turnover": 0.04199314789908476
+    }
+  },
+  "r8l": {
+    "capacity": null,
+    "convention": {
+      "annual_return": -3.956780502976772,
+      "cagr": -0.9850577162726928,
+      "max_drawdown": 0.39400743504923963,
+      "max_drawdown_additive": 0.47150912814699725,
+      "periods": 30,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.011413682698570205,
+      "profit_factor_trades": 0.1477082833384194,
+      "sharpe": -6.247482659727505,
+      "sharpe_population": -6.354284971597638,
+      "total_pnl": -471045.2979734251,
+      "trades": 87,
+      "volatility_population": 0.6226948461806131,
+      "win_rate": 0.40229885057471265
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.009983087075475091,
+      "cagr": -0.06590891058929382,
+      "cvar_5": 0.006652965520446708,
+      "kurtosis": 277.48548939347694,
+      "max_drawdown": 0.38916797699364314,
+      "max_drawdown_duration": 1333,
+      "n": 1799,
+      "sharpe": -1.020262758763747,
+      "sharpe_lo": -1.123401063237873,
+      "sharpe_period": -0.06427051265784665,
+      "sharpe_se": 0.41252997191401447,
+      "skew": -16.43126853440301,
+      "sortino": -1.0252302459542475,
+      "t_stat": -2.8255744363025235,
+      "total_return": -0.38537248621035736,
+      "volatility": 0.06467255456610321,
+      "worst_month": -0.2753168348977526
+    },
+    "subperiods": [
+      [
+        2022,
+        -1.020262758763747
+      ]
+    ],
+    "trading": {
+      "avg_gross": 1.3107991383690616,
+      "avg_net": -0.23224132811789716,
+      "avg_participation": 0.5419161966227904,
+      "cost_drag": 0.08291532315729314,
+      "decisions": 87,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 174,
+      "impact_drag": 0.0,
+      "max_leverage": 7.714772556049006,
+      "max_participation": 18.525804691206105,
+      "turnover": 20.623338090241536
+    }
+  },
+  "regime_momentum": {
+    "capacity": 262037.2104976443,
+    "convention": {
+      "annual_return": -0.2258324362098136,
+      "cagr": -0.24689182705945512,
+      "max_drawdown": 0.46570400447102933,
+      "max_drawdown_additive": 0.5414406201865305,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.7207677509901239,
+      "profit_factor_trades": 0.22050072919145577,
+      "sharpe": -0.7427371976381115,
+      "sharpe_population": -0.7436696991951006,
+      "total_pnl": -357568.0239988717,
+      "trades": 24,
+      "volatility_population": 0.3036730371752942,
+      "win_rate": 0.16666666666666666
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.03441960766740104,
+      "cagr": -0.24689182705945578,
+      "cvar_5": 0.03672093826938889,
+      "kurtosis": 253.31544843451263,
+      "max_drawdown": 0.46570400447103,
+      "max_drawdown_duration": 156,
+      "n": 399,
+      "sharpe": -0.7427371976381111,
+      "sharpe_lo": -0.8210967989255185,
+      "sharpe_period": -0.04678804558160648,
+      "sharpe_se": 0.8790438860853633,
+      "skew": -14.275137813672881,
+      "sortino": -0.7845702559930583,
+      "t_stat": -0.9824517972841605,
+      "total_return": -0.3617010140742217,
+      "volatility": 0.3040542966313738,
+      "worst_month": -0.31448403623300714
+    },
+    "subperiods": [
+      [
+        2022,
+        0.7135172335160531
+      ],
+      [
+        2023,
+        -1.5430383593730144
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.5476746205885434,
+      "avg_net": 0.5476746205885434,
+      "avg_participation": 0.0007644509048559064,
+      "cost_drag": 0.12454748317950003,
+      "decisions": 581,
+      "dropped": 4,
+      "fill_ratio": 1.0,
+      "fills": 575,
+      "impact_drag": 0.09767614717418985,
+      "max_leverage": 1.6012011115674127,
+      "max_participation": 0.018026663011069605,
+      "turnover": 12.828561269694175
+    }
+  },
+  "relative_strength": {
+    "capacity": 141198208334.0113,
+    "convention": {
+      "annual_return": -0.004232823238246879,
+      "cagr": -0.004246248107710793,
+      "max_drawdown": 0.00953419677233669,
+      "max_drawdown_additive": 0.009547082963322058,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.7464651657377471,
+      "profit_factor_trades": 0.24992629361356714,
+      "sharpe": -0.632619321360275,
+      "sharpe_population": -0.6334135706641012,
+      "total_pnl": -6701.970127224224,
+      "trades": 18,
+      "volatility_population": 0.006682558496195439,
+      "win_rate": 0.2777777777777778
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.009229305453175216,
+      "cagr": -0.0042462481077092384,
+      "cvar_5": 0.0007392603193859592,
+      "kurtosis": 295.89474490933407,
+      "max_drawdown": 0.009534196772334358,
+      "max_drawdown_duration": 159,
+      "n": 399,
+      "sharpe": -0.6326193213602052,
+      "sharpe_lo": -0.6683216428294917,
+      "sharpe_period": -0.03985127140222748,
+      "sharpe_se": 0.8399032388973474,
+      "skew": -16.052610626809653,
+      "sortino": -0.6564069650551888,
+      "t_stat": -0.7892904223706371,
+      "total_return": -0.0067148946105787255,
+      "volatility": 0.006690948403449591,
+      "worst_month": -0.007895498589695626
+    },
+    "subperiods": [
+      [
+        2022,
+        0.8809772803391787
+      ],
+      [
+        2023,
+        -1.5001158093997584
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.007811900904605152,
+      "avg_net": 0.007811900904605152,
+      "avg_participation": 0.00010572509466877839,
+      "cost_drag": 0.0004191612350351546,
+      "decisions": 38,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 39,
+      "impact_drag": 0.00013306241806047082,
+      "max_leverage": 0.024584305706959828,
+      "max_participation": 0.00034056291644459126,
+      "turnover": 0.1358204293840697
+    }
+  },
+  "resampled_momentum": {
+    "capacity": 5080.866199308127,
+    "convention": {
+      "annual_return": -0.9109490750263901,
+      "cagr": -0.6055392573698504,
+      "max_drawdown": 0.10162627376325617,
+      "max_drawdown_additive": 0.10504575553821657,
+      "periods": 29,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.28307486481875316,
+      "profit_factor_trades": 0.0,
+      "sharpe": -4.818341071511626,
+      "sharpe_population": -4.903628065601231,
+      "total_pnl": -104831.44117367186,
+      "trades": 3,
+      "volatility_population": 0.18577042606813188,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.014971602080082963,
+      "cagr": -0.6055392573698513,
+      "cvar_5": 0.03851094107976594,
+      "kurtosis": 3.1322575728958855,
+      "max_drawdown": 0.10162627376325639,
+      "max_drawdown_duration": 14,
+      "n": 29,
+      "sharpe": -4.818341071511612,
+      "sharpe_lo": -4.685664912670709,
+      "sharpe_period": -0.3035269573121003,
+      "sharpe_se": 2.9319337452244443,
+      "skew": -1.8208895756247483,
+      "sortino": -4.893638896593284,
+      "t_stat": -1.6773291722374202,
+      "total_return": -0.10152008649260802,
+      "volatility": 0.18905865348809883,
+      "worst_month": -0.09579439011912805
+    },
+    "subperiods": [
+      [
+        2022,
+        -4.818341071511612
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.4973068067303648,
+      "avg_net": 0.4973068067303648,
+      "avg_participation": 0.010248666394480296,
+      "cost_drag": 0.7564035121730331,
+      "decisions": 33,
+      "dropped": 2,
+      "fill_ratio": 1.0,
+      "fills": 31,
+      "impact_drag": 0.7014571158181465,
+      "max_leverage": 1.1165580209085997,
+      "max_participation": 0.05187526561835954,
+      "turnover": 36.81200905720642
+    }
+  },
+  "scale_in": {
+    "capacity": 23312032853.25296,
+    "convention": {
+      "annual_return": 0.002255902296858669,
+      "cagr": 0.0021789997853858267,
+      "max_drawdown": 0.009567009934794424,
+      "max_drawdown_additive": 0.009568,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.0399855013081927,
+      "profit_factor_trades": 0.2898266738897886,
+      "sharpe": 0.17900701388189863,
+      "sharpe_population": 0.17923175598406837,
+      "total_pnl": 3571.845303359558,
+      "trades": 10,
+      "volatility_population": 0.012586510043784836,
+      "win_rate": 0.3
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.07513519069382742,
+      "cagr": 0.0021789997853860488,
+      "cvar_5": 0.0019170716531408782,
+      "kurtosis": 16.733982229468364,
+      "max_drawdown": 0.009567009934794424,
+      "max_drawdown_duration": 120,
+      "n": 399,
+      "sharpe": 0.17900701388185797,
+      "sharpe_lo": 0.1895901712153718,
+      "sharpe_period": 0.011276381944468644,
+      "sharpe_se": 0.8417311488527277,
+      "skew": -1.2849549955381856,
+      "sortino": 0.24366460378545277,
+      "t_stat": 0.23439571873840187,
+      "total_return": 0.0034522750017318415,
+      "volatility": 0.01260231232250496,
+      "worst_month": -0.007832144115939021
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.2443135588602132
+      ],
+      [
+        2023,
+        0.4682734872874023
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.032497202170416475,
+      "avg_net": 0.032497202170416475,
+      "avg_participation": 0.000141393031594237,
+      "cost_drag": 0.0012328005696914605,
+      "decisions": 45,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 45,
+      "impact_drag": 0.00032747634241022923,
+      "max_leverage": 0.10185998191416681,
+      "max_participation": 0.0010858293836289504,
+      "turnover": 0.26543305200996914
+    }
+  },
+  "short_term_reversal": {
+    "capacity": 149796.79720227356,
+    "convention": {
+      "annual_return": 0.10829053921609756,
+      "cagr": 0.09576990325942525,
+      "max_drawdown": 0.1929659130193354,
+      "max_drawdown_additive": 0.20688842262071142,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.1024983606603138,
+      "profit_factor_trades": 1.65731395652092,
+      "sharpe": 0.5891670047595663,
+      "sharpe_population": 0.5899066999721018,
+      "total_pnl": 171460.02042548778,
+      "trades": 17,
+      "volatility_population": 0.18357231613273578,
+      "win_rate": 0.4117647058823529
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.02407284288673792,
+      "cagr": 0.09576990325942392,
+      "cvar_5": 0.022841736264762148,
+      "kurtosis": 0.465575087076346,
+      "max_drawdown": 0.1929659130193362,
+      "max_drawdown_duration": 169,
+      "n": 399,
+      "sharpe": 0.5891670047595616,
+      "sharpe_lo": 0.5014588221742757,
+      "sharpe_period": 0.03711403274472876,
+      "sharpe_se": 0.6766439222563554,
+      "skew": 0.22163066068853665,
+      "sortino": 0.8891099202525725,
+      "t_stat": 0.7304708751780908,
+      "total_return": 0.15581679014388072,
+      "volatility": 0.1838027899411814,
+      "worst_month": -0.11339222838240759
+    },
+    "subperiods": [
+      [
+        2022,
+        0.3999117152185802
+      ],
+      [
+        2023,
+        0.9091593927955232
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.7517819331222043,
+      "avg_net": 0.013586646952302637,
+      "avg_participation": 0.008330666305200733,
+      "cost_drag": 0.16124640633602252,
+      "decisions": 53,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 53,
+      "impact_drag": 0.12918697838017196,
+      "max_leverage": 1.032238314589595,
+      "max_participation": 0.028094897505375752,
+      "turnover": 13.970933081535849
+    }
+  },
+  "size_proxy": {
+    "capacity": 1755198.4490037342,
+    "convention": {
+      "annual_return": -0.17105396862532843,
+      "cagr": -0.16716964537284051,
+      "max_drawdown": 0.3153648537229161,
+      "max_drawdown_additive": 0.3642785112641711,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.8286502718691554,
+      "profit_factor_trades": 0.44377222740641453,
+      "sharpe": -1.1131836342312404,
+      "sharpe_population": -1.1145812287982508,
+      "total_pnl": -270835.45032343664,
+      "trades": 3,
+      "volatility_population": 0.15346927097431923,
+      "win_rate": 0.3333333333333333
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.038111731261222144,
+      "cagr": -0.16716964537284007,
+      "cvar_5": 0.022849066037510597,
+      "kurtosis": 0.5124060099951118,
+      "max_drawdown": 0.31536485372291545,
+      "max_drawdown_duration": 276,
+      "n": 399,
+      "sharpe": -1.1131836342312362,
+      "sharpe_lo": -1.2256455714462466,
+      "sharpe_period": -0.07012397761245093,
+      "sharpe_se": 0.8760827954404992,
+      "skew": -0.24851132667458012,
+      "sortino": -1.457168359794958,
+      "t_stat": -1.4052514552065545,
+      "total_return": -0.2514608308671088,
+      "volatility": 0.15366195061200094,
+      "worst_month": -0.10301010585333958
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.5279813565218257
+      ],
+      [
+        2023,
+        -2.0683890001253435
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.8053242961507336,
+      "avg_net": -0.008748248114178353,
+      "avg_participation": 0.0036988755955021818,
+      "cost_drag": 0.05028470943333161,
+      "decisions": 40,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 40,
+      "impact_drag": 0.03774043408976722,
+      "max_leverage": 1.279235806920175,
+      "max_participation": 0.016740412315158753,
+      "turnover": 4.396085480483578
+    }
+  },
+  "sma_crossover": {
+    "capacity": 78254643678.7186,
+    "convention": {
+      "annual_return": -0.006268899566196054,
+      "cagr": -0.006275273777581414,
+      "max_drawdown": 0.011674460080083215,
+      "max_drawdown_additive": 0.011706809090857745,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.7222145785428197,
+      "profit_factor_trades": 0.2305449066307523,
+      "sharpe": -0.8690013326177028,
+      "sharpe_population": -0.8700923579470772,
+      "total_pnl": -9925.757646477083,
+      "trades": 27,
+      "volatility_population": 0.007204866826996494,
+      "win_rate": 0.14814814814814814
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.05530089514023399,
+      "cagr": -0.006275273777580748,
+      "cvar_5": 0.0008675809259782064,
+      "kurtosis": 250.76018969630516,
+      "max_drawdown": 0.011674460080082771,
+      "max_drawdown_duration": 185,
+      "n": 399,
+      "sharpe": -0.8690013326177652,
+      "sharpe_lo": -1.0990716296326208,
+      "sharpe_period": -0.05474193845453163,
+      "sharpe_se": 1.0058761121920239,
+      "skew": -14.196660467449963,
+      "sortino": -0.913607920060208,
+      "t_stat": -1.1845134189361453,
+      "total_return": -0.009917648793535072,
+      "volatility": 0.007213912488847559,
+      "worst_month": -0.006502783054175065
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.2194042679926243
+      ],
+      [
+        2023,
+        -1.4497554648504662
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.011220751807221542,
+      "avg_net": 0.011220751807221542,
+      "avg_participation": 0.00010448136576516417,
+      "cost_drag": 0.000560196386160525,
+      "decisions": 53,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 54,
+      "impact_drag": 0.00017873719792709273,
+      "max_leverage": 0.026839716363937425,
+      "max_participation": 0.00017845575100425973,
+      "turnover": 0.18817756400845612
+    }
+  },
+  "total_return_momentum": {
+    "capacity": 144976.77550861784,
+    "convention": {
+      "annual_return": -0.4742999305507138,
+      "cagr": -0.4642397503499909,
+      "max_drawdown": 0.6571020048629083,
+      "max_drawdown_additive": 0.8372698201966887,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.6563784894592419,
+      "profit_factor_trades": 0.016904505473655435,
+      "sharpe": -1.0417811225734326,
+      "sharpe_population": -1.0430890717672132,
+      "total_pnl": -627719.7989301173,
+      "trades": 22,
+      "volatility_population": 0.4547070268382254,
+      "win_rate": 0.13636363636363635
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.06897405917021066,
+      "cagr": -0.46423975034999077,
+      "cvar_5": 0.05414875245680921,
+      "kurtosis": 243.2030051834575,
+      "max_drawdown": 0.6571020048629084,
+      "max_drawdown_duration": 339,
+      "n": 399,
+      "sharpe": -1.0417811225734332,
+      "sharpe_lo": -1.1564656065262748,
+      "sharpe_period": -0.06562604216407147,
+      "sharpe_se": 0.8831554634039619,
+      "skew": -13.862321872748268,
+      "sortino": -1.097701742902691,
+      "t_stat": -1.3832400892480743,
+      "total_return": -0.6277197989301179,
+      "volatility": 0.4552779084526765,
+      "worst_month": -0.47196489782781414
+    },
+    "subperiods": [
+      [
+        2022,
+        -1.6916235046998263
+      ],
+      [
+        2023,
+        -1.0565772355001821
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.8468581242818847,
+      "avg_net": 0.8468581242818847,
+      "avg_participation": 0.0005025690030915261,
+      "cost_drag": 0.17360580834990938,
+      "decisions": 705,
+      "dropped": 5,
+      "fill_ratio": 0.9999159499061441,
+      "fills": 690,
+      "impact_drag": 0.1313169497269522,
+      "max_leverage": 1.010605315009533,
+      "max_participation": 0.012434397029000385,
+      "turnover": 19.357979642085823
+    }
+  },
+  "trailing_stop": {
+    "capacity": 70383705884.21498,
+    "convention": {
+      "annual_return": -0.0008721555388050747,
+      "cagr": -0.0008755669525962739,
+      "max_drawdown": 0.0031829433113060857,
+      "max_drawdown_additive": 0.003185023093877594,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.9392484864754252,
+      "profit_factor_trades": 0.7647044802599807,
+      "sharpe": -0.3162451964018297,
+      "sharpe_population": -0.3166422401192748,
+      "total_pnl": -1380.9129364413675,
+      "trades": 18,
+      "volatility_population": 0.002754387849443415,
+      "win_rate": 0.3333333333333333
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": -0.0013797453319060085,
+      "cagr": -0.0008755669525959409,
+      "cvar_5": 0.00041760733647116524,
+      "kurtosis": 2.638629110929326,
+      "max_drawdown": 0.0031829433113056416,
+      "max_drawdown_duration": 334,
+      "n": 399,
+      "sharpe": -0.31624519640192844,
+      "sharpe_lo": -0.3389971412510459,
+      "sharpe_period": -0.019921574833292408,
+      "sharpe_se": 0.8519792273689833,
+      "skew": -0.19232817210306533,
+      "sortino": -0.43292678366864273,
+      "t_stat": -0.3740836125155032,
+      "total_return": -0.001385960270329556,
+      "volatility": 0.002757845964866155,
+      "worst_month": -0.0016659901095342766
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.9051920681238058
+      ],
+      [
+        2023,
+        0.28671399669690406
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.007711653250020414,
+      "avg_net": 0.007711653250020414,
+      "avg_participation": 0.00011361579213719098,
+      "cost_drag": 0.0007535808062693226,
+      "decisions": 39,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 39,
+      "impact_drag": 0.0001884664019455157,
+      "max_leverage": 0.01801551459405576,
+      "max_participation": 0.00030028947905781173,
+      "turnover": 0.19505027107231088
+    }
+  },
+  "volatility_targeting": {
+    "capacity": 7168788.343556642,
+    "convention": {
+      "annual_return": 0.06266506739259499,
+      "cagr": 0.04897849240620977,
+      "max_drawdown": 0.1625492667397508,
+      "max_drawdown_additive": 0.16976667427909625,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 1.0613097770306803,
+      "profit_factor_trades": null,
+      "sharpe": 0.3629569953800431,
+      "sharpe_population": 0.3634126854469851,
+      "total_pnl": 99219.69003827544,
+      "trades": 0,
+      "volatility_population": 0.17243500268990095,
+      "win_rate": 0.0
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.06741122522490159,
+      "cagr": 0.048978492406209106,
+      "cvar_5": 0.02173758699911855,
+      "kurtosis": 0.6368146131446655,
+      "max_drawdown": 0.1625492667397508,
+      "max_drawdown_duration": 238,
+      "n": 399,
+      "sharpe": 0.3629569953800433,
+      "sharpe_lo": 0.35607750317824344,
+      "sharpe_period": 0.022864141580638427,
+      "sharpe_se": 0.779758179203432,
+      "skew": 0.2067839503428482,
+      "sortino": 0.5380870164503694,
+      "t_stat": 0.44066290095819904,
+      "total_return": 0.07864969330618621,
+      "volatility": 0.17265149367621363,
+      "worst_month": -0.10318240488412145
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.345781055952294
+      ],
+      [
+        2023,
+        1.5431175223004474
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.4516073323928608,
+      "avg_net": 0.4516073323928608,
+      "avg_participation": 0.00033138348394583093,
+      "cost_drag": 0.033134410197004124,
+      "decisions": 388,
+      "dropped": 1,
+      "fill_ratio": 1.0,
+      "fills": 387,
+      "impact_drag": 0.018674420133710696,
+      "max_leverage": 0.8130717102193088,
+      "max_participation": 0.010380030266350877,
+      "turnover": 6.561764073986725
+    }
+  },
+  "volume_spike": {
+    "capacity": 133901271797.3507,
+    "convention": {
+      "annual_return": -0.00024090069375045,
+      "cagr": -0.00024108107941445134,
+      "max_drawdown": 0.0011679566115982976,
+      "max_drawdown_additive": 0.0011685303520786111,
+      "periods": 399,
+      "periods_per_year": 252.0,
+      "profit_factor": 0.872830141833353,
+      "profit_factor_trades": 0.7842816699189106,
+      "sharpe": -0.3718462929223338,
+      "sharpe_population": -0.3723131434425628,
+      "total_pnl": -381.42609843821265,
+      "trades": 19,
+      "volatility_population": 0.0006470378443344267,
+      "win_rate": 0.5263157894736842
+    },
+    "periods_per_year": 252.0,
+    "returns": {
+      "autocorrelation_1": 0.12521761862126227,
+      "cagr": -0.0002410810794147844,
+      "cvar_5": 0.00010453799680997799,
+      "kurtosis": 22.758592732262084,
+      "max_drawdown": 0.0011679566115987416,
+      "max_drawdown_duration": 231,
+      "n": 399,
+      "sharpe": -0.3718462929221679,
+      "sharpe_lo": -0.4053871355658516,
+      "sharpe_period": -0.023424114690793654,
+      "sharpe_se": 0.8665226000144424,
+      "skew": -1.0272330436335415,
+      "sortino": -0.5113122434724715,
+      "t_stat": -0.4530811257598276,
+      "total_return": -0.0003816848679956131,
+      "volatility": 0.0006478501959969066,
+      "worst_month": -0.00043713587755911387
+    },
+    "subperiods": [
+      [
+        2022,
+        -0.15181469342053236
+      ],
+      [
+        2023,
+        -0.6839999101618732
+      ]
+    ],
+    "trading": {
+      "avg_gross": 0.0012301781189370535,
+      "avg_net": 0.0012301781189370535,
+      "avg_participation": 0.00010420666348009107,
+      "cost_drag": 0.00044556839811295414,
+      "decisions": 39,
+      "dropped": 0,
+      "fill_ratio": 1.0,
+      "fills": 39,
+      "impact_drag": 0.0001366399370767985,
+      "max_leverage": 0.013792325495127818,
+      "max_participation": 0.000169370382539946,
+      "turnover": 0.14827099619034806
+    }
+  }
+}

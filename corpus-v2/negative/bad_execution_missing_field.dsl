@@ -3,7 +3,7 @@
 # `leverage` and `numerics` are missing, and there is no default to fall back
 # on, since the run is the program.
 strategy bad_execution_missing_field {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

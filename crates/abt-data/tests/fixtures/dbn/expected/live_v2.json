@@ -1,0 +1,153 @@
+{
+  "metadata": {
+    "dataset": "GLBX.MDP3",
+    "end": null,
+    "limit": null,
+    "mappings": [],
+    "not_found": [],
+    "partial": [],
+    "schema": null,
+    "start": "1705674540000000000",
+    "stype_in": null,
+    "stype_out": 0,
+    "symbol_cstr_len": 71,
+    "symbols": [],
+    "ts_out": false,
+    "version": 2
+  },
+  "records": [
+    {
+      "code": 1,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674540000000001"
+      },
+      "kind": "system",
+      "msg": "Subscription request 0 for ohlcv-1m data succeeded",
+      "ts_out": null
+    },
+    {
+      "end_ts": "1705708800000000000",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 0,
+        "rtype": 22,
+        "ts_event": "1705674540000000002"
+      },
+      "kind": "symbol_mapping",
+      "start_ts": "1705622400000000000",
+      "stype_in": 3,
+      "stype_in_symbol": "ES.c.0",
+      "stype_out": 1,
+      "stype_out_symbol": "ESH4",
+      "ts_out": null
+    },
+    {
+      "end_ts": "18446744073709551615",
+      "hd": {
+        "instrument_id": 2002,
+        "publisher_id": 0,
+        "rtype": 22,
+        "ts_event": "1705674540000000003"
+      },
+      "kind": "symbol_mapping",
+      "start_ts": "1705622400000000000",
+      "stype_in": null,
+      "stype_in_symbol": "NQ.c.0",
+      "stype_out": null,
+      "stype_out_symbol": "NQH4",
+      "ts_out": null
+    },
+    {
+      "code": 4,
+      "err": "Failed to resolve symbol: ZZ.c.0",
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 21,
+        "ts_event": "1705674540000000004"
+      },
+      "is_last": false,
+      "kind": "error",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "err": "Subscription request 1 for statistics data failed",
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 21,
+        "ts_event": "1705674540000000005"
+      },
+      "is_last": true,
+      "kind": "error",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "err": "Error with an unset is_last",
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 21,
+        "ts_event": "1705674540000000006"
+      },
+      "is_last": null,
+      "kind": "error",
+      "ts_out": null
+    },
+    {
+      "close": 4780250000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674540000000000"
+      },
+      "high": 4780500000000,
+      "kind": "ohlcv",
+      "low": 4779500000000,
+      "open": 4779750000000,
+      "ts_out": null,
+      "volume": 911
+    },
+    {
+      "body": "d7bf2003f5c5ab1707000100000059597e00000000000000",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 18,
+        "ts_event": "1705674540000000007"
+      },
+      "kind": "other",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674540000000009"
+      },
+      "kind": "system",
+      "msg": "A message without a code",
+      "ts_out": null
+    },
+    {
+      "code": 0,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674600000000000"
+      },
+      "kind": "system",
+      "msg": "Heartbeat",
+      "ts_out": null
+    }
+  ]
+}

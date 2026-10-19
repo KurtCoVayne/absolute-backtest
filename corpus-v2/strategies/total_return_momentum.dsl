@@ -7,7 +7,7 @@ strategy total_return_momentum {
     need    bars @1d
     need    actions, listing
     need    lists "SPX"
-    require tested
+    require reviewed
     prefer  latest
   }
   uses  calendar, catalog, stat, bars, book
@@ -44,6 +44,11 @@ strategy total_return_momentum {
     decide(T, hold(A, 0)) :- held(A, T, _), not selected(A, T).
   }
 
-  execution equity_default
+  # The weights are of the equity: on a fixed base a total loss on one of
+  # two names (a bankruptcy's haircut) would leave the book re-levered to the
+  # base on what is left, and the maintenance margin would call it. Two
+  # equal weights of equity filled at a cost exceed it by a hair, so such an
+  # order is rejected and logged rather than halting the run.
+  execution equity_default with { capital 1_000_000 USD compounding   leverage gross <= 1 reject }
   report { calendar base   periods 252 per year }
 }

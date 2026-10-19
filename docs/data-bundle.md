@@ -2,10 +2,15 @@
 
 Oct 4, 2026 · John Gonzalez
 
-> **Status in this repository.** This document is the second design document
-> after [`semantic-model.md`](semantic-model.md); it is implemented in
-> milestones, each a set of pull requests against the default branch. The
-> status notes in each section say what is in the crate today. Warning codes:
+> **Status in this repository (Oct 17, 2026, M-9).** This document is the
+> second design document after [`semantic-model.md`](semantic-model.md). It
+> was implemented in the milestones below, in the first formulation's single
+> crate. The three-layer split of [`spec/`](spec/) has since replaced that
+> crate, and each part of this design now lives in one layer. The milestone
+> table and each section's status note record the crate as it was (its
+> `src/` paths and the commands `abt bundle`, `abt synth`, `abt study`,
+> `abt explain`, `--kernel` and `--dump` are gone); each note ends with a
+> **Now** line naming where its part lives today. Warning codes:
 > the repository numbers warnings in the order they were added (W1 dead rule,
 > W2 unused parameter, W3 undefined relation, W4 degenerate reduction), so
 > this document's "degrees of freedom" warning is **W5** here and the ticker
@@ -20,7 +25,7 @@ Oct 4, 2026 · John Gonzalez
 > | M2 | Section 3 (catalog): stable identities, `ticker`, actions, delistings, membership, the bundle format and bundle tests | implemented: `Label`, stable identifiers and `ticker`, the catalog environment with actions, delistings, membership and classification, the `catalog` library, the executor's handling, the bundle format (manifest, security table, Parquet partitions by month), `env name@version`, and the bundle tests the data can answer (identity, bar labels, positive prices, action reconciliation, delisting coverage, membership); availability-time and resample reconciliation tests wait for M3's availability column |
 > | M3 | Section 2 (online construction): the fold kernel, barriers, checkpoints, availability time, the as-of join | the executor trait, the event log, barriers and the fold driver (`src/kernel/fold.rs`, equal to the batch kernel to the bit) and the incremental windows (each bar of a windowed group solved once, exact) checkpoints (serialisable state, monthly or every n bars, resumed by fingerprint), per-tuple availability with late tuples and the as-of join (`R(...) asof T`, section 4 of the semantic model) implemented; the opt-in fast aggregation mode is deferred, the exact mode being the only one |
 > | M4 | Sections 6 and 7 (research process, study API): lineage, trial log, metrics, hold-out | implemented: the metrics library (`src/study/metrics.rs`: return metrics with Lo errors, PSR, DSR, MinTRL, PBO by CSCV, Newey-West, block bootstrap, trading metrics and capacity), the executor's `nav` relation and the DSL `metrics` library; lineages (`revises`, similarity attachment, disputes), the append-only trial log, `abt study declare|run|reveal|metrics|dispute` with grids, DSR over the lineage, PBO over the grid, trailing and block hold-outs with reveals, walk-forward schemes with efficiency, the parameter surface and sub-period stability, and `abt study report` (every warning with its bias, trials, reveals, thresholds, degrees of freedom, the forty-bias audit with the rows warnings touched) |
-> | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | implemented: the pandas reference executor (`reference/engine.py`, `diff.py`, `abt run --dump`, `tests/reference.rs` over the daily corpus, policy variants and the four action markets), the stylized-fact tests (four canonical corpus strategies, published ranges checked on a bundle named by `ABT_BUNDLE_DIR`), the briefs harness (`briefs/`, `abt briefs report`) and the vendor adapters (`abt bundle build --from-norgate`, `--from-databento`, section 10's decisions in the manifest) |
+> | M5 | Section 8 (realism program): pandas reference, stylized facts, LLM-authored corpus | implemented: the pandas reference executor (`reference/engine.py`, `diff.py`, `abt run --dump`, `tests/reference.rs` over the daily corpus, policy variants and the four action markets), the stylized-fact tests (four canonical corpus strategies, published ranges checked on a bundle named by `ABT_BUNDLE_DIR`), the briefs harness (`briefs/`, `abt briefs report`) and the vendor adapters (`abt bundle build --from-norgate`, `--from-databento`, section 10's decisions in the manifest; since M-6 the data layer's `abt data ingest --adapter norgate|databento`, ERRATA E-68) |
 
 Data is closed and system-supplied, the kernel is built online so that
 backtesting is replay of the same fold that will run live, and every one of
@@ -84,6 +89,17 @@ warnings) has a single exception that is argued in section 9.
 > (`src/kernel/`) evaluates top-down with memoisation and already runs the
 > executor as a fold over bars; the plan keeps it as the batch reference and
 > adds the fold beside it.
+>
+> **Now (M-9).** The fold is the kernel's only driver (K-4.2,
+> `crates/abt-kernel/src/kernel/fold.rs`): it runs over the data layer's
+> stream, in receipt order with explicit barriers of the program's
+> calendars (D-5, `crates/abt-data/src/stream.rs`). The batch kernel is
+> deleted. Availability is a tuple's receipt time `r` (D-4.2, K-4.3), and a
+> late tuple is K-4.4's. A checkpoint is a cache object of the data layer
+> keyed by the run and the stream's seq (K-4.7, `docs/spec/ERRATA.md` E-56).
+> The store replaces the bundle (D-3): a bundle is an import format, `abt
+> data ingest --adapter bundle_v2` (E-78), and a run's record is its
+> outputs in the store (E-79).
 
 The kernel is a single fold `state' = step(state, event)` over a stream of
 events ordered by availability time, and a backtest is that fold replayed over
@@ -161,10 +177,20 @@ component that differs between the two is the executor attached to the fold.
 > forward, `liquid`), and the executor's handling of splits, dividends and
 > delistings with the haircuts of section 10 item 2. The synthetic catalog
 > market carries every event. The bundle format (`src/bundle.rs`), the
-> version a strategy names (`env name@version`) and the bundle tests the data
+> version a strategy names (`prefer version "V"` in its data block) and the bundle tests the data
 > can answer are in; a bundle that has not passed them is refused by `abt run
 > --bundle` unless `--untested`, which notes that its decisions are not
 > causality-certified.
+>
+> **Now (M-9).** Identities, tickers and labels are the data layer's
+> registry (D-2.4, D-2.5, `crates/abt-data/src/registry.rs`), and a
+> relation's rows are held in versions (D-2.6). `abt data catalog`
+> renders the class catalogs (`corpus-v2/catalog/*.dsl`) from the
+> registry. A program's `data` block is its demand, which the data layer
+> resolves (D-7). `require reviewed` admits only versions whose `reviewed`
+> attribute says so, in place of `--untested`. The bundle tests' checks of
+> market facts are the kernel's preconditions (K-3.2, ERRATA E-50) and the
+> query layer's `actions` feed statistic (Q-6).
 
 The catalog stores what was observable, never what was derived with
 hindsight: unadjusted prices plus corporate-action events, stable security
@@ -225,6 +251,9 @@ relation's test coverage so the LLM can read what is vouched for.
 > clause, no forward reference, no unbounded aggregate); the data rows wait
 > for M2's catalog; delisting handling is M2; selection and regime measures
 > are M4.
+>
+> **Now (M-9).** Each of the forty biases has an owning layer and a status
+> in the query layer's report (Q-8, `abt plan report`, ERRATA E-63).
 
 Eleven of the forty biases are ways for information from after T to reach a
 decision at T; eight are closed by construction (language or bundle) and three
@@ -306,7 +335,16 @@ write `AAPL`, and the bundle date fixes what that means.
 > (`--dividends reinvest`), actions already in a total-return price relation
 > (`--actions in-prices`), a run window (`--start`, `--end`) and the metrics
 > of both conventions per bar or per day on a reporting calendar
-> (`--report-by day --report-calendar REL`, `--periods-per-year`).
+> (`--report-by day --report-calendar REL`, `--periods-per-year`). In the
+> second formulation these options are gone: each is a field of the
+> program's execution block (`capital ... fixed | compounding`, `orders`,
+> `commission X bps per side`, `delisting last_price`, `actions in_price`)
+> or its report block (`calendar`, `periods N per year`, `window`).
+>
+> **Now (M-9).** The executor is the kernel's market simulation (K-5,
+> `crates/abt-kernel/src/sim/`), configured by the program's `execution`
+> block alone (K-2.2). Futures, options and the margin models are K-5.4 to
+> K-5.6 (ERRATA E-71, E-72), and the pre-trade limits K-3.5.
 
 Seventeen biases live in the gap between a decision and a fill; the executor
 models fourteen with conservative defaults and warns when a study turns a
@@ -359,6 +397,12 @@ from it.
 > sub-period stability (`src/study/validate.rs`) and the report
 > (`src/study/report.rs`, `abt study report`), which encodes the three bias
 > tables as data and marks the rows the warnings touched.
+>
+> **Now (M-9).** Lineages, trials, hold-outs and reveals are the query
+> layer's plans (Q-2), and the trials and lineages are rows of the store
+> (ERRATA E-59). The metrics are `crates/abt-query/src/metrics/` (Q-3,
+> E-58), with the deflated Sharpe ratio over a lineage's trial count
+> (Q-3.2). `src/study/` is deleted (E-66).
 
 Twelve biases are about how a strategy was found rather than how it runs;
 none can be forbidden, all can be counted, and the closed bundle is what makes
@@ -415,6 +459,11 @@ autocorrelation: Lo (2002).
 > walk-forward schemes are `--walk-forward`, `study.report` is `abt study
 > report`, and `study.explain` is `abt explain` (section 7 of the semantic
 > model) over the same program.
+>
+> **Now (M-9).** The study API is the plan language (Q-2): `abt plan
+> check|run|reveal|report|drop`, `abt lineage` and `abt dispute`.
+> `study.explain` is the kernel's query language (`why`, `why not`,
+> `trace`; K-7.2, ERRATA E-53).
 
 The study API is the only way to run a strategy, it lives inside the checker
 so that every run passes validation first, and it owns three things the author
@@ -472,6 +521,14 @@ honestly.
 > Bundle-level realism (resampled @1d against Norgate @1d, TBBO against the
 > spread proxy, broker executions) waits for the data; the adapters that
 > ingest the vendors' exports are `src/ingest.rs`.
+>
+> **Now (M-9).** The reference comparison (G6) is
+> `crates/abt/tests/reference.rs`: each case runs over a store, and the
+> reference reads the run back from it (ERRATA E-79). The stylized facts
+> are `crates/abt-tests/tests/stylized.rs`. The briefs harness is the plan
+> template `briefs_harness` (`abt briefs report`, E-65). The vendors'
+> adapters are the data layer's (D-7.7, `crates/abt-data/src/adapters/`,
+> E-68).
 
 Realism is the provider's claim and is proven three ways: the kernel agrees
 with an independent slow implementation on the corpus, it reproduces the
@@ -520,6 +577,9 @@ slippage and impact.
 > warning today and the stable identifier in M2. Item 3 is W5 and the
 > degrees-of-freedom count; the two warnings on constructs the grammar lacks
 > are not applicable. Item 4 needs no code.
+>
+> **Now (M-9).** Unchanged. The stable identifier is the registry's
+> instrument id (D-2.4).
 
 Four changes, three of them small; the fourth is the one exception to
 "constraints become warnings", because it is not a constraint on top of the

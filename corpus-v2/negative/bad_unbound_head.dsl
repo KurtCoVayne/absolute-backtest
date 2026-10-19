@@ -1,7 +1,7 @@
 # expect: B
 # The head variable X is bound by nothing in the body (WF-1).
 strategy bad_unbound_head {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, bars, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

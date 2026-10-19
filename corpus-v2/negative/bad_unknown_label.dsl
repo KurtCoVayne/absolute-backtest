@@ -3,7 +3,7 @@
 # (WF-15); the S&P 1500 is written as the union of the three index lists the
 # catalog holds, as corpus-v2/company/mw14.dsl does.
 strategy bad_unknown_label {
-  data { class equity   need bars @1d   need listing   need lists "SP500"   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   need lists "SP500"   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

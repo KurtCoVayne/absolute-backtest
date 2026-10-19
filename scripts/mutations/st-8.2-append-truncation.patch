@@ -1,0 +1,21 @@
+# proposition: ST-8.2 (Prop. 8.2, recovery: bytes past the last journaled block)
+# mutation: an append file keeps bytes past its last journaled block
+# test: cargo test -p abt-data --test appends a_restart_answers_what_it_answered_before
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/append.rs b/crates/abt-data/src/hot/append.rs
+index b7695f3..ae1f323 100644
+--- a/crates/abt-data/src/hot/append.rs
++++ b/crates/abt-data/src/hot/append.rs
+@@ -523,11 +523,7 @@ impl Overlay {
+             let f = &mut self.files[fi];
+             if f.path.exists() {
+                 let actual = fs::metadata(&f.path)?.len();
+-                if actual > end {
+-                    let h = fs::OpenOptions::new().write(true).open(&f.path)?;
+-                    h.set_len(end)?;
+-                    h.sync_all()?;
+-                }
++                let _ = actual;
+                 f.len = end;
+             }
+         }

@@ -1,0 +1,17 @@
+[package]
+name = "abt-query"
+description = "The query layer (docs/spec/03-query.md): plans, metrics, the statistical test framework, claims and reports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "abt-query"
+path = "src/bin/abt-query.rs"
+
+[dependencies]
+abt-wire.workspace = true
+arrow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -41,7 +41,8 @@ execution book_fixed_base {
   numerics      two_pass
 }
 
-# An intraday futures book on a fixed base, commission per contract only.
+# An intraday futures book on a fixed base, commission per contract only,
+# flat at every close: no session's settlement moves its cash (K-5.4).
 execution futures_fixed_base {
   price         close
   orders        moo_moc
@@ -58,4 +59,5 @@ execution futures_fixed_base {
   oversize      halt
   ruin          halt
   numerics      two_pass
+  settlement    none
 }

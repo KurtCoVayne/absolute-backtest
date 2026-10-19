@@ -1,0 +1,563 @@
+// The wire schema of absolute-backtest (docs/spec/04-protocol.md, P-1.1).
+//
+// Every control frame (hello, request, response, error, ack) carries one
+// size-prefixed `Envelope`; anything whose size scales with the data travels
+// as Arrow IPC in its own frames (P-2.2). The schema is the source of truth:
+// `build.rs` compiles it with planus into zero-copy readers (`HelloRef`, ...)
+// and owned types (`Hello`, ...) that derive serde. A minor protocol version
+// only adds optional fields, frame kinds or request kinds (P-7).
+
+namespace abt.wire;
+
+// The layer a peer serves (A-2, Definition 2.1); `Front` is the `abt` binary.
+enum Layer : ubyte { Data = 0, Kernel = 1, Query = 2, Front = 3 }
+
+// The opening frame of a session (P-2.3). A peer refuses a different major
+// version with `Error { code: Version }`.
+table Hello {
+  protocol: string (required);
+  layer: Layer;
+  client: string;
+  capabilities: [string];
+}
+
+// P-2.5: what went wrong, for the caller to act on.
+enum ErrorCode : ubyte {
+  Version = 0,
+  Malformed = 1,
+  UnknownRelation = 2,
+  UnknownVersion = 3,
+  OutOfBudget = 4,
+  Unresolved = 5,
+  Refused = 6,
+  Halted = 7,
+  NotFound = 8,
+  Busy = 9,
+  Internal = 10
+}
+
+// The detail is the typed value the caller can act on (P-2.5): the need a
+// resolution could not satisfy, the plan over budget.
+table Error {
+  code: ErrorCode;
+  message: string;
+  need: Need;
+  over_budget: ResolvePlan;
+}
+
+// ---------------------------------------------------------------- schemas
+
+// D-2.1: the scalar types a column holds.
+// `Tick` is an exact decimal: `i64` units of 10^(-s), the scale `s` (at most
+// 9) carried by the batch's Arrow type `Decimal128(18, s)` (ST-10.4,
+// A-D44); a `Num` column crosses as ticks when a request asks for them.
+enum ColumnType : ubyte { Entity = 0, Time = 1, Num = 2, Count = 3, Label = 4, Bool = 5, Bytes = 6, Tick = 7 }
+
+// Definition D-2.1: a column's role. Exactly one EventTime, at most one
+// ReceiptTime; the identity of a relation is its Entity columns and t.
+enum Role : ubyte { Entity = 0, EventTime = 1, ReceiptTime = 2, Value = 3, Label = 4 }
+
+enum ConstraintKind : ubyte { NotNull = 0, Gt = 1, Ge = 2, Lt = 3, Le = 4, In = 5 }
+
+table Constraint {
+  column: string (required);
+  kind: ConstraintKind;
+  value: double;
+  labels: [string];
+}
+
+table Attribute {
+  key: string (required);
+  value: string (required);
+}
+
+table ColumnSpec {
+  name: string (required);
+  ty: ColumnType;
+  role: Role;
+  // The dimension of a Num column as the language writes it (`Price<USD>`).
+  dimension: string;
+}
+
+table RelationSchema {
+  name: string (required);
+  class: string (required);
+  columns: [ColumnSpec] (required);
+  // The base calendar the relation is keyed on (`1d`, `1m`), or empty.
+  calendar: string;
+  constraints: [Constraint];
+  attributes: [Attribute];
+  // The schema's own version (P-7).
+  schema_version: string;
+}
+
+// ------------------------------------------------- views, filters, queries
+
+// A relation at an immutable version (hex BLAKE3, D-2.6).
+table VersionRef {
+  relation: string (required);
+  version: string (required);
+}
+
+// D-4: what a query reads: versions or a binding, as of a sequence number.
+table View {
+  versions: [VersionRef];
+  binding: string;
+  as_of_seq: ulong = null;
+}
+
+// D-4.2: rows received by r_max.
+table ReceiptFilter {
+  r_max: long = null;
+}
+
+// A constant of a predicate atom or an identity.
+enum ConstantKind : ubyte { Num = 0, Count = 1, Time = 2, Entity = 3, Label = 4, Bool = 5 }
+
+table Constant {
+  kind: ConstantKind;
+  num: double;
+  int: long;
+  text: string;
+}
+
+enum Op : ubyte { Eq = 0, Ne = 1, Lt = 2, Le = 3, Gt = 4, Ge = 5, In = 6, IsNull = 7 }
+
+table Atom {
+  column: string (required);
+  op: Op;
+  values: [Constant];
+}
+
+table Disjunction {
+  atoms: [Atom] (required);
+}
+
+// Definition D-4.1: a conjunction of disjunctions of atoms.
+table Predicate {
+  all: [Disjunction];
+}
+
+// The identity of a row (E-16: an entity, or a label for the series class).
+table Identity {
+  values: [Constant] (required);
+}
+
+table Point { relation: string (required); identity: Identity; t: long; }
+table Latest { relation: string (required); identity: Identity; t_max: long; }
+table Series { relation: string (required); identity: Identity; t0: long; t1: long; }
+table Section { relation: string (required); t: long; }
+table Scan { relation: string (required); t0: long; t1: long; predicate: Predicate; columns: [string]; }
+table Exists { relation: string (required); t0: long; t1: long; predicate: Predicate; }
+table CountRows { relation: string (required); t0: long; t1: long; predicate: Predicate; }
+table Distinct { relation: string (required); column: string (required); t0: long; t1: long; }
+
+// D-4.4: the closed set of chain filters.
+table ChainFilters {
+  expiry_from: Duration;
+  expiry_to: Duration;
+  moneyness_lo: double = null;
+  moneyness_hi: double = null;
+  right: string;
+  style: string;
+  strike_lo: double = null;
+  strike_hi: double = null;
+  min_open_interest: long = null;
+}
+
+table Chain { underlying: ulong; t: long; filters: ChainFilters; spot: double = null; }
+
+// D-4.1 over the registry's relations.
+table Catalog { relation: string (required); predicate: Predicate; }
+
+union QueryForm { Point, Latest, Series, Section, Scan, Exists, CountRows, Distinct, Chain, Catalog }
+
+// A calendar duration: months, days and a clock part in nanoseconds.
+table Duration {
+  months: long;
+  days: long;
+  nanos: long;
+}
+
+// ---------------------------------------------------------------- aggregates
+
+enum WindowKind : ubyte { Rows = 0, PriorRows = 1, Span = 2, PriorSpan = 3, Bucket = 4 }
+enum Grouping : ubyte { PerEntity = 0, PerLabel = 1, Whole = 2 }
+// D-6.3: `Exact` reduces tick columns as integers in the instrument's finest
+// exponent (ST-3, Proposition 3.3), one correctly rounded division at the end.
+enum Numerics : ubyte { TwoPass = 0, Running = 1, Exact = 2 }
+
+// D-6.1. `calendar` names the calendar whose labels index the window's
+// checkpoints and the answer's rows (E-27); `bucket` the calendar of a
+// bucket window.
+table AggregateRequest {
+  relation: string (required);
+  column: string (required);
+  second_column: string;
+  function: string (required);
+  level: double = null;
+  window: WindowKind;
+  n: ulong;
+  min: ulong = null;
+  span: Duration;
+  bucket: string;
+  group: Grouping;
+  group_column: string;
+  receipt_filter: ReceiptFilter;
+  numerics: Numerics;
+  calendar: string;
+  t0: long = null;
+  t1: long = null;
+  output: string;
+}
+
+// ---------------------------------------------------------------- streams
+
+enum ClockSource : ubyte { Replay = 0, Live = 1 }
+
+// D-5.1: the relations a stream carries, the calendars it emits barriers on
+// (in the order barriers of one instant are emitted, E-13), its receipt
+// filter and its clock. A live stream (clock Live) follows the versions of
+// the relations a session records (`session`, the source it records under)
+// and emits the barriers of its clock relation's labels as the clock passes
+// them (E-69).
+table StreamSpec {
+  relations: [VersionRef];
+  binding: string;
+  calendars: [string];
+  receipt_filter: ReceiptFilter;
+  clock: ClockSource;
+  session: string;
+}
+
+// ---------------------------------------------------------- demands, bindings
+
+enum ScopeKind : ubyte { All = 0, List = 1, Instruments = 2 }
+
+table InstrumentRef {
+  id: ulong = null;
+  symbol: string;
+  from: long = null;
+}
+
+table Scope {
+  kind: ScopeKind;
+  list: string;
+  instruments: [InstrumentRef];
+}
+
+// Definition D-7.1.
+table Need {
+  relations: [string] (required);
+  calendar: string;
+  from: long = null;
+  to: long = null;
+  scope: Scope;
+  attributes: [Attribute];
+  // The need as the program writes it, for the resolver's messages.
+  label: string;
+  // What the binding names only when the store holds it or a source offers
+  // it (a future's settlement price, a published margin): a relation of an
+  // optional need that cannot be covered is left out, noted, never refused.
+  optional: bool = false;
+}
+
+table Budget {
+  money: double = 0;
+  bytes: long = null;
+  requests: long = null;
+  seconds: double = null;
+}
+
+// Source: the versions of the source `version` names come first (a live
+// run's session, A-D56); the others keep their order.
+enum PreferenceKind : ubyte { Reviewed = 0, Latest = 1, Version = 2, Finest = 3, FewestSources = 4, Cheapest = 5, Source = 6 }
+
+table Preference {
+  kind: PreferenceKind;
+  version: string;
+}
+
+table DynamicNeed {
+  relation: string (required);
+  underlying: ulong;
+  filters: ChainFilters;
+  spot_relation: string;
+  spot_column: string;
+  horizon: Duration;
+  // E-70: the underlying as the program names it, resolved by the
+  // resolver to its id by ticker at the span's dates (`underlying` is 0
+  // until then).
+  underlying_symbol: string;
+}
+
+table Demand {
+  class: string (required);
+  needs: [Need];
+  require: [Attribute];
+  prefer: [Preference];
+  budget: Budget;
+  dynamic: [DynamicNeed];
+  // The parameter point the run is at (D-7.5): the binding carries it.
+  point: [ParamValue];
+}
+
+// A parameter of the point a binding was resolved for, as its literal text.
+table ParamValue {
+  name: string (required);
+  value: string (required);
+}
+
+// Definition D-7.5: the (relation, version) pairs, the parameter point and
+// the dynamic needs' filters; `id` is the hash of the rest (A-6).
+table Binding {
+  pairs: [VersionRef];
+  point: [ParamValue];
+  dynamic: [DynamicNeed];
+  id: string;
+}
+
+// Definition D-7.2.
+table CostVector {
+  money: double;
+  seconds: double;
+  bytes: long;
+  requests: long;
+}
+
+table PlanStep {
+  need: uint;
+  source: string (required);
+  relation: string (required);
+  version: string;
+  cost: CostVector;
+  // The version's span and attributes, what the kernel's preconditions on
+  // the binding read (K-3.2).
+  from: long = null;
+  to: long = null;
+  attributes: [Attribute];
+}
+
+table ResolvePlan {
+  steps: [PlanStep];
+  cost: CostVector;
+}
+
+// ---------------------------------------------------------- data service (P-3.1)
+
+table SchemaRequest { class: string; relation: string; }
+table SchemaResponse { schemas: [RelationSchema]; }
+table ResolveRequest { demand: Demand (required); dry_run: bool; }
+table ResolveResponse { plan: ResolvePlan; cost: CostVector; binding: Binding; over_budget: ResolvePlan; notes: [string]; }
+table ResolveDynamicRequest { binding: Binding (required); need: DynamicNeed (required); underlying: ulong; t: long; }
+table ResolveDynamicResponse { binding: Binding; }
+
+// A query, or with `explain` its estimate (D-4.1).
+table QueryRequest {
+  view: View;
+  form: QueryForm (required);
+  receipt_filter: ReceiptFilter;
+  with_seq: bool;
+  explain: bool;
+  // ST-10.4: price and quantity columns as `Decimal128(18, s)` ticks rather
+  // than their `Float64` view.
+  ticks: bool;
+}
+
+table ExplainResponse {
+  rows: ulong;
+  bytes: ulong;
+  partitions: ulong;
+  cached: bool;
+  unresolved: bool;
+}
+
+table AggregateCall { view: View; request: AggregateRequest (required); }
+table AggregateResponse { cache_key: string (required); }
+
+table SubscribeRequest {
+  spec: StreamSpec (required);
+  from_seq: ulong;
+  paced: bool;
+  to_seq: ulong = null;
+  with_index: bool;
+}
+
+table SubscribeResponse { stream: string (required); }
+table StreamIndexRequest { spec: StreamSpec (required); }
+
+// ST-10.2: the segments of a hot relation at the view's sequence, for a
+// reader on the same machine to map read-only and decode with abt-codec.
+// The answer is a table (`TableFollows`): one row per segment (path, offset,
+// length, codec version, the block tables' location) and per tail (its
+// visible count at the view's sequence).
+table MapRequest {
+  view: View;
+  relation: string (required);
+  columns: [string];
+  level: string;
+  from_entity: ulong;
+  to_entity: ulong = null;
+}
+table AckMessage { seq: ulong; }
+
+// The rows follow as Arrow frames in the request's correlation.
+// With `cache_key`, the rows are a cache object (D-3.5) under that key.
+// With `replace`, they are the relation's next version whole: the relation
+// starts over from them, its earlier versions readable by id (E-56).
+table PutRequest { relation: string (required); schema: RelationSchema (required); attributes: [Attribute]; cache_key: string; replace: bool; }
+table PutResponse { version: string (required); seq_from: ulong; seq_to: ulong; }
+table GetRequest { cache_key: string; version: string; relation: string; }
+table PinRequest { version: string; binding: string; pin: bool; }
+table StatsRequest { relation: string; }
+
+// A table follows in this correlation: its schema frame, batch frames, end.
+table TableFollows { rows: ulong = null; }
+
+table Done {}
+
+// ---------------------------------------------------------------- kernel service
+
+// P-3.4: the kernel's requests, one table for the seven (`op` says which);
+// a field a request does not take is left out (ERRATA E-54).
+enum KernelOp : ubyte { Check = 0, Contract = 1, Show = 2, Run = 3, Query = 4, Control = 5, Status = 6 }
+
+// A source file of the workspace a request checks.
+table SourceFile { path: string; text: string (required); }
+
+table KernelRequest {
+  op: KernelOp;
+  sources: [SourceFile];
+  strategy: string;
+  point: [ParamValue];
+  // `show`: program | plan [R] | schedule | calendars | contract;
+  // `control`: halt | checkpoint | flatten | release.
+  what: string;
+  run_id: string;
+  // `query`: the query's text (V-8).
+  text: string;
+  to_seq: ulong = null;
+  start: long = null;
+  end: long = null;
+  memory_budget: ulong = null;
+  pushdown: bool = true;
+  // `run`: a progress frame every this many decision barriers.
+  progress_every: ulong = null;
+  // `run`: a checkpoint every `month` or every N decision barriers, written
+  // through the data layer (K-4.7); `from_checkpoint` resumes from one.
+  checkpoint_every: string;
+  from_checkpoint: string;
+  // `run`: stop after the decision at this bar, the stream truncated at that
+  // barrier's seq (a trailing hold-out, a walk-forward window; Q-2.3).
+  horizon: long = null;
+  // `run`: π, the plan step that asks for the run (Q-2.5), as canonical
+  // JSON; part of the run's id (A-4.1).
+  plan_step: string;
+  // `run`: a block hold-out's mask (Q-2.3): no ledger row at a bar inside a
+  // span.
+  embargo_mask: [Span];
+  // `run`: relations observed beyond the program's own (`run ... observe`,
+  // Q-2.2).
+  observe: [string];
+  // `run`: the mode (replay-sim, the default; live-sim; live-broker), the
+  // live session a live run reads, and a live run's deployment document as
+  // its text (K-6.5).
+  mode: string;
+  session: string;
+  deployment: string;
+}
+
+// A span of times, `[from, to)`.
+table Span { from: long; to: long; }
+
+// An answer, or one of a run's progress frames (`status` running).
+table KernelResponse {
+  op: KernelOp;
+  diagnostics: [string];
+  program_hash: string;
+  normal_form: string;
+  degrees_of_freedom: string;
+  run_id: string;
+  // running | completed | halted(reason)
+  status: string;
+  text: string;
+  // The run's report rows as JSON.
+  report: string;
+  barrier: long = null;
+  decisions: ulong = null;
+  lag: long = null;
+  // A query's table follows in this correlation.
+  has_table: bool;
+}
+
+// ---------------------------------------------------------------- query service
+
+// P-3.5: the query layer's requests, one table for its commands (`op` says
+// which; ERRATA E-81). A request carries what its command reads, so the
+// service reads no file of the client's: the command's words, a plan's
+// text, and the program a plan or a lineage names. The service runs the
+// command against the data and kernel services it was started with.
+enum QueryLayerOp : ubyte { Plan = 0, Lineage = 1, Dispute = 2, Metrics = 3, Test = 4, Claim = 5, Feed = 6, Activation = 7 }
+
+table QueryLayerRequest {
+  op: QueryLayerOp;
+  // The command's words after its name, as its command line writes them
+  // (`run PLAN`, `--json`, `--threads 4`, a test's `NAME on INPUT`), less
+  // the transport options; the files they name travel below.
+  args: [string];
+  // `plan`: the plan's text.
+  plan: string;
+  // `plan`, `lineage`, `dispute`: the program's sources and its strategy.
+  sources: [SourceFile];
+  strategy: string;
+}
+
+// The command's answer, in parts of at most 256 KiB: what it printed (its
+// JSON under `--json`) and its notes. The last part is `done` and carries
+// the exit status the command line reports.
+table QueryLayerResponse {
+  op: QueryLayerOp;
+  out: string;
+  err: string;
+  done: bool;
+  status: int;
+}
+
+// Every control message; a frame's kind says which half (request, response)
+// the receiver expects, the correlation id pairs them (P-2.3).
+union Message {
+  Hello,
+  Error,
+  SchemaRequest,
+  SchemaResponse,
+  ResolveRequest,
+  ResolveResponse,
+  ResolveDynamicRequest,
+  ResolveDynamicResponse,
+  QueryRequest,
+  ExplainResponse,
+  AggregateCall,
+  AggregateResponse,
+  SubscribeRequest,
+  SubscribeResponse,
+  StreamIndexRequest,
+  MapRequest,
+  AckMessage,
+  PutRequest,
+  PutResponse,
+  GetRequest,
+  PinRequest,
+  StatsRequest,
+  TableFollows,
+  Done,
+  KernelRequest,
+  KernelResponse,
+  QueryLayerRequest,
+  QueryLayerResponse
+}
+
+table Envelope {
+  message: Message;
+}
+
+root_type Envelope;

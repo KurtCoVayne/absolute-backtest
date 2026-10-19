@@ -1,0 +1,17 @@
+# proposition: ST-5.1 (Prop. 5.1, windows from cumulative summaries)
+# mutation: the difference of two cumulatives keeps the later sum whole
+# test: cargo test -p abt-codec --test summary
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-codec/src/summary.rs b/crates/abt-codec/src/summary.rs
+index ac204d5..d34c414 100644
+--- a/crates/abt-codec/src/summary.rs
++++ b/crates/abt-codec/src/summary.rs
+@@ -84,7 +84,7 @@ impl Cumulative {
+     pub fn minus(&self, other: &Cumulative) -> Cumulative {
+         Cumulative {
+             count: self.count - other.count,
+-            sum: self.sum - other.sum,
++            sum: self.sum,
+             sum_sq: self.sum_sq.sub(&other.sum_sq),
+             sum_kx: self.sum_kx.sub(&other.sum_kx),
+         }

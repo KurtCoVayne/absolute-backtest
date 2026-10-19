@@ -5,8 +5,8 @@ strategy trailing_stop {
   data {
     class   equity
     need    bars @1d
-    need    listing
-    require tested
+    need    actions, listing
+    require reviewed
     prefer  latest
   }
   uses  calendar, state, book

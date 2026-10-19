@@ -1,0 +1,115 @@
+{
+  "metadata": {
+    "dataset": "GLBX.MDP3",
+    "end": null,
+    "limit": null,
+    "mappings": [],
+    "not_found": [],
+    "partial": [],
+    "schema": null,
+    "start": "1705674540000000000",
+    "stype_in": null,
+    "stype_out": 0,
+    "symbol_cstr_len": 22,
+    "symbols": [],
+    "ts_out": false,
+    "version": 1
+  },
+  "records": [
+    {
+      "code": null,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674540000000001"
+      },
+      "kind": "system",
+      "msg": "Subscription request for ohlcv-1m data succeeded",
+      "ts_out": null
+    },
+    {
+      "end_ts": "1705708800000000000",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 0,
+        "rtype": 22,
+        "ts_event": "1705674540000000002"
+      },
+      "kind": "symbol_mapping",
+      "start_ts": "1705622400000000000",
+      "stype_in": null,
+      "stype_in_symbol": "ES.c.0",
+      "stype_out": null,
+      "stype_out_symbol": "ESH4",
+      "ts_out": null
+    },
+    {
+      "end_ts": "1705708800000000000",
+      "hd": {
+        "instrument_id": 1001,
+        "publisher_id": 0,
+        "rtype": 22,
+        "ts_event": "1705674540000000003"
+      },
+      "kind": "symbol_mapping",
+      "start_ts": "1705622400000000000",
+      "stype_in": null,
+      "stype_in_symbol": "CL.c.0",
+      "stype_out": null,
+      "stype_out_symbol": "CLG4",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "err": "Failed to resolve symbol: ZZ.c.0",
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 21,
+        "ts_event": "1705674540000000004"
+      },
+      "is_last": null,
+      "kind": "error",
+      "ts_out": null
+    },
+    {
+      "close": 4780250000000,
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 33,
+        "ts_event": "1705674540000000000"
+      },
+      "high": 4780500000000,
+      "kind": "ohlcv",
+      "low": 4779500000000,
+      "open": 4779750000000,
+      "ts_out": null,
+      "volume": 911
+    },
+    {
+      "body": "83f71708db050000806a1afd5804000003000000800441429df22003f5c5ab1739300000432d0100",
+      "hd": {
+        "instrument_id": 2001,
+        "publisher_id": 1,
+        "rtype": 160,
+        "ts_event": "1705674540000000005"
+      },
+      "kind": "other",
+      "ts_out": null
+    },
+    {
+      "code": null,
+      "hd": {
+        "instrument_id": 0,
+        "publisher_id": 0,
+        "rtype": 23,
+        "ts_event": "1705674600000000000"
+      },
+      "kind": "system",
+      "msg": "Heartbeat",
+      "ts_out": null
+    }
+  ]
+}

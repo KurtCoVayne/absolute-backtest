@@ -3,7 +3,7 @@
 # literal of the rule (WF-2, Prop. 4.2): the family would be infinite. The
 # diagnostic names N and the literal that needs it.
 strategy bad_unbound_input {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, stat, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

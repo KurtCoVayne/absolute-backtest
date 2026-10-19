@@ -5,8 +5,8 @@ strategy cash_buffer {
   data {
     class   equity
     need    bars @1d
-    need    listing
-    require tested
+    need    actions, listing
+    require reviewed
     prefer  latest
   }
   uses  calendar, book

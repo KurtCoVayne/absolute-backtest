@@ -110,11 +110,26 @@ starts in 1991) and the metric conventions. See `docs/semantic-model.md`.
 
 ## Reproduce
 
+The first formulation's input script (`scripts/ingest/ndlake_weekly.py`) and the class it wrote are
+retired (M-6, ERRATA E-68); the recipe below is the record of how the result
+was made, and the script is in the history before that step.
+
 ```
 python scripts/ingest/ndlake_weekly.py --lake ~/data/ref/mw14/ndlake --artifacts ~/data/ref/mw14/artifacts --out IN
 abt bundle build --from IN --env equities_1w --version mw14 --out B corpus/env corpus/company/mw14.dsl
 abt run ... --returns R.parquet        # the command above
 python scripts/parity/mw14_compare.py R.parquet ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
+```
+
+Since M-4c the comparison reads the run's book from the data layer's store
+(K-9.1, ERRATA E-52): the bundle is ingested, the run reads it through the
+data service and writes its outputs there, and the script queries them.
+
+```
+abt data ingest --store S --adapter bundle_v2 --from B --class equity corpus-v2/catalog corpus-v2/lib
+abt data serve --store S --socket S.sock &
+abt run --strategy mw14 --data S.sock corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl   # prints `run RUN: ...`
+python scripts/parity/mw14_compare.py S RUN ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
 ```
 
 Inputs and their checksums: `docs/parity-inputs.md`.

@@ -1,0 +1,17 @@
+# proposition: ST-6.1 (Prop. 6.1, range closure)
+# mutation: a two-block window drops its last row
+# test: cargo test -p abt-codec --test summary
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-codec/src/summary.rs b/crates/abt-codec/src/summary.rs
+index ac204d5..982719c 100644
+--- a/crates/abt-codec/src/summary.rs
++++ b/crates/abt-codec/src/summary.rs
+@@ -258,7 +258,7 @@ pub fn moments(col: &dyn Column, a: u64, b: u64) -> Cumulative {
+         if ba == bb {
+             return direct(ba, ia, ib + 1);
+         }
+-        return direct(ba, ia, col.len(ba)).plus_totals(&direct(bb, 0, ib + 1));
++        return direct(ba, ia, col.len(ba)).plus_totals(&direct(bb, 0, ib));
+     }
+     let whole = col.cumulative(bb).minus(&col.cumulative(ba + 1));
+     let head = edge(col, ba, ia, col.len(ba));

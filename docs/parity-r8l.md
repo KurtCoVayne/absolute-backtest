@@ -115,6 +115,10 @@ the performance work in `docs/assessment.md`).
 
 ## Reproduce
 
+The first formulation's input script (`scripts/ingest/tradestation_sessions.py`) and the class it wrote are
+retired (M-6, ERRATA E-68); the recipe below is the record of how the result
+was made, and the script is in the history before that step.
+
 ```
 python scripts/ingest/tradestation_sessions.py --cache ~/data/ref/r8l/cache \
   --config ~/data/ref/r8l/config --commissions ~/data/ref/r8l/commissions_per_side.json \
@@ -123,6 +127,17 @@ abt bundle build --from IN --env futures_sessions --version r8l --out B corpus/e
 abt bundle test B corpus/env corpus/company/r8l.dsl
 abt run ... --returns R.parquet --dump DUMP      # the command above
 python scripts/parity/r8l_compare.py DUMP R.parquet ~/data/ref/r8l/results/leg_flags.parquet
+```
+
+Since M-4c the comparison reads the run from the data layer's store (K-9.1,
+ERRATA E-52): the decisions, the fills of the event log, the book, and ES's
+sessions for the reporting calendar.
+
+```
+abt data ingest --store S --adapter bundle_v2 --from B --class future corpus-v2/catalog corpus-v2/lib
+abt data serve --store S --socket S.sock &
+abt run --strategy r8l --data S.sock corpus-v2/catalog corpus-v2/lib corpus-v2/company/r8l.dsl   # prints `run RUN: ...`
+python scripts/parity/r8l_compare.py S RUN ~/data/ref/r8l/results/leg_flags.parquet
 ```
 
 Inputs and their checksums: `docs/parity-inputs.md`.

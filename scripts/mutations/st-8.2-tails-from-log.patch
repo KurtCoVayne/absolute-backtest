@@ -1,0 +1,17 @@
+# proposition: ST-8.2 (Prop. 8.2, recovery: the tails are a function of the log)
+# mutation: the tails are not rebuilt from the log at open
+# test: cargo test -p abt-data --test recovery every_answer_survives_a_crash_at_every_fault_point
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store_hot.rs b/crates/abt-data/src/store_hot.rs
+index 173db52..6099b53 100644
+--- a/crates/abt-data/src/store_hot.rs
++++ b/crates/abt-data/src/store_hot.rs
+@@ -29,7 +29,7 @@ impl Store {
+         let rec = self.registry.version(version).ok_or_else(|| DataError::UnknownVersion(version.to_string()))?;
+         let (relation, source) = (rec.relation.clone(), rec.source.clone());
+         let v = Arc::new(HotVersion::open(&self.root, &relation, version, false)?);
+-        self.replay_tails(&v, &relation, &source)?;
++        let _ = (&relation, &source);
+         self.residency.apply(&v);
+         if let Ok(mut c) = self.hot.lock() {
+             c.insert(version.to_string(), v.clone());

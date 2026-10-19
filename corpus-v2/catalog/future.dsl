@@ -17,5 +17,10 @@ class future {
   member(A: Future, @T, List: Label) complete
   usable(A: Future, @T) complete                                    # a research-defined availability, from the bundle's review
 
+  # Settlement, open interest and the margin an exchange publishes (K-5.4, K-5.6).
+  settlement(A: Future, @T, P: Price<USD>)                          # each session's settlement price, back-adjusted as the bars
+  open_interest(A: Future, @T, N: Quantity<Contracts>)
+  margin(A: Future, @T, Initial: Notional<USD>, Maintenance: Notional<USD>) complete   # per contract
+
   lists "HOME-26", "HOLD-6"
 }

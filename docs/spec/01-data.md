@@ -66,7 +66,7 @@ Columns beyond the identity are the adapter's declaration; a strategy reads them
 | `vendor_id` | `vendor: Label`, `key: Label`, `id`, `from`, `to` | a vendor's key for the instrument over a span (Norgate `asset_id`, Databento `instrument_id` and `raw_symbol`, ORATS ticker and OCC symbol, FIX `SecurityID` with `SecurityIDSource`) |
 | `ticker` | `id`, `t`, `r`, `symbol: Label` | the symbol carried at `t` (equities: a history when the vendor supplies one, the final ticker over the whole span otherwise, with `attributes.ticker_history = final`) |
 | `future_spec` | `id`, `root: Label`, `expiry: Time`, `first_trade`, `last_trade`, `point_value`, `tick`, `settlement: Label` | a contract |
-| `continuous` | `root_id`, `t`, `r`, `contract_id`, `adjustment: Num` | which contract the back-adjusted series of `root_id` holds at `t` and the additive adjustment applied |
+| `continuous` | `root_id`, `t`, `r`, `contract_id`, `adjustment: Num` | which contract the back-adjusted series of `root_id` holds at `t` and the additive adjustment applied, computed on the root's decimal grid (its prices' and tick sizes') so the adjusted prices stay on it (A-D53) |
 | `option_spec` | `id`, `underlying: Entity`, `right: Label`, `strike`, `expiry`, `style: Label`, `settlement: Label`, `multiplier`, `occ: Label` | a contract; `style ∈ {american, european}`, `settlement ∈ {physical, cash}`, `right ∈ {call, put}` |
 | `chain_index` | `underlying`, `t`, `r`, `id` | the contracts of `underlying`'s chain known at `t` (what a chain query enumerates, 4.4) |
 | `session` | `calendar: Label`, `label: Time`, `open: Time`, `close: Time`, `instrument: Entity?` | a session of a calendar (per instrument when the calendar is per instrument, V-3.5) |
@@ -92,7 +92,7 @@ Labels are interned per registry in one dictionary with stable `u32` codes; a co
 
 ## 3. The storage engine
 
-**Amended by `07-storage.md` (A-D36 to A-D39).** For Norgate and Databento the resident form is ST-4: instrument-contiguous, lane-interleaved blocks of tick values, with the precomputed structures of ST-5 (cumulative summaries, the calendar ladder, presence and rank, the catalog structures, wavelet matrices), all hot. Partitions of 3.1 and 3.2 are replaced for them by ST-7's content-addressed segments, compaction and delta partitions (3.3) by sealing tails and copy-on-write revisions (ST-8), and the per-row `seq` column by per-instrument visible counts (ST-8.2). The log, the manifest, versions, snapshot reads at a sequence number (Definition 3.2 and Proposition 3.3 hold, ST Prop. 8.1), retention and pinning (3.4), the cache (3.5) and tiers (3.7) stand. The time-major Parquet layout below remains the form for relations of other sources and for `put`s by other layers.
+**Amended by `07-storage.md` (A-D36 to A-D39).** For Norgate and Databento the resident form is ST-4: instrument-contiguous, lane-interleaved blocks of tick values, with the precomputed structures of ST-5 (cumulative summaries, the calendar ladder, presence and rank, the catalog structures, wavelet matrices), all hot. Partitions of 3.1 and 3.2 are replaced for them by ST-7's content-addressed segments, compaction and delta partitions (3.3) by sealing tails and copy-on-write revisions (ST-8), and the per-row `seq` column by per-instrument visible counts (ST-8.2). The log, the manifest, versions, snapshot reads at a sequence number (Definition 3.2 and Proposition 3.3 hold, ST Prop. 8.1), retention and pinning (3.4), the cache (3.5) and tiers (3.7) stand. The time-major Parquet layout below remains the form for relations of other sources and for `put`s by other layers. *Amended (A-D49, iteration 1):* a version is hot when its attribute says `storage = hot`, which the adapters set for the bar relations they stage (`open`, `high`, `low`, `close`, `volume`); every other relation stays in Parquet, as does a version whose rows the blocks cannot hold (its attribute then says `storage = parquet`). A relation a source holds hot stays hot: a later write without the `storage` attribute follows the current version, and one asking for Parquet is refused (A-D51).
 
 ### 3.1 Layout
 
@@ -241,7 +241,7 @@ The answer is a relation keyed like the input (entity, `t`) with the aggregate a
 
 ### 6.3 Numerics
 
-The request's `numerics ∈ {exact, two_pass, running}` selects the `abt-agg` form (P-1.2); the cache key includes it. Results are bit-identical to the kernel's evaluation of the same aggregate over the same rows (6.5). `exact` (added by `07-storage.md`, ST-3, Proposition 3.3) applies to tick columns: sums and moments are exact integers in the instrument's finest exponent, accumulated in `i128`, so they are independent of order and vectorise; the `f64` result is one correctly rounded division. It is the default for new programs; the parity books (MW14, R8L) pin `two_pass`. In `exact` mode tick columns cross the protocol as `Tick` (`Decimal128`), so both layers reduce the same integers. Aggregates over adjusted series (split, total return, continuous futures) are evaluated piecewise between events (ST-5.10).
+The request's `numerics ∈ {exact, two_pass, running}` selects the `abt-agg` form (P-1.2); the cache key includes it. Results are bit-identical to the kernel's evaluation of the same aggregate over the same rows (6.5). `exact` (added by `07-storage.md`, ST-3, Proposition 3.3) applies to tick columns: sums and moments are exact integers in the instrument's finest exponent, accumulated in `i128`, so they are independent of order and vectorise; the `f64` result is one correctly rounded division. It is the default for new programs; the parity books (MW14, R8L) pin `two_pass`. In `exact` mode tick columns cross the protocol as `Tick` (`Decimal128`), so both layers reduce the same integers. Aggregates over adjusted series (split, total return, continuous futures) are evaluated piecewise between events (ST-5.10). A column with no integer form (a float column, a derived series) is reduced in `exact` as in `two_pass`, and a function that is not a rational of the sums (`std`, `corr`, `ols_r`) takes its exact centred sums to `f64`, each correctly rounded, and finishes in `f64` (A-D47).
 
 ### 6.4 The algorithm
 
@@ -276,7 +276,7 @@ Demand { class, needs: [Need], require: [Attribute], prefer: [Preference], budge
 Need        { relations: [name], calendar: ≼ C, span: [from, to], scope: all | list(L) | instruments([(id | symbol, from)]), attributes }
 DynamicNeed { relation: quote | greeks, underlying: Entity, filters: chain filters (4.4), spot: (relation, column), horizon: Duration }
 Budget      { money: Num = 0, bytes: Count = ∞, requests: Count = ∞, seconds: Num = ∞ }
-Preference  = tested | latest | version(v) | finest | fewest_sources | cheapest
+Preference  = tested | latest | version(v) | finest | fewest_sources | cheapest | source(s)
 ```
 
 A `Need` is satisfied by a source offering the relations on a calendar at least as fine as `C` (the coarser one being a derived view, 6.2) over a span covering [`from`, `to`], with the attributes (`reviewed = complete`, `receipt = recorded`); the kernel decides which attributes it requires (K-3.2), the resolver only matches them.

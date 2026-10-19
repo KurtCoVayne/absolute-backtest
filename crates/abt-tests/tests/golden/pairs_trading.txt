@@ -1,0 +1,531 @@
+bars 400 2022-01-03 2023-07-14
+decision 2022-05-18 trade(E1, -100)
+decision 2022-05-18 trade(E3, 100)
+decision 2022-05-19 trade(E1, 100)
+decision 2022-05-19 trade(E3, -100)
+decision 2022-05-30 trade(E1, -100)
+decision 2022-05-30 trade(E3, 100)
+decision 2022-06-02 trade(E1, 100)
+decision 2022-06-02 trade(E3, -100)
+decision 2022-06-10 trade(E1, -100)
+decision 2022-06-10 trade(E3, 100)
+decision 2022-06-14 trade(E1, 100)
+decision 2022-06-14 trade(E3, -100)
+decision 2022-07-08 trade(E1, 100)
+decision 2022-07-08 trade(E3, -100)
+decision 2022-07-14 trade(E1, -100)
+decision 2022-07-14 trade(E3, 100)
+decision 2022-08-11 trade(E1, -100)
+decision 2022-08-11 trade(E3, 100)
+decision 2022-08-15 trade(E1, 100)
+decision 2022-08-15 trade(E3, -100)
+decision 2022-09-01 trade(E1, -100)
+decision 2022-09-01 trade(E3, 100)
+decision 2022-09-02 trade(E1, 100)
+decision 2022-09-02 trade(E3, -100)
+decision 2022-09-15 trade(E1, -100)
+decision 2022-09-15 trade(E3, 100)
+decision 2022-09-16 trade(E1, 100)
+decision 2022-09-16 trade(E3, -100)
+decision 2022-09-29 trade(E1, 100)
+decision 2022-09-29 trade(E3, -100)
+decision 2022-09-30 trade(E1, -100)
+decision 2022-09-30 trade(E3, 100)
+decision 2022-12-22 trade(E1, -100)
+decision 2022-12-22 trade(E3, 100)
+decision 2022-12-26 trade(E1, 100)
+decision 2022-12-26 trade(E3, -100)
+decision 2023-01-09 trade(E1, 100)
+decision 2023-01-09 trade(E3, -100)
+decision 2023-01-10 trade(E1, -100)
+decision 2023-01-10 trade(E3, 100)
+decision 2023-02-20 trade(E1, 100)
+decision 2023-02-20 trade(E3, -100)
+decision 2023-02-21 trade(E1, -100)
+decision 2023-02-21 trade(E3, 100)
+decision 2023-04-12 trade(E1, -100)
+decision 2023-04-12 trade(E3, 100)
+decision 2023-04-18 trade(E1, 100)
+decision 2023-04-18 trade(E3, -100)
+decision 2023-05-11 trade(E1, 100)
+decision 2023-05-11 trade(E3, -100)
+decision 2023-05-15 trade(E1, -100)
+decision 2023-05-15 trade(E3, 100)
+decision 2023-05-16 trade(E1, 100)
+decision 2023-05-16 trade(E3, -100)
+decision 2023-05-17 trade(E1, -100)
+decision 2023-05-17 trade(E3, 100)
+decision 2023-06-08 trade(E1, -100)
+decision 2023-06-08 trade(E3, 100)
+decision 2023-06-09 trade(E1, 100)
+decision 2023-06-09 trade(E3, -100)
+decision 2023-06-22 trade(E1, -100)
+decision 2023-06-22 trade(E3, 100)
+decision 2023-06-26 trade(E1, 100)
+decision 2023-06-26 trade(E3, -100)
+fill 2022-05-19 E1 qty -100.0 price 41.928054236808265 at_last false commission 1.0 fee 0.0 slippage 3.14862258623171 impact 4.045953732941572 participation 7.047131923014312e-5 partial false forced false
+fill 2022-05-19 E3 qty 100.0 price 61.80381963705925 at_last false commission 1.0 fee 0.0 slippage 11.064869509953514 impact 5.317094195971695 participation 0.00011215867311803354 partial false forced false
+fill 2022-05-20 E1 qty 100.0 price 42.603602552784714 at_last false commission 1.0 fee 0.0 slippage 3.2165331502712755 impact 4.143722128200181 participation 9.322296976685868e-5 partial false forced false
+fill 2022-05-20 E3 qty -100.0 price 59.23180516450528 at_last false commission 1.0 fee 0.0 slippage 11.66409345141664 impact 5.155390098055241 participation 0.00011050456383848653 partial false forced false
+fill 2022-05-31 E1 qty -100.0 price 42.861730663166476 at_last false commission 1.0 fee 0.0 slippage 4.515357438549579 impact 4.311576244802688 participation 0.00012819658176634378 partial false forced false
+fill 2022-05-31 E3 qty 100.0 price 64.4569212363575 at_last false commission 1.0 fee 0.0 slippage 12.200771341158898 impact 5.491352294591345 participation 9.467222581976681e-5 partial false forced false
+fill 2022-06-03 E1 qty 100.0 price 42.31802737984683 at_last false commission 1.0 fee 0.0 slippage 4.653013403446149 impact 4.149724581237452 participation 6.340816342059142e-5 partial false forced false
+fill 2022-06-03 E3 qty -100.0 price 64.7784250942973 at_last false commission 1.0 fee 0.0 slippage 11.642520849249676 impact 5.514969721019872 participation 0.00010550760235028736 partial false forced false
+fill 2022-06-13 E1 qty -100.0 price 42.215997367580165 at_last false commission 1.0 fee 0.0 slippage 5.348155879796521 impact 4.052107362187385 participation 8.074139982979712e-5 partial false forced false
+fill 2022-06-13 E3 qty 100.0 price 66.6779865204665 at_last false commission 1.0 fee 0.0 slippage 12.205853122322196 impact 6.592798924328199 participation 0.00010343154848405552 partial false forced false
+fill 2022-06-15 E1 qty 100.0 price 41.93056417032633 at_last false commission 1.0 fee 0.0 slippage 5.097330976760162 impact 3.9590860558723917 participation 0.00010411775301394866 partial false forced false
+fill 2022-06-15 E3 qty -100.0 price 64.37651042619943 at_last false commission 1.0 fee 0.0 slippage 11.919892102976316 impact 6.429065277080538 participation 9.152438438410953e-5 partial false forced false
+fill 2022-07-11 E1 qty 100.0 price 38.89679344628317 at_last false commission 1.0 fee 0.0 slippage 3.9296825462473897 impact 3.7496620820695705 participation 0.00011195525372419151 partial false forced false
+fill 2022-07-11 E3 qty -100.0 price 57.85395602782421 at_last false commission 1.0 fee 0.0 slippage 12.341588340488826 impact 5.262808877090597 participation 0.0002109179571330344 partial false forced false
+fill 2022-07-15 E1 qty -100.0 price 38.86796528225793 at_last false commission 1.0 fee 0.0 slippage 4.389649629773091 impact 3.8138221444341185 participation 9.82836722318158e-5 partial false forced false
+fill 2022-07-15 E3 qty 100.0 price 58.84951534510563 at_last false commission 1.0 fee 0.0 slippage 10.62122310655787 impact 5.330311404004781 participation 0.00010788918054930697 partial false forced false
+fill 2022-08-12 E1 qty -100.0 price 38.47885692789196 at_last false commission 1.0 fee 0.0 slippage 3.1556855518548343 impact 3.9586216589487697 participation 0.00011806026976771642 partial false forced false
+fill 2022-08-12 E3 qty 100.0 price 58.63456237183526 at_last false commission 1.0 fee 0.0 slippage 8.537836522991023 impact 5.918400660534691 participation 9.984932736500621e-5 partial false forced false
+fill 2022-08-16 E1 qty 100.0 price 38.27220471997307 at_last false commission 1.0 fee 0.0 slippage 3.1249484483935976 impact 4.095523548912968 participation 9.705976843480447e-5 partial false forced false
+fill 2022-08-16 E3 qty -100.0 price 56.88223759408763 at_last false commission 1.0 fee 0.0 slippage 8.963277047576412 impact 5.812963543661806 participation 8.00815550556687e-5 partial false forced false
+fill 2022-09-02 E1 qty -100.0 price 37.33533818346308 at_last false commission 1.0 fee 0.0 slippage 3.714443726278629 impact 3.7517379274130582 participation 8.537471388799008e-5 partial false forced false
+fill 2022-09-02 E3 qty 100.0 price 56.080071947536545 at_last false commission 1.0 fee 0.0 slippage 10.353089205765665 impact 5.654105547887926 participation 6.475010667580075e-5 partial false forced false
+fill 2022-09-05 E1 qty 100.0 price 37.46446836020186 at_last false commission 1.0 fee 0.0 slippage 3.705892001131166 impact 3.7409440190559944 participation 0.00011175282064119299 partial false forced false
+fill 2022-09-05 E3 qty -100.0 price 55.35479727594717 at_last false commission 1.0 fee 0.0 slippage 9.886344768994327 impact 5.633927636288265 participation 0.00015563063869257813 partial false forced false
+fill 2022-09-16 E1 qty -100.0 price 37.40983443584867 at_last false commission 1.0 fee 0.0 slippage 4.383662743557062 impact 3.632893671576065 participation 0.0001196723371409082 partial false forced false
+fill 2022-09-16 E3 qty 100.0 price 56.46792923516563 at_last false commission 1.0 fee 0.0 slippage 10.559902085106206 impact 5.233021431456195 participation 0.00011308034245250908 partial false forced false
+fill 2022-09-19 E1 qty 100.0 price 37.440022918884544 at_last false commission 1.0 fee 0.0 slippage 4.366277076204299 impact 3.636014812250076 participation 0.00010061040331692378 partial false forced false
+fill 2022-09-19 E3 qty -100.0 price 58.077336873687806 at_last false commission 1.0 fee 0.0 slippage 11.813956252525868 impact 5.452356378693605 participation 0.0001262615103149341 partial false forced false
+fill 2022-09-30 E1 qty 100.0 price 35.54536742063407 at_last false commission 1.0 fee 0.0 slippage 4.2631847096575815 impact 3.273557353750155 participation 4.669458380183566e-5 partial false forced false
+fill 2022-09-30 E3 qty -100.0 price 53.869288788877235 at_last false commission 1.0 fee 0.0 slippage 11.066977133391104 impact 5.004143978885278 participation 9.266157398656036e-5 partial false forced false
+fill 2022-10-03 E1 qty -100.0 price 35.13514317155967 at_last false commission 1.0 fee 0.0 slippage 4.243624909136536 impact 3.2420579348967205 participation 9.963622813109338e-5 partial false forced false
+fill 2022-10-03 E3 qty 100.0 price 54.853461844036644 at_last false commission 1.0 fee 0.0 slippage 11.301007856976073 impact 5.045176546688357 participation 0.00012067835718138802 partial false forced false
+fill 2022-12-23 E1 qty -100.0 price 33.620292627215754 at_last false commission 1.0 fee 0.0 slippage 3.9435744636206795 impact 3.027162814803897 participation 0.00010997845522062228 partial false forced false
+fill 2022-12-23 E3 qty 100.0 price 51.60061692112389 at_last false commission 1.0 fee 0.0 slippage 9.858045134969739 impact 5.2036469774181295 participation 5.624812623429482e-5 partial false forced false
+fill 2022-12-27 E1 qty 100.0 price 34.16937252101751 at_last false commission 1.0 fee 0.0 slippage 3.837275031247962 impact 3.0999770705023377 participation 6.154399102934786e-5 partial false forced false
+fill 2022-12-27 E3 qty -100.0 price 49.45228280202332 at_last false commission 1.0 fee 0.0 slippage 10.714771417196319 impact 5.056948380471628 participation 0.00011633358422609664 partial false forced false
+fill 2023-01-10 E1 qty 100.0 price 33.50142298770239 at_last false commission 1.0 fee 0.0 slippage 4.015399041408501 impact 3.1268997288300544 participation 8.89454186438492e-5 partial false forced false
+fill 2023-01-10 E3 qty -100.0 price 46.40832420959236 at_last false commission 1.0 fee 0.0 slippage 9.585239186486833 impact 4.582339854276771 participation 0.00011341417495724286 partial false forced false
+fill 2023-01-11 E1 qty -100.0 price 33.667221496656 at_last false commission 1.0 fee 0.0 slippage 4.119082339341803 impact 3.1587679950588083 participation 0.00013076493564403692 partial false forced false
+fill 2023-01-11 E3 qty 100.0 price 46.44787106698042 at_last false commission 1.0 fee 0.0 slippage 8.209690451582196 impact 4.577416246460013 participation 0.0001326508007465587 partial false forced false
+fill 2023-02-21 E1 qty 100.0 price 34.30801172133066 at_last false commission 1.0 fee 0.0 slippage 3.478027754770351 impact 3.323144378295163 participation 9.456506218125663e-5 partial false forced false
+fill 2023-02-21 E3 qty -100.0 price 37.76810091179321 at_last false commission 1.0 fee 0.0 slippage 7.538718650811299 impact 3.651190169867846 participation 0.00010234105155430472 partial false forced false
+fill 2023-02-22 E1 qty -100.0 price 34.16241961083369 at_last false commission 1.0 fee 0.0 slippage 3.422091997350991 impact 3.3359469192799414 participation 0.00011647382483734431 partial false forced false
+fill 2023-02-22 E3 qty 100.0 price 38.26283982276209 at_last false commission 1.0 fee 0.0 slippage 7.672283251547448 impact 3.6116990246614447 participation 6.219969211152405e-5 partial false forced false
+fill 2023-04-13 E1 qty -100.0 price 34.74430831748622 at_last false commission 1.0 fee 0.0 slippage 3.4438980235526904 impact 3.1252702278256046 participation 8.138954746597714e-5 partial false forced false
+fill 2023-04-13 E3 qty 100.0 price 39.835252832395966 at_last false commission 1.0 fee 0.0 slippage 7.373058997787648 impact 4.152224241808774 participation 0.0002144266232095377 partial false forced false
+fill 2023-04-19 E1 qty 100.0 price 33.716330208211055 at_last false commission 1.0 fee 0.0 slippage 3.616222549400894 impact 3.0167982717050155 participation 9.556876315862408e-5 partial false forced false
+fill 2023-04-19 E3 qty -100.0 price 39.094499068467684 at_last false commission 1.0 fee 0.0 slippage 8.50721696895765 impact 4.042876184273984 participation 7.900017380038237e-5 partial false forced false
+fill 2023-05-12 E1 qty 100.0 price 32.80382105832111 at_last false commission 1.0 fee 0.0 slippage 3.0703625782859594 impact 3.31174325382485 participation 0.00012222742367814097 partial false forced false
+fill 2023-05-12 E3 qty -100.0 price 40.21795276431631 at_last false commission 1.0 fee 0.0 slippage 9.636026373778726 impact 3.5686971945904573 participation 7.178859121350717e-5 partial false forced false
+fill 2023-05-16 E1 qty -100.0 price 31.807539092437988 at_last false commission 1.0 fee 0.0 slippage 3.0955847554025566 impact 3.1505060007984533 participation 8.603763974663635e-5 partial false forced false
+fill 2023-05-16 E3 qty 100.0 price 39.43180028851013 at_last false commission 1.0 fee 0.0 slippage 8.72861187283082 impact 3.451416978181924 participation 9.757268433187592e-5 partial false forced false
+fill 2023-05-17 E1 qty 100.0 price 31.732016840915726 at_last false commission 1.0 fee 0.0 slippage 3.0617421346474405 impact 3.1399419569243934 participation 0.00010793051864931431 partial false forced false
+fill 2023-05-17 E3 qty -100.0 price 37.778478260682995 at_last false commission 1.0 fee 0.0 slippage 8.83134744366019 impact 3.320826488040308 participation 7.288295070998926e-5 partial false forced false
+fill 2023-05-18 E1 qty -100.0 price 31.33898715064799 at_last false commission 1.0 fee 0.0 slippage 3.0286473198722845 impact 3.072637615328636 participation 6.772920239382093e-5 partial false forced false
+fill 2023-05-18 E3 qty 100.0 price 38.38217128980846 at_last false commission 1.0 fee 0.0 slippage 8.896469964687146 impact 3.3206590161594396 participation 6.630824848087803e-5 partial false forced false
+fill 2023-06-09 E1 qty -100.0 price 32.67345636412155 at_last false commission 1.0 fee 0.0 slippage 3.394654930397602 impact 3.2597086574477587 participation 9.422726107735681e-5 partial false forced false
+fill 2023-06-09 E3 qty 100.0 price 34.49217214965857 at_last false commission 1.0 fee 0.0 slippage 7.231762858976358 impact 2.985452106881163 participation 0.00011863606488918205 partial false forced false
+fill 2023-06-12 E1 qty 100.0 price 32.87694867972284 at_last false commission 1.0 fee 0.0 slippage 3.3909557666175045 impact 3.3039122056665504 participation 0.00011891058875010701 partial false forced false
+fill 2023-06-12 E3 qty -100.0 price 35.290887428135235 at_last false commission 1.0 fee 0.0 slippage 7.830594851943191 impact 3.0806623345327893 participation 8.527446439108917e-5 partial false forced false
+fill 2023-06-23 E1 qty -100.0 price 32.983528908640906 at_last false commission 1.0 fee 0.0 slippage 3.372121079570111 impact 3.2749880563390605 participation 8.520471284307678e-5 partial false forced false
+fill 2023-06-23 E3 qty 100.0 price 33.25230755819134 at_last false commission 1.0 fee 0.0 slippage 5.31324203264462 impact 2.91751378648923 participation 8.287022688210716e-5 partial false forced false
+fill 2023-06-27 E1 qty 100.0 price 33.16574017078869 at_last false commission 1.0 fee 0.0 slippage 3.3045026067233363 impact 3.2695144721458664 participation 0.000108617730758369 partial false forced false
+fill 2023-06-27 E3 qty -100.0 price 33.41744787140856 at_last false commission 1.0 fee 0.0 slippage 5.340701011592575 impact 2.914511847551172 participation 7.91443545540453e-5 partial false forced false
+book 2022-01-03 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-04 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-05 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-06 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-07 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-10 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-11 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-12 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-13 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-14 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-17 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-18 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-19 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-20 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-21 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-24 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-25 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-26 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-27 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-28 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-01-31 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-01 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-02 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-03 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-04 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-07 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-08 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-09 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-10 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-11 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-14 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-15 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-16 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-17 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-18 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-21 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-22 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-23 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-24 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-25 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-02-28 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-01 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-02 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-03 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-04 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-07 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-08 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-09 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-10 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-11 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-14 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-15 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-16 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-17 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-18 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-21 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-22 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-23 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-24 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-25 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-28 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-29 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-30 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-03-31 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-01 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-04 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-05 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-06 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-07 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-08 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-11 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-12 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-13 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-14 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-15 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-18 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-19 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-20 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-21 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-22 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-25 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-26 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-27 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-28 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-04-29 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-02 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-03 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-04 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-05 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-06 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-09 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-10 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-11 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-12 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-13 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-16 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-17 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-18 cash 1000000.0 gross 0.0 net 0.0 equity 1000000.0 leverage 0.0
+book 2022-05-19 cash 998010.4234599749 gross 10364.0 net 1964.0 equity 999974.4234599749 leverage 0.010364265082040702
+book 2022-05-20 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-23 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-24 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-25 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-26 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-27 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-30 cash 999671.2145910101 gross 0.0 net 0.0 equity 999671.2145910101 leverage 0.0
+book 2022-05-31 cash 997509.695533691 gross 10723.0 net 2133.0 equity 999642.695533691 leverage 0.010726832745249227
+book 2022-06-01 cash 997509.3481912252 gross 10705.0 net 2253.000000000001 equity 999762.3481912252 leverage 0.010707544667357734
+book 2022-06-02 cash 997509.0009309512 gross 10694.0 net 2244.0 equity 999753.0009309512 leverage 0.010696642060630923
+book 2022-06-03 cash 999753.0117777388 gross 0.0 net 0.0 equity 999753.0117777388 leverage 0.0
+book 2022-06-06 cash 999753.0117777388 gross 0.0 net 0.0 equity 999753.0117777388 leverage 0.0
+book 2022-06-07 cash 999753.0117777388 gross 0.0 net 0.0 equity 999753.0117777388 leverage 0.0
+book 2022-06-08 cash 999753.0117777388 gross 0.0 net 0.0 equity 999753.0117777388 leverage 0.0
+book 2022-06-09 cash 999753.0117777388 gross 0.0 net 0.0 equity 999753.0117777388 leverage 0.0
+book 2022-06-10 cash 999753.0117777388 gross 0.0 net 0.0 equity 999753.0117777388 leverage 0.0
+book 2022-06-13 cash 997304.8128624503 gross 10880.0 net 2417.999999999999 equity 999722.8128624503 leverage 0.010883016632228194
+book 2022-06-14 cash 997304.7839925872 gross 10631.0 net 2201.0 equity 999505.7839925872 leverage 0.010636256608274759
+book 2022-06-15 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-16 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-17 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-20 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-21 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-22 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-23 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-24 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-27 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-28 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-29 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-06-30 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-01 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-04 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-05 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-06 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-07 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-08 cash 999547.3499606403 gross 0.0 net 0.0 equity 999547.3499606403 leverage 0.0
+book 2022-07-11 cash 1001441.0662187943 gross 9685.0 net -1921.0 equity 999520.0662187943 leverage 0.009689650390550497
+book 2022-07-12 cash 1001441.0259174245 gross 9688.0 net -2080.0 equity 999361.0259174245 leverage 0.00969419433893403
+book 2022-07-13 cash 1001440.9852941368 gross 9764.0 net -2098.0 equity 999342.9852941368 leverage 0.009770419309168573
+book 2022-07-14 cash 1001440.9452530409 gross 9692.0 net -2000.0 equity 999440.9452530409 leverage 0.009697421389461041
+book 2022-07-15 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-18 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-19 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-20 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-21 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-22 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-25 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-26 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-27 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-28 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-07-29 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-01 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-02 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-03 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-04 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-05 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-08 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-09 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-10 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-11 cash 999440.7500481259 gross 0.0 net 0.0 equity 999440.7500481259 leverage 0.0
+book 2022-08-12 cash 997423.1795037315 gross 9704.0 net 1994.0000000000005 equity 999417.1795037315 leverage 0.00970965898827014
+book 2022-08-15 cash 997422.2316681151 gross 9699.0 net 2011.0 equity 999433.2316681151 leverage 0.009704500203392053
+book 2022-08-16 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-17 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-18 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-19 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-22 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-23 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-24 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-25 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-26 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-29 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-30 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-08-31 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-09-01 cash 999280.9209829239 gross 0.0 net 0.0 equity 999280.9209829239 leverage 0.0
+book 2022-09-02 cash 997404.4476065167 gross 9333.0 net 1851.0000000000005 equity 999255.4476065167 leverage 0.009339954085169137
+book 2022-09-05 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-06 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-07 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-08 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-09 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-12 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-13 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-14 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-15 cash 999190.5585528858 gross 0.0 net 0.0 equity 999190.5585528858 leverage 0.0
+book 2022-09-16 cash 997282.7490729541 gross 9380.0 net 1882.0 equity 999164.7490729541 leverage 0.009387841203067822
+book 2022-09-19 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-20 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-21 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-22 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-23 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-26 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-27 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-28 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-29 cash 999344.4037013111 gross 0.0 net 0.0 equity 999344.4037013111 leverage 0.0
+book 2022-09-30 cash 1001174.7958381354 gross 8950.0 net -1856.0 equity 999318.7958381354 leverage 0.008956100933229795
+book 2022-10-03 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-04 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-05 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-06 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-07 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-10 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-11 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-12 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-13 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-14 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-17 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-18 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-19 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-20 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-21 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-24 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-25 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-26 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-27 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-28 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-10-31 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-01 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-02 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-03 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-04 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-07 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-08 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-09 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-10 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-11 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-14 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-15 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-16 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-17 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-18 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-21 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-22 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-23 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-24 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-25 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-28 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-29 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-11-30 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-01 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-02 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-05 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-06 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-07 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-08 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-09 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-12 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-13 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-14 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-15 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-16 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-19 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-20 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-21 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-22 cash 999200.8515941753 gross 0.0 net 0.0 equity 999200.8515941753 leverage 0.0
+book 2022-12-23 cash 997400.8191647845 gross 8514.0 net 1776.0 equity 999176.8191647845 leverage 0.008521014335697743
+book 2022-12-26 cash 997400.7500414968 gross 8573.0 net 1845.0 equity 999245.7500414968 leverage 0.008579471065695279
+book 2022-12-27 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2022-12-28 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2022-12-29 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2022-12-30 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-02 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-03 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-04 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-05 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-06 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-09 cash 998927.0177134331 gross 0.0 net 0.0 equity 998927.0177134331 leverage 0.0
+book 2023-01-10 cash 1000215.7078356221 gross 7998.0 net -1312.0 equity 998903.7078356221 leverage 0.008006777767728675
+book 2023-01-11 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-12 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-13 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-16 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-17 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-18 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-19 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-20 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-23 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-24 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-25 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-26 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-27 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-30 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-01-31 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-01 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-02 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-03 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-06 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-07 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-08 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-09 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-10 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-13 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-14 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-15 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-16 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-17 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-20 cash 998935.6111525623 gross 0.0 net 0.0 equity 998935.6111525623 leverage 0.0
+book 2023-02-21 cash 999279.6200716086 gross 7212.0 net -364.00000000000045 equity 998915.6200716086 leverage 0.007219829037694894
+book 2023-02-22 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-02-23 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-02-24 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-02-27 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-02-28 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-01 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-02 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-03 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-06 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-07 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-08 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-09 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-10 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-13 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-14 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-15 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-16 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-17 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-20 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-21 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-22 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-23 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-24 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-27 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-28 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-29 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-30 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-03-31 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-03 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-04 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-05 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-06 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-07 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-10 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-11 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-12 cash 998867.5519202787 gross 0.0 net 0.0 equity 998867.5519202787 leverage 0.0
+book 2023-04-13 cash 998356.4574687878 gross 7453.0 net 491.0 equity 998847.4574687878 leverage 0.007461599811133216
+book 2023-04-14 cash 998356.4337496097 gross 7516.0 net 589.9999999999995 equity 998946.4337496097 leverage 0.007523926955510727
+book 2023-04-17 cash 998356.3639687878 gross 7294.0 net 501.99999999999955 equity 998841.3639687878 leverage 0.007302460894308664
+book 2023-04-18 cash 998356.3407290617 gross 7388.0 net 602.0000000000005 equity 998941.3407290617 leverage 0.007395829663639692
+book 2023-04-19 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-20 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-21 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-24 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-25 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-26 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-27 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-04-28 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-01 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-02 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-03 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-04 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-05 cash 998892.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-08 cash 998875.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-09 cash 998875.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-10 cash 998875.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-11 cash 998875.1345671421 gross 0.0 net 0.0 equity 998875.1345671421 leverage 0.0
+book 2023-05-12 cash 999614.5477377416 gross 7309.0 net -761.0 equity 998853.5477377416 leverage 0.00731738903721554
+book 2023-05-15 cash 999614.466943221 gross 7193.0 net -671.0 equity 998943.466943221 leverage 0.007200607680042862
+book 2023-05-16 cash 998850.0138989564 gross 0.0 net 0.0 equity 998850.0138989564 leverage 0.0
+book 2023-05-17 cash 999452.660040933 gross 6957.0 net -623.0 equity 998829.660040933 leverage 0.00696515159523286
+book 2023-05-18 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-19 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-22 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-23 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-24 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-25 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-26 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-29 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-30 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-05-31 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-01 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-02 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-05 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-06 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-07 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-08 cash 998746.3154215376 gross 0.0 net 0.0 equity 998746.3154215376 leverage 0.0
+book 2023-06-09 cash 998562.4438429839 gross 6713.0 net 165.0 equity 998727.4438429839 leverage 0.0067215535543603145
+book 2023-06-12 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-13 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-14 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-15 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-16 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-19 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-20 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-21 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-22 cash 998801.0287041266 gross 0.0 net 0.0 equity 998801.0287041266 leverage 0.0
+book 2023-06-23 cash 998772.1508391716 gross 6622.0 net 12.000000000000455 equity 998784.1508391716 leverage 0.006630061154290685
+book 2023-06-26 cash 998772.0827432811 gross 6615.0 net -13.0 equity 998759.0827432811 leverage 0.0066232188665865735
+book 2023-06-27 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-06-28 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-06-29 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-06-30 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-03 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-04 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-05 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-06 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-07 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-10 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-11 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-12 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-13 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+book 2023-07-14 cash 998795.2308421102 gross 0.0 net 0.0 equity 998795.2308421102 leverage 0.0
+action 2023-05-08 E1 dividend 0.17 on -100.0 cash -17.0
+final_cash 998795.2308421102

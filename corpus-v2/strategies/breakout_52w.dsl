@@ -7,8 +7,8 @@ strategy breakout_52w {
   data {
     class   equity
     need    bars @1d
-    need    listing
-    require tested
+    need    actions, listing
+    require reviewed
     prefer  latest
   }
   uses  calendar, stat, book

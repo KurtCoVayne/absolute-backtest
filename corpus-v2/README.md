@@ -5,18 +5,17 @@ defines it, in five parts.
 
 | Directory | Contents |
 | --- | --- |
-| `catalog/` | The classes a program is written against, as `abt bundle env` would generate them from a bundle's manifest: `equity`, `future`, `series`. A program never names them; its `data` block names what it needs. |
+| `catalog/` | The classes a program is written against, as `abt data catalog --class C` renders them from the registry: `equity`, `future`, `series`. A program never names them; its `data` block names what it needs. |
 | `lib/` | The standard library of section 7, one module a file: `calendar`, `catalog`, `stat`, `bars`, `xsec`, `state`, `book`, and the execution presets `equity_default`, `book_fixed_base`, `futures_fixed_base`. |
 | `strategies/` | The 23 strategies of `corpus/` rewritten, and `scale_in`, whose rules aggregate their own past. |
 | `company/` | MW14 and R8L, the programs of section 9, which reproduces them verbatim. |
 | `negative/` | 35 cases, one or more per judgment of section 10 and of the retained ones; each file's `# expect:` header names the code it must produce. |
 
 It is the acceptance corpus of the implementation ordered in section 11 of
-that document: when the checker of the second formulation lands,
-`tests/corpus_v2.rs` asserts that every strategy here checks clean (modulo
-its `# allow:` lines) and every negative case produces its code, as
-`tests/corpus.rs` does for `corpus/` today. Nothing here is read by the
-present toolchain.
+that document: `tests/corpus_v2.rs` asserts that every strategy and company
+program here checks clean (modulo its `# allow:` lines), that every
+negative case produces its code, and that every program runs on synthetic
+data of its class and decides.
 
 ## The grammar the corpus assumes
 
@@ -27,7 +26,7 @@ libraries a unit reads directly.
 
 ```
 strategy NAME {
-  data       { class CLASS   need ...   require tested | allow untested   prefer latest | version V | base finest }
+  data       { class CLASS   need ...   require reviewed | allow unreviewed   prefer latest | version V | base finest   [budget { ... }] }
   uses       LIB, LIB, ...
   calendars  { NAME = base | days | weeks(n) | months(n) | years(n) | sessions | sessions of "ROOT"   ... }
   clock      { decide on CALENDAR [at session + OFFSET] }
@@ -45,12 +44,18 @@ defines it: `need bars @r [from DATE] [complete]` (open, high, low, close,
 volume at resolution r or finer, from the date on), `need actions` (split,
 dividend, delisted), `need listing` (listed, ticker), `need lists "L", ...`
 (member), `need series "S" @r [complete]`, `need sessions`, `need
-point_value`, `need commission`, `need instruments where ATTR = VALUE`.
-Several needs may share a line, comma-separated. With `complete` the program
-requires a bundle whose bars (or series) are reviewed complete, so that a
-missing bar means the instrument did not trade and WF-5 treats the primitives
-as closed; without it a missing bar is unknown, and the bar primitives may
-not be negated, directly or through a relation that reads them. A library's
+point_value`, `need commission`, `need instruments where ATTR = VALUE`, and
+for options `need chain of "U" within D1..D2 and M1..M2 [right call|put]
+[spot RELATION]` (docs/spec/01-data.md, 7.2). Several needs may share a
+line, comma-separated. With `complete` the program requires versions a
+reviewer marked `reviewed = complete`, so that a missing bar means the
+instrument did not trade and WF-5 treats the primitives as closed; without it
+a missing bar is unknown, and the bar primitives may not be negated, directly
+or through a relation that reads them. `require reviewed` asks every version
+the binding names for a reviewer's `reviewed` attribute; `allow unreviewed`
+admits the others, warned on every run. An optional `budget { money X; bytes
+Y; requests Z; seconds S }` caps what resolving the demand may spend (money
+is zero unless written). A library's
 `data` block says what the library needs; a strategy's demand must cover its
 libraries'. `class any` in a library means the module is written for every
 class, with `Entity` as the class's entity sort and `units` as its unit. A
@@ -108,7 +113,12 @@ signed delta; each with an optional trailing order (`market`, `moo`, `moc`,
 omitted. `silence hold` keeps an instrument with no decision; `silence flat`
 closes it. A sale of a held quantity is a negative delta bound in the body:
 `decide(T, trade(A, Q)) :- held(A, T, Q0), ..., Q = -Q0.` A decision term's
-arguments are variables, parameters or literals.
+arguments are variables, parameters or literals. Two more forms
+(docs/spec/02-kernel.md, 2.3): `combo([leg(A1, Q1), ..., leg(An, Qn)])`, an
+all-or-none multi-leg delta of at least two legs on distinct instruments,
+whose optional order's limit is the net price; and `exercise(A, Q)`, Q long
+contracts of an option exercised, admitted only in the option class. Both
+check; the kernel runs them when the options model lands (M-7).
 
 **Kernel relations**, at the decision calendar: `position(A, @T, Q)`,
 `cash(@T, C)`, `nav(@T, N)`, `capital(@T, C)` (the base the execution block's

@@ -1,0 +1,19 @@
+# proposition: ST-3.2 / A-D54 (a value off every grid counts as 0 in the decoded integers as in the summaries)
+# mutation: a raw position decodes to the block base (the packed 0 of the row) instead of the 0 the summaries and cumulatives count
+# test: cargo test -p abt-data --test hot a_value_off_every_grid_keeps_its_bits_counts_as_zero_and_has_no_tick_view
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/version.rs b/crates/abt-data/src/hot/version.rs
+index e9d2548..e10e5c7 100644
+--- a/crates/abt-data/src/hot/version.rs
++++ b/crates/abt-data/src/hot/version.rs
+@@ -413,9 +413,7 @@ impl HotVersion {
+         patch(&exceptions, 0, BLOCK, &mut out);
+         let n = h.n as usize;
+         let scale = abt_agg::exact::pow10((run.exponent as i32 - h.e as i32).max(0) as u32) as i64;
+-        let mut ints: Vec<i64> = (0..n).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect();
+-        // A value off any grid counts as 0, as the summaries count it (A-D54).
+-        abt_codec::block::zero_raw(&exceptions, 0, n, &mut ints);
++        let ints: Vec<i64> = (0..n).map(|j| h.base.wrapping_add(h.g.wrapping_mul(out[j]) as i64).wrapping_mul(scale)).collect();
+         let floats: Vec<f64> = match lv.entries[c].kind {
+             Kind::Tick | Kind::TickF32 => {
+                 let mut raw = exceptions

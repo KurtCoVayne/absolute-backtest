@@ -202,6 +202,11 @@ out["databento"] = dbn
 
 # ---------------- ORATS ----------------
 files = sorted(glob.glob(f"{ROOT}/orats/*.parquet"))
+if not files:
+    print("orats: no samples under orats/ (ST-11 only): skipped", file=sys.stderr)
+    json.dump(out, open(f"{ROOT}/study.json", "w"), indent=1)
+    print("written", file=sys.stderr)
+    sys.exit(0)
 day = pq.read_table(files[0]); act = actual_sizes(files[0])
 day = day.sort_by([("ticker", "ascending"), ("expirDate", "ascending"), ("strike", "ascending")])
 # Within a day, the chain order: one block per (ticker, expiry).

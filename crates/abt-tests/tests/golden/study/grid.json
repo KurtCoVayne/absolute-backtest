@@ -1,0 +1,165 @@
+{
+  "best": 2,
+  "dsr": {
+    "dsr": 0.3741082971195909,
+    "expected_max_sr": 0.03270092785565205,
+    "trials": 3
+  },
+  "embargo": {
+    "intervals": [
+      [
+        1693958400000000000,
+        9223372036854775807
+      ]
+    ],
+    "truncates": true
+  },
+  "pbo": {
+    "combinations": 12870,
+    "mean_logit": 0.5884020595018249,
+    "partitions": 16,
+    "pbo": 0.40606060606060607,
+    "trials": 3
+  },
+  "points": [
+    {
+      "point": [
+        [
+          "n",
+          "1"
+        ]
+      ],
+      "returns": {
+        "autocorrelation_1": 0.10272140076878886,
+        "cagr": -0.3408119944145056,
+        "cvar_5": 0.049825543800173434,
+        "kurtosis": 0.6034522564575204,
+        "max_drawdown": 0.6312124656927056,
+        "max_drawdown_duration": 212,
+        "n": 436,
+        "sharpe": -0.932644972540705,
+        "sharpe_lo": -0.769212185623138,
+        "sharpe_period": -0.05875111092517546,
+        "sharpe_se": 0.6275686893459198,
+        "skew": 0.16546063988342952,
+        "sortino": -1.2787056117005722,
+        "t_stat": -1.1351486082475075,
+        "total_return": -0.5137525305373973,
+        "volatility": 0.37234534721203816,
+        "worst_month": -0.32088173073830295
+      },
+      "trading": {
+        "avg_gross": 0.8954410671955739,
+        "avg_net": 0.8954410671955739,
+        "avg_participation": 0.0024031198170564798,
+        "cost_drag": 0.46398064700973524,
+        "decisions": 402,
+        "dropped": 1,
+        "fill_ratio": 1.0,
+        "fills": 400,
+        "impact_drag": 0.37768133762774225,
+        "max_leverage": 2.578386505715379,
+        "max_participation": 0.05972941119530767,
+        "turnover": 39.0413116313857
+      }
+    },
+    {
+      "point": [
+        [
+          "n",
+          "2"
+        ]
+      ],
+      "returns": {
+        "autocorrelation_1": 0.047359500191227595,
+        "cagr": -0.0674911847744264,
+        "cvar_5": 0.029372726815672438,
+        "kurtosis": 0.5495395055375139,
+        "max_drawdown": 0.2972385079501507,
+        "max_drawdown_duration": 149,
+        "n": 436,
+        "sharpe": -0.1959471111890233,
+        "sharpe_lo": -0.1935880764226027,
+        "sharpe_period": -0.012343507769706608,
+        "sharpe_se": 0.7511268851604459,
+        "skew": 0.1867998582317135,
+        "sortino": -0.28067922182813065,
+        "t_stat": -0.2408733784884475,
+        "total_return": -0.11387542805734707,
+        "volatility": 0.2263237654178585,
+        "worst_month": -0.13026655855651148
+      },
+      "trading": {
+        "avg_gross": 0.783961386726878,
+        "avg_net": 0.783961386726878,
+        "avg_participation": 0.001043332216042444,
+        "cost_drag": 0.2680584240848228,
+        "decisions": 794,
+        "dropped": 3,
+        "fill_ratio": 1.0,
+        "fills": 787,
+        "impact_drag": 0.2046545584634813,
+        "max_leverage": 1.0809815409178003,
+        "max_participation": 0.04531056274035571,
+        "turnover": 30.002776935194202
+      }
+    },
+    {
+      "point": [
+        [
+          "n",
+          "3"
+        ]
+      ],
+      "returns": {
+        "autocorrelation_1": 0.016810909438871105,
+        "cagr": 0.0325427584596949,
+        "cvar_5": 0.021032255361346966,
+        "kurtosis": 0.3167204888330235,
+        "max_drawdown": 0.1740547802074106,
+        "max_drawdown_duration": 134,
+        "n": 436,
+        "sharpe": 0.2750745433028823,
+        "sharpe_lo": 0.33615178970401993,
+        "sharpe_period": 0.01732806746628796,
+        "sharpe_se": 0.9291260809424483,
+        "skew": 0.14134532732278743,
+        "sortino": 0.40302394807030406,
+        "t_stat": 0.3525579157329498,
+        "total_return": 0.056971131521467155,
+        "volatility": 0.16688423439840533,
+        "worst_month": -0.09280791426814672
+      },
+      "trading": {
+        "avg_gross": 0.7828125656308198,
+        "avg_net": 0.7828125656308198,
+        "avg_participation": 0.0005678132815610549,
+        "cost_drag": 0.1698111057504463,
+        "decisions": 1166,
+        "dropped": 3,
+        "fill_ratio": 1.0,
+        "fills": 1144,
+        "impact_drag": 0.1253244129612384,
+        "max_leverage": 1.0384855815097747,
+        "max_participation": 0.02210344917122315,
+        "turnover": 21.396643380313392
+      }
+    }
+  ],
+  "subperiods": [
+    [
+      2022,
+      0.6539972509850778
+    ],
+    [
+      2023,
+      -0.1817029363886878
+    ]
+  ],
+  "surface": {
+    "neighbours": 1,
+    "smoothness": 0.5,
+    "stability": 0.0,
+    "tolerance": 0.1
+  }
+}

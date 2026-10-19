@@ -2,7 +2,7 @@
 # `60 USD` is a Notional<USD> literal (currency), not a price: a Price<USD>
 # parameter needs the per-share form `60 USD/share` (WF-3).
 strategy bad_price_param_notional {
-  data { class equity   need bars @1d   need listing   require tested   prefer latest }
+  data { class equity   need bars @1d   need listing   require reviewed   prefer latest }
   uses calendar, book
   clock { decide on base }
   universe { universe(A, T) :- listed(A, T), traded@base(A, T). }

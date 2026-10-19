@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""MORNIGHT-R8L parity: abt's legs and daily P&L (abt run ... --dump DIR
---returns FILE --report-by day --report-calendar calendar) against the Python
-book's golden legs (results/r40/leg_flags.parquet, HOME-26 main and sidecar
-legs: R8L is R8 without the late leg) and its fixed-base scorecard
-(scripts/r39_fixed.py `path_stats_fixed`: daily P&L over the $1M base on the
-ES calendar, mean x 252, population Sharpe, additive drawdown).
+"""MORNIGHT-R8L parity: abt's legs and daily P&L, read from the run's outputs
+in the data layer's store (K-9.1: `kernel.<run>.decisions`, the fills of
+`kernel.<run>.events`, `kernel.<run>.book`, and the ES sessions the store
+holds), against the Python book's golden legs (results/r40/leg_flags.parquet,
+HOME-26 main and sidecar legs: R8L is R8 without the late leg) and its
+fixed-base scorecard (scripts/r39_fixed.py `path_stats_fixed`: daily P&L over
+the $1M base on the ES calendar, mean x 252, population Sharpe, additive
+drawdown).
 
-  python scripts/parity/r8l_compare.py DUMP RETURNS LEG_FLAGS [--f F]
+  abt data ingest --store STORE --adapter bundle_v2 --from BUNDLE --class future corpus-v2/catalog corpus-v2/lib
+  abt data serve --store STORE --socket SOCKET &
+  abt run --strategy r8l --data SOCKET corpus-v2/catalog corpus-v2/lib corpus-v2/company/r8l.dsl
+      (prints `run RUN: the outputs are kernel.RUN.{...}`)
+  python scripts/parity/r8l_compare.py STORE RUN LEG_FLAGS [--f F]
 """
 import argparse
 import sys
 
 import numpy as np
 import pandas as pd
+
+import abt_store
 
 
 def stats(v: np.ndarray) -> dict:
@@ -29,8 +37,8 @@ def stats(v: np.ndarray) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("dump")
-    ap.add_argument("returns")
+    ap.add_argument("store")
+    ap.add_argument("run")
     ap.add_argument("leg_flags")
     ap.add_argument("--f", type=float, default=0.006493912071090746)
     ap.add_argument("--base", type=float, default=1e6)
@@ -41,16 +49,18 @@ def main() -> int:
     D = args.f * args.base
     py["pnl"] = D * py["net"]
     # abt legs: decisions (one per market-session) and their two fills.
-    dec = pd.read_parquet(f"{args.dump}/decisions.parquet")
-    dec["day"] = pd.to_datetime(dec["t"]).dt.normalize()
+    names = abt_store.keys(args.store)
+    dec = abt_store.relation(args.store, args.run, "decisions")
+    dec["equity"] = dec["instrument"].astype("int64").map(names)
+    dec["day"] = dec["t"].dt.normalize()
     # A target quantity is signed; a delta order (sell, short) records a positive amount.
     dec["dir"] = np.where(dec["ctor"].isin(["sell", "short"]), -1, 1) * np.sign(dec["amount"])
-    fills = pd.read_parquet(f"{args.dump}/fills.parquet")
-    fills["day"] = pd.to_datetime(fills["t"]).dt.normalize()
-    fills["flow"] = 0.0
-    sec = pd.read_parquet(f"{args.dump}/data/securities.parquet").set_index("id")
-    fills["mult"] = fills["equity"].map(sec["multiplier"])
-    fills["flow"] = -fills["quantity"] * fills["price"] * fills["mult"] - fills["commission"]
+    events = abt_store.relation(args.store, args.run, "events")
+    fills = events[events["kind"].isin(["fill", "partial_fill"])].sort_values("seq").copy()
+    fills["equity"] = fills["instrument"].astype("int64").map(names)
+    fills["day"] = fills["t"].dt.normalize()
+    # The fill's cash: -quantity x price x multiplier, less commission and fee.
+    fills["flow"] = fills["cash_flow"]
     entries = fills[fills.groupby(["equity", "day"]).cumcount() == 0].rename(columns={"price": "e_abt"})
     exits = fills[fills.groupby(["equity", "day"]).cumcount() == 1].rename(columns={"price": "x_abt"})
     leg = fills.groupby(["equity", "day"])["flow"].sum().rename("pnl_abt").reset_index()
@@ -70,8 +80,9 @@ def main() -> int:
     print(m[m["_merge"] == "left_only"][["mkt", "day", "kind", "dir_py", "m", "g", "m_med", "pnl"]].head(10).to_string())
     print("abt-only legs (first 10):")
     print(m[m["_merge"] == "right_only"][["mkt", "day", "dir_abt", "pnl_abt"]].head(10).to_string())
-    # The scorecard on the ES calendar.
-    r = pd.read_parquet(args.returns)
+    # The scorecard on the ES calendar, from the book.
+    book = abt_store.relation(args.store, args.run, "book")
+    r = abt_store.daily_returns(book, args.base, abt_store.session_days(args.store, "ES"))
     v_abt = r["pnl"].to_numpy() / args.base
     pyd = py.groupby("day")["pnl"].sum()
     cal = pd.to_datetime(r["t"]).dt.normalize()

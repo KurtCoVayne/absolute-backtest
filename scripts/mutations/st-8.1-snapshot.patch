@@ -1,0 +1,17 @@
+# proposition: ST-8.1 (Prop. 8.1, snapshot exactness under appends)
+# mutation: an appended row is admitted whatever the reader's sequence
+# test: cargo test -p abt-data --test appends readers_at_a_sequence_keep_their_view_under_appends
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/version.rs b/crates/abt-data/src/hot/version.rs
+index e10e5c7..05a666d 100644
+--- a/crates/abt-data/src/hot/version.rs
++++ b/crates/abt-data/src/hot/version.rs
+@@ -667,7 +667,7 @@ impl HotVersion {
+         // beyond the published labels, so the rows are sorted after.
+         for (o, id, rows) in appended {
+             for r in rows {
+-                if f.r_max.is_none_or(|m| r.r <= m) && f.as_of_seq.is_none_or(|n| r.seq <= n) {
++                if f.r_max.is_none_or(|m| r.r <= m) {
+                     gathered.push(id, r.label, r.r, r.seq, &r.ints, &r.floats);
+                     keys.push((u32::MAX, o as u32, r.r));
+                     extra = true;

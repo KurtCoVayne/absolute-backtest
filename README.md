@@ -1,840 +1,1329 @@
 # absolute-backtest
 
-A strategy DSL for equities backtesting, implemented exactly as fixed by
-[`docs/semantic-model.md`](docs/semantic-model.md): a typed intermediate
-representation, a well-formedness checker with one diagnostic code per
-judgment, and a kernel that evaluates a checked program bar by bar in a closed
-loop with a simulated executor. One Rust crate, no dependencies.
+A backtesting system for programs written in a strategy language, built as
+three programs that share nothing but a protocol
+([`docs/spec/00-architecture.md`](docs/spec/00-architecture.md)):
+
+| Program | Crate | What it does | Specification |
+| --- | --- | --- | --- |
+| The data layer | `crates/abt-data` | Holds typed relations with two timestamps in a store, answers structured queries and aggregate requests, streams events in a canonical order with explicit clock barriers, and plans the cheapest way to satisfy a demand from the store, the vendors and the feeds. It interprets nothing. | `docs/spec/01-data.md` |
+| The kernel | `crates/abt-kernel` | Parses, checks, normalises, analyses and plans a program; derives its contract; binds its demand through the data layer; evaluates it as a fold over the stream; keeps the book and simulates execution for equities, futures and options; serves its state tables and its query language. | `docs/spec/02-kernel.md` |
+| The query layer | `crates/abt-query` | A client of both: runs plans (studies), computes metrics, runs statistical tests, judges claims, counts trials and writes reports. | `docs/spec/03-query.md` |
+
+The layers speak the protocol of `docs/spec/04-protocol.md`, over a Unix
+socket or an in-process channel that carries the same frames. Two crates are
+shared:
+- `crates/abt-wire` holds the FlatBuffers messages, the frames, RFC 8785
+  canonical JSON and BLAKE3 hashes;
+- `crates/abt-agg` is the one implementation of every aggregate.
+
+`abt` (`crates/abt`) is the front binary. Each subcommand is a call on one
+layer. With no socket named, it links the layers in one process, with the
+same results, bit for bit, as over sockets (G3).
+
+The language is the second formulation of
+[`docs/language-v2.md`](docs/language-v2.md); its grammar is
+`corpus-v2/README.md`. A program is written as typed blocks and linked
+against a class catalog and a standard library. A checker judges it, with
+one diagnostic code per judgment, and the compiler takes it from the typed
+IR to an executable plan. The kernel evaluates it bar by bar in a closed
+loop with a simulated executor, every setting of which is a field of the
+program's `execution` block.
+
+## Quick start
+
+In one process, the front serving a store directory itself:
 
 ```
-abt check corpus/                                   # every strategy and library in the corpus
-abt run --strategy momentum_top_n --synthetic corpus/   # backtest on a synthetic market
-abt run --strategy sma_crossover --data ./market corpus/ --verify-causality
-abt run --strategy momentum_top_n --synthetic --all --fills corpus/  # every decision, and the fills
-abt run --strategy breakout_52w --synthetic --param hold=21d --param qty='50 shares' corpus/
-abt explain --strategy breakout_52w --rule 'decide#1' --at 2023-02-24 --synthetic corpus/
-abt explain --strategy breakout_52w --rule 'decide#2' --at 2023-02-24 --bind A=SPY --synthetic corpus/
-abt explain --strategy breakout_52w --rule 'features::sma#1' --at 2023-02-24 --inputs SPY,20d,10 --synthetic corpus/
-abt synth --env equities_1d --out ./market corpus/  # write a synthetic market as Parquet
+abt check corpus-v2/catalog corpus-v2/lib corpus-v2/strategies      # every strategy, against the catalog and the library
+abt data ingest --store ./store --adapter synthetic --class equity --days 500   # a synthetic market in a store
+abt run --strategy sma_crossover --data ./store --verify-causality corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN: ...`
+abt metrics --run RUN --store ./store
+abt data query --store ./store 'kernel.RUN.book'
+abt run --strategy sma_crossover --synthetic --all --fills corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt run --strategy sma_crossover --synthetic --param fast=30d --start 2022-06-01 --end 2022-09-30 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt query --strategy sma_crossover --text 'trace decide at 2022-04-07' --text 'why not above(E3, 2022-04-07)' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+abt query --strategy sma_crossover --text '? above(A, T), close(A, T, P), P > 50 USD/share at T = 2022-04-07' --synthetic --days 200 corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
 ```
 
-Data is one Parquet file per primitive relation (`close.parquet`,
-`volume.parquet`, ...), with columns named after the signature's arguments. Timestamps are bar close
-instants: a 09:30 to 09:31 minute bar is labelled `09:31`, the last bar of a
-session `16:00`, and a daily bar by its date. `abt synth` writes this
-convention; minute data labelled by open time silently misaligns every
-resampled bucket.
+As three programs over sockets, one per layer (Definition 2.1: each
+layer's binary links that layer and the shared crates and no other layer;
+a socket's path must be shorter than 108 bytes):
 
-## Layout
+```
+abt-data serve --store ./store --socket data.sock &
+abt-kernel serve --socket kernel.sock --data data.sock &
+abt-query serve --socket query.sock --data data.sock --kernel kernel.sock &
+abt-kernel kernel run --kernel kernel.sock --strategy sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl   # prints `run RUN`
+abt-kernel kernel query --kernel kernel.sock --run RUN --text 'coverage'
+abt-query plan run study.plan corpus-v2/catalog corpus-v2/lib --query query.sock
+abt-query metrics --run RUN --query query.sock
+```
 
-| Path | What it is |
+The front runs the same commands as `abt data ...`, `abt kernel ...` and
+`abt plan|metrics|...`, and adds what one process can do: a store served
+in process (`--data STORE`, `--store DIR`), a synthetic market
+(`--synthetic`) and kernels in process (`--kernels N`).
+
+A run reads its data from a store:
+- `--data STORE` serves a store directory in the process, and the run's
+  outputs are written to it;
+- `--data SOCKET` reads a running `abt data serve`;
+- `--synthetic` generates a market into a temporary store.
+
+Data enters a store through `abt data ingest`: a synthetic market, an
+imported bundle or directory of Parquet files (below), or a vendor's files.
+Timestamps are bar close instants: a 09:30 to 09:31 minute bar is labelled
+`09:31`, the last bar of a session `16:00`, and a daily bar by its date. The
+synthetic adapter writes this convention; minute data labelled by open time
+silently misaligns every bucket.
+
+## The documents
+
+The specification is six documents, a seventh added after them, and the
+errata:
+
+| Document | What it fixes |
 | --- | --- |
-| `docs/semantic-model.md` | The v1 semantic model: domains, types, signatures, the seven literal forms, WF-1 to WF-10, the kernel contract, the causality theorem. The code cites it by section. |
-| `docs/data-bundle.md` | The data bundle and validation program: closed data, the online fold kernel, the catalog, the bias audit, the study API, with the status of each section in this crate and the milestone that implements it. |
-| `docs/formal-foundations.md` | The formal foundations (Oct 8, 2026): the language as stratified Datalog over the cross-section and synchronous dataflow over time, with every guarantee derived from established results, what is new, and the seven changes the theory asks of the semantic model. |
-| `docs/language-v2.md` | The second formulation (Oct 8–9, 2026): a review of the MW14 and R8L changes against the foundations, and the proposal that follows: one data store per instrument class with every resolution derived, a data block that is a query over the catalog, explicit universes, programs as typed blocks with no run-time flags, order-independent rule bodies with sound short-circuiting, a library of formal operators, and a query facility with its state tables and algorithms; MW14 and R8L rewritten in it. Section 11 is the implementation order; section 15 the prototype and the Haiku study. Its corpus is `corpus-v2/`. |
-| `docs/compiler-design.md` | The compiler design (Oct 8, 2026): the pipeline from typed IR to plan (Normalise, Analyse, Rewrite, Plan), verification by tier, observability, and the acceptance test; the kernel of the three-layer split follows it (`docs/spec/02-kernel.md`, section 8, lists the deltas). |
-| `docs/spec/` | The specification of the three-layer split (Oct 12, 2026): `00-architecture.md` (the three programs, the decisions record A-D1 to A-D46, cross-layer invariants, the gates G1 to G10), `01-data.md` (the store, query engine, stream and resolver), `02-kernel.md` (verifier, evaluator, contracts derived from the program, market simulation for equities, futures and options, the three modes), `03-query.md` (plans, metrics, the test framework, claims, reports), `04-protocol.md` (the shared crates and the wire protocol), `05-migration.md` (the order of landing, M-0 to M-10, each step gated by the parity runs), `06-performance.md` (the algorithms and data structures of each layer and how the targets are reached), `07-storage.md` (Oct 15, 2026: the hot store for Norgate and Databento, decided from measurements on the company's data: integer ticks with a per-block quantum, lane-interleaved blocks, every program-independent structure precomputed and hot in about 7 GB, every encoding and structure answering ranges (audited and measured), the staging pipeline, appends, consolidation, recovery, adjusted series, futures calendars, residency and memory profiles). Nothing in this tree implements it yet. |
-| `docs/observability.md` | The observability commands of this crate: `abt show` (the program graph), the coverage report every run prints (what every relation derived; the first empty relation when nothing was decided), `abt query --explain` (any relation at any bar, and why each rule did or did not fire), `--ledger` (a relation's tuples at every bar as Parquet). |
-| `docs/llm-observability.md` | The observability study (Oct 9, 2026): twelve Haiku agents writing the two company books on synthetic data and four briefs, with and without the observability commands; what they found, and the defects they surfaced with their status. |
-| `src/observe.rs` | The program graph and the coverage report behind `abt show` and the run's coverage lines. |
-| `scripts/synth/` | Synthetic markets in the layouts of `equities_1w` and `futures_sessions`, on which the two company books run (`docs/llm-observability.md`). |
-| `experiments/llm-observability/` | The observability study: Haiku agents writing six strategies with and without the observability commands; prompts, tasks, sandboxes, scorer, and every run. |
-| `src/lexer.rs`, `src/parser.rs` | Surface syntax to IR. The parser never reorders literals. |
-| `src/ir.rs` | The typed IR: dimension vectors, signatures with modes and the temporal key, rules, literals, units. |
-| `src/check/` | The checker. `types.rs` is the dimensional algebra of section 2; `rule.rs` is the per-rule pass (U, E, B, M, T, F, D, X, C); `mod.rs` builds the scope and runs the program-level judgments (R, N, S, Z, W1 to W6); `dof.rs` walks a rule's literals for the degrees-of-freedom count. |
-| `src/kernel/` | The kernel: `eval.rs` solves rule bodies top-down with memoisation; `executor.rs` is the executor behind a trait (`SimExecutor` is the simulated one with every realism model); `mod.rs` holds the kernel, the batch driver of section 7, `explain`, and the empirical causality check; `fold.rs` is the same evaluation driven by an availability-ordered event stream with barriers (`docs/data-bundle.md`, section 2); `time.rs` is calendar arithmetic and resolution buckets. |
-| `src/data.rs` | Parquet environment instances and a deterministic synthetic market. |
-| `src/table.rs` | Parquet tables: the one file format of every input and output outside a bundle's log. |
-| `src/bin/abt.rs` | The command line. |
-| `corpus/env` | Four environments: `equities_1d` (tier 1), `equities_1d_ext` (tier 2), `equities_1m`, and `equities_1d_v2`, the catalog of `docs/data-bundle.md` section 3 (prices as traded, `split`, `dividend`, `delisted`, `member`, `classification`, `ticker`). |
-| `corpus/lib` | Feature libraries written in the DSL: `features` (@1d), `features_m` (@1m), `bars` (@1m resampled to @1d), `catalog` (total return and a point-in-time adjusted close over `equities_1d_v2`). |
-| `corpus/strategies` | 23 strategies that must check clean, including the four canonical stylized-fact strategies, `dividend_capture` with its as-of join, `opening_gap` at @1m, `resampled_momentum` over @1m data at @1d and `total_return_momentum` over the catalog. |
-| `corpus/negative` | 21 negative cases, one or more per judgment code; each file's `# expect:` header is asserted by `tests/corpus.rs`. |
-| `tests/corpus.rs` | The corpus as the checker's test suite (section 8). |
-| `corpus-v2/` | The corpus of the second formulation (`docs/language-v2.md`): `catalog/` (the equity, future and series classes), `lib/` (the modules `calendar`, `catalog`, `stat`, `bars`, `xsec`, `state`, `book`, and the execution presets), `strategies/` (the 23 strategies above rewritten, and `scale_in`), `company/` (MW14 and R8L as section 9 gives them) and `negative/` (35 cases, one or more per judgment code, each with its `# expect:` header). `corpus-v2/README.md` fixes the grammar; nothing in it is read by the present toolchain, and `tests/corpus_v2.rs` is its acceptance test when the checker of section 11 lands. |
-| `tests/checker_messages.rs` | Diagnostics pinned exactly: one diagnostic per root cause, library diagnostics reported once, and the wording of the messages for builtins, wildcards and resolution mismatches. |
-| `tests/kernel.rs` | Hand-computed executor outcomes, every corpus strategy run end to end, determinism, the causality theorem, runtime diagnostics. |
-| `tests/data.rs`, `tests/cli.rs` | The Parquet loader's contract (duplicates, bar labels, empty files) and the command line's option validation. |
+| `docs/spec/00-architecture.md` | The three programs, the decisions record A-D1 to A-D46, the cross-layer invariants, the modes, the identifiers, the gates G1 to G10 and the targets of A-7.3 |
+| `docs/spec/01-data.md` | The data layer (D): the data model and its registries, the storage engine, the query interface, streams, aggregates, the resolver, the data-side checks |
+| `docs/spec/02-kernel.md` | The kernel (K): the program form, contracts derived from structure, the pipeline and the fold, market simulation for equities, futures and options with their margin and cost models, the executor modes, the state tables and the query service |
+| `docs/spec/03-query.md` | The query layer (Q): plans, metrics, the test framework and its starting set, claims, feed and activation statistics, reports |
+| `docs/spec/04-protocol.md` | The protocol (P): the shared crates, the transport, the services' requests, the Arrow schemas, ordering and determinism, canonical forms and hashing |
+| `docs/spec/05-migration.md` | The order of landing, M-0 to M-10, each step gated |
+| `docs/spec/06-performance.md` | The algorithms and structures of each layer and how the targets are reached (X), written after the six |
+| `docs/spec/07-storage.md` | The hot store for Norgate and Databento (ST), decided from measurements on the company's data (Oct 15, 2026): integer ticks with a per-block quantum, lane-interleaved blocks, every program-independent structure precomputed and hot, every encoding and structure answering ranges, the staging pipeline, appends, consolidation, recovery, adjusted series, futures calendars, residency and memory profiles. Its implementation is iteration 1 of `docs/iterations/` (`docs/spec/TRACE.md` has the row of every clause) |
+| `docs/spec/ERRATA.md` | Where the implementation settles what the documents leave open, one entry per decision (E-1 onwards), and the changes the golden runs were blessed for |
 
-## The surface syntax in one page
+The design documents it builds on, cited by the letters in brackets:
+
+| Document | What it is |
+| --- | --- |
+| `docs/language-v2.md` (V) | The language: one store per instrument class with every resolution derived, programs as typed blocks, order-independent bodies with sound short-circuiting, the standard library, the query facility, MW14 and R8L rewritten, the checker's judgments |
+| `corpus-v2/README.md` | The grammar the corpus assumes: the nine blocks, the `data` block's needs, universes, calendars, signatures, the literal forms, decisions, the kernel relations, literals with units, the corpus headers and the diagnostic codes |
+| `docs/compiler-design.md` (C) | The compiler: Normalise, Analyse, Rewrite, Plan and Lower, the invariants that make translation validation exact, the verification tiers and the state tables (K-8 lists the deltas) |
+| `docs/formal-foundations.md` (F) | The language as stratified Datalog over the cross-section and synchronous dataflow over time, every guarantee derived from established results |
+| `docs/semantic-model.md` (S) | The first formulation's model; what V-10 retains of it (types, closedness, causality, total orders, stratification, the kernel's semantics) is specified there |
+| `docs/data-bundle.md` (B) | The data and validation program: closed data, the online fold, the catalog, the bias audit, the study API. A design record; its status notes say where each part lives now |
+| `docs/assessment.md` | Measurements: the budgets of D-9.1, the performance ladder, memory, the targets of A-7.3 as measured here |
+| `docs/parity-mw14.md`, `docs/parity-r8l.md`, `docs/parity-inputs.md` | G1: the two books' parity runs, their inputs and the comparisons |
+| `docs/handoff-data.md` | The real data as found: the Norgate lake's layout and the decisions the `norgate` adapter states on its versions |
+| `docs/llm-usability.md`, `docs/llm-observability.md` | The two studies of models writing programs, both on the first formulation; records, with their material under `experiments/` |
+
+## The data layer: `abt-data`
+
+The data layer holds every relation in a store directory and serves it
+(`abt data serve`); the kernel and the query layer reach it only through
+its service. A store holds:
+- the registry: schemas, the identity relations (`instrument`, `vendor_id`,
+  `ticker`, ...) and the labels (D-2);
+- every relation's versions: each is immutable, hashed and carries its
+  attributes (`reviewed`, `calendar`, the source's statements), and one per
+  relation and source is current (D-2.6);
+- the logs, the partitions and the content-addressed cache (D-3), with the
+  decoded row groups kept resident under a budget, half the machine's
+  memory or `ABT_RESIDENT_BUDGET` bytes (ERRATA E-74);
+- every other layer's artefacts, under `kernel.<run>.*` and
+  `query.<plan>.*`.
+
+`abt data query` answers the query forms of D-4 in their text form, `abt data
+stats` describes the versions, `abt data gc` keeps the store within its disk
+budget, sparing what `abt data pin` pins, and `abt data catalog --class C`
+renders a class's catalog from the registry (`corpus-v2/catalog/*.dsl` are
+its output).
+A run's stream (D-5) is every bound relation's tuples in receipt order, with
+the barriers of the program's calendars; the aggregate pass (D-6) answers
+the windowed aggregates the kernel pushes down.
+
+### The resolver
+
+The data layer resolves the demand (`docs/spec/01-data.md`, section 7). Each
+need's relations are bound at the store's versions that satisfy the need,
+chosen as before: the version a preference names, the finest calendar, else
+the first source by name. A catalog of sources (`abt data serve --config
+FILE`: each source's offers, its prices with A-8's placeholders given
+values, its quota) lets the resolver buy the parts of a need's span that
+the store does not hold. It buys the cheapest cover of the span (money
+first, then seconds, bytes and requests) through the source's adapter, and
+only within the program's `budget`, whose money is 0 by default: nothing is
+bought unless the program allows it. What it buys is ingested, versioned
+and the store's from then on. A plan over budget binds what the store holds
+and reports the cheapest plan that covers every span. `abt data resolve
+--demand FILE --dry-run --explain` prints a plan without buying, and `abt
+data catalog --sources` prints the catalog (ERRATA E-67).
+
+### Imports: bundles and Parquet directories
+
+A bundle (`docs/data-bundle.md`, sections 2 and 3) is the first formulation's
+data directory, and since M-9 an import format: `abt data ingest --adapter
+bundle_v2 --from DIR --class CLASS` reads it, or a directory of Parquet
+files, into a store, and a run reads the store. A bundle is `manifest.json`
+(the class, the version, the bundle date, every relation with its signature,
+resolution, availability convention, row count and partitions, and the
+bundle tests' report once they passed), `securities.parquet` (the security
+table: `id,ticker,from,to`, `to` null while the ticker is still carried, and
+optionally the contract columns `multiplier`, `asset_class` and
+`commission_per_contract`) and `log/<relation>/<YYYY-MM>.parquet`,
+append-only Parquet partitions of each primitive relation by the month of
+its temporal key. With a security table every equity field is a security
+id and the `ticker` relation is derived from the table. A directory of
+Parquet files is the same files without the log: one `<relation>.parquet`
+per primitive of the program's class, a relation being a function of its
+identity columns (two rows for one identity with different outputs are an
+error naming both rows; an identical row is dropped), a missing or empty
+file leaving the relation empty with a `note:`.
 
 ```
-environment equities_1d {
-  close(+A: Equity, @T: Timestamp, -P: Price<USD>) @1d
-  volume(+A: Equity, @T: Timestamp, -V: Quantity<Shares>) @1d
-  universe(-A: Equity, @T: Timestamp) @1d complete
-}
+abt data ingest --store ./store --adapter bundle_v2 --from ./bundle --class equity
+abt data ingest --store ./reviewed --adapter bundle_v2 --from ./bundle --class equity --attributes reviewed=complete
+abt run --strategy sma_crossover --data ./store corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl
+```
 
-library features {
-  env equities_1d
-  resolution @1d
-  rel sma(+A: Equity, @T: Timestamp, +N: Duration, +K: Count, -M: Price<USD>)
-  sma(A, T, N, K, M) :- universe(A, T),
-      M = mean(P) over (T1 in window(T, N, min K), close(A, T1, P)).
-  rel flat(+A: Equity, @T: Timestamp)
-  flat(A, T) :- universe(A, T), not position(A, T, _).
-}
+A bundle whose tests passed imports `reviewed = complete`; one that did not
+imports unreviewed, unless a reviewer says otherwise with `--attributes`. A
+program's `data` block says `require reviewed`, so a run on an unreviewed
+store is refused (exit 2, naming the version and what it lacks); `allow
+unreviewed` runs on it with a warning. The bundle tests' checks of market
+facts (action reconciliation, delisting coverage, membership) are the
+kernel's preconditions, run at every run's start (ERRATA E-50), and the
+query layer's `actions` feed statistic.
 
+### Vendors
+
+A vendor's data enters a store through the data layer's adapters (D-7.7,
+`crates/abt-data/src/adapters/`, ERRATA E-68), named by `abt data ingest
+--adapter` or by a catalog's source:
+
+- `norgate` reads the NDLake lake directly (`--from LAKE`): the equity class
+  of the members, ever, of its lists (`--lists 'S&P 500=SPX'`), keyed by
+  Norgate's `asset_id`, with index series (`--series '$SPXTR=SPXTR'`) and
+  the ten decisions of `docs/handoff-data.md` (section 4) stated on the
+  versions; `--exceptions FILE` adds the reviewed exceptions
+  (`scripts/reviewed/norgate-spx-2014.parquet`).
+- `databento` reads DBN files (`.dbn`, `.dbn.zst`), the bucket's Parquet
+  layout, or the historical API (`--from https://hist.databento.com` with
+  `--dataset --schema --symbols --stype-in`, the key from
+  `$DATABENTO_API_KEY`). Futures are contracts by `instrument_id`, rolled
+  per root into a back-adjusted continuous series (`ES.v.0`, by volume, or
+  `ES.c.0`, by expiry) with `continuous`, `future_spec`, sessions and point
+  values; equities are joined to the store's tickers by symbol. Bars are
+  keyed at their close and received at `ts_recv` or the close, plus
+  `--processing-delay S`. The venue's statistics give `settlement`
+  (back-adjusted as the bars) and `open_interest`, each keyed at the
+  session's last close and received when published.
+- `databento_live` is the live gateway's session (CRAM, the subscription,
+  DBN), every record stamped at acceptance.
+- `orats` reads ORATS's strikes, files or the Data API (`--from
+  https://api.orats.io --tickers SPY`, the token from `$ORATS_TOKEN`), as the
+  option class (ERRATA E-70): every contract an instrument keyed by its OCC
+  symbol, with its quotes, its greeks, its terms (`option_spec`, `--terms
+  'SPX=european:cash:am'`) and its day's chain (`chain_index`), the
+  underlying joined to the store's tickers. A demand's `need chain` is
+  resolved by a pre-pass that binds the quotes of the contracts the chain's
+  filters admit and buys a missing day's chain within the budget.
+
+### Live sessions
+
+A live session (D-5.4, `crates/abt-data/src/live.rs`, ERRATA E-69) records
+a feed into the store write-ahead, every row received at its acceptance.
+`abt run --mode live-sim --session S --data SOCKET` reads it as it arrives:
+the data service emits each barrier when its clock passes the label plus the
+calendar's grace, after the bars accepted before it, and records the
+instants. `abt run --replay-of RUN` replays that recorded stream (`--paced`
+at the clock's pace) and decides and fills as the live run did (G4,
+`crates/abt-tests/tests/replay.rs`). A bar evaluated past its deadline
+(`--deadline`, one bar by default) is late: the execution block's `late send`
+flags its decisions, `late reject` drops them. `abt data serve --record
+synthetic --clock-rate R` records a rehearsal session of the synthetic feed.
+
+## The kernel: `abt-kernel`
+
+The kernel owns the language, from the parser to the plan, and the run, from
+the binding to the outputs. It is a library, a binary (`abt-kernel`) and a
+service (`abt kernel serve`, P-3.4).
+
+### The language in one page
+
+A workspace is a set of `.dsl` files holding units: the classes of the
+catalog, libraries, execution presets and strategies. A strategy is nine
+blocks and a `uses` line:
+
+```
 strategy sma_crossover {
-  env equities_1d
-  uses features
-  resolution @1d
-  mode delta
-  param fast : Duration = 20d in 10d..60d
-  param qty : Quantity<Shares> = 100 shares
-  rel above(-A: Equity, @T: Timestamp)
-  above(A, T) :- universe(A, T), sma(A, T, fast, 12, F), sma(A, T, 50d, 30, S), F > S.
-  decide(T, buy(A, qty)) :- above(A, T), prev(T, T0), below(A, T0), flat(A, T).
+  data {
+    class   equity
+    need    bars @1d
+    need    listing
+    require reviewed
+    prefer  latest
+  }
+  uses  calendar, stat, book
+  clock { decide on base }
+  universe {
+    universe(A, T) :- listed(A, T), traded@base(A, T).
+  }
+
+  params {
+    fast     : Duration = 20d in 10d..60d
+    slow     : Duration = 50d in 30d..250d
+    fast_min : Count = 12
+    slow_min : Count = 30
+    qty      : Quantity<Shares> = 100 shares
+  }
+
+  rules {
+    rel above(A: Equity, @T)
+    above(A, T) :- mean_window[fast, fast_min, close](A, T, F), mean_window[slow, slow_min, close](A, T, S), F > S.
+    rel below(A: Equity, @T)
+    below(A, T) :- mean_window[fast, fast_min, close](A, T, F), mean_window[slow, slow_min, close](A, T, S), F <= S.
+  }
+
+  decisions {
+    silence hold
+    orders  market
+    decide(T, trade(A, qty)) :- above(A, T), prev(T, T0), below(A, T0), flat(A, T).
+    decide(T, trade(A, Q)) :- below(A, T), prev(T, T0), above(A, T0), held(A, T, Q0), Q = -Q0.
+  }
+
+  execution equity_default
+  report { calendar base   periods 252 per year }
+}
+```
+
+A library is a `data` block, a `uses` line when it reads other modules, and
+a `rules` block; its relations are templates, instantiated at every call:
+
+```
+library stat {
+  data { class any }
+  uses calendar
+  rules {
+    rel mean_window[W: Duration, K: Count, R: rel(Entity, @T, D)](A: Entity, @T, M: D)
+    mean_window[W, K, R](A, T, M) :- universe(A, T), M = mean(X) over (T1 in window[W] min K, R(A, T1, X)).
+  }
 }
 ```
 
 - Variables start with an uppercase letter; parameters, relations and
-  keywords are lowercase; `_` is a wildcard (output positions only, which
-  include the bound position of `prev` and `lag`: `prev(T, _)` holds when T
-  has a bar before it).
-- A strategy's header lines are `env`, `uses`, `resolution`, `mode` and,
-  optionally, `revises "<program hash>"`, which places it in the lineage of
-  the program with that hash (see Studies).
-- A signature marks each argument `+` (input, bound by the caller), `-`
-  (output, bound by the call) or `@` (the temporal key, exactly one). A
-  relation's resolution follows the signature (`@1d`); in a library or
-  strategy it defaults to the unit's `resolution`.
-- Literals carry units: `100 shares`, `5_000_000 USD`, `60 USD/share` (a
-  `Price<USD>`, so `param floor : Price<USD> = 60 USD/share` compares with
-  `close` and `sma`), `20d`, `3mo`, `1y`, `0.02`, `"SPY"` (a string: an
-  `Equity` or a `Label` from the type its context expects, the way a bare
-  integer is a Count or a Scalar; the checker resolves it, and a string with
-  no typed context is a T error). A
-  bare `60 USD` is a `Notional<USD>`. A bare integer is a Count or a Scalar
-  from context; a bare decimal is a Scalar. A number is digits with optional
-  `_` separators, an optional fraction with digits on both sides of the
-  point, an optional exponent (`1e5`, `2.5e-3`) and an optional leading `-`;
-  `.5` and `+0.5` are not numbers. Durations are whole numbers of `d`, `w`,
-  `mo` or `y`.
-- Body literals, in the order written: positive atom, `not` atom, comparison,
-  `X = expr` (including `TE = T`, which copies a bound time into a value
-  column such as an entry date; the copy is a value, not a temporal key),
-  `X = agg(e) over (...)`, `top(N, R(...), by (K desc, A asc))`,
-  `resample(R(...) to @1d as T, min K, X = last(P))`, the as-of join
-  `R(A, T0, X) asof T` (R's latest tuple keyed at or before T, at any
-  resolution; T0 is bound causally), and the temporal
-  builtins `prev(T, T1)`, `lag(T, N, T1)`, `month_start(T)`, `day_start(T)`,
-  plus `T1 in window(T, N, min K)` / `prior_window` (calendar durations) and
-  `T1 in rows(T, N, min K)` (the group's own last N bars, N a Count: "the
-  last 20 sessions", "the stock's last 18 rows") inside an aggregation.
-  A builtin is not a relation, so `not month_start(T)` does not resolve; the
-  idiom is `mstart(T) :- bar(T), month_start(T).` and then `not mstart(T)`.
-- Scalar functions in expressions: `abs`, `least`, `greatest` (any number of
-  arguments of one dimension; an integer literal takes the others'
-  dimension), `log` and `exp` (Scalar only: `log(P / P0)`, never `log(P)`),
-  `sqrt`. Aggregates: `sum`, `mean`, `std`, `median`, `quantile`, `max`,
-  `min`, `count` (a Count, convertible to Scalar by division only), `corr`,
-  `cov`, `ols_beta`, and `first`/`last` in a resample.
-- `rank(R(...), by (K desc, A asc)[, ties average], as N)` numbers the
-  tuples of R within the group of the variables bound before it, so bind the
-  bar first: `ranked(A, T, N) :- bar(T), rank(scored(A, T, S), by (S desc,
-  A asc), as N).`; with A bound before the rank every group has one tuple
-  and every rank is 1 (W4 says so).
-- Decisions: `decide(T, buy(A, Q))`, `sell`, `short`, `cover` in delta mode;
-  `target_weight(A, W)`, `target_quantity(A, Q)` in target mode; any
-  constructor takes a trailing order (`buy(A, Q, moo_moc)`,
-  `target_weight(A, W, moc)`; `market` when omitted). In target mode an
-  instrument with no decision keeps its position; an exit is an explicit
-  zero target. The kernel supplies `decided(T0, D)`, `position(A, T, Q)`,
-  `cash(T, C)`, `nav(T, N)` (the book marked at T, before T's decisions) and
-  `fill(A, T, Q, P)` at the decision resolution; `universe`, `position` and
-  `fill` are enumerable (`-A`), so a rule can range over the book.
-- Sizing and accounting: a `target_weight` is a fraction of the fixed
-  starting capital by default and of equity under `--compounding on`; a
-  strategy whose weights are meant as fractions of equity ("equally
-  weighted", "capped at one") runs with `--compounding on`. Fractional
-  quantities need `--lot fractional`; the default truncates to whole shares.
+  keywords are lowercase; `_` is a wildcard; `#` starts a comment.
+- **`data`** is the demand (section 3.6): the instrument class the program
+  trades and what it reads. `need bars @r [from DATE] [complete]` is open,
+  high, low, close and volume at resolution `r` or finer, from the date on;
+  `need actions` (split, dividend, delisted), `need listing` (listed,
+  ticker), `need lists "L", ...` (member), `need series "S" @r
+  [complete]`, `need sessions`, `need point_value`, `need commission`,
+  `need instruments where ATTR = VALUE`, `need chain of "U" within
+  D1..D2 and M1..M2` (options). `require reviewed` or `allow unreviewed`
+  (the versions' `reviewed` attribute, warned when admitted without it);
+  `prefer latest`, `version V` or `base finest`; an optional `budget {
+  money X; bytes Y; requests Z }`. With `complete` the versions must be
+  `reviewed = complete`: a missing bar means the instrument did not trade and the bar primitives
+  are closed; without it a missing bar is unknown, so they may not be
+  negated, directly or through a relation that reads them (N). A rule that
+  reads a primitive the demand did not ask for is an E error; a label or
+  series name no `need` covers is a V error. A library's `data` block says
+  what the module needs (`class any` is written for every class, with
+  `Entity` as the entity sort and `units` as the unit).
+- **`universe`** defines the entity domain by rules for `universe(A, @T)`,
+  reading the catalog (`listed(A, T), member(A, T, "SP500")`) or an
+  `instruments { ES from 2000-01-01; ... }` table written in the block
+  (counted as degrees of freedom and warned W9 as a hindsight constant).
+  It is complete by definition, so the calendar module's `prev_row`,
+  `first_row` and `bar` are closed and may be negated.
+- **`calendars`** declares the calendars the program uses: `base` always
+  exists; `days`, `weeks(n)`, `months(n)`, `years(n)`, `sessions` (per
+  instrument) and `sessions of "ROOT"`. **`clock`** names the decision
+  calendar, `decide on base`, `decide on weekly`, or `decide on base at
+  session + 30min` for a sub-daily base. A relation is on the decision
+  calendar unless its signature writes another after its key (`@T:
+  weekly`); `@X: base | session` instantiates the rule on each. The bar
+  view of a price primitive at a calendar is `close@C`, `open@C`,
+  `high@C`, `low@C`, `volume@C` or `traded@C`; at `base` it is the
+  primitive itself, and `traded@base(A, T)` says that A has a bar at T. A
+  library relation is instantiated at the calendar of the key it is called
+  with (`true_range@session`). A series or a catalog relation on a
+  calendar coarser than the rule's is read as of the bar.
+- **Signatures**: `rel name[INPUT: TYPE, ...](A: Equity, @T[: CALENDAR],
+  X: TYPE, ...)`. The identity is the entity arguments and the key;
+  bracketed inputs are bound by the caller and may be relations (`R:
+  rel(Entity, @T, D)`); value arguments are outputs. An uppercase type name
+  not otherwise declared (`D`) is a dimension variable, so `mean_window`
+  serves prices, returns and dollar volumes alike. There are no binding
+  modes.
+- **Body literals**, in any order: an atom; `not atom` over a closed
+  relation; a comparison; `X = expr`; `X = agg(e) over (conj) [within
+  (vars)]` with `agg` one of sum, mean, std, var, median, quantile, max,
+  min, count, corr, cov, ols_slope, ols_r, first, last; `K = rank(R(...) by
+  (k dir, ...)) within (vars)` and `rank_average`; `top[k](R(...) by (...))
+  within (vars)`; `X = case { G -> e ; ... [; else -> e] }`; the as-of join
+  `R(..., T0, ...) asof T`; the builtins `prev(T, T1)`, `lag(T, DUR, T1)`,
+  `month_start(T)`, `day_start(T)`, `session_of(A, T, S)`. A temporal
+  constraint inside a group is `T1 in rows[N] [min K]` (the entity's own
+  last N rows, all N unless `min K`), `T1 in prior_rows[N] [min K]`, `T1 in
+  window[DUR] min K`, `T1 in prior_window[DUR] min K`, `T1 in bucket(C,
+  T)`, or `T1 in session(X, [a, b))`. The group of a reduction, and of an
+  aggregation that names one, is `within (vars)`; every variable of the
+  reduced atom outside it must be fresh (G). Functions: abs, least,
+  greatest, log, exp, sqrt, sign, floor, ceil, clamp, decile, and the
+  option pricing functions of K-2.5: `bs_price(S, K, τ, r, q, σ, right)`
+  with `bs_delta` … `bs_rho` (Black–Scholes–Merton), `b76_price(F, K, τ,
+  r, σ, right)` with its Greeks (Black 1976), `am_price` (Bjerksund and
+  Stensland 2002) and `implied_vol(P, S, K, τ, r, q, right, style)`, τ a
+  Duration (`46d`) or years. `observe R
+  [where ...] [trace relations | instances]` in the `rules` block adds a
+  relation to every bar's demand without changing a decision.
+- **Literals** carry units: `100 shares`, `2 contracts`, `0 units` (the
+  class's unit), `60 USD/share`, `0 USD/contract`, `1_000_000 USD`, `20d`,
+  `3mo`, `1y`, `30min`, `0.02`, `"SPX"` (a label), `"AAA"` (an instrument,
+  warned W6 as a snapshot of the bundle date). A bare number is a Scalar,
+  or a Count where a Count is expected; a dimensioned zero is written typed
+  (`0 USD/share`, `0 shares`).
+- **`decisions`**: one algebra, no mode. `hold(A, W)` with W a Scalar is a
+  target weight of the capital the execution block names; `hold(A, Q)`
+  with Q a quantity is a target quantity; `trade(A, Q)` is a signed delta;
+  `combo([leg(A1, Q1), leg(A2, Q2), ...])` is an all-or-none multi-leg
+  delta, filled at one bar under one order id, and `exercise(A, Q)`
+  exercises Q long contracts of an option at the decision bar's close. Each
+  takes an optional trailing order (`market`, `moo`, `moc`,
+  `moo_moc`, `limit(P[, TIF])`, `stop(P[, TIF])`), the block's `orders`
+  when omitted. `silence hold` keeps an instrument with no decision;
+  `silence flat` closes it. A sale of a held quantity is a negative delta
+  bound in the body: `held(A, T, Q0), ..., Q = -Q0`. Two decisions for one
+  instrument at one bar halt the run naming both rules.
+- The kernel supplies, at the decision calendar, `position(A, @T, Q)`,
+  `cash(@T, C)`, `nav(@T, N)`, `capital(@T, C)` (the base the execution
+  block's `capital` names), `mark(A, @T, P)` (the price it names, as the
+  book is marked), `fill(A, @T, Q, P)` and `decided(@T0, D)`; the `book`
+  module's views of them are closed, so `not held(A, T, _)` is legal. An
+  option program also has `chain(U, @T, A)` (the contracts its `need
+  chain` admits at the bar), `spec(A, @T, Underlying, Right, Strike,
+  Expiry, Style, Settlement, Multiplier)` (as adjusted by corporate
+  actions) and `greeks(A, @T, IV, Delta, Gamma, Theta, Vega, Rho)`.
+- **`execution`** is a preset name (`equity_default`), a preset with
+  overrides (`book_fixed_base with { commission 10 bps per side }`) or the
+  fifteen fields written out: `price`, `orders`, `lot`, `capital`,
+  `commission`, `slippage`, `impact`, `participation`, `financing`,
+  `leverage`, `actions`, `delisting`, `oversize`, `ruin`, `numerics`. Every
+  field is required (P); their values are in `corpus-v2/lib/execution.dsl`
+  and under Reading the kernel. An optional `limits { gross <= 1.5 reject;
+  weight <= 0.1 per name clamp; ... }` field holds the pre-trade limits of
+  K-3.5 (`gross`, `net`, `weight ... per name`, `loss ... per day`,
+  `drawdown`, `turnover ... per day|week|month|quarter|year`,
+  `participation`, `names`, each `halt`, `reject` (the default), `clamp`
+  or `warn` as the kind admits). **`report`** names the reporting calendar,
+  `periods N per year`, and optionally `window DATE .. DATE`, the run's
+  window; every bar before it is warm-up.
+- A corpus file's headers: `# expect: CODE` on a negative case, `# allow:
+  Wn` on a strategy that is meant to warn.
 
-`abt check` also prints each strategy's degrees of freedom (`docs/data-bundle.md`,
-section 6), the counts the study report will use:
+`abt check` judges every strategy, and every library whether or not a
+strategy uses it: a library is instantiated in a probe that calls each of
+its relations once, with a parameter of its type for every value input and
+a stub of its shape for every relation input, and its own diagnostics are
+reported under its name. It prints each strategy's degrees of freedom (the
+counts the study report uses) and a summary line:
 
 ```
-momentum_top_n: degrees of freedom: 4 params, 0 literals, 5 rules (+ 2 library literals)
+sma_crossover: degrees of freedom: 5 params, 0 literals, 5 rules (+ 0 library literals)
+1 strategies, 7 libraries checked: 0 error(s), 0 warning(s)
 ```
 
 Every diagnostic names its code and judgment, for example:
 
 ```
-error [N] bad_negation_incomplete_derived at 22:51 in rule ...::decide#2:
-  `not selected` is not permitted: `selected` depends on `regime_on` depends
-  on `close`: `close` is a primitive of environment `equities_1d` not declared
-  complete, so a missing tuple is unknown, not false (WF-5 completeness)
+error [N] bad_negation_incomplete_derived at 29:49 in rule bad_negation_incomplete_derived::decide#2:
+  `not selected` is not permitted: `selected` reads `regime_on` reads `close` is not closed:
+  `close` is a primitive of class `equity` the demand does not require complete, so a missing
+  tuple is unknown, not false (add `complete` to `need bars` when the store is reviewed, so
+  that a missing bar means the instrument did not trade) (WF-5 completeness)
 ```
 
-## Reading the checker
+### Reading the checker
 
 | Code | Judgment | What the rule checks |
 | --- | --- | --- |
-| U | name resolution | relation or parameter declared in the strategy, a used library, or the environment; heads define relations declared in their own unit; one unit per (kind, name) in the workspace; `env` declared once; no builtin or keyword as a relation name |
-| E | environment | the primitive belongs to the declared environment, not another one |
-| B | WF-1 | every head, negated, compared or assigned variable is bound, left to right |
-| M | WF-2 | `+` arguments bound at the call; `_` only in `-` positions; inside a resample, a fresh entity variable in a `+` position of a stored relation is bound by the grouping |
-| T | WF-3 | dimensions balance; terms match signatures; constructors typed; a parameter's default lies within its ordered range; a string literal resolves to `Equity` or `Label` from its context (`=` only on both) |
-| R | WF-4 | every positive cycle steps strictly back in time through `prev` or `lag` |
-| N | WF-5 | `not R` only when R is complete; completeness propagates; reductions close |
-| F | WF-6 | every temporal key is T or derived from T by a causal builtin; `decided` strictly earlier |
-| D | WF-7 | `top` has `by`; the keys cover every identity column; the key is bound; no `first`/`last` outside resample |
-| S | WF-8 | no cycle through `not` or an aggregate |
-| Z, C | WF-9 | at least one decide; `mode` declared exactly once; constructors of that mode, in decide heads and in `decided` patterns; decide's T is a positive atom's key |
-| X | WF-10 | `resolution` declared once; body atoms share the head's resolution; resample goes strictly finer to coarser with `min K`. The kernel's `position`, `cash`, `fill` and `decided` are at the strategy's decision resolution, so a library that reads them is usable only by strategies deciding at its resolution; the error names the strategy |
-| W1, W2, W3, W4 | warnings | dead derived relation; unused parameter; declared relation that no rule defines (always empty); `top` whose identity columns are all bound by the outer rule (keeps every tuple, `by` is dead) |
-| W5, W6 | warnings | a numeric literal inside a strategy's own rule is a degree of freedom the study counts (0 and 1 in any unit are structural and exempt; a library's literals are counted, never warned); an `Equity` literal names the security carrying that ticker at the bundle date, a snapshot rather than an identity |
+| U | name resolution | every relation, parameter, library and class named is declared; no builtin, keyword or reserved name as a relation name (`not month_start(T)` does not resolve); the strategy is in the workspace |
+| E | demand | a rule reads only primitives the `data` block needed |
+| B | WF-1 range restriction | every head variable is bound by the body |
+| M | WF-2 well-modedness | every bracketed input is bound at the call, and the body has a well-moded order (Proposition 4.2); the diagnostic names the variable no literal can bind |
+| T | WF-3 types | dimensions balance; terms match signatures; decision terms are typed; a parameter's default lies within its range; a comparison of a dimensioned quantity with a bare `0` names the typed zero to write |
+| R | WF-4 temporal recursion | every positive cycle steps strictly back in time (`prev`, `prev_row`, `lag`) |
+| N | WF-5 completeness | `not R` only when R is closed: a complete primitive, the universe, a reduction, or a relation built from closed ones |
+| F | WF-6 causality | every temporal key is T or derived from T by a causal builtin or constraint (`prev`, `lag`, windows, rows, buckets, `session(X, [a, b))`, `asof`); `decided` strictly earlier; a session-calendar relation is not read at its own session from a base bar |
+| D | WF-7 determinism | a `top` or `rank` has `by`, whose keys cover every identity column |
+| S | WF-8 stratification | no cycle through `not` or an aggregate |
+| Z | WF-9 decisions | at least one decide rule |
+| X | WF-16 calendars | every calendar named is declared or a class property; bucket aggregates go coarser; `@T: C` on a head is a declared calendar; the executor's relations are read at the decision calendar, not with a session label; a series is read in the direction its calendar allows |
+| K | WF-11 keyedness | every temporally recursive relation is keyed: its rules' guards are complementary (a case form, or `enter` against `not enter`) |
+| G | WF-13 grouping | `rank` and `top` name `within`; every variable of the reduced atom outside the group is fresh |
+| P | WF-14 closed configuration | every block present; every field of `execution` and `report` set with an admissible value; a preset expanded |
+| V | WF-15 vocabulary | every label and series name a rule uses occurs in a `need`, and in the class's vocabulary; every `instruments` name is known |
+| Q | WF-17 demand | the `data` block is a well-formed demand with at least one `need` |
+| O | observation | every `observe` names a relation of the program; a `where` binds identity arguments only |
+| W1, W2, W3, W4 | dead rule, unused parameter, undefined relation, degenerate reduction | a derived relation decide never reaches; a parameter never referenced; a declared relation no rule defines (always empty); a reduction whose group holds every identity of its atom, so it ranks one tuple |
+| W5, W6 | degrees of freedom, ticker snapshot | a numeric literal inside a strategy's own rule is a degree of freedom the study counts (a library's literals are counted, never warned); an instrument literal names the security carrying that ticker at the bundle date |
+| W7, W8, W9 | window sanity, never fired, hindsight list | a calendar window's `min K` exceeds what its duration can hold on the rule's calendar (judged on the defaults, and again by the run on its `--param` overrides); a relation on a path to decide never fired (reported by the run's coverage report); an `instruments` table is counted and warned |
 
-Diagnostics are ordered by the dependency rank of the rule's head, so the
-first error reported is the earliest offending relation; diagnostics about a
-whole unit (a missing or mismatched environment or library, no decide rule)
-come before any rule's. One root cause is one diagnostic: when the
-environment or a used library is missing from the workspace, the checker
-reports that once and does not report the names that may live there; a
-library written against another environment is one E error on the `uses`
-line; a relation that does not resolve binds its variables with unknown type
-and unknown time, so nothing after it is judged against them; and when a
-rule's head time is itself bound outside a temporal-key position, only the
-head is reported, not every atom keyed by it.
+Diagnostics are ordered errors before warnings, whole-unit diagnostics (a
+missing block, a library or class not in the workspace, no decide rule)
+before any rule's, then by the dependency rank of the rule's head, so the
+first error reported is the earliest offending relation, then by position;
+duplicates are dropped, so `abt check` on a workspace reports a library's
+warning once and not once per strategy that uses it.
 
-## Reading the kernel
+### A run: the fold over the stream
 
-Two drivers share one evaluator and one executor. The batch driver
-(`Kernel::run`, `abt run`) walks the decision bars of a fully loaded
-dataset. The fold (`kernel::run_fold`, `abt run --kernel fold`;
-`docs/data-bundle.md`, section 2) is `state' = step(state, event)` over the
-dataset's event log: every primitive tuple available at its own bar's close
-(the v1 convention), ordered by availability, then relation; a tuple's
-arrival opens the buckets it falls in at every resolution the program needs
-and closes the ones before them, and the barrier of a decision bucket runs
-the executor's fill of the previous bar's orders, the bar's open (actions,
-mark, margin), the strategy's decisions and the executor's take, in the
-batch driver's order. Because every temporal builtin looks back only, a
-time domain that grows as buckets open is observationally the up-front one,
-and `tests/fold.rs` requires the two drivers to agree to the bit on every
-corpus strategy; a fold stopped at `t` equals the batch run on the dataset
-truncated at `t`, which is the causality theorem operationally. The
-executor is a trait (`kernel::Executor`: `open_bar`, `on_decisions`,
-`fill`, `finish`), so a live run attaches another executor to the same
-fold.
+The kernel reads its data through the data layer (`docs/spec`, M-2). Bind
+sends the program's demand, receives the binding, and subscribes to a stream
+of the bound relations' tuples in receipt order with explicit barriers of
+the program's calendars. The fold (`kernel::run`) is `state' = step(state,
+event)` over that stream: a tuple is stored at its `t` (late when its
+decision bucket was already decided), a barrier opens its bucket, and a
+barrier of the decision calendar runs the executor's fill of the previous
+bar's orders (after the bar's corporate actions, so an ex-date's orders fill
+against the post-split book), the bar's open (delistings, mark, margin), the
+strategy's decisions and the executor's take. Because every temporal
+builtin looks back only, a time domain that grows as buckets open is
+observationally the up-front one. The fold's state is serialisable
+(`kernel::Checkpoint`, with the stream's seq as its cursor):
+`--checkpoint-every month|N` takes one at the end of every calendar month
+(or every N bars). Over `--data SOCKET` or `--data STORE` it is a cache object of the data
+layer, keyed by the run's id and the seq and printed (`checkpoint KEY of
+DATE`), and the run writes its outputs so far before it; under `--synthetic` it is
+`DIR/<bar>.json` under `--checkpoint-dir DIR`. `--resume KEY|FILE`
+continues from one. The checkpoint's program hash, binding, mode, run id
+and configuration must be the run's, and a resume that differs is refused
+naming which (ERRATA E-56). A run is identified by BLAKE3 over its program
+hash, its binding (the data versions and the parameter point), its window
+and the mode, 64 hex digits. The executor
+is a trait (`kernel::Executor`), so a live run attaches another executor to
+the same fold.
 
-A windowed aggregation keeps, per group (the rule, the aggregation and the
-outer bindings its conjunction reads, including the window's length and
-minimum), the rows of every bar it has solved, so a rolling feature solves
-each bar once and evicts bars that leave the window; the rows are
-re-based on the current call's bindings and sorted as a whole solve would
-sort them, so the result is the uncached evaluation to the bit (`tests/fold_windows.rs`
-proves it on every corpus strategy, on both drivers; `ExecConfig::window_cache`
-turns the cache off only for that proof). A group whose conjunction reads
-the window's base time, or has more than one window, is solved whole.
-Resampled buckets and carried values (WF-4 recursion) are already evaluated
-once per bucket or bar through the memo. `RunResult.stats` counts the
-windowed aggregations, the bars solved and the cache's size.
-
-The fold's state is serialisable (`kernel::Checkpoint`: the facts, the time
-domains, the windowed groups' rows, the last prices, the executor's book
-through the `Executor` trait's `checkpoint` and `restore`, the run so far,
-and the cursor the replay resumes from; derived values are recomputed from
-the facts). `abt run --kernel fold --checkpoint-every month|N
---checkpoint-dir DIR` writes one at the end of every calendar month (or
-every N bars) of the decision bars, taken after the bar's barrier and
-before the tuple that closed it is stored, as `DIR/<bar>.json`; `--resume
-FILE` restores it over the same data and configuration (a fingerprint of
-the program, its parameters and the configuration, and the dataset's
-symbols, are checked) and replays the events from the cursor on.
-`tests/fold_checkpoint.rs` requires a run resumed from any monthly
-checkpoint to equal the unbroken fold and the batch kernel to the bit.
-
-A tuple may carry its own availability time (`Dataset::add_available`, an
-`available_at` column in a loose Parquet file or in a bundle's partitions, whose manifest
-then says `recorded` rather than `bar_close`): the fold reads it from then
-on, so a tuple that arrived after its bar closed is late in the backtest
-too, exactly as section 2 of the data-bundle doc wants. The stream's
-buckets close when its availability passes their end, never because of a
-key; a late tuple is stored at its own key, everything derived from that
-key on is recomputed on demand (the memo is dropped and the windowed
-groups forget those bars), and decisions already emitted stand. The batch
-kernel is blind to availability, so with late tuples the two drivers
-differ and the fold is the one that is right; `Dataset::truncated` keeps
-what was available at `t`, and `verify_causality` compares the fold's
-decisions at sampled bars with the batch kernel's on that subset, which is
-the v2 theorem. Nothing is ever available before its own bar.
+A tuple carries its receipt time `r` (an `available_at` column in an
+imported Parquet file or a bundle's partitions; a vendor's receipt stamp):
+a decision at a barrier sees the tuples received by the barrier's instant,
+so a tuple that arrived after its bar closed is late in the backtest too. A
+run truncated at a decision is the stream's `to_seq` at that barrier, and
+`verify_causality` (`--verify-causality`) re-runs truncated streams for
+sampled bars and compares `decide(t)`, printing `causality verified at 5
+sampled bars`.
 
 Evaluation is top-down: `decide(t, D)` is requested for each bar `t` of the
-decision resolution's time domain, and every derived relation is requested
-with its temporal key and inputs bound and memoised by them. Because WF-4
-makes all positive recursion strictly time-decreasing and WF-8 keeps
-negation and aggregation acyclic, every request terminates and the result is
-the unique model of section 7 restricted to what the decisions need. The
-partial-arithmetic halt follows the same restriction: a degenerate tuple
-halts the run when a decision demands it, and a tuple no decision requests
-is never evaluated.
+decision calendar, and every derived relation is requested with its key and
+inputs bound and memoised by them. A library relation is a template
+instantiated at link time, so `mean_window[fast, fast_min, close]` and
+`mean_window[slow, slow_min, close]` are two relations with their own
+memo, and the coverage report lists them as such. Because WF-4 makes all
+positive recursion strictly time-decreasing and WF-8 keeps negation and
+aggregation acyclic, every request terminates. A rule body is read under
+Kleene's three-valued conjunction (section 5): a false literal excludes the
+instance whatever the rest, so a guard may be written anywhere in the rule
+and the planner moves tests ahead of generators (the run prints `plan:
+optimised (2 of 10 rules reordered, ...)`; `--plan written` keeps the
+written order); an instance stuck on a partial operation (`x / 0`, `log`
+of a non-positive, `sqrt` of a negative, a statistic below its minimum
+count) halts the run naming the rule, the tuple and the expression only
+when a decision demands it. A windowed aggregation keeps, per group, the
+rows of every bar it has solved and evicts bars that leave the window, so a
+rolling feature solves each bar once (`ExecConfig::window_cache` turns the
+cache off for the tests that prove it changes nothing).
 
-The executor has four policies, all set in `ExecConfig` and on the command
-line, and every default halts the run with a diagnostic naming the bar, the
-decision and its rule (`RunError::Risk`): `on_ruin` (equity at the execution
-bar not positive while orders are pending: `halt` or `continue`, where a
-positive `target_weight` of a non-positive equity targets flat); `on_leverage`
-(a fill that would make cash negative or gross exposure exceed equity: `halt`,
-`reject` with a reason, or `allow`); `on_oversize` (a `sell` beyond the long
-or a `cover` beyond the short: `halt`, `clamp` at the position dropping the
-remainder, or `allow` the signed order); and `lot` (`whole`, truncating every
-order's quantity toward zero, or `fractional`). Within a bar, orders that
-reduce a position fill first, so a rebalance funds its buys with its sells,
-and a reducing order is never leverage. A liquidation whose fill bar has no
-price for the instrument fills at the last known price, flagged on the fill
-(`--fills` prints `(last price)`); an opening or adding order without a price
-is dropped. Most backtesters reject an order beyond buying power and continue;
-the halt default is stricter on purpose, so that a backtest cannot look
-plausible on a book the model never defined.
+### The executor
 
-The executor fills a bar's decisions at the next bar's close, at that bar's
-price adjusted by the cost model of `ExecConfig` (below), then writes `fill`,
-`position` and `cash` at that bar and `decided` at the decision bar. In
-target mode the order is the difference between the target and the position
-at execution; `target_weight` sizes from cash plus marked positions at the
-execution bar, rounded by the configured lot, and a long that is bought is
-sized at the price it will fill at, so the cash it spends is the weight of
-equity.
+The executor is configured by the program's `execution` block and nothing
+else (`ExecConfig::from_program`; `docs/language-v2.md`, 4.3). Field by
+field: `price` names the primitive or derived `Price` relation it fills and
+marks at, with a calendar instance when written (`close`,
+`tr_index@weekly`); `orders` the order of a decision that names none;
+`lot whole` truncates every order's quantity toward zero, `lot fractional`
+does not; `capital N USD fixed` sizes a weight from the fixed starting
+capital and reports returns on that base, `compounding` from equity;
+`commission` is `per_share P min M`, `per_contract from catalog` (the
+catalog's commission per contract per side), `X bps per side` or `none`;
+`slippage` is `fixed X bps`, `vol X over N bars` (X times the instrument's
+realized volatility over the last N bars, against the order) or `none`;
+`impact sqrt X over N days adv` moves the fill price against the order by
+X times the square root of the filled quantity over the mean volume of the
+last N bars, or `none`; `participation X of bar volume` caps a fill at that
+fraction of the bar's volume, or `none`; `financing cash X debit Y short Z`
+accrues annual rates on positive cash, on a debit and on short notional,
+or `none` (nothing accrues and every name is shortable at no fee);
+`leverage` is `gross <= X halt|reject` (a fill beyond X times equity
+halts, or is rejected with a reason), `reg_t` (2x gross, 25% maintenance,
+orders beyond rejected) or `unconstrained`; `actions apply` applies splits,
+dividends and delistings to the book, `in_price` says the price relation
+already carries them; `delisting last_price` closes a delisted holding at
+its last price, `haircut { bankruptcy 1, acquisition 0, ..., other 1 }` at
+the last trade less the haircut for the reason; `oversize halt|clamp|allow`
+rules on a `trade` that would cross zero; `ruin halt|continue` on an
+equity that is not positive while orders are pending; `numerics running`
+or `two_pass` selects the aggregate implementation. There is no
+regulatory-fee field, so the costs line's `fees` is always zero. A field
+whose value turns a model off is reported on every run as the bias it
+leaves unmodeled (`warning (cash-management): cash earns nothing (the
+execution block's financing credits no cash rate)`), by reading the block.
+A run also warns when the data has corporate actions (`split`, `dividend`,
+`delisted`) and the program's data block does not `need actions`: the
+executor cannot apply what it does not load, so a split would move the
+price and not the position, and a delisted name would never be closed.
+The numbers of the semantic model's conservative defaults are the
+`equity_default` preset.
 
-The cost model (`docs/data-bundle.md`, section 5) has conservative non-zero
-defaults: a commission of 0.005 per share with a 1.00 per-order minimum, a
-regulatory fee of 0.278 basis points on the notional of sells, and slippage
-against the order of a fixed part (0 basis points) plus 0.1 times the
-instrument's realized volatility, the sample standard deviation of its log
-returns over the 20 bars ending at the fill bar (fewer than 10 returns: the
-fixed part only). Each fill records its commission, fee and slippage;
-`RunResult.costs` sums them with the turnover, and `abt run` prints the line.
-A bar's transaction costs are never leverage: a fully invested book stays
-fully invested after paying them, carrying a debit of at most the bar's
-costs, which the next sizing sees. `ExecConfig::frictionless()` turns every
-model off; the command line's `--frictionless` turns off slippage, impact,
-the participation cap, the per-share commission and the fees, while a
-security table's per-contract commission, `--commission-bps` and the funding
-rates stay (the parity runs rely on this: a futures book under
-`--frictionless` still pays its commission per contract). The run then
-carries a warning per model it leaves unmodeled (`RunResult.warnings`,
-printed as `warning (slippage): ...`); the commission warning is withheld
-when commissions were in fact charged.
+The executor fills a bar's decisions at the next bar's close, at the price
+relation adjusted by the cost model, then writes `fill`, `position` and
+`cash` at that bar and `decided` at the decision bar. Within a bar, orders
+that reduce a position fill first, so a rebalance funds its buys with its
+sells. A `hold` is the difference between the target and the position at
+execution, sized from the block's capital at the price it will fill at;
+under `silence hold` an instrument with no decision keeps its position and
+an exit is an explicit `hold(A, 0)`. A capped `hold` re-issues itself at
+each following bar until it is reached or a new decision on the instrument
+supersedes it; a capped `trade`'s remainder expires. Corporate actions act
+on the book at the bar's open, before the mark: a split multiplies the
+position at its ex-date, a dividend's receivable is recorded at the ex-date
+and paid at the pay date, a delisted name is force-closed at its last trade
+less the haircut for the reason. The NAV is cash, the marked positions and
+the receivables. Every change to the book is an event of the run's log
+(`RunResult.events`: decisions, orders with their ids, fills, drops,
+replacements, expiries, actions, funding, margin calls, each with the cash
+it moved), and the log folds to the book bit for bit; the decisions, fills,
+drops and actions lists are projections of it. A decision the executor
+cannot carry out is dropped with a reason in `RunResult.dropped` (`no price
+for E3 at 2022-05-04`) and is still recorded in `decided`; `abt run` prints
+`decisions: 11   fills: 9   dropped: 2` and then each dropped decision with
+its reason. `--all` prints every decision instead of the first twenty,
+`--fills` prints the fills (`fill 2022-02-24 E3 +100 @ 69.5578`), and
+`--quiet` prints the summary only. After the metrics, every run prints the
+coverage report: one line per relation `decide` reaches with the bars it
+was demanded at, the bars it held a tuple at and the tuples it derived,
+then the primitives and executor relations with their counts; when
+`decide` derived nothing, the report says so and names the first empty
+relation on each path to it (W8). A plain run also warns of what counts it as
+a trial: over a data service its program's lineage does, in a temporary
+store nothing does (see Plans and trials).
 
-The liquidity model (same section) caps a fill at 0.1 of the bar's volume
-(from the `volume`-like primitive at the decision resolution, or
-`--volume-relation`; a coarser decision bar sums the fine volumes in its
-bucket). A delta order's remainder expires, reported as dropped with
-`partial fill: 4 of 10 shares (participation cap 10% of volume 40)`; a
-target's remainder re-issues itself at each following bar, sized afresh,
-until the target is reached or a new decision on the instrument supersedes
-it. Impact moves the fill price against the order by 0.1 times the square
-root of the filled quantity over average daily volume (the mean bar volume
-over the 20 bars ending at the fill bar). Each fill records its impact,
-participation and whether it was partial; `RunResult.liquidity` reports the
-fill ratio (filled over requested, a re-issue counting its fills and not a
-new request) and the mean and maximum participation, and a run with fills
-above 5% of bar volume carries a `market-impact` warning. A cap can leave a
-reduction partially filled while the bar's buys fill to their targets, which
-is leverage: the leverage policy decides (halt by default; `reject` drops the
-buy).
+### Options and futures
 
-The margin and funding models (same section) are configuration too. Gross
-exposure may reach `max_gross` times equity after a fill (1 by default: no
-borrowing, as ruled for the executor policies; `ExecConfig::reg_t()` or
-`--margin reg-t` is Reg T: 2x gross, 25% maintenance, orders beyond rejected
-and logged). At every bar's mark, positive equity below `maintenance_margin`
-of gross exposure is a margin call: halt by default, `liquidate` sells the
-fraction of every position that restores maintenance at the bar's close
-(fills flagged forced), `allow` carries on and the run counts the calls.
-Funding accrues over the calendar time between consecutive decision bars at
-annual rates: positive cash earns `cash_rate` (0 in v1 and warned as cash
-management), a debit pays `margin_rate` (5%; a run that paid it is warned
-that the rate is constant), short notional pays the borrow fee of its
-average-daily-volume bucket (below 100k shares: not shortable, the order is
-dropped with `not shortable: ADV ...`; below 1M: 300 bps; above: 25 bps, all
-a proxy and warned) and earns `short_rebate` (0). `RunResult.funding` sums
-the four; `RunResult.exposure` records cash, gross, net, equity and leverage
-at every bar's mark, written as Parquet by `--nav FILE` for the study and
-the reference engine. Two distinct decisions for one instrument at one bar halt the
-run naming both rules; `x / 0`, `log` of a non-positive, `sqrt` of a
-negative, `std` (or `cov`, `corr`, `ols_beta`) of one observation, `corr` of
-a constant series, a `quantile` level outside [0, 1], and a non-positive delta
-quantity halt it naming the rule, the tuple and the expression (for an
-aggregate, the whole aggregate: `quantile(P, q) over (...)`). `median` of an
-even count is the midpoint of the two middle values and `quantile` interpolates
-linearly between order statistics, so `quantile(e, 0.5)` is the median. `cash` is populated at the
-first bar with the initial cash so that cash-aware rules can fire from the
-start.
+An option program's contracts are instruments with terms (`spec`), named by
+their OCC symbols. They are marked at their quote: `option_mark mid` (half
+the ask without a bid, the last mark `stale` without a quote), `last`, or
+`model` (the model's price at the contract's implied volatility). They are
+filled against it, `option_fill touch + F spread`, `mid + F spread` or
+`last`, at `commission per_contract P` with no slippage or impact; a fill's
+`spread` is its cost against the mid.
 
-A decision the executor cannot carry out is dropped with a reason in
-`RunResult.dropped`: a decision on the last bar has no bar to fill at (`no
-next bar`), and an instrument with no price at the fill bar cannot be filled
-(`no price for AAA at 2022-02-09`); both are still recorded in `decided`.
-`abt run` prints the counts and then each dropped decision with its reason,
-so that `decisions = fills + dropped`, except that in target mode a decision
-whose order is zero (the target is already held) makes neither a fill nor a
-drop. `--all` prints every decision instead of the first twenty, `--fills`
-prints the fills, and `--quiet` prints the summary only.
+- **Combos.** A combo fills every leg at one bar under one order id, or is
+  dropped naming the leg without a quote. Its `limit(P)` is the net price
+  per unit of the combo.
+- **Expiry.** At its expiry day's close (its open, for AM settlement) an
+  option in the money beyond `atm_tolerance` is exercised (long) or
+  assigned (short). A physical one delivers the underlying at the strike,
+  as a fill; a cash-settled one pays its intrinsic value; any other
+  expires.
+- **Early exercise.** The `exercise` field's `early_short` assigns an
+  American short early (a call before an ex-dividend date whose extrinsic
+  value is below the dividend), and `early_long decide` carries out the
+  program's `exercise(A, Q)`.
+- **Corporate actions.** A split or special dividend of the underlying
+  adjusts the terms the book holds by OCC's conventions (`adjustment`), and
+  a delisted underlying forces its options to expire at intrinsic.
+- **Greeks.** `greeks data` serves the binding's rows; `greeks model`
+  computes them at the mark's implied volatility.
 
-Parameters are the kernel's sweep axis (section 1) and the only values it
-may vary between runs of one program (section 3): `ExecConfig.param_overrides`
-replaces defaults by name (`hold`, or `unit::name` for a library's), and
-`abt run` and `abt explain` take a repeatable `--param name=value` whose
-value is a literal in the DSL's grammar (`21d`, `50 shares`, `0.02`, `"SPY"`
-or a bare identifier for an equity). An override must be of the parameter's
-declared type and within its declared range, or the run is refused before it
-starts. An override also may not change what the checker judged on the
-default: a `lag` length may not be overridden between zero and non-zero,
-because WF-4 treats `lag` by a zero duration as causal rather than strict.
+The hand-computed cases are `crates/abt-tests/tests/options.rs` (ERRATA
+E-71). The pricing functions' known answers are
+`crates/abt-kernel/tests/pricing.rs`.
 
-A decision the executor cannot fill (no price for the instrument at the next
-bar) is reported as dropped, is still recorded in `decided`, and is not
-retried by the kernel; whether the strategy retries it depends on how the
-rule is written. A point test on history, `lag(T, hold, T0), decided(T0,
-buy(A, _))`, is one-shot: `lag` is many-to-one and partial over the bar
-domain, so it fires at most once per entry and never for an entry whose `T0
-+ hold` falls on a weekend or holiday, and it can land on an older entry of
-the same instrument. A test of the current state is retried every bar, which
-is why the corpus writes every time-based exit in the window form:
+A future is booked fully paid under `settlement none`, as R8L's book is.
+Under `settlement daily` it is margined (ERRATA E-72): a fill moves only its
+costs and the variation of the units it closes against the position's
+reference price, each session's close moves the variation since the
+reference to cash at the binding's `settlement` price (the close where it
+has none, warned) and makes that price the reference, and the NAV counts the
+position against its reference. A roll of the continuous series with a
+position on the root records the two contracts' fills and their commissions
+(`roll`); a contract held itself is settled and closed at its last trade
+(`contract_expiry`). `contract(A, @T, Root, Expiry, PointValue)` names the
+contract each series holds. The execution block's `margin published, reg_t,
+portfolio, span, approx F` price the book at every decision bar, the first
+model that covers an instrument setting its requirement: the binding's
+published margins, Reg T's option and stock rules, a portfolio margin over
+the underlying's moves with each option repriced at the volatility its mark
+implies, or a fraction of the notional. `margin_req(@T, Initial,
+Maintenance)` is written for every program and `margin_by` per instrument
+where models are listed; a margin call below the maintenance halts, is
+allowed, or liquidates whole units, the largest maintenance per unit first
+(`forced_liquidation`). The cases are `crates/abt-tests/tests/futures.rs` and
+the margin rules' are `crates/abt-kernel/tests/margin.rs`. K-9.3's 25 cases
+(G8) are in `tests/options.rs`, `tests/futures.rs` and `tests/limits.rs`;
+ERRATA E-73 lists each case's test.
+
+### Parameters and decisions
+
+Parameters are the only values a run may vary: `--param name=value`
+(repeatable; `unit::name` for a library's) replaces a default with a
+literal in the DSL's grammar (`30d`, `50 shares`, `0.02`, `"SPY"`). An
+override must be of the parameter's declared type and within its declared
+range, or the run is refused before it starts (`parameter `fast` of
+`sma_crossover` = 5d is outside its range 10d..60d`).
+
+A decision the executor cannot fill is not retried by the kernel; whether
+the strategy retries it depends on how the rule is written. A point test on
+history, `lag(T, hold, T0), decided(T0, trade(A, _))`, is one-shot: `lag`
+lands on at most one bar per entry and never for an entry whose `T0 +
+hold` is not a bar. A test of the current state is retried every bar,
+which is why the corpus writes every time-based exit over the `book`
+module's `bought_within[W]`, a count of the strategy's own buy decisions in
+the prior window:
 
 ```
-decide(T, sell(A, Q)) :- held(A, T, Q), not bought_within(A, T, hold).
+decide(T, trade(A, Q)) :- held(A, T, Q0), not bought_within[hold](A, T), Q = -Q0.
 ```
 
 This sells at the first bar strictly later than `hold` after the entry,
 closes every entry, and fires again if a fill was dropped.
 
-`Kernel::explain(rule, t, inputs)` reports the first body literal with no
-solution at `t`. `t` must be a bar of the rule's time domain (a weekend, a
-date before the data, or a label between two resample buckets is refused
-naming the nearest bars, since no run ever evaluates a rule there). A rule
-with `+` arguments needs their values: `abt explain --inputs SPY,20d,10`
-passes them in signature order, parsed by the signature's types, and asking
-without them names the inputs the rule takes. The literal reported is the
-first with no solution over *every* binding that survived the literals
-before it, so for a multi-instrument rule it can be the literal that fails
-for the last surviving instrument rather than for the one you are asking
-about; `Kernel::explain_with(rule, t, inputs, bindings)` and `--bind A=SPY`
-(repeatable; an equity, a timestamp, or a literal, a bare integer being a
-Count) pre-bind body variables so the explanation is about that instrument.
-`verify_causality` re-runs truncated instances for sampled bars and compares
-`decide(t)`, which `tests/kernel.rs` does for seven corpus strategies.
+### The contract
+
+Every program has a contract derived from its structure (K-3): the
+preconditions the binding must meet before the first barrier (a binding,
+positive prices, a derived state within `--memory-budget`, the reconciled
+actions, delistings and memberships the bundle tests used to check), the
+invariants the kernel checks on itself at every decision barrier (the NAV
+identity, one decision per instrument, no read past the barrier, keyed
+stored relations, the leverage field, the limits, the event log folding to
+the book, one working order per instrument), the postconditions computed at
+the end, and the limits of the `limits` field, which act on a bar's orders
+before they are sent. `abt contract --strategy NAME files...` prints it,
+each clause with its source, discharge and policy; with data it runs the
+program and prints each clause's status (`proven`, `checked`, `warned`,
+`not_applicable`); a refused precondition stops the run with exit 2, a
+failed invariant halts it naming the clause, the bar and the values.
+
+### What a run writes
+
+A run over a data service or a store (`abt run --data SOCKET|STORE`) writes
+its outputs to the store under `kernel.<run>.*` and prints the run's id (K-7.1):
+`events` (the event log), `book` (the book at every decision barrier),
+`holdings`, `decisions` and `fills` (projections of the log), `coverage`,
+`contract` (the clauses with the run's statuses), `binding` (the versions
+read, the program's hash and normal form, the parameter point),
+`plans`, `late`, `report` (the status, `completed` or `halted(reason)`, the
+counters and the warnings), and `ledger.R` for each `observe R`. A halted
+run writes what it has. `abt data query --store DIR 'kernel.<run>.book'`
+prints one, and `--parquet FILE` writes it for pandas: the parity scripts
+read the books' runs that way (ERRATA E-52).
+
+### The query language
+
+`abt query --text QUERY` runs the program and asks the query language of
+`docs/language-v2.md`, section 8, over it (repeat `--text` to ask several
+of one run):
+
+- `? BODY at T = DATE` is a rule body, checked with the program as any rule
+  is (a stratum above it, so it changes no decision), and answered with its
+  solutions at the bar. `at T` asks at every bar of the run, `over D1 ..
+  D2` over a window, and `for A = KEY` binds a variable to one instrument.
+  A one-atom query of a derived relation names the rule of each row.
+- `why R(...)` is a tuple's derivation down to the supplied tuples.
+- `why not R(A, T)` names, for each rule, the literal that excluded the
+  instance, with the bindings at that point, in the plan's order or `in
+  written order` (`sma_crossover::above#1 excluded at literal 3 `F > S` with
+  A = E1, F = 43.49, S = 43.95, T = 2022-04-07`).
+- `trace decide at DATE` lists every instance attempted at the bar: fired,
+  or the literal that excluded it.
+- `coverage over D1 .. D2` names the first empty relation of every path to
+  `decide`, with its `why not`.
+- `show program|plan R|schedule|calendars|contract` prints the program's
+  forms.
+- `ledger R into NAME` writes R's extension over the run through the data
+  service as `kernel.<run>.NAME`.
+
+A bar must be one of the queried relation's calendar.
+
+### Observing a run: K-7's commands
+
+A program that checks clean can still decide nothing, and a program that
+decides can do so for another reason than its author believes. The kernel
+therefore answers, for every relation, what it held at any bar and why, and
+every run reports what every relation derived (K-7; V-8 is the design).
+These commands were `docs/observability.md` until M-9 (ERRATA E-80).
+
+**The program before a run.** `abt show --strategy NAME <files...>` prints
+the program graph: every relation `decide` reaches, from `decide` upward.
+For each it gives:
+- its signature: `@T` the temporal key and every other argument with its
+  type; a library relation appears under its instance name, such as
+  `bought_within[cooldown]`;
+- its kind: primitive, executor, kernel, derived or output;
+- its calendar, and whether it is complete, so that `not R(...)` is
+  admissible;
+- its stratum, and whether it reads its own past (temporal recursion);
+- whether it is in the closed loop (it reads the book: `position`, `cash`,
+  `nav`, `fill`, `decided`) or the open loop;
+- its depth (the longest path from a primitive);
+- the relations it reads, each with its sign (`+` positive, `-` negated,
+  `~` inside an aggregation or reduction), and its rules.
+
+The primitives follow with their completeness, then the execution block
+expanded field by field (a preset's defaults included) and the report
+block. Read it to confirm that the relations you meant to connect are
+connected (a relation `decide` never reaches is not in the graph), that a
+feature you meant to be open-loop does not read the book, and that a
+relation you negate is complete.
+
+**Every run: the coverage report.** After the metrics, `abt run` prints one
+line per relation `decide` reaches:
+
+```
+coverage over 468 decision bars (calls: bars and inputs the relation was demanded at; tuples: what it derived):
+  decide            468 calls       229 with tuples        1057 tuples
+  tgt               468 calls       374 with tuples        4405 tuples
+  crowded           374 calls         0 with tuples           0 tuples   EMPTY: demanded, never derived
+  flat                0 calls         0 with tuples           0 tuples   never demanded
+  close                                                     27577 tuples in the data (primitive)
+```
+
+A derived relation's `calls` are the bars at which a rule or the decision
+asked for it, `with tuples` the calls that derived at least one tuple, and
+`tuples` all it derived. A primitive, executor or kernel relation shows what
+the data, the executor or the kernel holds.
+- **EMPTY: demanded, never derived** marks a relation that was asked for and
+  never held: a rule reading it positively never fires.
+- **never demanded** marks a relation no rule reached, because an earlier
+  literal of every rule that reads it excluded every instance first.
+
+When `decide` derived nothing, the report adds the root causes. It gives the
+path of empty relations from `decide` down to the first one whose own reads
+are not empty. For that relation's rules, it gives an explanation at a
+sample bar naming the first literal with no solution:
+
+```
+never fired: decide derived no tuple over 500 bars.
+  decide <- go <- rich: `rich` is the first empty relation on this path; what it reads is not empty: universe+ (1000 tuples), close+ (1000 tuples)
+  rule never::rich#1 did not fire at 2022-12-19: literal 3 `P > floor` has no solution (a sample bar; abt query --text 'why not rich(A, BAR)' for another)
+```
+
+**Any relation at any bar: the query language.** See `abt query` above. A
+query is checked as a rule of a stratum above the program, so asking it
+changes no decision.
+
+**Every bar of the run.** `observe R` in the program's `rules` block, or
+`abt run ... --ledger R1,R2,... --ledger-out DIR`, records the relation's
+extension at every bar of the run:
+- `observe` writes it to the store as `kernel.<run>.ledger.<R>`;
+- `--ledger` writes `DIR/<relation>.parquet`, with `bar` and one column per
+  argument of the signature, and the coverage counts as
+  `DIR/coverage.parquet`.
+
+A library relation is named by its instance name (`--ledger 'mean_window[fast,
+fast_min, close]'`). A feature the plan skipped at some bars (an earlier
+literal excluded the instance) is computed for the ledger, so the ledger is
+the relation's extension whatever the plan.
+
+**The compiler's view.**
+- `abt graph` is `show` with the compiler's facts (C-7.1): the keyedness
+  label of every temporally recursive relation, whether a relation is
+  demanded or elided, and the abstract value of each column; the last line
+  carries the program hash and the plan's totals.
+- `abt ir --stage S` prints a stage's result: the normalised form with its
+  hash and name map, the analysis with its warnings, the rewritten form, the
+  plan.
+- `abt rewrite-log` prints every rewrite applied, with its law.
+- `abt show plan` prints the literal order and cost of every rule, the
+  aggregate implementations, the stores and strata, and each aggregate's
+  pushdown; with `--observed` it adds the counts a run produced.
+- `abt verify` prints the verification report tier by tier, every
+  obligation with its verdict, budget use and replay file. Tiers 3 and 4
+  need a solver on the PATH (`--solver z3`); without one their obligations
+  are undecided, and `--replay-dir DIR` keeps the scripts to run by hand.
+
+**The state tables.** After a run the state tables of C-7.2 are queryable.
+`abt table --table NAME` prints one as text (the schema line, then the
+rows) or JSON; `--out FILE` writes it as Arrow IPC, or Parquet for a
+`.parquet` name. `abt run ... --tables DIR` writes them all under `DIR`:
+`extension/<R>` for every demanded derived relation, `carried/<R>` for the
+temporally recursive ones, and `derivation` and `failure` of `decide` at the
+sampled bars (the last bar and nine evenly spaced ones; `abt table --at BAR`
+answers for any other).
+
+| Table | Columns | What it holds |
+| --- | --- | --- |
+| `coverage` | relation, derived, calls, nonempty, tuples | the coverage counts of the run |
+| `plan` | rule, position, literal, kind, text, card_in, card_out, cost, selectivity, observed_in, observed_out, observed_emptied, infeasible, elided | every literal in its evaluation order, with the estimates and the observed counts |
+| `book` | bar, cash, gross, net, equity, leverage | the executor's ledger at every bar |
+| `binding` | relation, kind, rows, first_bar, last_bar, availability | the data the run was bound to |
+| `summary` | rule, literal, aggregate, group, bar, rows, path, shift_x, shift_y, sum_x, sum_y, sum_xx, sum_yy, sum_xy, value | the window state of every aggregation group at every bar it served: the rows a calendar window held, or the shifted moment sums of a `rows` window served by running sums (`mean = shift_x + sum_x / rows`) |
+| `extension` (`--rel R`) | the signature's columns | every tuple of R at every bar of its resolution, sorted by bar |
+| `carried` (`--rel R`) | identity, bar, carried_from, values | at every bar, the latest earlier tuple of each identity: what a rule reading R through `prev` sees |
+| `derivation` (`--rel R`, `--at T`) | tuple, bar, rule, body | one witness per derived tuple at the bar: the rule and its body tuples |
+| `failure` (`--rel R`, `--at T`, `--symbol`) | rule, identity, bar, literal, literal_text, bindings, absence_driven | for every rule and attempted instrument, the first excluding literal and the bindings at that point |
+
+**A way to work.**
+1. `abt check` until clean.
+2. `abt show`, and read the graph against what you meant to write.
+3. `abt run`, and read the coverage report. An EMPTY relation on the way to
+   `decide`, or a `never fired`, is the first thing to resolve.
+4. `--text 'trace R at BAR'` on the first empty relation. The literal named
+   is where the rule and the data disagree; `--text '? ...'` on that
+   literal's relation at the same bar shows what it holds.
+5. `observe R` or `--ledger R` for a feature's values over time, when one
+   bar is not enough (a window that never fills, a value off by a unit, a
+   latch that never sets). `abt table --table extension` or `carried` asks
+   the same through the state tables, and `summary` gives a window's state.
+6. `--text 'why not R(S, BAR)'` when a tuple you expected is absent: the
+   excluding literal and its bindings, and whether the data (absence-driven)
+   or a comparison decided.
+7. `--text 'why R(...)'` on a tuple you did not expect: the tree of tuples
+   that produced it.
+8. `abt graph`, `abt show plan` and `abt verify` before trusting a program:
+   the keyedness labels, the dead literals the analysis found, the plan the
+   run uses, and the verification report.
+
+### The kernel service
+
+The kernel is also a service (`docs/spec/04-protocol.md`, P-3.4):
+`abt kernel serve --data SOCKET` reaches a data service.
+`abt kernel run --strategy NAME <files...>` starts a run, which writes its
+outputs to the data service's store and prints a progress line every
+`--progress N` barriers. `abt kernel query --run RUN --text QUERY` asks the
+run a query: between barriers while it runs, over its final state after.
+`--checkpoint-every month|N` writes checkpoints through the data layer and
+prints each key, `--resume KEY` runs from one, and `abt kernel control
+--run RUN checkpoint` takes one while the run runs and prints its key.
+`abt kernel status`, `control RUN halt`, `check`, `contract` and `show`
+complete the commands (`--kernel SOCKET` names the service; ERRATA E-54,
+E-56). `abt kernel run --mode live-broker --deployment FILE` runs through
+the deployment's broker, and `abt kernel control --run RUN flatten` closes
+that run's positions (below).
+
+### A broker: `live-broker`
+
+The third run mode sends the program's orders to a broker (K-6.4,
+`crates/abt-kernel/src/live/`, ERRATA E-82). `abt run --mode live-broker
+--deployment FILE` takes a deployment document (K-6.5). It names:
+- the account, and the broker with its session;
+- the routing, and the broker's time in force for each order kind;
+- the kill switch and the reconciliation policy;
+- the deadlines, and the stream the session records into.
+
+```
+deployment rehearsal {
+  account DU0001   broker mock
+  routing destination SMART   tif_map { market -> DAY, moc -> MOC }
+  kill_switch { halt_all on SIGTERM | file /run/abt/halt | socket; flatten_all through decisions }
+  reconcile warn at session_open, reconnect
+  deadline { base 55s; session 5min }
+}
+```
+
+The document is hashed apart from the run's id, and the hash is recorded
+with the run (`binding.deployment_hash`). The executor is
+`BrokerExecutor`:
+- the limits act as in the simulation;
+- each decision is sized at its bar's mark and sent, replacing the order
+  working on its instrument (one order works per instrument);
+- the book moves by the broker's fills, at the broker's prices and
+  commissions, as its execution reports (new, partial, filled, cancelled,
+  rejected, expired) come in at the next barrier.
+
+At every session's open and after a reconnect, the book is reconciled with
+the broker's account. On a difference, `halt` (the default) stops the run,
+`adopt` takes the broker's positions and cash, and `warn` reports it.
+
+The kill switch either halts the run after its barrier, or closes every
+position at the next bar through decisions:
+- `abt kernel control --run RUN halt`, the document's file or its signal
+  halts it;
+- `control flatten` closes the positions: the program's decisions at that
+  bar are dropped, and the closing ones are logged, limited and sent like
+  any.
+
+With no session (`--session`, or the document's `recording stream`), the
+run is a rehearsal over the data's replay, or over a recorded run's stream
+with `--replay-of`. This build has no broker adapter (A-D27). `broker mock`
+is a broker in memory that fills every order at the price it was sized at;
+any other broker is refused, naming the adapter it lacks. On the same
+stream a broker's run decides what the simulation decides, and only its
+fills differ (Proposition A-4.3, `crates/abt-tests/tests/live_mock.rs`).
+`abt run` prints the mode, the document's hash and the fills that came from
+the broker after its decision counts.
+
+## The query layer: `abt-query`
+
+The query layer never evaluates a program. It asks the kernel for runs and
+reads their tables back from the store, through the data service like every
+other reader (A-D13, A-D17). Its commands are `abt plan`, `abt metrics`,
+`abt test`, `abt claim`, `abt feed`, `abt activation`, `abt lineage`,
+`abt dispute` and `abt briefs`. Each runs in the process that gives it, or,
+with `--query SOCKET`, in the query service `abt query serve` (P-3.5),
+which reaches the data and kernel services it was started with. The front
+reads the files a command names and sends them with it, and the command
+prints the same, with the same exit status (ERRATA E-81).
+
+### Metrics
+
+The query layer reads a run back from the store (`docs/spec/03-query.md`).
+`abt metrics --run RUN --data SOCKET` (or `--store DIR`) computes the run's
+metrics from the tables it wrote. These are the return metrics of its NAV
+curve, its trading metrics, its capacity, the metrics per period of its
+report block, and the Sharpe ratio of each calendar year, each printed
+with the versions of the tables it read (ERRATA E-58). Its book metrics
+are the margin's share of the NAV, the largest weight, the effective number
+of names and the funding paid. A run that held options adds the options
+metrics (ERRATA E-73): premium paid and collected; exercises, assignments
+and expiries; days to expiry at entry and exit; the book's net Greeks at
+every bar; each underlying's realised against implied volatility; and each
+bar's P&L attributed to Δ, Γ, Θ and V, with the residual.
+
+### Plans and trials
+
+Plans are studies written in the language's block syntax
+(`docs/spec/03-query.md`, section 2): a program, a parameter grid, a
+hold-out, a walk-forward scheme, an objective and the steps. `abt plan
+check PLAN` prints the plan's normal form, its hash H(Π), its steps in order
+and the trials it will count. `abt plan run` asks the kernels for every run
+with its step's identity π, spreads a grid over them, truncates every run
+before a trailing hold-out and masks a block hold-out out of the metrics and
+the ledgers. It writes every run as a trial row of `query.trials`, the
+plan's outcomes under `query.<hash>.outcomes` and the plan, which pins its
+bindings, in `query.plans`. `abt plan reveal PLAN STEP` runs one committed
+point over the whole sample and reports the embargoed bars; `abt plan
+report` prints the report, and `abt plan drop` unpins. `abt lineage`
+counts a lineage's trials, every run ever made of its members, and `abt
+dispute` records a dispute of an attachment (ERRATA E-59).
+
+`docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial.
+The kernel's study directory is retired (ERRATA E-66): a study is a plan,
+and its trials, lineages and disputes are rows of the store.
+
+```
+abt plan check  study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt plan run    study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR --kernels 4
+abt plan reveal study.plan final corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt plan report study.plan corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt lineage sma_crossover corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+abt dispute sma_crossover --reason "a different idea" corpus-v2/catalog corpus-v2/lib corpus-v2/strategies --store DIR
+```
+
+A strategy belongs to a *lineage*: its own when nothing like it exists, or
+the nearest one when its normalised rules are within Jaccard 0.8 of a
+member's (attached with a warning; a dispute is a row and changes nothing).
+The program hash (`abt hash` prints it; `abt ir --stage normalised` carries
+it) is over the normal form of the checked program, with its variable names
+canonicalised, its literals in canonical order and the `report` block
+removed, so renaming a variable or reordering a body resets nothing. A
+lineage's trials are every run of its members the store holds, in a plan or
+not, and every claim and test judged on one; the deflated Sharpe ratio of a
+plan's best point is over that count. A hold-out is `trailing:Ny` (the last
+N years are truncated away from every run) or `blocks:K:Nmo[:seed]` (K
+random month-aligned blocks the runs cross but whose metrics are withheld);
+`abt plan reveal` runs a committed point over the whole sample and reports
+the embargoed bars only, counted as a trial. A grid's report gives the
+probability of backtest overfitting, the parameter surface around the best
+point (smoothness, and the share of its grid neighbours within 10 % of it)
+and the best point's Sharpe ratio per calendar year; a walk-forward picks
+each fold's best point on its train window and judges it on the test
+window. The metrics library is `crates/abt-query/src/metrics/`; returns are
+reported on the `report` block's calendar and annualised by its `periods`.
+`abt plan report` reads the plan back as a bias checklist: its trials, the
+claims and tests with their verdicts, the contract, every warning with its
+bias, and the forty biases with the layer that owns each, its status and its
+source.
+
+### Tests and claims
+
+A plan's claims are tests of the registry, 24 of them in the starting set
+(`docs/spec/03-query.md`, section 4), each checked against its known
+answers (ERRATA E-60 to E-62). Each claim is judged on its input with an
+expected outcome. Its p-value is adjusted by Benjamini–Hochberg among the
+claims of its phase, and its verdict is written as a row of
+`query.<hash>.verdicts`. A `before` claim that fails under `block` stops
+the runs that would follow it. A reveal judges every claim again over the
+embargoed bars. Feed statistics describe the binding's data, activation
+statistics a run's rules, and the report the whole execution, with the
+forty biases and the layer that owns each (ERRATA E-63). `abt test`, `abt
+claim`, `abt feed` and `abt activation` do the same outside a plan; a test
+or a claim made there is still counted as a trial.
+
+### Briefs
+
+`briefs/` holds plain-language briefs for the model-authored corpus
+(`docs/data-bundle.md`, section 8) and the procedure: a model writes the
+strategy from a brief, its successive attempts are kept as
+`attempts/<brief>/<n>.dsl`, and `abt briefs report --briefs briefs
+--attempts attempts [--out report.json] corpus-v2/catalog corpus-v2/lib`
+records, per brief, whether the first attempt checked clean, the
+diagnostics of every attempt, the attempts to a valid program and the first
+valid one's verdict on the synthetic daily market, run as an instance of
+the plan template `briefs_harness` under the program's own execution block
+(trades, does not trade, does not survive costs, halted), and across briefs
+the first-attempt pass rate, the distribution of diagnostics and the mean
+attempts to a valid program. Every attempt is a row of
+`query.briefs.attempts` (ERRATA E-65). Measured and stored, never asserted.
+
+`docs/llm-usability.md` reports the study of whether a model can write the
+company books from the docs alone, on the first formulation, and
+`docs/llm-observability.md` the study of the observability commands on the
+same books; every attempt, the scores and the root causes are in
+`experiments/llm-usability/` and `experiments/llm-observability/`.
+Section 11 of `docs/language-v2.md` asks for the usability experiment to be
+rerun on the second formulation.
 
 ## The command line
 
 ```
 abt check <files...>
-abt run --strategy NAME (--data DIR | --synthetic [--days N] [--symbols A,B,C] [--seed N])
-        [--cash X] [--slippage-bps X] [--slippage-vol X] [--vol-window N]
-        [--commission X] [--commission-min X] [--fee-bps X] [--frictionless]
-        [--participation X] [--impact X] [--adv-window N] [--volume-relation REL]
-        [--margin none|reg-t] [--max-gross X] [--maintenance X] [--on-margin-call halt|liquidate|allow]
-        [--cash-rate X] [--margin-rate X] [--short-rebate X] [--nav]
-        [--price-relation REL]
-        [--on-leverage halt|reject|allow] [--on-oversize halt|clamp|allow]
-        [--on-ruin halt|continue] [--lot whole|fractional]
-        [--verify-causality] [--quiet] <files...>
-abt explain --strategy NAME --rule LABEL --at TIMESTAMP (--data DIR | --synthetic ...)
-        [--price-relation REL] <files...>
+abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])
+        [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]
+        [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>
+abt run ... [--checkpoint-every month|N [--checkpoint-dir DIR]] [--resume KEY|FILE]
+abt run ... [--mode replay-sim|live-sim|live-broker [--session S] [--deployment FILE]] [--replay-of RUN [--paced]] [--deadline SECONDS|none] [--memory-budget BYTES]
+abt hash --strategy NAME [--json | --show] <files...>
 abt show --strategy NAME <files...>
-abt query --strategy NAME --rel RELATION [--at TIMESTAMP] [--inputs V1,V2,...] [--symbol SYM] [--explain]
-        (--data DIR | --bundle DIR | --synthetic ...) [executor options] <files...>
-abt run ... [--ledger R1,R2,... --ledger-out DIR]
-abt synth --env NAME --out DIR [--days N] [--symbols A,B,C] [--seed N] <files...>
+abt graph --strategy NAME <files...>
+abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>
+abt rewrite-log --strategy NAME [--json] <files...>
+abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt contract --strategy NAME [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>
+abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>
+abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>
+abt metrics --run RUN (--data SOCKET | --store DIR) [--json]
+abt plan check|run|report|drop PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt lineage PROGRAM [SOURCES...] [--json] (--data SOCKET | --store DIR)
+abt dispute PROGRAM --reason TEXT [SOURCES...] (--data SOCKET | --store DIR)
+abt test TEST on INPUT [--run RUN] [--with NAME=VALUE]... [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
+abt claim 'NAME : TEST on INPUT ... expect OUTCOME' --run RUN [--json] (--data SOCKET | --store DIR)
+abt feed STATISTIC (--binding B | --run RUN) [--relation R] [--over FROM..TO] [--json] (--data SOCKET | --store DIR)
+abt activation --run RUN [--json] (--data SOCKET | --store DIR)
+abt data serve [--store DIR] [--socket PATH] [--config FILE] [--clock-rate R] [--grace 'CAL=S;...'] [--record synthetic --session S --start T --end T ...]
+abt data ingest [--store DIR] --adapter norgate|databento|orats|bundle_v2|synthetic --from LOCATOR ...   (abt data prints each adapter's options)
+abt data resolve [--store DIR] --demand FILE|- [--config FILE] [--explain] [--dry-run] [--json]
+abt data catalog [--store DIR] [--class CLASS | --sources [--config FILE]]
+abt data query [--store DIR] 'TEXT' [--view BINDING|VERSION] [--as-of-seq N] [--explain] [--parquet FILE]
+abt data stats [--store DIR] [--relation R] [--json]
+abt data pin|unpin [--store DIR] VERSION | --binding B
+abt data gc [--store DIR] [--disk-budget BYTES]
+abt kernel serve [--socket PATH] --data SOCKET
+abt kernel run|check|contract [--kernel SOCKET] --strategy NAME [--param NAME=VALUE]... [--start DATE] [--end DATE] [--progress N] [--checkpoint-every month|N] [--resume KEY] <files...>
+abt kernel run ... [--mode replay-sim|live-sim|live-broker] [--session S] [--deployment FILE]
+abt kernel query|show|status|control [--kernel SOCKET] --run RUN [--text QUERY | --what FORM | halt | checkpoint | flatten | release]
+abt query serve [--socket PATH] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]
+abt-data CMD ...    the data layer's program: `abt data CMD ...` without the front
+abt-kernel CMD ...  the kernel's program: `abt kernel CMD ...` as `abt-kernel kernel CMD ...` (or `abt-kernel serve|status|control`), the program commands (check, run, ...) as themselves, over --data SOCKET only
+abt-query CMD ...   the query layer's program: serve, plan, metrics, lineage, dispute, test, claim, feed, activation, briefs, over --data SOCKET and --kernel SOCKET only
+abt plan|metrics|test|claim|feed|activation|lineage|dispute ... --query SOCKET   (asked of the query service)
+abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
 ```
 
-`show`, the coverage report every `run` prints, `query` and `--ledger` are
-described in `docs/observability.md`.
+The executor is the program's `execution` block and the reporting its
+`report` block: no option sets a cost, a policy, a price relation or the
+periods. `abt` with no arguments prints the usage with every option
+explained. `show`, `graph`, the coverage report every `run` prints,
+`query` (whose `why`, `why not` and `trace` replace the first formulation's
+`explain`, `why-not` and `materialise`), `--ledger`, the state tables and
+the compiler's `ir`, `rewrite-log`, `plan` and `verify` are described
+under "Observing a run" above; the compiler itself in
+`docs/compiler-design.md`.
 
-`<files...>` are `.dsl` files or directories searched recursively. The
-synthetic market is seeded (`--seed`, default 7) and deterministic.
-`--price-relation REL` names the primitive the executor fills at; by default
-it is the `close`-like primitive at the decision resolution (or the finest
-one below it, whose last tuple in the bucket is used). `REL` must be a
-primitive with an equity argument and a `Price<...>` output no coarser than
-the decision resolution; anything else halts the run before it starts
-rather than dropping every order.
+`<files...>` are `.dsl` files or directories searched recursively; a run
+needs the catalog, the library modules the program uses and the program
+(`corpus-v2/catalog corpus-v2/lib corpus-v2/strategies/sma_crossover.dsl`).
+The synthetic market is the one of the program's class and base, seeded
+(`--seed`, default 7) and deterministic, over 500 days (40 for a sub-daily
+base) and the symbols `AAA,BBB,CCC,DDD,SPY`; its equities are securities
+`E1`, `E2`, ... carrying those tickers, which is why a decision reads
+`trade(E3, 100)` and a query names the instrument `for A = E3`. The daily market
+changes its second name's ticker halfway and delists its last name at four
+fifths of the sample, so a strategy that names `"SPY"` runs with `--symbols
+AAA,XYZ,BBB,SPY,DDD`, as the acceptance test does. `--start DATE` and
+`--end DATE` bound the run as the report block's `window` does: the
+executor runs and the strategy decides only at bars within them, and
+earlier bars stay data. `--as-of DATE` is the bundle date a ticker literal
+or a command-line name resolves at (default: the data's last bar).
+`--nav FILE` writes the book at every bar as Parquet (`t, equity, cash,
+gross, net, leverage`), `--returns FILE` the returns per reporting period
+(`t, ret, pnl`), `--ledger R1,R2 --ledger-out DIR` the named relations'
+tuples at every bar, and `--tables DIR` every state table as Arrow IPC.
+A run over a store writes everything it did there (`kernel.<run>.*`), which
+is what the reference engine reads back. `--timing` prints one
+stderr line with the load, build and run times, the bar and tuple counts
+and the kernel's statistics, among them `pushed_answers`, the windows the
+data layer's aggregate pass answered. An aggregate over one stored relation
+in one of the pass's window forms is pushed down to the data layer, which
+computes it over the whole run in one request; `abt show plan` prints, under
+each aggregate, `pushdown: ...` or `local:` and the condition that keeps it
+in the kernel (`docs/spec/ERRATA.md`, E-47). `--no-pushdown` evaluates every
+aggregate in the kernel, a test switch: both give the same bits. A rule's
+body is solved over blocks of bindings, each row a slice of one buffer (the
+set evaluator of `docs/spec/06-performance.md`, ERRATA E-75); `--evaluator
+tuple` solves it one environment at a time, also a test switch.
 
-Every option value is validated: `--days abc`, `--cash lots`, `--symbols ""`
-or `--at yesterday` are errors naming the option, never a silent default,
-and an unknown `--option` prints the usage. `explain` at a timestamp that is
-not a bar reports `2030-01-01 is not a bar of the @1d time domain (2022-01-03
-to 2023-12-01)` instead of a missing literal. Exit codes: 0 success; 1 the
-strategy does not check, the run halted, or the usage is wrong; 2 an input
-could not be read or parsed (a source file, a data directory, an option
-value).
+Every option value is validated: `--days abc`, `--symbols ""` or `--at
+yesterday` are errors naming the option, never a silent default, and an
+unknown `--option` prints the usage. Exit codes: 0 success; 1 the strategy
+does not check, the run was refused or halted, or the usage is wrong; 2 an
+input could not be read (a source file, a store, a data service's socket),
+or a store's data was refused (a binding without the attributes the
+program requires).
 
-## Environment instances as Parquet
+## Verification
 
-`abt run --data DIR` loads one `<relation>.parquet` per primitive of the
-strategy's environment; `abt synth` writes the same layout with typed
-columns. Column names are the signature's arguments (case-insensitive);
-a column may be typed (integer, float, date, timestamp) or text, a text
-timestamp being `YYYY-MM-DD`, optionally followed by `THH:MM[:SS]` or
-` HH:MM[:SS]` (`src/table.rs`). The loader enforces what the signature promises:
+The gates of A-7.1, and where each is checked here:
 
-- The temporal key is stored as the label of the bar containing it at the
-  relation's resolution (spec section 3: at @1d the trading date), so
-  `2022-01-03T16:00:00` in `close.parquet` and `2022-01-03` in `universe.parquet`
-  are one bar and share one time domain.
-- A relation is a function of its identity columns (its inputs, its key and
-  its entity-typed outputs; spec section 3): two rows for one identity with
-  different value outputs are an error naming both rows, such as
-  `close.parquet row 2: duplicate tuple for (AAA, 2022-01-03) with different
-  outputs; row 1 already binds them`. A row identical to an earlier one is dropped.
-- A cell that does not parse as its type and a missing column are errors
-  naming the file and row.
-- `securities.parquet` (`id,ticker,from,to`, `to` null while the ticker is
-  still carried, and optionally the contract columns `multiplier`,
-  `asset_class` and `commission_per_contract`) is the bundle's security table (`docs/data-bundle.md`,
-  section 3): with it, every equity field is a security id (an unknown id is
-  an error naming the row), the identity bundle tests run at load (one id
-  carries one ticker at a time, one ticker is carried by one id at a time,
-  every interval ends after it starts), and the `ticker(A, @T, S)` relation
-  is derived from the table over the bars of `universe` rather than read from
-  a file. Without a table the ticker is the id and `ticker` is derived from
-  the symbols.
-- A ticker literal in a program (`param bench : Equity = "SPY"`), a
-  `--param` value, a `--bind` or an `--inputs` name resolves through the
-  table to the security carrying that ticker at the bundle date: the data's
-  last bar, or `--as-of DATE` (`ExecConfig::as_of`). A ticker nobody carries
-  at that date is a configuration error naming the date, never a silent
-  empty symbol. A security id is accepted anywhere a ticker is.
-- A missing or header-only file leaves the relation empty and prints a
-  `note:`; `--data DIR` must be an existing directory.
+| Gate | Here |
+| --- | --- |
+| G1 parity | The owner's: `scripts/parity/` against the books' references (`docs/parity-inputs.md`). Its stand-in here is `crates/abt-tests/tests/tv_golden.rs`: every corpus-v2 strategy and both books held to their golden runs, which change only in a commit that names the change, recorded in the ERRATA. |
+| G2 corpus | `crates/abt-tests/tests/corpus_v2.rs` |
+| G3 determinism | `crates/abt-tests/tests/determinism.rs`: in process against a socket, 1 against 8 data threads, 1 against 4 kernels. `crates/abt/tests/deployment.rs`: the three-process deployment (`abt data serve`, `abt kernel serve`, `abt query serve`) gives the runs the front gives in one process. `ABT_TRANSPORT=socket` runs the whole suite with the layers of each process connected over sockets |
+| G4 replay | `crates/abt-tests/tests/replay.rs`, on a recorded synthetic feed; a recorded Databento session is the owner's |
+| G5 fold | `crates/abt-tests/tests/fold.rs` (truncation at every sampled barrier), `checkpoint.rs` and `fold_checkpoint.rs` (resume from every monthly checkpoint) |
+| G6 reference | `crates/abt/tests/reference.rs` (below) |
+| G7 contracts | `crates/abt-tests/tests/contracts.rs` |
+| G8 options | `crates/abt-tests/tests/options.rs`, `futures.rs` and `limits.rs`, K-9.3's 25 cases (ERRATA E-73 lists each case's test); the owner's options book when it is supplied |
+| G9 tests | `crates/abt-query/tests/known_answers_*.rs` |
+| G10 performance | `scripts/bench.sh`, measured here and recorded in `docs/assessment.md`; asserted on the reference machine by the owner |
 
-## Decisions taken where the model left room
+M-10's gate, the live interface over the mock broker, is
+`crates/abt-tests/tests/live_mock.rs`: Proposition A-4.3 (the same
+decisions as the simulation on the same stream, the broker's fills), the
+order lifecycle, reconciliation under each policy, and the kill switch.
 
-These are the places where implementing the model required a choice; each is
-small and easy to flip.
+### Company books
 
-- **Head inputs are bound on entry.** WF-2 says the caller binds every `+`
-  argument, so inside a rule's body the head's `+` variables are bound from
-  the start. This is what makes `flat(+A, @T) :- universe(A, T), not
-  position(A, T, _)` well-formed. The key and the outputs must still be bound
-  by the body.
-- **`universe` is declared `-A`.** The model's table writes `+A` for every
-  primitive, but with `+A` on the domain relation no rule could ever range
-  over the universe. The corpus environments declare `universe(-A, @T)`; the
-  other primitives keep `+A`.
-- **`position` and `fill` are enumerable (`-A`).** A strategy must be able to
-  range over what it holds; the model's `+A` would forbid `held(A, T, Q) :-
-  position(A, T, Q), Q > 0 shares`. Identity columns for WF-7 are therefore
-  every entity-typed argument plus the key, not only the inputs, so a
-  reduction over such a relation still has to name the entity as a tie-break.
-- **A window may precede or follow the atoms it bounds.** Inside an
-  aggregation, `T1 in window(T, ...)` is registered before the conjunction is
-  judged, so an atom written ahead of its window (the model's bivariate
-  example) is causal by the window's provenance; the kernel evaluates the
-  window first either way, so the atom is a lookup, never a scan.
-- **A reduction's key is bound before the `top`.** The group of a `top` is
-  the bound outer variables, so `bar(T)` (or any atom at the head's
-  resolution) precedes `top(n, candidate(A, T, M), ...)`; otherwise the group
-  would be global and the declarative and operational readings would differ.
-- **`day_start(T)`** joins `month_start(T)` as a builtin, so that an opening
-  strategy at @1m can find the first bar of the day without a calendar
-  primitive.
-- **Windowed library features take their minimum count as an input**
-  (`sma(+A, @T, +N, +K, -M)`), because every window must declare `min K` and
-  there is no Duration-to-Count conversion.
-- **`lag(T, 0d, T1)`** is causal rather than strict (it lands on T itself).
-- **An unpriced position is marked at its last price.** When the price
-  relation has no tuple for a held instrument at a bar (a delisting that
-  removes its rows), the equity curve and `target_weight` sizing value it at
-  the last price seen for it, its last close or fill, rather than at zero.
-  The executor never trades at that stale price: a decision on the
-  instrument is dropped with `no price for ...` until a price reappears.
-- **A library is usable only on its own environment.** Section 4 says both
-  libraries and strategies name the environment they are written against; a
-  `uses` of a library written against another environment is one E error,
-  even when the two environments share primitive names.
-- **A resample groups a stored inner relation by every fresh entity
-  variable**, including one in a `+` position (`resample(close_m(A, T1, P)
-  to @5m as T, ...)` with `A` fresh yields one bucket per symbol), because
-  section 4 says the form binds R's entity variables by grouping and a stored
-  relation can be enumerated. A derived inner relation is a call: its `+`
-  inputs must be bound before the resample (M), or it is declared with `-A`.
-- **A duration parameter's range is judged under every calendar length**:
-  a month is 28 to 31 days and a year 365 or 366, so `1mo in 31d..60d` is
-  accepted and `1mo in 32d..60d` is a T error; the kernel still orders
-  durations by their mean length.
-- **`X = T` copies a bound Timestamp** into a value column (the "held since"
-  idiom, `entry(A, T, E, TE) :- fill(A, T, Q, P), ..., TE = T`); the copy
-  carries no causal provenance, so it compares freely but cannot serve as a
-  body atom's temporal key.
-- **`min K` removes a bar from a relation, not from the time domain.** The
-  @1d domain over minute data is every day with at least one minute bar
-  (section 6), so a half-day with fewer than the bars library's 300 bars
-  has no `close_d` but is still a bar: `prev` from the next day lands on
-  it, and a rule needing `close_d` at prev(T) does not fire on the day
-  after it either. Skip bar-less days with `lag` or a window, or resample
-  with `min 1` and a `count` output and gate on the count.
-- **The executor prices from the data, not from the strategy's bars.** When
-  the decision resolution is coarser than the price data, a decision is
-  filled at the last fine close inside the next decision bucket, whatever
-  `min K` the strategy's bar rules declare; a bucket with no fine tuple for
-  the instrument drops the decision.
-- **Ruin and leverage halt by default.** The model defines no margin; rather
-  than borrow silently, the executor halts when a fill would make cash
-  negative or gross exposure exceed equity, or when equity is not positive
-  with orders pending. `--on-leverage reject|allow` and `--on-ruin continue`
-  relax this per run.
-- **An oversize delta order halts by default.** A `sell` larger than the
-  long position or a `cover` larger than the short would cross zero; `clamp`
-  fills up to the position and drops the rest, `allow` keeps the signed-order
-  reading.
-- **Liquidations fill at the last price.** An order that shrinks a position
-  without crossing zero fills at the instrument's last known price when the
-  fill bar has none, flagged as such, so a delisted holding can always be
-  closed; opening or adding orders without a price still drop.
-- **Whole shares by default.** Every order's quantity (a delta amount or a
-  target's quantity) is truncated toward zero unless `--lot fractional`;
-  literals stay real-valued, and this rounding is where a contract size for
-  futures would later apply.
-- **Transaction costs are never leverage.** The leverage check exempts the
-  bar's commissions, fees and slippage, so a book targeting weights that sum
-  to one is not halted for paying its costs; the debit it carries is at most
-  the bar's costs and the next sizing sees it. A bought long is sized at its
-  expected fill price for the same reason; a reduction or a short is sized at
-  the bar price it is marked at.
-- **A capped target re-issues itself; a capped delta order expires.** The
-  doc says so; the kernel keeps the open target per instrument, re-sizes it
-  at each bar from that bar's equity and price, and drops it when a new
-  decision names the instrument or the instrument has no price. Re-issues
-  are fills without decisions: `decided` still holds only what the strategy
-  emitted.
-- **Corporate actions act on the book at the bar's open, before the mark.**
-  A `split(A, T, F)` multiplies the position by F at its ex-date T; under
-  whole lots the fraction is cashed at the bar's price. A `dividend(A, T0,
-  Ex, Pay, Amount)` creates a receivable of Amount times the shares held at
-  Ex (a short owes it), credited at Pay; the receivable is not marked, so
-  equity dips between the ex-date and the pay date, and a pay date beyond
-  the data is never credited. A `delisted(A, T, Reason)` force-closes the
-  position at the first bar it holds, at the last trade less the haircut for
-  the reason (`--haircut REASON=X`; bankruptcy and regulatory 1, acquisition
-  and voluntary 0, anything else 1), with commission and no slippage, as a
-  forced fill; a zero haircut on an involuntary reason is warned. Every
-  action is in `RunResult.actions`.
-- **Without a security table the ticker is the id.** A dataset that has no
-  `securities.parquet` (the synthetic markets) is the v1
-  world: equity fields are tickers, a ticker literal interns its own symbol,
-  and `ticker(A, T, S)` is derived with every symbol as its own ticker, so
-  `not ticker(...)` keeps its meaning. With a table, resolution is by bundle
-  date and strict.
-- **Ruin is not a margin call.** The maintenance check fires on positive
-  equity below the margin of gross exposure; a non-positive equity is ruin
-  and is judged by the ruin policy when an order comes to be filled, so a
-  book that is already ruined and silent is not halted twice over.
-- **A forced liquidation pays commission and fee, not slippage or impact**,
-  and fills at the mark bar's close; it is the kernel's order, flagged
-  `forced`, and never a decision of the strategy.
-- **A non-positive price is a data error**, rejected at load with the file
-  and row, except a future's (`asset_class = future`), whose back-adjusted
-  series may cross zero.
+The company's two production strategies are written in the language:
+`corpus-v2/company/mw14.dsl`, the weekly S&P 1500 momentum book (daily bars
+bucketed to `weeks(1)`, the `SPXTR` and `VIX` series, the `catalog`,
+`state` and `book` modules, `book_fixed_base` execution, a weekly report
+with its window), and `corpus-v2/company/r8l.dsl`, the intraday futures
+opening-range book (a minute base, `sessions` and `sessions of "ES"`
+calendars, `decide on base at session + 30min`, an `instruments` table of
+the 26 roots with their start years, allowed W9, and `futures_fixed_base`
+execution). `docs/language-v2.md` section 9 reads each file against the
+book's own rules and lists the known differences. `crates/abt-tests/tests/corpus_v2.rs`
+checks both and runs both on synthetic data of their class (R8L with its
+session windows shortened to the synthetic market's thirty days). The
+parity of the first formulation's versions with the books' reference
+results, the run commands and the comparisons are `docs/parity-mw14.md`,
+`docs/parity-r8l.md`, `docs/parity-inputs.md` and `scripts/parity/`;
+rerunning them on these files is G1, the owner's (step 7 of
+`docs/language-v2.md` section 11).
 
-## Bundles
-
-`docs/data-bundle.md` (sections 2 and 3) makes data a versioned bundle the
-system ships. A bundle is a directory: `manifest.json` (the environment name,
-the version, the bundle date, every relation with its signature, resolution,
-availability convention, row count and partitions, and the bundle tests'
-report once they pass, and the layout `format`, now 2), `securities.parquet`
-(the security table), and
-`log/<relation>/<YYYY-MM>.parquet`, append-only Parquet partitions of each
-primitive relation by the month of its temporal key (`snapshots/` is
-reserved for the fold kernel's checkpoints). The derived `ticker` relation is
-rebuilt from the table, never stored. A bundle of layout 1 (text security
-table) is refused with a request to rebuild it.
-
-```
-abt bundle build --synthetic --env equities_1d_v2 --version 2026.10 --out ./bundle corpus/
-abt bundle build --from ./market --env equities_1d --version 2026.10 --out ./bundle corpus/
-abt bundle test ./bundle corpus/
-abt run --strategy total_return_momentum --bundle ./bundle corpus/
-```
-
-`abt bundle test` runs the bundle tests of the doc's section 3 that the data
-can answer today (identity; every temporal key a bar label; positive prices;
-action reconciliation, where a close ratio outside [0.6, 1.67] between
-consecutive bars must be a split that day and every split must show one;
-delisting coverage, where a name that leaves the universe before the last bar
-has a `delisted` record; membership, where a member is in the universe that
-bar) and records a pass in the manifest; `abt run --bundle` refuses a bundle
-that has not passed unless `--untested`, and then notes that its decisions
-are not causality-certified. A strategy or library may name the version it
-is written against, `env equities_1d_v2@2026.10`: the bundle must match, and
-a library pinned to another version than its strategy is an E error. The
-crate depends on `serde`, `serde_json`, `arrow` and `parquet` for this.
-
-Vendor exports become bundles through adapters (`src/ingest.rs`): `abt
-bundle build --from-norgate DIR` reads a Norgate-style daily layout
-of Parquet files (`prices` as traded, `symbols` for the symbol history,
-`splits`, `dividends`, `delistings`, `membership` and `classification`, the
-last two expanded over trading days, and `exceptions`, reviewed bundle-test
-exceptions; `scripts/ingest/norgate_lake_to_inputs.py` writes it from the
-NDLake lake) into
-`equities_1d_v2`; `--from-databento DIR [--processing-delay S]` reads a
-Databento-style minute layout (`ohlcv-1m.parquet` keyed at the bar close
-with an optional `ts_recv`, `symbology.parquet`) into `equities_1m` with every
-tuple's availability recorded as its receipt time plus the delay. The
-manifest records the source and the schema decisions of
-`docs/data-bundle.md` section 10 (consolidated bars, the availability
-offset as the processing delay).
-
-## Company books
-
-Two of the company's production strategies run in abt with their reference
-results reproduced: `corpus/company/mw14.dsl`, the weekly S&P 1500 momentum
-book (exact to its canonical weekly returns, 1991–2026), and
-`corpus/company/r8l.dsl`, the intraday futures opening-range book (exact to its
-legs and daily P&L, 2000–2026). How each maps onto the DSL, the run command,
-the comparison and the known differences: `docs/parity-mw14.md`,
-`docs/parity-r8l.md`; inputs and checksums: `docs/parity-inputs.md`. Their
-data comes from `scripts/ingest/ndlake_weekly.py` (env `equities_1w`) and
-`scripts/ingest/tradestation_sessions.py` (env `futures_sessions`), and
-`scripts/parity/` holds the comparisons.
-
-They use what the executor and the DSL gained for them: fixed-base
-accounting (the default; `--compounding on` compounds), order types with a
-time in force (`decide(T, target_weight(A, W, moc))`; `market`, `moo`,
-`moc`, `moo_moc`, `limit(P, tif)`, `stop(P, tif)`), futures contracts in the
-security table, `rows(T, N, min K)` windows over a group's own rows,
-`rank(R(...), by (...), as K)`, `--actions in-prices`, `--delist-proceeds`,
-`--dividends reinvest`, `--commission-bps`, `--start`/`--end`, and metrics in
-both conventions (`--report-by day --report-calendar REL`,
-`--periods-per-year`, `--returns FILE`).
-
-## Studies
-
-`docs/data-bundle.md` (sections 6 and 7) makes a backtest a counted trial. A
-study directory (`--study DIR`) holds `lineages.json`, the declared studies
-in `studies/` and the append-only trial log `trials.jsonl`:
-
-```
-abt study declare --study DIR --strategy NAME [--holdout trailing:2y] [--objective sharpe] [--require sharpe>=1] corpus/
-abt study run     --study DIR --strategy NAME --synthetic --grid lookback=3mo,6mo,1y --grid n=2,5 corpus/
-abt study run     --study DIR --strategy NAME --synthetic --grid n=2,5 --walk-forward anchored:2y:6mo corpus/
-abt study reveal  --study DIR --strategy NAME --synthetic corpus/
-abt study metrics --study DIR --strategy NAME corpus/
-abt study report  --study DIR --strategy NAME corpus/
-abt study dispute --study DIR --strategy NAME --reason "a different idea" corpus/
-```
-
-A strategy belongs to a *lineage*: its own when nothing like it exists, the
-one it declares with a `revises "<hash>"` header line, or the nearest one
-when its normalised rules are within Jaccard 0.8 of a member's (attached
-with a warning; a dispute is logged and changes nothing). The program hash
-(`abt study declare` prints it) is over the checked program with the
-strategy's name and its variable names normalised away, so renaming resets
-nothing. `declare` fixes the study's inputs (hold-out policy, objective,
-thresholds, executor configuration) and warns about what is missing: no
-hold-out, zero costs or slippage. A hold-out is `trailing:Ny` (the last N
-years are truncated away from every run) or `blocks:K:Nmo[:seed]` (K random
-month-aligned blocks the runs cross, since the book's state must, but whose
-metrics are withheld); `reveal` runs a committed version (one the study has
-run) over the whole sample and reports the embargoed bars only, logged as
-an out-of-sample trial and counted. `run` logs one trial per grid point on
-the sample the hold-out leaves, then reports the deflated Sharpe ratio of
-the best point over the lineage's whole trial count, the probability of
-backtest overfitting over the grid, the parameter surface around the best
-point (smoothness, and the share of its grid neighbours within 10 % of it)
-and the best point's Sharpe ratio per calendar year, with warnings for a
-short sample, a Sharpe ratio below its minimum track-record length,
-deflation below 0.95, PBO at or above 0.5, a peak rather than a plateau,
-and a sign that flips across years. With `--walk-forward anchored:2y:6mo`
-(or `rolling`), each fold picks the grid's best point on its train window
-and judges it on the test window, every evaluation a logged trial, and the
-test windows are stitched into one out-of-sample curve with Pardo's
-walk-forward efficiency (mean out-of-sample over mean in-sample CAGR). The metrics library behind it is `src/study/metrics.rs` (its
-conventions are in the module notes); `corpus/lib/metrics.dsl` writes the
-book's return, running peak, drawdown and trailing volatility in the DSL
-over the executor's `nav`. A plain `abt run` is an untracked trial: logged
-when it names `--study DIR`, warned either way. `report` reads the lineage
-back as a bias checklist: its members and disputes, the studies declared,
-the trial count by kind (in studies, untracked, reveals) and the study runs
-(`runs.jsonl` keeps each run's DSR, PBO, surface, efficiency and warnings),
-the degrees of freedom, the latest trial and every reveal, the author's
-thresholds judged on the latest trial and the latest reveal, every warning
-raised with its bias and how often (the checker's W5 and W6 included), and
-the forty biases of `docs/data-bundle.md` sections 4 to 6 with their status
-and the rows a warning touched marked.
-
-## The reference engine
+### The reference engine
 
 `reference/` is a second implementation of the execution contract in plain
-Python over pandas, written from `docs/semantic-model.md` section 6 and
-sharing nothing with the kernel (`docs/data-bundle.md`, section 8). `abt run
---dump DIR` writes what a run saw and did (the data as Parquet, the
-configuration, decisions, fills, dropped decisions, actions, the book at
-every bar and the final state); `python3 reference/diff.py DIR` replays the
-decisions through the reference executor and requires fills identical in
-quantity (exactly under whole lots) and in price to floating tolerance, the
-book identical at the end, the NAV within tolerance at every bar and the
-same dropped count. `tests/reference.rs` runs every daily corpus strategy,
-policy and model variants and the four action markets through it, skipping
-with a note where python3 with pandas is absent. `.github/workflows/ci.yml`
-is the GitHub Actions workflow (format, clippy, tests with pandas installed
-so the comparison runs).
+Python over pandas, written from the semantic model's section 6 and sharing
+nothing with the kernel (`docs/data-bundle.md`, section 8). It reads a run
+back from the store it ran over: the store is the dump (M-9). `python3
+reference/diff.py STORE RUN` reads the run's configuration, data at the
+binding's versions, decisions, events and book through `abt data query`,
+replays the decisions through the reference executor, and compares fills,
+book, NAV and dropped count (`reference/README.md` gives the tolerances).
+`crates/abt/tests/reference.rs` (G6) runs the comparison over the daily
+corpus strategies, a set of policy and model variants and four action
+markets, each over a store of its own, and skips with a note where `python3`
+with pandas is absent. `.github/workflows/ci.yml` is the GitHub
+Actions workflow (format, clippy, tests with pandas installed so the
+comparison runs).
 
-## Stylized facts
+### Stylized facts
 
-`corpus/strategies/` carries the four canonical strategies of
-`docs/data-bundle.md` section 8, each long-short with four tenths of equity a
-leg (slack for the legs' drift under the default 1x gross policy) and a
-monthly rebalance over the catalog environment: `momentum_12_1`,
+`corpus-v2/strategies/` carries the four canonical strategies of
+`docs/data-bundle.md` section 8, each long-short at each month start over
+the index members, four tenths of the capital a leg: `momentum_12_1`,
 `low_volatility`, `short_term_reversal` and `size_proxy` (market
 capitalisation is not a catalog relation, so average dollar volume stands
-in). `tests/stylized.rs` shows them trading both legs on the synthetic
-catalog market, and, when `ABT_BUNDLE_DIR` names a bundle of the
-point-in-time universe (`ABT_STYLIZED_N` sets the names a leg, 50 by
-default), runs them with the default cost model and checks wide published
-ranges for the long-short return, its volatility, the deepest drawdown and
-the known failure years (momentum's 2009, low volatility's 2020): gross
-execution or data errors, not strategy merit. Without a bundle the ranges
-are skipped with a note.
+in). `crates/abt-tests/tests/corpus_v2.rs` checks them and runs them on the synthetic daily
+market; `crates/abt-tests/tests/stylized.rs` checks wide published ranges for each when
+`ABT_BUNDLE_DIR` names a bundle of the point-in-time universe, and skips
+the ranges with a note without one.
 
-## Briefs
+## Layout
 
-`briefs/` holds plain-language briefs for the LLM-authored corpus
-(`docs/data-bundle.md`, section 8) and the procedure: a model writes the
-strategy from a brief, its successive attempts are kept as
-`attempts/<brief>/<n>.dsl`, and `abt briefs report --briefs briefs
---attempts attempts [--out report.json] corpus/` records, per brief, whether
-the first attempt checked clean, the diagnostics of every attempt, the
-attempts to a valid program and the first valid one's verdict on the
-synthetic market under the default cost model (trades, does not trade, does
-not survive costs, halted), and across briefs the first-attempt pass rate,
-the distribution of diagnostics and the mean attempts to a valid program.
-Measured and stored, never asserted.
-
-`docs/llm-usability.md` reports the study of whether an LLM can write the
-company books from the docs alone: Haiku 4.5 and Sonnet 5.5 agents given only
-the language description, a plain-language spec, the checker and the data
-wrote MW14, R8L and two briefs. Sonnet's files land within rounding of both
-books; Haiku's check clean and never trade. Every attempt, the scores, the
-root causes and the ranked fixes are in `experiments/llm-usability/`.
+| Path | What it is |
+| --- | --- |
+| `Cargo.toml`, `crates/` | The workspace of M-0: the three layers, the two shared crates, the front and the cross-layer suites. |
+| `crates/abt-wire/` | The protocol's types and messages: the FlatBuffers schema `schema/abt.fbs` compiled by planus, frames, the transport (Unix socket, in-process channel), RFC 8785 canonical forms, BLAKE3 hashes. |
+| `crates/abt-agg/` | The aggregate kernels: windows, moments, order statistics, reductions. |
+| `crates/abt-data/src/` | The data layer: `registry.rs`, `store.rs` with `resident.rs`, `query.rs`, `stream.rs`, `agg.rs` (the aggregate pass), `service.rs`, `live.rs` (live sessions), `options.rs` (the chain query), `resolver/` (catalog, cost, cover, plan, fetch, bind, pre-pass), `adapter.rs` and `adapters/`: `norgate` (the NDLake lake), `databento` (DBN files, the bucket's Parquet, the historical API), `databento_live` (the live gateway), `orats` (option chains), `dbn` (DBN versions 1 to 3), `http`, and `mock` for the resolver's tests. |
+| `crates/abt-kernel/src/syntax/` | The front end: `lexer.rs`, `ast.rs` (units are strategies, libraries, classes and execution presets; a strategy is nine blocks) and `parser.rs`. The parser never reorders literals. |
+| `crates/abt-kernel/src/ir.rs` | The core IR of a linked program: domains, dimensional types, calendars, signatures, rules and the literal forms of sections 3 to 5. |
+| `crates/abt-kernel/src/check/` | The elaborator and checker. `link.rs` links a strategy against the class catalog and its libraries, instantiates the library templates at every call, and generates the bar views, the per-calendar universes, the instruments table, the series and catalog reads and the clock; `rule.rs` is the per-rule pass (a well-moded order, B and M; T; F; D; G; W7); `config.rs` expands the `execution` and `report` blocks (P); `types.rs` is the dimensional algebra; `dof.rs` counts degrees of freedom (W5, W6, W9); `mod.rs` holds the workspace, the codes, the program-level judgments and the strata. |
+| `crates/abt-kernel/src/compiler/`, `analysis/`, `rewrite/`, `plan/`, `lower/` | Normalise (the normal form and the program hash, `abt hash`) and the stage printing behind `abt ir`; Analyse (strata, the open-loop partition, keyedness, demand, window lengths, the abstract interpretation); the rewrites R1 to R6 with their log; the planner and the lowering the kernel executes (`abt show plan`). |
+| `crates/abt-kernel/src/verify/`, `contract/` | The verification tiers (`abt verify`) and the contract derived from a program (`abt contract`, K-3). |
+| `crates/abt-kernel/src/kernel/` | The kernel: `bind.rs` (Bind and the client of the data layer), `fold.rs` (the fold over the stream), `eval.rs` and `eval_set.rs` (rule bodies under Kleene's three-valued conjunction, over blocks of bindings), `rows.rs` (the stored tables' blocks), `pushdown.rs`, `events.rs` (the event log), `outputs.rs` (`kernel.<run>.*`), `checkpoints.rs`, `service.rs` (the kernel service), `mod.rs` (the kernel, `ExecConfig::from_program`, the causality check), `time.rs`, `value.rs`. |
+| `crates/abt-kernel/src/live/` | The live interface (K-6.4, K-6.5): the `Broker` trait, `BrokerExecutor`, the deployment document, reconciliation, the order lifecycle, the kill switch, and `MockBroker`. |
+| `crates/abt-kernel/src/sim/`, `functions/` | The market simulation behind the `Executor` trait (`SimExecutor`): equities, futures, options, the margin models and the limits; the pricing functions (Black–Scholes–Merton, Black 1976, Bjerksund–Stensland 2002, implied volatility). |
+| `crates/abt-kernel/src/query/`, `state/`, `observe.rs` | The query language (parse, check, answer), the state tables and the provenance of a run, the program graph and the coverage report. |
+| `crates/abt-kernel/src/data.rs`, `bundle.rs`, `table.rs` | The Parquet loaders and the bundle format that `bundle_v2` imports with, the deterministic synthetic markets of the three classes (`synthetic_daily`, `synthetic_minute`, `synthetic_futures`), and Parquet tables. |
+| `crates/abt-kernel/src/cli.rs`, `kernel_cli.rs` | The kernel's command line and `abt kernel ...`. |
+| `crates/abt-query/src/` | The query layer: `plan/` (parse, normal form, the executor, claims, lineages, trials), `metrics/`, `tests/` (the framework, dependence, resampling, HAC, the starting set), `feed.rs`, `activation.rs`, `report.rs`, `briefs.rs`, `service.rs` (the query service, P-3.5), and `kernel.rs` and `data.rs`, its clients of the other two. |
+| `crates/abt/src/` | The front: `main.rs` dispatches, `lib.rs` wires the layers in one process (over in-process channels, or sockets under `ABT_TRANSPORT=socket`), `data_cli.rs` and `query_cli.rs` are the data and query layers' commands and `abt query serve`. |
+| `corpus-v2/catalog/` | The three classes a program is written against: `equity`, `future` and `series`. A program never names them; its `data` block names what it needs. |
+| `corpus-v2/lib/` | The standard library of V-7, one module a file (`calendar`, `catalog`, `stat`, `bars`, `xsec`, `state`, `book`), and `execution.dsl`, the presets `equity_default`, `book_fixed_base` and `futures_fixed_base`. |
+| `corpus-v2/strategies/`, `company/`, `negative/` | 24 strategies that must check clean; MW14 and R8L as V-9 gives them; 35 negative cases, one or more per judgment code, each file's `# expect:` header asserted by `crates/abt-tests/tests/corpus_v2.rs`. |
+| `crates/*/tests/`, `crates/abt-tests/` | Each crate's own suites, and the suites that span layers with the fixtures they share (`crates/abt-tests/src/lib.rs`: the catalog and the library as the base workspace, a strategy skeleton, crafted markets). Those that drive the `abt` binary are the front's, `crates/abt/tests/`. |
+| `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies (records). |
+| `scripts/` | `parity/` holds the books' comparisons with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake and their editor; `bench.sh` the performance ladder and A-7.3's table; `synth/` writes the first formulation's layouts and is kept for the record. |
 
 ## Development
 
 ```
-cargo test            # type algebra, time, corpus, checker, kernel, syntax, Parquet loader, command line
+cargo test --test corpus_v2      # the acceptance corpus: checks, negative cases, runs on synthetic data
+cargo test                       # every suite
+ABT_TRANSPORT=socket cargo test  # every suite, the layers of each process connected over sockets
 cargo build --release
 ```
 
-Adding a corpus case: a strategy goes in `corpus/strategies/` and must check
-clean: no errors, and no warnings beyond those it allows itself with a
+Adding a corpus case: a strategy goes in `corpus-v2/strategies/` and must
+check clean: no errors, and no warnings beyond those it allows itself with a
 `# allow: <code>` header line (one per code, warnings only; the four
-strategies with an `Equity` param allow W6, and a header whose code is not
-raised fails the test). A negative case goes in `corpus/negative/` with a
-`# expect: <code>` header and must produce errors of that code only.
-`tests/corpus.rs` asserts all of this and that every judgment code has a case.
+strategies with an instrument literal allow W6, R8L allows W9, and a header
+whose code is not raised fails the test). It must also run on the synthetic
+market of its class and decide at least once. A negative case goes in
+`corpus-v2/negative/` with a `# expect: <code>` header and must produce
+errors of that code only, and no program. `crates/abt-tests/tests/corpus_v2.rs` asserts all
+of this, with the counts (24 strategies, 2 company programs, 35 negative
+cases), and `crates/abt-tests/src/lib.rs` gives a new test the catalog and the
+library as a workspace, a strategy skeleton to fill in and crafted markets.
+From Rust, a program is checked and run as the tests do it: a
+`check::Workspace` takes every unit's source with `add_source`,
+`check_workspace` judges every strategy in it, `check_program(&ws, name)`
+returns the linked `Program` with its diagnostics, `data::synthetic_for_program`
+builds the market of its class, `ExecConfig::from_program` the executor,
+and `kernel::run` the `RunResult` (the crate is `abt_kernel`). The suites
+under `crates/abt-tests/tests/` and `crates/abt/tests/` run on this
+formulation's programs; `crates/abt-tests/tests/tv_golden.rs` holds every
+corpus program's run to its golden file (`docs/spec/ERRATA.md`, E-1);
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings` and `cargo test` at the workspace's virtual
+root, which covers every member.
 
-## Program
+## Status
 
-The crate follows two design documents: `docs/semantic-model.md` (the v1
-language and kernel, implemented) and `docs/data-bundle.md` (closed data
-bundles, the online fold kernel, the catalog, the bias audit and the study
-API), whose status table names the milestone each section lands in: M0
-section 9 and the warnings W5, W6; M1 execution realism; M2 catalog,
-identities and the bundle format; M3 the fold kernel and availability time
-(all done); M4 the study API (done); M5 the realism program (done: the
-pandas reference, the stylized-fact tests, the briefs harness and the vendor
-adapters).
+The migration of `docs/spec/05-migration.md` has landed, M-0 to M-10:
+- Step 0 merged the specification and set up the golden runs.
+- M-0 to M-8 built the workspace, `abt-agg`, the data layer, the second
+  formulation over it, contracts and the kernel's outputs, the query layer,
+  the resolver and the vendors, options and futures, and the performance
+  work.
+- M-9 retires the first formulation's commands, and adds the query
+  service: each layer now runs as a process of its own, and the
+  three-process deployment is tested (ERRATA E-81).
+- M-10 freezes the live interface: the broker trait, `BrokerExecutor`,
+  the deployment document, reconciliation, the order lifecycle and the kill
+  switch, over a mock broker (ERRATA E-82).
+
+M-8's entity-parallel strata were not built (ERRATA E-77 says why). No
+broker adapter is part of this build: IBKR's is the live deployment's
+(A-D27).
+
+What this tree cannot run is the owner's:
+- G1's parity runs, against `~/data/ref`;
+- the vendors' real data and sessions: a recorded Databento session, the
+  lake rebuilt from Norgate, ORATS's chains;
+- G10 on the reference machine;
+- the usability and observability studies, rerun on the second formulation
+  (A-7.2).

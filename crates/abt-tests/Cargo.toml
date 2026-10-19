@@ -1,0 +1,19 @@
+[package]
+name = "abt-tests"
+description = "The suites that span layers, and the fixtures every suite shares (docs/spec/ERRATA.md, E-26)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+abt.workspace = true
+abt-data.workspace = true
+abt-kernel.workspace = true
+abt-query.workspace = true
+abt-wire.workspace = true
+arrow.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "abt-agg"
+description = "The one implementation of every aggregate, shared by the data layer and the kernel (docs/spec/04-protocol.md, P-1.2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
