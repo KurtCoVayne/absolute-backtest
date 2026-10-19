@@ -79,6 +79,7 @@ impl Store {
                 ov.push(o, row);
             }
         }
+        ov.shrink_tails();
         Ok(())
     }
 
@@ -772,7 +773,6 @@ impl Store {
         });
         let ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
         let tail_rows: u64 = ov.instruments.iter().map(|i| i.tail.len() as u64).sum();
-        let values = v.value_columns() as u64;
         out.push(Measured {
             structure: "append files (sealed blocks)".into(),
             bytes: ov.append_bytes(),
@@ -780,8 +780,8 @@ impl Store {
             blocks: ov.instruments.iter().map(|i| i.sealed.len() as u64).sum(),
         });
         out.push(Measured {
-            structure: "tails (rows in memory)".into(),
-            bytes: tail_rows * (std::mem::size_of::<TailRow>() as u64 + 16 * values),
+            structure: "tails (columns in memory)".into(),
+            bytes: ov.tail_bytes(),
             rows: tail_rows,
             blocks: 0,
         });

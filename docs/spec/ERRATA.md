@@ -2637,3 +2637,47 @@ batch driver agree on every corpus program. Each bless since:
   content, one version, one record) had made the same; `resolver.rs::a_source_preference_binds_that_source_first`
   and `replay.rs::a_live_run_and_its_replay_bind_the_session_among_other_sources`
   (a decoy source sorting first in the store).
+
+- **E-93 (ST-8.3, ST-8.8, ST-9, P-2.2, A-7.3; iteration 1, the books).**
+  Two findings of running MW14 on the three programs, each fixed with its
+  test. (1) The data service holding MW14's store
+  (`data/store/mw14-lake-1990`: the lake since 1990 staged in seven
+  five-year chunks, each an ingest appended to the current versions, so
+  9.2M of each bar relation's 15.9M rows sit in tails) took 7.49 GB of
+  anonymous memory right after opening, before any request, and the run's
+  bind-time reads (whole-relation `Distinct` and `Scan` queries over
+  day-keyed relations of 15.9M rows, 1.6 GB transient each) took it past
+  the container's 13 GB; the kernel killed it at 11.8 GB resident. A tail
+  was a `Vec<TailRow>` per instrument, each row a struct with two heap
+  vectors (its integers, the source's values): 163 bytes a row measured,
+  46M rows. ST-8.3 holds a tail as one packed horizontal block. The tail
+  is now `hot::append::Tail`, the rows as columns (labels, receipts,
+  sequence numbers, one integer vector per value column) at 32 bytes a
+  row, the source's bits kept beside only where the integer does not
+  reproduce them at the instrument's exponent (a value off every grid,
+  A-D54, or an integer past 2^53 after a raise), trimmed after the
+  restart's rebuild; the hot read path visits tail rows without
+  allocating per row. Measured on the same store: 2.83 GB anonymous after
+  opening (`abt-data stats --measure`: `tails (columns in memory)
+  294,703,968 B, 9,209,499 rows, 32.000 B/row` per relation). The packed
+  tail of ST-8.3 (`W` bits a value) is the remaining distance, and the
+  restart's rebuild of 46M tail rows from the log takes 34 to 70 s on
+  this VM against A-7.3's 30 s (92 ms on the 2014 store, whose tails are
+  empty): both iteration 2's, with a consolidation that folds tails.
+  `hot/append.rs::tests::a_tail_gives_back_every_bit_of_its_rows`;
+  falsified by `scripts/mutations/e-93-tail-bits.patch`. (2) The first
+  event batch of MW14's stream was refused on the wire: `Value at
+  position 0 out of bounds: 3193 (should be in [0, -1])`.
+  `abt_wire::table::TableEncoder::batch` wrote a batch and, when its IPC
+  bytes passed a frame's 64 MiB, discarded them and wrote the two halves;
+  the `StreamWriter`'s dictionary tracker had counted the batch's
+  dictionaries (the label columns' registry labels) as sent, so the
+  halves went without them and the reader validated their keys against
+  an empty dictionary. No stream before MW14's had carried a label column
+  in a batch that large. The bytes are now cut at the frame's limit (the
+  `StreamDecoder` reads a byte stream cut anywhere; the client's
+  `next_batch` already took a frame that completes no batch).
+  `abt-wire/tests/table.rs::a_batch_larger_than_a_frame_keeps_its_dictionaries`
+  (6M rows, a 4,000-label dictionary column and a float column, 72 MB of
+  IPC) failed with the same error before the fix; falsified by
+  `scripts/mutations/p-2.2-frame-split.patch`.

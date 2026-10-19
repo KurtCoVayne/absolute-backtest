@@ -36,7 +36,8 @@ use crate::error::DataError;
 /// Bytes an append file is rotated at.
 pub const APPEND_FILE_BYTES: u64 = 64 << 20;
 
-/// A row appended since the version's publication.
+/// A row appended since the version's publication, as it travels: into a
+/// tail, out of a seal or a read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TailRow {
     pub label: i64,
@@ -46,6 +47,208 @@ pub struct TailRow {
     /// instrument's exponent and the source's value.
     pub ints: Vec<i64>,
     pub floats: Vec<f64>,
+}
+
+/// An instrument's unsealed rows (ST-8.2), in label order, held as
+/// columns: the labels, receipts and sequence numbers, and per value
+/// column the integers at the instrument's exponent. A value its integer
+/// does not reproduce at that exponent (off every grid, A-D54, or past
+/// `2^53` at it) keeps the source's bits beside, by label and column, so
+/// the `f64` view is the source's bits (Proposition 3.2) at a few bytes a
+/// row rather than two allocations a row (E-93).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tail {
+    labels: Vec<i64>,
+    rs: Vec<i64>,
+    seqs: Vec<u64>,
+    /// Per value column, one integer per row.
+    ints: Vec<Vec<i64>>,
+    /// `(label, column, bits)`, sorted.
+    raw: Vec<(i64, u16, u64)>,
+}
+
+/// What a visit of appended rows receives per row: the label, the receipt,
+/// the sequence number, the integers at the instrument's exponents and the
+/// `f64` views.
+pub type RowVisitor<'a> = dyn FnMut(i64, i64, u64, &[i64], &[f64]) + 'a;
+
+/// The `f64` view of an integer at exponent `e`, as a sealed block's
+/// reader computes it (`tick::decode_value` with the block's base and
+/// quantum folded in): one correctly rounded division, rounded to `f32`
+/// for an `f32` source; an integer column is its integer.
+fn reconstruct(int: i64, e: u8, kind: Kind) -> f64 {
+    match kind {
+        Kind::Tick => int as f64 / abt_agg::exact::pow10(e as u32) as f64,
+        Kind::TickF32 => ((int as f64 / abt_agg::exact::pow10(e as u32) as f64) as f32) as f64,
+        Kind::Int | Kind::Residual => int as f64,
+    }
+}
+
+impl Tail {
+    pub fn new(columns: usize) -> Tail {
+        Tail {
+            ints: vec![Vec::new(); columns],
+            ..Tail::default()
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+
+    pub fn labels(&self) -> &[i64] {
+        &self.labels
+    }
+
+    pub fn seqs(&self) -> &[u64] {
+        &self.seqs
+    }
+
+    pub fn label_at(&self, k: usize) -> i64 {
+        self.labels[k]
+    }
+
+    pub fn r_at(&self, k: usize) -> i64 {
+        self.rs[k]
+    }
+
+    pub fn seq_at(&self, k: usize) -> u64 {
+        self.seqs[k]
+    }
+
+    pub fn int_at(&self, k: usize, c: usize) -> i64 {
+        self.ints[c][k]
+    }
+
+    /// Whether a row at `label` is held.
+    pub fn has_label(&self, label: i64) -> bool {
+        self.labels.binary_search(&label).is_ok()
+    }
+
+    /// The source's bits of row `k`'s column `c`.
+    fn bits(&self, k: usize, c: usize, kinds: &[Kind], exponents: &[u8]) -> u64 {
+        match self.raw.binary_search_by_key(&(self.labels[k], c as u16), |&(l, col, _)| (l, col)) {
+            Ok(i) => self.raw[i].2,
+            Err(_) => reconstruct(self.ints[c][k], exponents[c], kinds[c]).to_bits(),
+        }
+    }
+
+    fn set_raw(&mut self, label: i64, c: usize, bits: u64) {
+        match self.raw.binary_search_by_key(&(label, c as u16), |&(l, col, _)| (l, col)) {
+            Ok(i) => self.raw[i].2 = bits,
+            Err(i) => self.raw.insert(i, (label, c as u16, bits)),
+        }
+    }
+
+    /// Inserts a row at its label (a row at a label held replaces it):
+    /// its integers as given, the source's bits kept where they do not
+    /// come back from the integer at the instrument's exponent.
+    pub fn insert(&mut self, row: TailRow, kinds: &[Kind], exponents: &[u8]) {
+        let at = self.labels.partition_point(|&l| l < row.label);
+        let replace = at < self.labels.len() && self.labels[at] == row.label;
+        if replace {
+            self.labels[at] = row.label;
+            self.rs[at] = row.r;
+            self.seqs[at] = row.seq;
+            for (c, col) in self.ints.iter_mut().enumerate() {
+                col[at] = row.ints[c];
+            }
+            self.raw.retain(|&(l, _, _)| l != row.label);
+        } else {
+            self.labels.insert(at, row.label);
+            self.rs.insert(at, row.r);
+            self.seqs.insert(at, row.seq);
+            for (c, col) in self.ints.iter_mut().enumerate() {
+                col.insert(at, row.ints[c]);
+            }
+        }
+        for c in 0..self.ints.len() {
+            let bits = row.floats[c].to_bits();
+            if reconstruct(row.ints[c], exponents[c], kinds[c]).to_bits() != bits {
+                self.set_raw(row.label, c, bits);
+            }
+        }
+    }
+
+    /// Removes the first `n` rows (sealed).
+    pub fn drain_front(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let last = self.labels[n - 1];
+        self.labels.drain(..n);
+        self.rs.drain(..n);
+        self.seqs.drain(..n);
+        for col in &mut self.ints {
+            col.drain(..n);
+        }
+        self.raw.retain(|&(l, _, _)| l > last);
+    }
+
+    /// Multiplies a column's integers by `up` (its exponent raised from
+    /// `from` to `to`): a value the raised integer no longer reproduces
+    /// keeps its bits.
+    pub fn rescale(&mut self, c: usize, up: i64, kind: Kind, from: u8, to: u8) {
+        for k in 0..self.labels.len() {
+            let old = self.ints[c][k];
+            let new = old.wrapping_mul(up);
+            self.ints[c][k] = new;
+            let raw = self.raw.binary_search_by_key(&(self.labels[k], c as u16), |&(l, col, _)| (l, col)).is_ok();
+            if !raw && reconstruct(new, to, kind).to_bits() != reconstruct(old, from, kind).to_bits() {
+                self.set_raw(self.labels[k], c, reconstruct(old, from, kind).to_bits());
+            }
+        }
+    }
+
+    /// Row `k` as it travels.
+    pub fn row(&self, k: usize, kinds: &[Kind], exponents: &[u8]) -> TailRow {
+        TailRow {
+            label: self.labels[k],
+            r: self.rs[k],
+            seq: self.seqs[k],
+            ints: self.ints.iter().map(|col| col[k]).collect(),
+            floats: (0..self.ints.len()).map(|c| f64::from_bits(self.bits(k, c, kinds, exponents))).collect(),
+        }
+    }
+
+    /// Visits the rows with labels in `[t0, t1]`, in label order: the
+    /// label, receipt, sequence, integers and `f64` views of each.
+    pub fn for_each_in(&self, t0: Option<i64>, t1: Option<i64>, kinds: &[Kind], exponents: &[u8], f: &mut RowVisitor<'_>) {
+        let ncols = self.ints.len();
+        let mut ints = vec![0i64; ncols];
+        let mut floats = vec![0f64; ncols];
+        let start = t0.map_or(0, |a| self.labels.partition_point(|&l| l < a));
+        for k in start..self.labels.len() {
+            if t1.is_some_and(|b| self.labels[k] > b) {
+                break;
+            }
+            for c in 0..ncols {
+                ints[c] = self.ints[c][k];
+                floats[c] = f64::from_bits(self.bits(k, c, kinds, exponents));
+            }
+            f(self.labels[k], self.rs[k], self.seqs[k], &ints, &floats);
+        }
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.labels.shrink_to_fit();
+        self.rs.shrink_to_fit();
+        self.seqs.shrink_to_fit();
+        for col in &mut self.ints {
+            col.shrink_to_fit();
+        }
+        self.raw.shrink_to_fit();
+    }
+
+    /// Bytes held.
+    pub fn bytes(&self) -> u64 {
+        let words = self.labels.capacity() + self.rs.capacity() + self.seqs.capacity() + self.ints.iter().map(|c| c.capacity()).sum::<usize>();
+        (words * 8 + self.raw.capacity() * std::mem::size_of::<(i64, u16, u64)>()) as u64
+    }
 }
 
 /// Where a sealed block's bytes lie in an append file.
@@ -83,7 +286,7 @@ pub struct InstrumentOverlay {
     pub exponents: Vec<u8>,
     pub sealed: Vec<SealedRef>,
     /// In label order, at most 1,023 rows.
-    pub tail: Vec<TailRow>,
+    pub tail: Tail,
 }
 
 impl InstrumentOverlay {
@@ -176,9 +379,9 @@ impl Overlay {
                 id,
                 published_rows: rows,
                 published_last: last,
+                tail: Tail::new(exponents.len()),
                 exponents,
                 sealed: Vec::new(),
-                tail: Vec::new(),
             })
             .collect();
         let by_id = instruments.iter().enumerate().map(|(i, x)| (x.id, i)).collect();
@@ -251,7 +454,7 @@ impl Overlay {
     /// The least sequence number a tail holds (what a restart replays the
     /// log from once the sealed blocks are folded, ST-8.8), if any.
     pub fn least_tail_seq(&self) -> Option<u64> {
-        self.instruments.iter().flat_map(|i| i.tail.iter().map(|r| r.seq)).min()
+        self.instruments.iter().flat_map(|i| i.tail.seqs().iter().copied()).min()
     }
 
     /// Bytes of the append files.
@@ -262,12 +465,13 @@ impl Overlay {
     /// The rows of an instrument's tail visible at `seq` (every row when
     /// no sequence is given).
     pub fn tail_visible(&self, o: usize, seq: Option<u64>) -> u64 {
-        self.instruments[o].tail.iter().filter(|r| seq.is_none_or(|s| r.seq <= s)).count() as u64
+        self.instruments[o].tail.seqs().iter().filter(|&&q| seq.is_none_or(|s| q <= s)).count() as u64
     }
 
     /// Raises an instrument's exponent of a column to `e` (a finer
     /// quantum arrived): its totals and tail integers rescale exactly.
     pub fn raise(&mut self, o: usize, c: usize, e: u8) {
+        let kind = self.kinds[c];
         let inst = &mut self.instruments[o];
         if e <= inst.exponents[c] {
             return;
@@ -277,10 +481,26 @@ impl Overlay {
             s.summaries[c] = scaled_summary(&s.summaries[c], up);
             s.after[c] = scaled_cumulative(&s.after[c], up);
         }
-        for r in &mut inst.tail {
-            r.ints[c] = r.ints[c].wrapping_mul(up);
-        }
+        inst.tail.rescale(c, up, kind, inst.exponents[c], e);
         inst.exponents[c] = e;
+    }
+
+    /// The tails trimmed to their rows (after a rebuild, ST-8.8).
+    pub fn shrink_tails(&mut self) {
+        for i in &mut self.instruments {
+            i.tail.shrink_to_fit();
+        }
+    }
+
+    /// Bytes the tails hold.
+    pub fn tail_bytes(&self) -> u64 {
+        self.instruments.iter().map(|i| i.tail.bytes()).sum()
+    }
+
+    /// The first `n` rows of an instrument's tail as they travel.
+    fn tail_rows(&self, o: usize, n: usize) -> Vec<TailRow> {
+        let inst = &self.instruments[o];
+        (0..n).map(|k| inst.tail.row(k, &self.kinds, &inst.exponents)).collect()
     }
 
     /// Whether anything was appended.
@@ -305,9 +525,9 @@ impl Overlay {
             id,
             published_rows: 0,
             published_last: None,
+            tail: Tail::new(exponents.len()),
             exponents,
             sealed: Vec::new(),
-            tail: Vec::new(),
         });
         let o = self.instruments.len() - 1;
         self.by_id.insert(id, o);
@@ -322,7 +542,7 @@ impl Overlay {
     /// row lives in the revision table a version build maintains (E-90).
     pub fn admits(&self, o: usize, label: i64) -> bool {
         let inst = &self.instruments[o];
-        inst.last_sealed().is_none_or(|l| label > l) && inst.tail.binary_search_by_key(&label, |r| r.label).is_err()
+        inst.last_sealed().is_none_or(|l| label > l) && !inst.tail.has_label(label)
     }
 
     /// A row into its instrument's tail (the log batch holding it being
@@ -331,13 +551,8 @@ impl Overlay {
     pub fn push(&mut self, o: usize, row: TailRow) {
         self.seq_high = self.seq_high.max(row.seq);
         self.note_bucket(row.label, row.r, row.seq);
-        let tail = &mut self.instruments[o].tail;
-        let at = tail.partition_point(|x| x.label < row.label);
-        if at < tail.len() && tail[at].label == row.label {
-            tail[at] = row;
-        } else {
-            tail.insert(at, row);
-        }
+        let inst = &mut self.instruments[o];
+        inst.tail.insert(row, &self.kinds, &inst.exponents);
     }
 
     /// Whether the instrument's tail is due for sealing.
@@ -377,7 +592,7 @@ impl Overlay {
         if n == 0 {
             return Ok(());
         }
-        let rows: Vec<TailRow> = self.instruments[o].tail[..n].to_vec();
+        let rows: Vec<TailRow> = self.tail_rows(o, n);
         let ncols = self.value_columns();
         // Every column family's block.
         let mut encoded: Vec<Encoded> = Vec::with_capacity(ncols + 3);
@@ -398,7 +613,7 @@ impl Overlay {
             }
             encoded.push(enc);
         }
-        let rows: Vec<TailRow> = self.instruments[o].tail[..n].to_vec();
+        let rows: Vec<TailRow> = self.tail_rows(o, n);
         encoded.push(encode_integers(&rows.iter().map(|r| r.r - r.label).collect::<Vec<_>>()));
         encoded.push(encode_integers(&rows.iter().map(|r| r.label).collect::<Vec<_>>()));
         encoded.push(encode_integers(&rows.iter().map(|r| r.seq as i64).collect::<Vec<_>>()));
@@ -441,7 +656,7 @@ impl Overlay {
         crate::fault::point("seal-after-record");
         let inst = &mut self.instruments[o];
         inst.sealed.push(sealed);
-        inst.tail.drain(..n);
+        inst.tail.drain_front(n);
         Ok(())
     }
 
@@ -652,14 +867,17 @@ impl Overlay {
         Ok(decode_block(bytes, exponent, kind))
     }
 
-    /// The appended rows of an instrument with labels in `[t0, t1]`, in
-    /// label order: the sealed blocks' and the tail's.
+    /// Visits the appended rows of an instrument with labels in `[t0, t1]`,
+    /// in label order: the sealed blocks' and the tail's, each as its label,
+    /// receipt, sequence, integers and `f64` views (E-93: a read of a tail
+    /// allocates nothing per row).
     #[allow(clippy::needless_range_loop)]
-    pub fn rows_of(&mut self, o: usize, t0: Option<i64>, t1: Option<i64>) -> Result<Vec<TailRow>, DataError> {
+    pub fn for_each_row(&mut self, o: usize, t0: Option<i64>, t1: Option<i64>, f: &mut RowVisitor<'_>) -> Result<(), DataError> {
         let ncols = self.value_columns();
         let sealed = self.instruments[o].sealed.clone();
         let exps = self.instruments[o].exponents.clone();
-        let mut out = Vec::new();
+        let mut ints = vec![0i64; ncols];
+        let mut floats = vec![0f64; ncols];
         for s in &sealed {
             if t0.is_some_and(|a| s.last_label < a) || t1.is_some_and(|b| s.first_label > b) {
                 continue;
@@ -676,20 +894,30 @@ impl Overlay {
                 if t0.is_some_and(|a| label < a) || t1.is_some_and(|b| label > b) {
                     continue;
                 }
-                out.push(TailRow {
-                    label,
-                    r: label + res[k],
-                    seq: seqs[k] as u64,
-                    ints: cols.iter().map(|c| c.0[k]).collect(),
-                    floats: cols.iter().map(|c| c.1[k]).collect(),
-                });
+                for c in 0..ncols {
+                    ints[c] = cols[c].0[k];
+                    floats[c] = cols[c].1[k];
+                }
+                f(label, label + res[k], seqs[k] as u64, &ints, &floats);
             }
         }
-        for r in &self.instruments[o].tail {
-            if t0.is_none_or(|a| r.label >= a) && t1.is_none_or(|b| r.label <= b) {
-                out.push(r.clone());
-            }
-        }
+        self.instruments[o].tail.for_each_in(t0, t1, &self.kinds, &exps, f);
+        Ok(())
+    }
+
+    /// The appended rows of an instrument with labels in `[t0, t1]`, in
+    /// label order, as they travel.
+    pub fn rows_of(&mut self, o: usize, t0: Option<i64>, t1: Option<i64>) -> Result<Vec<TailRow>, DataError> {
+        let mut out = Vec::new();
+        self.for_each_row(o, t0, t1, &mut |label, r, seq, ints, floats| {
+            out.push(TailRow {
+                label,
+                r,
+                seq,
+                ints: ints.to_vec(),
+                floats: floats.to_vec(),
+            })
+        })?;
         Ok(out)
     }
 
@@ -701,7 +929,7 @@ impl Overlay {
                 out.push(s.first_label);
                 out.push(s.last_label);
             }
-            out.extend(i.tail.iter().map(|r| r.label));
+            out.extend_from_slice(i.tail.labels());
         }
         out.sort_unstable();
         out.dedup();
@@ -884,5 +1112,70 @@ mod tests {
         let seqs: Vec<i64> = (0..700).map(|i| 5_000 + 13 * i).collect();
         let (back, _) = decode_block(&block_bytes(&encode_integers(&seqs), None, None), 0, Kind::Int);
         assert_eq!(back, seqs);
+    }
+
+    fn row(label: i64, seq: u64, price: f64, volume: i64, e: u8) -> TailRow {
+        TailRow {
+            label,
+            r: label + 7,
+            seq,
+            ints: vec![abt_codec::tick::scaled_or_zero(price, e), volume],
+            floats: vec![price, volume as f64],
+        }
+    }
+
+    /// A tail holds its rows as columns and gives every source bit back:
+    /// on-grid values from their integers, a value off every grid (A-D54)
+    /// and a value whose raised integer passes `2^53` from the bits kept
+    /// beside; a row at a held label replaces it; sealing drains a prefix.
+    #[test]
+    fn a_tail_gives_back_every_bit_of_its_rows() {
+        let kinds = [Kind::Tick, Kind::Int, Kind::Residual];
+        let mut exps = vec![2u8, 0];
+        let mut tail = Tail::new(2);
+        let off_grid = 0.1 + 0.2;
+        assert!(abt_codec::tick::exponent(&[off_grid], Source::F64).is_none(), "the test's off-grid value sits off every grid");
+        for (label, price) in [(30, 12.34), (10, off_grid), (20, 1234567891.23), (40, -0.0), (50, 7.0)] {
+            tail.insert(row(label, label as u64, price, label * 1000, exps[0]), &kinds, &exps);
+        }
+        assert_eq!(tail.labels(), &[10, 20, 30, 40, 50]);
+        assert_eq!(tail.seqs(), &[10, 20, 30, 40, 50]);
+        assert!(tail.has_label(30) && !tail.has_label(35));
+        let sources = [off_grid, 1234567891.23, 12.34, -0.0, 7.0];
+        for (k, want) in sources.iter().enumerate() {
+            let r = tail.row(k, &kinds, &exps);
+            assert_eq!(r.floats[0].to_bits(), want.to_bits(), "row {} price bits", k);
+            assert_eq!(r.floats[1], (r.label * 1000) as f64);
+            assert_eq!(r.ints[1], r.label * 1000);
+            assert_eq!(r.r, r.label + 7);
+        }
+        assert_eq!(tail.row(0, &kinds, &exps).ints[0], 0, "a value off every grid counts as 0 (A-D54)");
+        // A replacement at a held label: the row and its bits.
+        tail.insert(row(10, 60, 2.5, 1, exps[0]), &kinds, &exps);
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail.row(0, &kinds, &exps), row(10, 60, 2.5, 1, exps[0]));
+        // Raised to the ninth decimal: the integers scale, the bits stay.
+        tail.rescale(0, 10_000_000, Kind::Tick, 2, 9);
+        exps[0] = 9;
+        assert_eq!(tail.int_at(2, 0), 1234 * 10_000_000);
+        for (k, want) in [2.5f64, 1234567891.23, 12.34, -0.0, 7.0].iter().enumerate() {
+            assert_eq!(tail.row(k, &kinds, &exps).floats[0].to_bits(), want.to_bits(), "row {} after the raise", k);
+        }
+        let mut seen = Vec::new();
+        tail.for_each_in(Some(20), Some(40), &kinds, &exps, &mut |label, r, seq, ints, floats| {
+            seen.push((label, r, seq, ints.to_vec(), floats.to_vec()))
+        });
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].0, 20);
+        assert_eq!(seen[2].3[0], 0, "-0.0 is off the grid: its integer is 0");
+        assert_eq!(seen[2].4[0].to_bits(), (-0.0f64).to_bits());
+        // Two rows sealed away.
+        tail.drain_front(2);
+        assert_eq!(tail.labels(), &[30, 40, 50]);
+        assert_eq!(tail.row(1, &kinds, &exps).floats[0].to_bits(), (-0.0f64).to_bits());
+        let before = tail.clone();
+        tail.shrink_to_fit();
+        assert_eq!(tail, before);
+        assert!(tail.bytes() >= 3 * 4 * 8, "three rows of three words and one integer column");
     }
 }

@@ -19,7 +19,7 @@ use abt_wire::generated::abt::wire::{ColumnSpec, ColumnType, RelationSchema, Rol
 use arrow::array::{ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, RecordBatch, TimestampNanosecondArray, UInt32Array, UInt64Array};
 use arrow::datatypes::SchemaRef;
 
-use super::append::{Overlay, TailRow};
+use super::append::Overlay;
 use super::ladder::Level;
 use super::manifest::{ColumnEntry, HotManifest, Kind, Revision};
 use super::presence::{Instrument, Presence};
@@ -568,8 +568,9 @@ impl HotVersion {
         let mut keys: Vec<(u32, u32, i64)> = Vec::with_capacity(total as usize);
         let mut extra = false;
         // The overlay's rows (ST-8): the base level's appended rows, whose
-        // integers may sit at an exponent the appends raised.
-        let mut appended: Vec<(usize, u64, Vec<TailRow>)> = Vec::new();
+        // integers may sit at an exponent the appends raised, admitted by
+        // receipt and sequence. They sit beyond the published labels, so
+        // the rows are sorted after (`extra`).
         let mut raised: Vec<Vec<i64>> = Vec::new();
         if level == 0 {
             let mut ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
@@ -582,10 +583,14 @@ impl HotVersion {
                 wanted.sort_unstable();
                 wanted.dedup();
                 for o in wanted {
-                    let rows = ov.rows_of(o, t0, t1)?;
-                    if !rows.is_empty() {
-                        appended.push((o, ov.instruments[o].id, rows));
-                    }
+                    let id = ov.instruments[o].id;
+                    ov.for_each_row(o, t0, t1, &mut |label, r, seq, ints, floats| {
+                        if f.r_max.is_none_or(|m| r <= m) && f.as_of_seq.is_none_or(|n| seq <= n) {
+                            gathered.push(id, label, r, seq, ints, floats);
+                            keys.push((u32::MAX, o as u32, r));
+                            extra = true;
+                        }
+                    })?;
                 }
                 raised = (0..presence.instruments.len())
                     .map(|o| {
@@ -662,17 +667,6 @@ impl HotVersion {
                             keys.push((label_ix, o as u32, c.0));
                         }
                     }
-                }
-            }
-        }
-        // The appended rows, admitted by receipt and sequence; they sit
-        // beyond the published labels, so the rows are sorted after.
-        for (o, id, rows) in appended {
-            for r in rows {
-                if f.r_max.is_none_or(|m| r.r <= m) && f.as_of_seq.is_none_or(|n| r.seq <= n) {
-                    gathered.push(id, r.label, r.r, r.seq, &r.ints, &r.floats);
-                    keys.push((u32::MAX, o as u32, r.r));
-                    extra = true;
                 }
             }
         }

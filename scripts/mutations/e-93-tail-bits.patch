@@ -1,0 +1,16 @@
+# proposition: ST-3.2 / E-93 (a tail row's f64 view is the source's bits: a value its integer does not reproduce keeps them beside the columns)
+# mutation: the tail never keeps a value's bits, so a value off every grid or past 2^53 reads back as its integer's view
+# test: cargo test -p abt-data --lib a_tail_gives_back_every_bit_of_its_rows
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/append.rs b/crates/abt-data/src/hot/append.rs
+--- a/crates/abt-data/src/hot/append.rs
++++ b/crates/abt-data/src/hot/append.rs
+@@ -168,7 +168,7 @@ impl Tail {
+         }
+         for c in 0..self.ints.len() {
+             let bits = row.floats[c].to_bits();
+-            if reconstruct(row.ints[c], exponents[c], kinds[c]).to_bits() != bits {
++            if false {
+                 self.set_raw(row.label, c, bits);
+             }
+         }

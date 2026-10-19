@@ -1,7 +1,8 @@
 //! Tables on the wire (P-2.2, P-4): a table follows its control response as
-//! one `schema` frame (an Arrow IPC schema message), `batch` frames (each the
-//! IPC messages of one record batch, its dictionaries first) and an `end`
-//! frame. A batch whose frame would pass 64 MiB is split.
+//! one `schema` frame (an Arrow IPC schema message), `batch` frames (the
+//! IPC messages of the record batches, each batch's dictionaries first) and
+//! an `end` frame. A batch whose IPC messages would pass 64 MiB spans
+//! several `batch` frames, cut at the frame's limit.
 
 use arrow::array::RecordBatch;
 use arrow::buffer::Buffer;
@@ -34,21 +35,20 @@ impl TableEncoder {
         Ok((TableEncoder { writer }, head))
     }
 
-    /// The payloads of one batch's frames: one, or several when the batch is
-    /// larger than a frame allows.
+    /// The payloads of one batch's frames: one, or several when the batch's
+    /// IPC messages are larger than a frame allows. The bytes are cut, not
+    /// the batch: the writer has sent the batch's dictionaries once it has
+    /// written it (a re-encoded half would go without them, E-93), and the
+    /// decoder reads a byte stream cut anywhere.
     pub fn batch(&mut self, batch: &RecordBatch) -> Result<Vec<Vec<u8>>, ArrowError> {
         let schema = self.writer_schema(batch);
         let batch = if schema != batch.schema() { batch.clone().with_schema(schema)? } else { batch.clone() };
         self.writer.write(&batch)?;
         let bytes = std::mem::take(self.writer.get_mut());
-        if bytes.len() <= MAX_PAYLOAD || batch.num_rows() < 2 {
+        if bytes.len() <= MAX_PAYLOAD {
             return Ok(vec![bytes]);
         }
-        // Too large for one frame: discard and send the halves.
-        let half = batch.num_rows() / 2;
-        let mut out = self.batch(&batch.slice(0, half))?;
-        out.extend(self.batch(&batch.slice(half, batch.num_rows() - half))?);
-        Ok(out)
+        Ok(bytes.chunks(MAX_PAYLOAD).map(|c| c.to_vec()).collect())
     }
 
     fn writer_schema(&self, batch: &RecordBatch) -> SchemaRef {

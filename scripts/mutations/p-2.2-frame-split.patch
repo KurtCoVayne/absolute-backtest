@@ -1,0 +1,23 @@
+# proposition: P-2.2 / E-93 (a batch larger than a frame reaches the reader whole, its dictionaries with it)
+# mutation: a batch whose IPC bytes pass a frame is re-encoded as two halves after the writer has sent its dictionaries, so the halves go without them
+# test: cargo test -p abt-wire --test table a_batch_larger_than_a_frame_keeps_its_dictionaries
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-wire/src/table.rs b/crates/abt-wire/src/table.rs
+--- a/crates/abt-wire/src/table.rs
++++ b/crates/abt-wire/src/table.rs
+@@ -45,10 +45,13 @@ impl TableEncoder {
+         let batch = if schema != batch.schema() { batch.clone().with_schema(schema)? } else { batch.clone() };
+         self.writer.write(&batch)?;
+         let bytes = std::mem::take(self.writer.get_mut());
+-        if bytes.len() <= MAX_PAYLOAD {
++        if bytes.len() <= MAX_PAYLOAD || batch.num_rows() < 2 {
+             return Ok(vec![bytes]);
+         }
+-        Ok(bytes.chunks(MAX_PAYLOAD).map(|c| c.to_vec()).collect())
++        let half = batch.num_rows() / 2;
++        let mut out = self.batch(&batch.slice(0, half))?;
++        out.extend(self.batch(&batch.slice(half, batch.num_rows() - half))?);
++        Ok(out)
+     }
+ 
+     fn writer_schema(&self, batch: &RecordBatch) -> SchemaRef {
