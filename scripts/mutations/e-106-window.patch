@@ -1,0 +1,18 @@
+# proposition: E-106 (a session sub-interval not yet begun is the empty window)
+# mutation: the guard removed
+# test: cargo test -p abt-tests --test session_window a_session_sub_interval_after_the_bar_asked_is_empty
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
+index 684baba..f508673 100644
+--- a/crates/abt-kernel/src/kernel/eval.rs
++++ b/crates/abt-kernel/src/kernel/eval.rs
+@@ -1277,9 +1277,6 @@ impl<'p> Kernel<'p> {
+                 // minute 3) has no bar yet (E-106): the empty window, where
+                 // the range's start would pass its end.
+                 let upper = to.min(end + 1);
+-                if from >= upper {
+-                    return Ok(vec![]);
+-                }
+                 Ok(self
+                     .domains
+                     .get(&Cal::Base)
