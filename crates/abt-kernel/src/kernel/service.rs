@@ -153,8 +153,14 @@ impl KernelService {
         };
         let mode = match r.mode.as_deref() {
             None | Some("replay-sim") => RunMode::ReplaySim,
+            // The session: named, else the deployment's recording stream
+            // (A-D52), as the front resolves it.
             Some("live-sim") => RunMode::LiveSim {
-                session: r.session.clone().ok_or_else(|| refused("a live-sim run names the live session it reads"))?,
+                session: match deployment.as_ref() {
+                    Some(d) => crate::live::session_of(r.session.clone(), d).map_err(refused)?,
+                    None => r.session.clone(),
+                }
+                .ok_or_else(|| refused("a live-sim run names the live session it reads: `session`, or the deployment document's `recording stream S`"))?,
             },
             Some("live-broker") => {
                 let d = deployment.as_ref().ok_or_else(|| refused("a live-broker run takes its deployment document (K-6.5)"))?;

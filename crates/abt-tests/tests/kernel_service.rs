@@ -402,4 +402,19 @@ fn the_live_modes_refuse_what_they_cannot_do() {
     assert!(with(None, Some("deployment { account U1 broker mock }")).contains("a deployment document is a live run's"));
     assert!(with(Some("live-broker"), Some("deployment { broker mock }")).contains("names its `account`"));
     assert!(with(Some("paper"), None).contains("is not replay-sim, live-sim or live-broker"));
+    // A-D52: a live-sim run reads the session it names, else the
+    // deployment's recording stream; the two must agree, and one is needed.
+    let live_sim = |session: Option<&str>, deployment: &str| {
+        let mut r = of("sma_crossover", KernelOp::Run);
+        r.mode = Some("live-sim".into());
+        r.session = session.map(str::to_string);
+        r.deployment = Some(deployment.into());
+        ask(&c, r).err().unwrap_or_default()
+    };
+    let e = live_sim(Some("s1"), "deployment { account SIM0001 broker mock recording stream s2 }");
+    assert!(e.contains("the session s1 is not the deployment's recording stream s2"), "{}", e);
+    let e = live_sim(None, "deployment { account SIM0001 broker mock }");
+    assert!(e.contains("a live-sim run names the live session it reads"), "{}", e);
+    let e = live_sim(None, "deployment { account SIM0001 broker mock recording stream s9 }");
+    assert!(!e.contains("names the live session"), "the recording stream names the session: {}", e);
 }
