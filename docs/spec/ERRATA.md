@@ -2581,6 +2581,18 @@ batch driver agree on every corpus program. Each bless since:
   sessions. [D] Rejected: a gap starting at the break's middle counted
   as holding it (17:30 would then serve 2010's break with no room, and
   the 45-minute gap would still keep 2013's print).
+- **E-109 (ST-5.3, A-D46; a ladder level's index of its buckets).**
+  Staging a minute relation's ladder looked each bar of a source level up
+  in an index of that level's bucket keys rebuilt for the bar: from the
+  15-minute level up, bars times labels, quadratic in a root's history.
+  The pipeline's GLBX roots never finished staging (CL spent 23 minutes
+  on one core in `ladder::index_of` after `future.open`'s presence, some
+  17 hours for that relation's 15-minute level alone). Each level's index
+  is now built once with the level and kept beside its labels: a lookup
+  is logarithmic, and staging builds one index per level and relation.
+  `abt-data/tests/ladder_index.rs`: 20,000 minute bars of one root stage
+  with at most 200 indexes built (4,000 per relation at the 15-minute
+  level before).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

@@ -467,14 +467,16 @@ fn build_ladder(
     let source_kind = if value_kind == Kind::TickF32 { Source::F32 } else { Source::F64 };
     let mut bars_of: BTreeMap<Level, Vec<Vec<Bar>>> = BTreeMap::new();
     let mut labels_of: BTreeMap<Level, Vec<(i64, i64)>> = BTreeMap::new();
+    // Each built level's index of its bucket keys, built once with the
+    // level (E-109): a bar of the level above looks its source bucket's
+    // label up in it. Rebuilt per bar, it made a root's 15-minute level
+    // quadratic in its 5-minute labels.
+    let mut indexes: BTreeMap<Level, BTreeMap<i64, u32>> = BTreeMap::new();
     let mut out = Vec::new();
     for level in Level::of_base(calendar) {
         let labels = level.labels(base_labels);
         let index = ladder::index_of(&labels);
-        let label_of = |lv: Level, key: i64| -> i64 {
-            let l = &labels_of[&lv];
-            l[*ladder::index_of(l).get(&key).expect("a bucket of the source level") as usize].1
-        };
+        let label_of = |lv: Level, key: i64| -> i64 { labels_of[&lv][*indexes[&lv].get(&key).expect("a bucket of the source level") as usize].1 };
         let mut per_inst: Vec<Vec<Bar>> = Vec::with_capacity(planned.len());
         for (o, p) in planned.iter().enumerate() {
             let e = exponents[o][0];
@@ -601,6 +603,7 @@ fn build_ladder(
         });
         bars_of.insert(level, per_inst);
         labels_of.insert(level, labels);
+        indexes.insert(level, index);
     }
     Ok(out)
 }
