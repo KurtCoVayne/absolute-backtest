@@ -2483,6 +2483,27 @@ batch driver agree on every corpus program. Each bless since:
   (the parity book is G1's and does not change for a store's naming).
   With it, a fixture's demand under `need lists` notes `industry` with
   `classification` (`abt-tests/tests/labels.rs`).
+- **E-104 (D-2.4, D-7.7; the volume roll against fragment sessions, and
+  spreads named as spreads).** RB's continuous series from the bucket held
+  56,832 of 36,460,210 bars over 5,273 sessions and rolled 70 times in
+  sixteen years (`2010-07-11 RBU0 -> RBZ0`, `2010-07-20 RBZ0 -> RBM1`): at a
+  session in which only a far month printed (a fragment of a session, a
+  thin holiday), the roll compared the contracts printing in that session
+  by their volume in the session before, the far month was the only
+  candidate and became the series, and the rule that a roll never goes to
+  an earlier expiry kept it there. The roll now compares, in the latest
+  session in which the contract held traded, the contracts that traded
+  there and have not expired by the session's open; with nothing traded
+  then, the contract held stays while it has not expired, and an expired
+  one gives way to the nearest live contract printing. The 22,326,635 bars
+  reported `no_definition` were spreads (the bucket's definition files
+  hold the outrights only; 105 sampled days of RB, and samples of HO, CL,
+  ZB, NG, GC and ES, show no outright bar without its definition): a bar
+  whose symbol names a spread is now counted `not_an_outright_future`.
+  [D] Rejected: synthesizing contracts for undefined bars from their
+  symbols (no outright bar lacks a definition in the bucket), and the
+  previous session's volumes over every contract (a fragment session's
+  volumes would still name the far month).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

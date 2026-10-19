@@ -749,6 +749,13 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     for b in &bars {
         let d = match raw.defs.get(&b.id) {
             Some(d) => d,
+            // A spread's bar without a definition (the bucket's definition
+            // files hold the outrights only, E-104): a spread, never a leg of
+            // a continuous series, counted as one.
+            None if b.symbol.as_deref().or_else(|| raw.symbol_at(b.id, b.start)).is_some_and(|s| s.contains('-') || s.contains(':')) => {
+                *report.dropped.entry("not_an_outright_future".into()).or_default() += 1;
+                continue;
+            }
             None if opts.undefined == Undefined::Drop => {
                 *report.dropped.entry("no_definition".into()).or_default() += 1;
                 continue;
@@ -825,21 +832,31 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 // expiry, as the volume of the session itself is not known
                 // until it ends.
                 Roll::Volume if s == 0 => cands.iter().copied().min_by_key(|&c| (expiry(c), c)),
+                // The volumes compared are the latest session's in which the
+                // contract held traded (E-104): a session in which it did not
+                // (a fragment, a thin holiday) cannot roll the series to a
+                // far month printing alone there, which the rule that a roll
+                // never returns to an earlier expiry would then keep.
                 Roll::Volume => {
+                    let open = sessions[s].open;
                     let prev = held.last().copied();
-                    let best = cands.iter().copied().max_by(|&a, &b| {
-                        volume(s - 1, a)
-                            .partial_cmp(&volume(s - 1, b))
+                    let k = prev.and_then(|p| (0..s).rev().find(|&k| per[k].contains_key(&p))).unwrap_or(s - 1);
+                    let live = |c: u32| expiry(c) >= open && prev.is_none_or(|p| expiry(c) >= expiry(p));
+                    let best = per[k].keys().copied().filter(|&c| live(c)).max_by(|&a, &b| {
+                        volume(k, a)
+                            .partial_cmp(&volume(k, b))
                             .unwrap_or(std::cmp::Ordering::Equal)
                             .then(expiry(b).cmp(&expiry(a)))
                             .then(b.cmp(&a))
                     });
                     match (best, prev) {
-                        // Nothing traded the session before: stay, when the
-                        // contract held still trades.
-                        (Some(b), Some(p)) if volume(s - 1, b) == 0.0 && cands.contains(&p) => Some(p),
-                        (Some(b), _) => Some(b),
-                        (None, _) => None,
+                        (Some(b), _) if volume(k, b) > 0.0 => Some(b),
+                        // Nothing traded then: stay while the contract held
+                        // has not expired.
+                        (_, Some(p)) if live(p) => Some(p),
+                        // The contract held expired: the nearest live
+                        // contract printing now.
+                        _ => cands.iter().copied().filter(|&c| expiry(c) >= open).min_by_key(|&c| (expiry(c), c)),
                     }
                 }
             };

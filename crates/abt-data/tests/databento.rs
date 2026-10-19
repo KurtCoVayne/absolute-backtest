@@ -382,6 +382,68 @@ fn the_tick_is_the_held_contracts_minimum_increment() {
     assert_eq!(times(tick, "T"), times(relation(&f, "future.point_value"), "T"), "stated where the point value is");
 }
 
+/// E-104: a session in which only a far contract prints (a fragment of a
+/// session, a holiday's thin trading) must not roll the series to it. The
+/// volume roll compared the contracts printing in the session at hand by
+/// their volume in the session before, so the far month RBZ0, alone in a
+/// fragment, became the series, and the rule that a roll never goes to an
+/// earlier expiry kept it there: RB's series held sparse far months. The
+/// roll now compares, in the latest session the held contract traded in,
+/// the contracts that traded there and have not expired; and a spread's bar
+/// without a definition is counted as a spread, not as undefined.
+#[test]
+fn a_far_contract_alone_in_a_session_does_not_take_the_series() {
+    let mut records = vec![
+        def_of(1, "RBQ0", "RB", b'F', "2010-07-30T18:30:00", 0.0001),
+        def_of(2, "RBU0", "RB", b'F', "2010-08-31T18:30:00", 0.0001),
+        def_of(3, "RBZ0", "RB", b'F', "2010-11-30T18:30:00", 0.0001),
+    ];
+    let price = |id: u32, d: usize| 2.0 + id as f64 * 0.01 + d as f64 * 0.001;
+    // Q0 front and heavy; on the second day only Z0 prints (a fragment);
+    // U0 overtakes Q0 on the fourth day, so the series rolls on the fifth.
+    let days = ["2010-07-06", "2010-07-07", "2010-07-08", "2010-07-09", "2010-07-12"];
+    for (d, day) in days.iter().enumerate() {
+        let vols: Vec<(u32, u64)> = match d {
+            0 => vec![(1, 900), (2, 100), (3, 5)],
+            1 => vec![(3, 3)],
+            2 => vec![(1, 800), (2, 300)],
+            3 => vec![(1, 200), (2, 900), (3, 10)],
+            _ => vec![(1, 100), (2, 950)],
+        };
+        for m in 0..3 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            for &(id, v) in &vols {
+                records.push(bar(id, start, price(id, d), v));
+            }
+        }
+    }
+    // A spread's bar whose instrument has no definition (the bucket's
+    // definition files hold the outrights only), named by its symbol.
+    let start = t("2010-07-06") + 14 * 60 * MIN + 30 * MIN;
+    records.push(bar(77, start, 0.01, 50));
+    let mappings = vec![dbn::SymbolMapping {
+        raw_symbol: "RBQ0-RBU0".into(),
+        intervals: vec![dbn::MappingInterval {
+            start_date: 20100701,
+            end_date: 20100801,
+            symbol: "77".into(),
+        }],
+    }];
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), mappings), &records), "rb").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    let rb = &report.roots["RB"];
+    assert_eq!(rb.rolls.len(), 1, "{:?}", rb.rolls);
+    assert!(rb.rolls[0].starts_with("2010-07-12 RBQ0 -> RBU0"), "{:?}", rb.rolls);
+    let held: Vec<String> = strings(relation(&f, "continuous"), "contract_id");
+    assert!(!held.contains(&"3".to_string()), "the far month never held: {:?}", held);
+    // Q0's three bars on days one and three and four, U0's on day five; none
+    // on the fragment.
+    assert_eq!(relation(&f, "future.close").num_rows(), 12);
+    assert_eq!(report.dropped.get("no_definition"), None, "{:?}", report.dropped);
+    assert_eq!(report.dropped["not_an_outright_future"], 1);
+}
+
 #[test]
 fn a_futures_bar_without_its_definition_is_refused_naming_it() {
     let records = vec![
