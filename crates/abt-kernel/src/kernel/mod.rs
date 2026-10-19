@@ -4023,7 +4023,7 @@ pub fn replay_observed<'p>(
     let run = bind::run_id(
         &identity.program_hash,
         &identity.binding_id,
-        &bind::plan_step(opts.plan_step.as_ref(), &cfg, opts.to_seq, opts.horizon),
+        &bind::plan_step(opts.plan_step.as_ref(), &cfg, opts.to_seq, opts.horizon, opts.mode.session(), opts.replay_of.as_deref()),
         &identity.mode,
     );
     let identity = Identity { run_id: run.clone(), ..identity };

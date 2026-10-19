@@ -850,15 +850,18 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
             }
         }
         let sessions = &sessions[..held.len()];
-        // The root's grid (A-D53): the decimal exponent of the held
-        // contracts' tick sizes, at which the gaps, the adjustments and the
-        // adjusted prices are integers; a root without one, or a price off
-        // it, takes the `f64` arithmetic (and such values are raw
-        // exceptions in their blocks, A-D54).
+        // The root's grid (A-D53): the smallest decimal exponent at which
+        // every price of its bars and the held contracts' tick sizes are
+        // integers (a definition's tick can be coarser than the prices
+        // traded), at which the gaps, the adjustments and the adjusted
+        // prices are computed; a root with a price off every grid takes
+        // the `f64` arithmetic (such values are raw exceptions in their
+        // blocks, A-D54).
         let grid: Option<u8> = {
             let held_set: BTreeSet<u32> = held.iter().copied().collect();
-            let ticks: Option<Vec<f64>> = held_set.iter().map(|c| raw.defs[c].tick.filter(|t| *t > 0.0)).collect();
-            ticks.filter(|t| !t.is_empty()).and_then(|t| abt_codec::tick::exponent(&t, abt_codec::tick::Source::F64))
+            let mut vals: Vec<f64> = rbars.iter().flat_map(|b| [b.open, b.high, b.low, b.close]).collect();
+            vals.extend(held_set.iter().filter_map(|c| raw.defs[c].tick.filter(|t| *t > 0.0)));
+            abt_codec::tick::exponent(&vals, abt_codec::tick::Source::F64)
         };
         let p10 = grid.map_or(1.0, |e| abt_agg::exact::pow10(e as u32) as f64);
         let on = |x: f64| -> Option<i64> { grid.and_then(|e| abt_codec::tick::on_grid(x, e)) };

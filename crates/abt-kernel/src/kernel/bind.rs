@@ -1622,9 +1622,10 @@ pub fn run_id(program_hash: &str, binding_id: &str, step: &serde_json::Value, mo
 }
 
 /// π of a run outside a plan: what of its request, beyond the program and
-/// the binding, changes what it decides; none for a run over the whole
-/// stream.
-pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>) -> serde_json::Value {
+/// the binding, changes what it decides: its window, truncation and bundle
+/// date (E-56), the live session it reads or the recording it replays
+/// (A-D55); none for a run over the whole stream.
+pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>, session: Option<&str>, replay_of: Option<&str>) -> serde_json::Value {
     let fields = [
         ("start", cfg.start.map(|t| serde_json::json!(t))),
         ("end", cfg.end.map(|t| serde_json::json!(t))),
@@ -1633,6 +1634,8 @@ pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i6
         ("horizon", horizon.map(|t| serde_json::json!(t))),
         ("fault", cfg.inject.as_ref().map(|(c, t)| serde_json::json!([c, t]))),
         ("mask", (!cfg.embargo_mask.is_empty()).then(|| serde_json::json!(cfg.embargo_mask))),
+        ("session", session.map(|s| serde_json::json!(s))),
+        ("replay_of", replay_of.map(|r| serde_json::json!(r))),
     ];
     let set: serde_json::Map<String, serde_json::Value> = fields.into_iter().filter_map(|(k, v)| v.map(|v| (k.to_string(), v))).collect();
     if set.is_empty() {
@@ -1645,8 +1648,8 @@ pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i6
 /// π of a run (Q-2.5): the plan step that asked for it, with what of the
 /// request beyond the step changes what it decides; a run outside a plan
 /// has `run_step`'s alone.
-pub fn plan_step(step: Option<&serde_json::Value>, cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>) -> serde_json::Value {
-    let own = run_step(cfg, to_seq, horizon);
+pub fn plan_step(step: Option<&serde_json::Value>, cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>, session: Option<&str>, replay_of: Option<&str>) -> serde_json::Value {
+    let own = run_step(cfg, to_seq, horizon, session, replay_of);
     match (step, own) {
         (None, own) => own,
         (Some(pi), serde_json::Value::Object(extra)) => {
