@@ -1,0 +1,16 @@
+# proposition: E-103 (the full store's lists are in the vocabulary)
+# mutation: R2000 out of the lists vocabulary
+# test: cargo test -p abt-tests --test needs the_full_stores_lists_and_series_are_in_the_vocabulary
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/catalog.rs b/crates/abt-data/src/catalog.rs
+index 813b2b4..2d0b191 100644
+--- a/crates/abt-data/src/catalog.rs
++++ b/crates/abt-data/src/catalog.rs
+@@ -194,7 +194,6 @@ pub fn classes() -> Vec<ClassDef> {
+                         ("SP100", None),
+                         ("R3000", None),
+                         ("R1000", None),
+-                        ("R2000", None),
+                         ("RMID", None),
+                         ("RMICRO", None),
+                         ("RTOP200", None),
