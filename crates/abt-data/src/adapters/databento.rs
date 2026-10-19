@@ -25,8 +25,13 @@
 //!   (`ES.v.0` rolled by volume, `ES.c.0` by expiry):
 //!   - the root's sessions are its bars' runs, a gap longer than
 //!     `session_gap` (45 minutes: CME Globex's daily break is an hour)
-//!     ending one; a session is labelled at its last bar's close and opens
-//!     at its first bar's start (`session(A, S, Open)`);
+//!     ending one when it holds the middle of the venue's daily break
+//!     (`session_break`, 17:30 in New York: CME's break is 17:00 to 18:00
+//!     there, US daylight saving applied), as every gap between two trade
+//!     dates does, so a thin night's gaps stay inside the trade date
+//!     (E-104); a session is
+//!     labelled at its last bar's close and opens at its first bar's start
+//!     (`session(A, S, Open)`);
 //!   - by volume, a session holds the contract that traded the most in the
 //!     session before, never one expiring before the contract held; by
 //!     expiry, the contract nearest its expiry that trades in the session;
@@ -101,6 +106,10 @@ pub struct Options {
     pub roll: Roll,
     /// The longest gap within a session, in nanoseconds.
     pub session_gap: i64,
+    /// The middle of the venue's daily break, in New York local time, in
+    /// nanoseconds after midnight: a gap ends a session only when it holds
+    /// that instant of some day (E-104).
+    pub session_break: i64,
     /// A root's currency per point, where its contracts' size is not it.
     pub point_values: BTreeMap<String, f64>,
     /// A root's settlement (`cash`, `physical`).
@@ -131,6 +140,7 @@ impl Default for Options {
             processing_delay: 0,
             roll: Roll::Volume,
             session_gap: 45 * MINUTE,
+            session_break: (17 * 60 + 30) * MINUTE,
             point_values: BTreeMap::new(),
             settlement: BTreeMap::new(),
             commission: None,
@@ -221,6 +231,60 @@ pub struct Raw {
     mappings: Vec<(u32, i64, i64, String)>,
     dataset: Option<String>,
     files: usize,
+}
+
+/// Whether the gap from `a` to `b` (no bar in between) ends a session: it
+/// holds the break's middle (`at`, New York local time) of some day, as a
+/// weekend's or a holiday's gap does too (E-104).
+fn ends_session(a: i64, b: i64, at: i64) -> bool {
+    let first = a.div_euclid(DAY) - 1;
+    (first..=b.div_euclid(DAY) + 1).any(|day| {
+        let x = day * DAY + at + new_york_offset(day);
+        a < x && x < b
+    })
+}
+
+/// New York's offset from UTC on a civil day (days since the epoch), in
+/// nanoseconds to add to local time: four hours under US daylight saving
+/// (the second Sunday of March to the first Sunday of November, the rule
+/// since 2007), five otherwise. The day's afternoon is what matters here,
+/// after the 02:00 changes.
+fn new_york_offset(day: i64) -> i64 {
+    let (y, _, _) = civil(day);
+    let sunday_on_or_after = |y: i64, m: u32, d: u32| {
+        let x = days_from_civil(y, m, d);
+        // 1970-01-01 was a Thursday: (x + 4) mod 7 is 0 on a Sunday.
+        x + (7 - (x + 4).rem_euclid(7)) % 7
+    };
+    let start = sunday_on_or_after(y, 3, 8);
+    let end = sunday_on_or_after(y, 11, 1);
+    if start <= day && day < end {
+        4 * 60 * MINUTE
+    } else {
+        5 * 60 * MINUTE
+    }
+}
+
+/// Days since the epoch of a civil date, and back (Howard Hinnant's).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+}
+
+fn civil(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
 fn ts(x: u64) -> Option<i64> {
@@ -801,11 +865,12 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     for (root, mut rbars) in by_root {
         rbars.sort_by_key(|b| (b.t, b.id));
         intervals.extend(rbars.iter().map(|b| b.t - b.start));
-        // Sessions: runs of the root's bars.
+        // Sessions: runs of the root's bars, a gap ending one when it covers
+        // the venue's daily break or is long (E-104).
         let mut sessions: Vec<Session> = Vec::new();
         for b in &rbars {
             match sessions.last_mut() {
-                Some(s) if b.t - s.close <= opts.session_gap => {
+                Some(s) if b.t - s.close <= opts.session_gap || !ends_session(s.close, b.start, opts.session_break) => {
                     s.close = s.close.max(b.t);
                     s.open = s.open.min(b.start);
                 }
@@ -1248,6 +1313,13 @@ impl Databento {
                     }
                 }
                 "session_gap" => opts.session_gap = v.parse::<i64>().map_err(|_| bad(k, v, "a number of minutes"))? * MINUTE,
+                "session_break" => {
+                    let hm = |x: &str| -> Option<i64> {
+                        let (h, m) = x.trim().split_once(':')?;
+                        Some((h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?) * MINUTE)
+                    };
+                    opts.session_break = hm(v).ok_or_else(|| bad(k, v, "HH:MM in New York"))?;
+                }
                 "point_values" => {
                     for (r, x) in pairs(k, v)? {
                         opts.point_values.insert(r, x.parse().map_err(|_| bad(k, &x, "a number"))?);

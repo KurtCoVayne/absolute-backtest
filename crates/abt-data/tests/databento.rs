@@ -444,6 +444,44 @@ fn a_far_contract_alone_in_a_session_does_not_take_the_series() {
     assert_eq!(report.dropped["not_an_outright_future"], 1);
 }
 
+/// E-104: a session ends at a gap that holds the middle of the venue's daily
+/// break (17:30 in New York by default: CME's 17:00 to 18:00, 21:30 UTC in
+/// June), not at any gap over `session_gap`: RB's thin nights (an hour
+/// without a trade at 04:00) split each trade date into fragments. A long
+/// gap inside a trade date (an illiquid root's afternoon) stays in it.
+#[test]
+fn a_thin_nights_gaps_stay_inside_the_trade_date() {
+    let mut records = vec![def_of(1, "RBQ0", "RB", b'F', "2010-07-30T18:30:00", 0.0001)];
+    // Two trade dates: each opens at 22:00 UTC the evening before, trades at
+    // 22:01 and 03:30, pauses 82 minutes, trades at 04:52, then not for seven
+    // hours (an illiquid stretch), at 12:00 and 16:00, and closes at 21:14
+    // before the break.
+    for (d, day) in ["2010-06-13", "2010-06-14"].iter().enumerate() {
+        let eve = t(day) + 22 * 60 * MIN;
+        for (k, offset) in [0, 1, 5 * 60 + 30, 6 * 60 + 52, 14 * 60, 18 * 60, 23 * 60 + 14].iter().enumerate() {
+            records.push(bar(1, eve + offset * MIN, 2.0 + d as f64 * 0.01 + k as f64 * 0.001, 10));
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "rb").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    assert_eq!(report.roots["RB"].sessions, 2, "{:?}", report.roots["RB"]);
+    let sessions = relation(&f, "future.session");
+    assert_eq!(times(sessions, "Open"), vec![t("2010-06-13") + 22 * 60 * MIN, t("2010-06-14") + 22 * 60 * MIN]);
+    // With a break whose middle the 82-minute gap holds (00:00 in New York,
+    // 04:00 UTC in June), it ends sessions and the evening's gap does not:
+    // three sessions, the option being the venue's.
+    let (_, r2) = futures(
+        &raw,
+        &Options {
+            session_break: 0,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r2.roots["RB"].sessions, 3, "{:?}", r2.roots["RB"]);
+}
+
 #[test]
 fn a_futures_bar_without_its_definition_is_refused_naming_it() {
     let records = vec![

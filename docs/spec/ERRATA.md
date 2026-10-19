@@ -2506,10 +2506,23 @@ batch driver agree on every corpus program. Each bless since:
   hold the outrights only; 105 sampled days of RB, and samples of HO, CL,
   ZB, NG, GC and ES, show no outright bar without its definition): a bar
   whose symbol names a spread is now counted `not_an_outright_future`.
-  [D] Rejected: synthesizing contracts for undefined bars from their
-  symbols (no outright bar lacks a definition in the bucket), and the
-  previous session's volumes over every contract (a fragment session's
-  volumes would still name the far month).
+  The fragments themselves came from the sessions: a gap over
+  `session_gap` (45 minutes) ended one, and RB's thin nights (51, 60, 82
+  minutes without a trade around 04:00 UTC) split each trade date, 5,273
+  sessions in sixteen years. A gap now ends a session only when it holds
+  the middle of the venue's daily break, `session_break` (17:30 in New
+  York, CME's break being 17:00 to 18:00 there, US daylight saving
+  applied), as every gap between two trade dates does, a weekend's
+  included; a long gap inside a trade date stays in it. On RB 2010-06-07
+  to 2012-12-31 the series keeps 495,107 bars (20,140 before) over 664
+  sessions with 31 monthly rolls, each to the contract d20-research's
+  daily volumes name, 29 on the same day or the next and two within two
+  days (near-equal volumes). [D] Rejected: synthesizing contracts for
+  undefined bars from their symbols (no outright bar lacks a definition
+  in the bucket); the previous session's volumes over every contract (a
+  fragment's volumes still name the far month); a UTC window for the
+  break (21:00 to 23:00 covers both offsets, and in summer its second
+  hour is the evening's trading).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
