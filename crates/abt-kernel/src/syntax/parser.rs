@@ -161,6 +161,15 @@ impl Parser {
             false
         }
     }
+    /// A currency name (`USD`) where an amount may carry one.
+    fn eat_currency(&mut self) -> bool {
+        if matches!(self.peek(), Tok::Ident(w) if is_currency(w)) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
     fn ident(&mut self) -> PResult<(String, Span)> {
         match self.peek().clone() {
             Tok::Ident(s) => {
@@ -1575,7 +1584,7 @@ impl Parser {
             "actions" => word(self, &["apply", "in_price"])?,
             "oversize" => word(self, &["halt", "clamp", "allow"])?,
             "ruin" => word(self, &["halt", "continue"])?,
-            "numerics" => word(self, &["two_pass", "running"])?,
+            "numerics" => word(self, &["exact", "two_pass", "running"])?,
             "late" => word(self, &["send", "reject"])?,
             "option_mark" => word(self, &["mid", "last", "model"])?,
             "greeks" => word(self, &["data", "model"])?,
@@ -1697,11 +1706,14 @@ impl Parser {
                 if self.eat_kw("none") {
                     ExecValue::None
                 } else if self.eat_kw("per_share") {
+                    // K-2.2 writes `per_share P min M` and `per_contract P`;
+                    // a currency after an amount is admitted, not required
+                    // (E-96): the book is USD (A-D32).
                     let (per_share, _) = self.number()?;
-                    self.ident()?;
+                    self.eat_currency();
                     self.expect_kw("min")?;
                     let (min, _) = self.number()?;
-                    self.ident()?;
+                    self.eat_currency();
                     ExecValue::CommissionPerShare { per_share, min }
                 } else if self.eat_kw("per_contract") {
                     if self.eat_kw("from") {
@@ -1709,7 +1721,7 @@ impl Parser {
                         ExecValue::CommissionPerContract
                     } else {
                         let (x, _) = self.number()?;
-                        self.ident()?;
+                        self.eat_currency();
                         ExecValue::CommissionPerContractFixed(x)
                     }
                 } else if self.eat_kw("bps") {

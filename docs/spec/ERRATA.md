@@ -1122,6 +1122,50 @@ batch driver agree on every corpus program. Each bless since:
     - **The document:** it parses, its hash ignores layout, and it says why
       when it is refused. The modes refuse a run with no deployment, a
       broker with no adapter, and a document on a replay.
+- **E-96 (K-2.2, A-D32; the house presets, and the execution grammar as
+  K-2.2 writes it).** The pipeline's guideline (section 15,
+  `absolute-pipeline/docs/design/agent-guidelines.md`) fixes two
+  execution presets every agent program names, `futures_house`
+  (`futures_fixed_base` plus 3.75 a contract a side, no slippage for
+  starters) and `equities_house` (half a cent a share, one dollar at the
+  least, a tenth of the book per name, clamped); both are appended to
+  `corpus-v2/lib/execution.dsl` as the guideline writes them, comments
+  included. The parser accepted less than K-2.2's grammar: it required
+  a currency after `per_share P`, `min M` and `per_contract P`
+  (`per_share 0.005 USD min 1 USD`), where K-2.2 writes none, and it
+  refused `numerics exact`, which K-2.2 lists first. Both are the
+  parser's now (`syntax/parser.rs`): a currency after an amount is
+  admitted and not required (the book is USD, A-D32; `abt show` prints
+  the block with it, as before), and `exact` is a word of `numerics`,
+  which the lowering already read as `two_pass` (D-6.3: exact over what
+  has no integer form is two-pass; the kernel's exact windows over
+  ticks are iteration 2's), so the normal form keeps the word and the
+  evaluation is `two_pass`'s until then. `limits { weight <= 0.10 per
+  name clamp }` was accepted as written (K-3.5). Nothing of the
+  guideline's text differs from what the library holds. Rejected:
+  writing the presets in the stricter syntax (every agent would have
+  to learn a unit the grammar does not ask for). One point stays the
+  owner's: by E-71, `commission per_contract P` is charged where the
+  catalog states no rate per contract, and the catalog's rate otherwise
+  (`sim/mod.rs::commission`), so on a store whose roots state one (the
+  Databento adapter's, D-2.3) `futures_house` pays the catalog's rate,
+  not 3.75; the guideline's "7.50 round-turn, half per side" reads the
+  written rate as the one paid, with `from catalog` the form that
+  defers. This tree keeps E-71's rule, since changing which rate a
+  program pays is a change of intent. A second: `equities_house` writes
+  `orders moo_moc`, an intraday order the checker admits under a
+  sub-daily base alone (WF-14), so a daily equity program names the
+  preset with the one-field variant the harness allows,
+  `equities_house with { orders moc }` (or `moo`, `market`); the owner
+  may rather have the preset say `moc`. Tests:
+  `abt-tests/tests/corpus_v2.rs::the_house_presets_check_clean_run_and_show_their_fields`
+  (R8L on `futures_house`, `opening_gap` on `equities_house` and
+  `momentum_top_n` on `equities_house with { orders moc }` check clean,
+  run on the synthetic market of their class, decide and fill, pay the
+  commission the rules above give, and `abt show` prints the preset's
+  fields expanded); the library check reads the presets. Falsified by
+  `scripts/mutations/k-2.2-commission-unit.patch` (the parser requires
+  the currency again, and the library no longer parses).
 
 ## Data layer and protocol
 

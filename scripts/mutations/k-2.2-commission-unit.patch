@@ -1,0 +1,17 @@
+# proposition: K-2.2 (the execution grammar as written: `per_contract P` with no currency; the house presets of E-96)
+# mutation: the parser requires a currency after `per_contract P` again, so `futures_house` as the guideline writes it does not parse
+# test: cargo test -p abt-tests --test corpus_v2 the_house_presets_check_clean_run_and_show_their_fields
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/syntax/parser.rs b/crates/abt-kernel/src/syntax/parser.rs
+index c722e34..87add44 100644
+--- a/crates/abt-kernel/src/syntax/parser.rs
++++ b/crates/abt-kernel/src/syntax/parser.rs
+@@ -1721,7 +1721,7 @@ impl Parser {
+                         ExecValue::CommissionPerContract
+                     } else {
+                         let (x, _) = self.number()?;
+-                        self.eat_currency();
++                        self.ident()?;
+                         ExecValue::CommissionPerContractFixed(x)
+                     }
+                 } else if self.eat_kw("bps") {

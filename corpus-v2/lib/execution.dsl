@@ -61,3 +61,45 @@ execution futures_fixed_base {
   numerics      two_pass
   settlement    none
 }
+
+# The pipeline's house presets (absolute-pipeline, agent-guidelines.md 15;
+# ERRATA E-96): `futures_fixed_base` plus the house commission, and its
+# equity counterpart; no slippage for starters (PL-9.7 later). The harness
+# refuses a program whose execution block is not one of these.
+execution futures_house {
+  price         close
+  orders        moo_moc
+  lot           fractional
+  capital       1_000_000 USD fixed
+  commission    per_contract 3.75          # 7.50 round-turn, half per side; rolls pay it per contract (K-5.4)
+  slippage      none                       # for starters (owner, Oct 19); `range 0.10` on open and stop fills when PL-9.7 lands
+  impact        none
+  participation none
+  financing     none
+  leverage      unconstrained
+  actions       apply
+  delisting     last_price
+  oversize      halt
+  ruin          halt
+  numerics      exact
+  settlement    none
+}
+
+execution equities_house {
+  price         close
+  orders        moo_moc
+  lot           fractional
+  capital       1_000_000 USD fixed
+  commission    per_share 0.005 min 1
+  slippage      none
+  impact        none
+  participation none
+  financing     none
+  leverage      unconstrained
+  actions       apply
+  delisting     last_price
+  oversize      halt
+  ruin          halt
+  numerics      exact
+  limits        { weight <= 0.10 per name clamp }
+}
