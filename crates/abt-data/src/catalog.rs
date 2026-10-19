@@ -181,7 +181,31 @@ pub fn classes() -> Vec<ClassDef> {
             vocabularies: vec![
                 Vocabulary {
                     name: "lists",
-                    values: vec![("SPX", None), ("SP500", None), ("SP400", None), ("SP600", None), ("ETF", None)],
+                    // The index lists the Norgate adapter stages (E-103): `SPX`
+                    // is the S&P 500 as the lake's membership names it, `SP500`
+                    // and `ETF` the parity bundle's.
+                    values: vec![
+                        ("SPX", None),
+                        ("SP500", None),
+                        ("SP400", None),
+                        ("SP600", None),
+                        ("ETF", None),
+                        ("SP1500", None),
+                        ("SP100", None),
+                        ("R3000", None),
+                        ("R1000", None),
+                        ("R2000", None),
+                        ("RMID", None),
+                        ("RMICRO", None),
+                        ("RTOP200", None),
+                        ("RALL", None),
+                        ("NASDAQ", None),
+                        ("NDX", None),
+                        ("NBI", None),
+                        ("NYSE", None),
+                        ("DJIA", None),
+                        ("SPDA", None),
+                    ],
                 },
                 Vocabulary {
                     name: "reasons",
@@ -339,7 +363,28 @@ pub fn classes() -> Vec<ClassDef> {
             vocabulary_comment: None,
             vocabularies: vec![Vocabulary {
                 name: "names",
-                values: vec![("SPXTR", Some("1d")), ("VIX", Some("1w")), ("VIX_MA4", Some("1w"))],
+                // `VIX` is the parity bundle's weekly close (MW14 reads it over
+                // weekly rows); the lake's daily `$VIX` is `VIX_D` (E-103).
+                values: vec![
+                    ("SPXTR", Some("1d")),
+                    ("VIX", Some("1w")),
+                    ("VIX_MA4", Some("1w")),
+                    ("SPX", Some("1d")),
+                    ("NDX", Some("1d")),
+                    ("NDXTR", Some("1d")),
+                    ("RUT", Some("1d")),
+                    ("RUTTR", Some("1d")),
+                    ("VIX_D", Some("1d")),
+                    ("DJI", Some("1d")),
+                    ("DJITR", Some("1d")),
+                    ("RUA", Some("1d")),
+                    ("RUATR", Some("1d")),
+                    ("COMP", Some("1d")),
+                    ("XCMP", Some("1d")),
+                    ("SML", Some("1d")),
+                    ("MID", Some("1d")),
+                    ("OEX", Some("1d")),
+                ],
             }],
         },
         // The pipeline's provenance (absolute-pipeline PL-7.2; ERRATA E-94):

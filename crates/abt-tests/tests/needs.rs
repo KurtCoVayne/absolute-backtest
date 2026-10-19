@@ -48,3 +48,42 @@ fn industry_is_admitted_by_need_lists() {
     let (p, diags) = common::check(&src, "industries");
     assert!(p.is_some(), "{}", common::text(&diags));
 }
+
+fn equity_src(needs: &str, rules: &str, decide_on: &str) -> String {
+    common::StrategyParts {
+        name: "vocab".into(),
+        class: "equity".into(),
+        needs: needs.into(),
+        uses: "calendar, book".into(),
+        universe: "universe(A, T) :- close(A, T, _).".into(),
+        params: "    w : Scalar = 0.01".into(),
+        rules: rules.into(),
+        decides: format!("    decide(T, hold(A, w)) :- universe(A, T), {}.", decide_on),
+        execution: "equities_house with { orders moc }".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// E-103: the index lists and the daily index series the full store stages
+/// are in the catalog's vocabularies (WF-15), and `VIX` stays the weekly
+/// series MW14 reads while the lake's daily one is `VIX_D`.
+#[test]
+fn the_full_stores_lists_and_series_are_in_the_vocabulary() {
+    for (needs, rules, on) in [
+        ("need bars @1d   need lists \"R2000\"", "", "member(A, T, \"R2000\")"),
+        ("need bars @1d   need lists \"NASDAQ\", \"SPDA\"", "", "member(A, T, \"SPDA\")"),
+        ("need bars @1d   need series \"NDX\" @1d", "    rel up(@T)\n    up(T) :- value(\"NDX\", T, V), V > 0.\n", "up(T)"),
+        (
+            "need bars @1d   need series \"VIX_D\" @1d",
+            "    rel calm(@T)\n    calm(T) :- value(\"VIX_D\", T, V), V < 20.\n",
+            "calm(T)",
+        ),
+    ] {
+        let (p, diags) = common::check(&equity_src(needs, rules, on), "vocab");
+        assert!(p.is_some(), "{}: {}", needs, common::text(&diags));
+    }
+    let (p, diags) = common::check(&equity_src("need bars @1d   need lists \"R5000\"", "", "member(A, T, \"R5000\")"), "vocab");
+    assert!(p.is_none(), "an unknown list label checks");
+    assert!(common::text(&diags).contains("R5000"), "{}", common::text(&diags));
+}

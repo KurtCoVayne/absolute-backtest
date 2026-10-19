@@ -2465,6 +2465,24 @@ batch driver agree on every corpus program. Each bless since:
   erratum. With it, the checker's `need_for` admits E-98's `industry` under
   `need lists` as it admits `classification` (a program reading it was
   refused for a missing need).
+- **E-103 (D-2.5, WF-15; the lists and series the full store stages).**
+  The equity class's `lists` vocabulary held the parity bundle's labels
+  and `SPX`, and the series class's `names` held `SPXTR`, `VIX` and
+  `VIX_MA4`, so WF-15 refused programs naming the index lists and daily
+  index series the Norgate adapter stages from the lake. The `lists`
+  vocabulary gains `SP1500`, `SP100`, `R3000`, `R1000`, `R2000`, `RMID`,
+  `RMICRO`, `RTOP200`, `RALL`, `NASDAQ`, `NDX`, `NBI`, `NYSE`, `DJIA` and
+  `SPDA`; the `names` vocabulary gains, each `@1d`, `SPX`, `NDX`, `NDXTR`,
+  `RUT`, `RUTTR`, `VIX_D`, `DJI`, `DJITR`, `RUA`, `RUATR`, `COMP`, `XCMP`,
+  `SML`, `MID` and `OEX` (`NDX` is a list and a series: two vocabularies).
+  [D] `VIX` stays the parity bundle's weekly close and the lake's daily
+  `$VIX` is `VIX_D`: MW14 reads `series "VIX" @1w` over weekly rows
+  (`rows[vix_rows]`), and a daily series under the same name would make
+  its four rows four days on a store staged from the lake, silently.
+  Rejected: the daily one as `VIX` with MW14 rewritten to a weekly view
+  (the parity book is G1's and does not change for a store's naming).
+  With it, a fixture's demand under `need lists` notes `industry` with
+  `classification` (`abt-tests/tests/labels.rs`).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

@@ -27,7 +27,7 @@ class equity {
   margin(A: Equity, @T, Initial: Notional<USD>, Maintenance: Notional<USD>) complete   # per share, where the source publishes it (K-5.6)
 
   # Vocabularies (WF-15 checks a program's labels against them).
-  lists   "SPX", "SP500", "SP400", "SP600", "ETF"
+  lists   "SPX", "SP500", "SP400", "SP600", "ETF", "SP1500", "SP100", "R3000", "R1000", "R2000", "RMID", "RMICRO", "RTOP200", "RALL", "NASDAQ", "NDX", "NBI", "NYSE", "DJIA", "SPDA"
   reasons "bankruptcy", "acquisition", "voluntary", "regulatory"
   schemes "sector"
 }

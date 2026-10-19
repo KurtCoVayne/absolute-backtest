@@ -166,10 +166,11 @@ fn a_label_column_loads_from_parquet_and_round_trips() {
     let delisted = to_text(&dir.join("delisted.parquet")).unwrap();
     assert!(delisted.contains("BBB,2024-01-10,bankruptcy"), "{}", delisted);
     let (ds, notes) = abt_tests::load_fixture(&p, &dir).unwrap();
-    // The demand brings `split`, `dividend` and `classification` into the
-    // program too; the market carries no such facts, so their files are
-    // absent and noted. Nothing else is noted.
-    let absent = ["split.parquet", "dividend.parquet", "classification.parquet"];
+    // The demand brings `split`, `dividend`, `classification` and its
+    // deeper levels `industry` (E-98, E-102) into the program too; the
+    // market carries no such facts, so their files are absent and noted.
+    // Nothing else is noted.
+    let absent = ["split.parquet", "dividend.parquet", "classification.parquet", "industry.parquet"];
     assert!(notes.iter().all(|n| n.contains("no file") && absent.iter().any(|f| n.contains(f))), "{:?}", notes);
     let reasons: Vec<&Value> = ds.facts["delisted"].iter().map(|tu| &tu[2]).collect();
     assert_eq!(reasons.len(), 2);
