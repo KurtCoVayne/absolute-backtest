@@ -293,14 +293,19 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     let idset: BTreeSet<i64> = ids.iter().copied().collect();
     report.universe_assets = ids.len();
     // 2. The universe's equity bars over the span.
+    // Only the year files of the span are read: the lake holds every name
+    // of every year, and a year of it is about half a gigabyte in Arrow.
     let first_year = abt_wire::scalar::civil_from_days(opts.from).0;
+    let last_year = opts.to.map(|t| abt_wire::scalar::civil_from_days(t).0);
     let mut latest: HashMap<(i64, i64), (i64, Bar)> = HashMap::new();
     let series_of: BTreeMap<&str, &str> = opts.series.iter().map(|(t, n)| (t.as_str(), n.as_str())).collect();
     // The index series' closes by (name, day), the latest ingest kept.
     let mut series: BTreeMap<(String, i64), (i64, f64)> = BTreeMap::new();
     let mut rows_in = 0;
     let cols = ["asset_id", "ticker", "source_symbol", "date", "open", "high", "low", "close", "volume", "ingest_ts", "series_type"];
-    for b in read(lake, "curated/bars_by_date", &cols, |p| year_of(p).is_none_or(|y| y >= first_year))? {
+    for b in read(lake, "curated/bars_by_date", &cols, |p| {
+        year_of(p).is_none_or(|y| y >= first_year && last_year.is_none_or(|ly| y <= ly))
+    })? {
         let (asset, ticker, source, day) = (ints(&b, "asset_id")?, strings(&b, "ticker")?, strings(&b, "source_symbol")?, days(&b, "date")?);
         let (open, high, low, close, volume) = (nums(&b, "open")?, nums(&b, "high")?, nums(&b, "low")?, nums(&b, "close")?, nums(&b, "volume")?);
         let ingest = if b.column_by_name("ingest_ts").is_some() {

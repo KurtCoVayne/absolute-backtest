@@ -102,7 +102,7 @@ fn appends_read_as_the_parquet_twin_and_keep_the_version() {
     let (tail_id, tail_label, tail_r) = {
         let ov = h.overlay.lock().unwrap();
         let inst = ov.instruments.iter().find(|i| i.tail.len() >= 3).expect("a tail of three rows");
-        (inst.id, inst.tail[1].label, inst.tail[1].r)
+        (inst.id, inst.tail.label_at(1), inst.tail.r_at(1))
     };
     let inside = (tail_id, tail_label + NANOS_PER_HOUR, tail_r + NANOS_PER_DAY, 123.45);
     let before = seq_high(&a, &va);

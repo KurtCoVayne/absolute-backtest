@@ -2,7 +2,7 @@
 //! | payload`, where `length` counts the bytes that follow it. A control
 //! payload is a size-prefixed FlatBuffer `Envelope`; a `schema` or `batch`
 //! payload is an Arrow IPC message. A frame is at most 64 MiB and a control
-//! payload at most 1 MiB; a larger table is split into batches.
+//! payload at most 1 MiB; a larger batch spans several frames.
 
 use std::fmt;
 use std::io::{self, Read, Write};
