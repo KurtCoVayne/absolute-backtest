@@ -1273,10 +1273,17 @@ impl<'p> Kernel<'p> {
                 let from = time::add_duration(open, lo_d) + res;
                 let to = time::add_duration(open, *hi) + res;
                 let end = label.min(t);
+                // A sub-interval that starts after `t` (minute 5 asked at
+                // minute 3) has no bar yet (E-106): the empty window, where
+                // the range's start would pass its end.
+                let upper = to.min(end + 1);
+                if from >= upper {
+                    return Ok(vec![]);
+                }
                 Ok(self
                     .domains
                     .get(&Cal::Base)
-                    .map(|d| d.range(from..to.min(end + 1)).filter(|b| **b > open && **b <= end).copied().collect())
+                    .map(|d| d.range(from..upper).filter(|b| **b > open && **b <= end).copied().collect())
                     .unwrap_or_default())
             }
             WindowKind::Rows | WindowKind::PriorRows => Err(RunError::Internal("a `rows` window is solved by its aggregation".into())),

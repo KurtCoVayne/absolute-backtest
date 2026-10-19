@@ -2549,6 +2549,14 @@ batch driver agree on every corpus program. Each bless since:
   commissions), on either level. [D] Rejected: the UTC-day ladder level
   (not the session); building session bars in the kernel from the minutes
   (the stream would still carry every minute).
+- **E-106 (V-3.5, K-4.3; a session sub-interval not yet begun).** `T1 in
+  session(X, [a, b))` asked at a bar before minute `a` of its session
+  (`[5min, 10min)` at a clock of `session + 3min`) aborted the kernel: the
+  base bars' range started past its end ("range start is greater than
+  range end in BTreeSet"). Such a window has no bar yet and is now empty,
+  as the rule reading it then has no solution at that bar.
+  `abt-tests/tests/session_window.rs`: the window is empty at minute 3 and
+  read at minute 12, over minute bars the Databento adapter writes.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
