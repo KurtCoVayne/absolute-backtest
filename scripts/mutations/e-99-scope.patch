@@ -1,0 +1,17 @@
+# proposition: E-99 (a scoped stream carries its instruments only, and its index numbers it)
+# mutation: the stream reads every instrument of a partition again
+# test: cargo test -p abt-data --test stream a_scoped_stream_is_the_unscoped_one_restricted_to_its_instruments
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/stream.rs b/crates/abt-data/src/stream.rs
+index 6d92e21..52cfa08 100644
+--- a/crates/abt-data/src/stream.rs
++++ b/crates/abt-data/src/stream.rs
+@@ -311,7 +311,7 @@ impl Stream {
+         let keyed_by_entity = entity_column(&m.schema).is_some();
+         let f = RowFilter {
+             r_max: self.res.r_max,
+-            identity: if keyed_by_entity { self.res.entities.clone() } else { None },
++            identity: if keyed_by_entity { None } else { None },
+             ..RowFilter::default()
+         };
+         let batch = store.read_partition_rows(m, part, &f)?;
