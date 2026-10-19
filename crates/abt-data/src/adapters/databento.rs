@@ -842,11 +842,13 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                     }
                 }
             };
-            match pick {
-                Some(c) => held.push(c),
-                // Only contracts expiring before the one held trade: the
-                // series ends.
-                None => break,
+            match (pick, held.last().copied()) {
+                (Some(c), _) => held.push(c),
+                // Only contracts expiring before the one held traded this
+                // session (a thin deferred month, E-101): the session keeps
+                // the contract held and has no bar of it; the series goes on.
+                (None, Some(p)) => held.push(p),
+                (None, None) => break,
             }
         }
         let sessions = &sessions[..held.len()];
@@ -875,8 +877,11 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
             if o == n {
                 continue;
             }
-            let o_last = per[s - 1][&o].last().map(|b| b.close).unwrap_or(f64::NAN);
-            let n_at = match per[s - 1].get(&n).and_then(|v| v.last()) {
+            // The gap at the last session the outgoing contract traded in
+            // (it may hold sessions without a bar of its own, E-101).
+            let k = (0..s).rev().find(|&k| per[k].get(&o).is_some_and(|v| !v.is_empty())).unwrap_or(s - 1);
+            let o_last = per[k].get(&o).and_then(|v| v.last()).map(|b| b.close).unwrap_or(f64::NAN);
+            let n_at = match per[k].get(&n).and_then(|v| v.last()) {
                 Some(nb) => nb.close,
                 None => per[s][&n][0].open,
             };
@@ -955,7 +960,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
         for (s, sess) in sessions.iter().enumerate() {
             let c = held[s];
             let adj = adjustment[s];
-            for b in &per[s][&c] {
+            for b in per[s].get(&c).into_iter().flatten() {
                 let r = received(b, opts.processing_delay);
                 series.keys.push(root_key.clone());
                 series.t.push(b.t);
@@ -967,7 +972,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 cont.others.push(c.to_string());
                 cont.nums.push(vec![adj]);
             }
-            let last = per[s][&c].last().map(|b| received(b, opts.processing_delay)).unwrap_or(sess.close);
+            let last = per[s].get(&c).and_then(|v| v.last()).map(|b| received(b, opts.processing_delay)).unwrap_or(sess.close);
             sessions_rows.keys.push(root_key.clone());
             sessions_rows.t.push(sess.close);
             sessions_rows.times.push(sess.open);

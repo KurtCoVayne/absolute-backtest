@@ -2430,6 +2430,21 @@ batch driver agree on every corpus program. Each bless since:
   exchange-traded product of the lake: the hot store's budget (ST-9) and
   the adapter's in-memory read hold the named set, not the lake's
   thousands.
+- **E-101 (D-2.4, D-7.7; a continuous series through a session without the
+  contract held).** The Databento adapter's volume roll picked, per
+  session, among the contracts that traded in it and expire no earlier
+  than the one held, and ended the root's series at the first session with
+  none: on a root whose deferred month trades thinly (SOL's monthly
+  contracts from the bucket's live prefix) the session after the roll
+  into J5, in which only the expiring H5 printed, ended the series, and
+  1.8 years of SOL bars became 364 (ETH's and BTC's extensions stopped
+  after their rolls the same way). Such a session now keeps the contract
+  held and has no bar of it, the series going on when that contract (or a
+  later one) trades again; a roll's gap is taken at the last session the
+  outgoing contract traded in. [D] No bar rather than a bar of the expiring
+  contract: the series holds one contract at a time and the roll was
+  decided on the session before; going back to H5 for a day would roll
+  twice and put an expiring contract's prices in the series.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

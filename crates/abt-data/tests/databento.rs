@@ -297,6 +297,54 @@ fn futures_roll_by_volume_into_a_back_adjusted_series() {
     assert!(ins.iter().any(|i| i.key == "1") && ins.iter().any(|i| i.key == "2"));
 }
 
+/// E-101: a root whose deferred month trades thinly (SOL, monthly crypto
+/// contracts): after the roll into J5, a session in which only the expiring
+/// H5 printed kept the series from going on: no contract expiring at or after
+/// the one held traded, and the loop ended the root there. Such a session
+/// keeps the contract held and has no bar; the series continues when J5
+/// trades again.
+#[test]
+fn a_session_without_the_held_contract_does_not_end_the_series() {
+    let mut records = vec![def_of(1, "SOLH5", "SOL", b'F', "2025-03-28T15:00:00", 0.5), def_of(2, "SOLJ5", "SOL", b'F', "2025-04-25T15:00:00", 0.5)];
+    // H5 trades most the first day, J5 the second (the roll is on the
+    // third); on the fourth only H5 prints; on the fifth J5 trades again.
+    let days = ["2025-03-20", "2025-03-21", "2025-03-24", "2025-03-25", "2025-03-26"];
+    for (d, day) in days.iter().enumerate() {
+        for m in 0..5 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            let (v1, v2) = match d {
+                0 => (Some(900), Some(10)),
+                1 => (Some(100), Some(800)),
+                2 => (Some(50), Some(900)),
+                3 => (Some(40), None),
+                _ => (None, Some(700)),
+            };
+            if let Some(v) = v1 {
+                records.push(bar(1, start, 130.0 + d as f64 + m as f64 * 0.5, v));
+            }
+            if let Some(v) = v2 {
+                records.push(bar(2, start, 131.0 + d as f64 + m as f64 * 0.5, v));
+            }
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "sol").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    let sol = &report.roots["SOL"];
+    assert_eq!(sol.sessions, 5, "{:?}", sol);
+    assert_eq!(sol.rolls.len(), 1, "{:?}", sol.rolls);
+    assert!(sol.rolls[0].starts_with("2025-03-24 SOLH5 -> SOLJ5"), "{:?}", sol.rolls);
+    let close = relation(&f, "future.close");
+    let ts = times(close, "T");
+    // H5's two sessions, J5's roll session, no bar on the fourth, J5's fifth.
+    assert_eq!(close.num_rows(), 20, "{:?}", ts);
+    assert_eq!(*ts.last().unwrap(), t("2025-03-26") + 14 * 60 * MIN + 35 * MIN);
+    assert!(!ts.iter().any(|x| (*x - t("2025-03-25")).div_euclid(DAY) == 0), "no bar of the held contract on the fourth day");
+    assert_eq!(strings(relation(&f, "continuous"), "contract_id").last().unwrap(), "2");
+    // The five sessions are the root's, the fourth among them.
+    assert_eq!(relation(&f, "future.session").num_rows(), 5);
+}
+
 #[test]
 fn a_futures_bar_without_its_definition_is_refused_naming_it() {
     let records = vec![
