@@ -143,6 +143,7 @@ pub enum NeedKind {
     Sessions,
     PointValue,
     Tick,
+    Industry,
     Commission,
     Instruments { attr: String, value: String },
     Chain(ChainNeed),

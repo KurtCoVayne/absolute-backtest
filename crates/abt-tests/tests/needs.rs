@@ -1,6 +1,7 @@
 //! The needs that admit the contract terms and the classification's levels
-//! (E-102, E-98): `tick` under `need tick`, refused without it, naming the
-//! need; `industry` under `need lists`, as `classification` is.
+//! (E-102, E-98): `tick` under `need tick` and `industry` under `need
+//! industry`, each refused without its need, naming it; neither changes the
+//! hash of a program that does not write it (`checkpoint.rs`).
 
 use abt_tests as common;
 
@@ -31,11 +32,11 @@ fn tick_is_admitted_by_need_tick_and_refused_without_it() {
 }
 
 #[test]
-fn industry_is_admitted_by_need_lists() {
+fn industry_is_admitted_by_need_industry() {
     let src = common::StrategyParts {
         name: "industries".into(),
         class: "equity".into(),
-        needs: "need bars @1d   need lists \"SPX\"".into(),
+        needs: "need bars @1d   need lists \"SPX\"   need industry".into(),
         uses: "calendar, book".into(),
         universe: "universe(A, T) :- member(A, T, \"SPX\").".into(),
         params: "    w : Scalar = 0.01".into(),

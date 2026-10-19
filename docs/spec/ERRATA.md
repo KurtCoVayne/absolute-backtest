@@ -2462,9 +2462,15 @@ batch driver agree on every corpus program. Each bless since:
   `need point_value`, since every class relation is a primitive of every
   program of the class, so every program writing `need point_value` would
   demand `future.tick` and fail to bind on a store staged before this
-  erratum. With it, the checker's `need_for` admits E-98's `industry` under
-  `need lists` as it admits `classification` (a program reading it was
-  refused for a missing need).
+  erratum. E-98's `industry` likewise gets a need of its own, `need
+  industry` (no need admitted it: a program reading it was refused). Both
+  are left out of the demand's serialized form when false, and neither is
+  a primitive of a program that does not write its need: a program's hash
+  covers its demand and its primitives (`hash_view`), and admitting
+  `industry` under `need lists` changed the hash of every program writing
+  `need lists` (MW14 among them; `checkpoint.rs::program_hashes_are_stable`
+  on the machine's Rust 1.99 caught it), which would have cut every such
+  program's lineage.
 - **E-103 (D-2.5, WF-15; the lists and series the full store stages).**
   The equity class's `lists` vocabulary held the parity bundle's labels
   and `SPX`, and the series class's `names` held `SPXTR`, `VIX` and

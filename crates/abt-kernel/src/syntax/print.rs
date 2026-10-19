@@ -297,6 +297,7 @@ fn render_need(n: &Need) -> String {
         NeedKind::Sessions => "sessions".into(),
         NeedKind::PointValue => "point_value".into(),
         NeedKind::Tick => "tick".into(),
+        NeedKind::Industry => "industry".into(),
         NeedKind::Commission => "commission".into(),
         NeedKind::Instruments { attr, value } => format!("instruments where {} = \"{}\"", attr, value),
         NeedKind::Chain(c) => format!(

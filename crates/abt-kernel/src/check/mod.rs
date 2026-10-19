@@ -327,8 +327,15 @@ pub struct Demand {
     pub series_complete: bool,
     pub sessions: bool,
     pub point_value: bool,
-    /// `need tick`: a future's minimum price increment (E-102).
+    /// `need tick`: a future's minimum price increment (E-102). Left out of
+    /// the serialized demand when false, so the hash of a program that does
+    /// not write it is the hash it had before the field existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tick: bool,
+    /// `need industry`: the classification's deeper levels (E-98), a need
+    /// of its own so that a program writing `need lists` keeps its hash.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub industry: bool,
     pub commission: bool,
     pub usable: bool,
     pub instruments_where: Vec<(String, String)>,
@@ -382,8 +389,8 @@ impl Demand {
             "point_value" => "point_value",
             "tick" => "tick",
             "commission" => "commission",
-            // `industry` is the classification's deeper levels (E-98).
-            "classification" | "industry" => "classification",
+            "classification" => "classification",
+            "industry" => "industry",
             "usable" => "usable",
             _ => "",
         }
@@ -398,6 +405,7 @@ impl Demand {
             "sessions" => self.sessions,
             "point_value" => self.point_value,
             "tick" => self.tick,
+            "industry" => self.industry,
             "commission" => self.commission,
             "classification" => self.classification,
             "usable" => self.usable,
@@ -1234,6 +1242,7 @@ impl<'a> Checker<'a> {
                             NeedKind::Sessions => !self.demand.sessions,
                             NeedKind::PointValue => !self.demand.point_value,
                             NeedKind::Tick => !self.demand.tick,
+                            NeedKind::Industry => !self.demand.industry,
                             NeedKind::Commission => !self.demand.commission,
                             NeedKind::Instruments { .. } => false,
                             NeedKind::Chain(_) => self.demand.chains.is_empty(),
@@ -1248,6 +1257,7 @@ impl<'a> Checker<'a> {
                                 NeedKind::Sessions => "sessions",
                                 NeedKind::PointValue => "point_value",
                                 NeedKind::Tick => "tick",
+                                NeedKind::Industry => "industry",
                                 NeedKind::Commission => "commission",
                                 NeedKind::Instruments { .. } => "instruments",
                                 NeedKind::Chain(_) => "chain",
@@ -1617,6 +1627,7 @@ impl<'a> Checker<'a> {
                 NeedKind::Sessions => d.sessions = true,
                 NeedKind::PointValue => d.point_value = true,
                 NeedKind::Tick => d.tick = true,
+                NeedKind::Industry => d.industry = true,
                 NeedKind::Commission => d.commission = true,
                 NeedKind::Instruments { attr, value } => d.instruments_where.push((attr.clone(), value.clone())),
                 NeedKind::Chain(c) => {
@@ -1685,7 +1696,7 @@ impl<'a> Checker<'a> {
                 Code::Q,
                 data.span,
                 format!(
-                    "the data block of `{}` has no `need`: a demand is a conjunctive query over the catalog with at least one need (bars, actions, listing, lists, series, sessions, point_value, tick, commission)",
+                    "the data block of `{}` has no `need`: a demand is a conjunctive query over the catalog with at least one need (bars, actions, listing, lists, series, sessions, point_value, tick, industry, commission)",
                     root_name
                 ),
             );

@@ -1176,11 +1176,12 @@ fn need_relations(word: &str) -> &'static [&'static str] {
         "bars" => &["open", "high", "low", "close", "volume"],
         "actions" => &["split", "dividend", "special_dividend", "delisted"],
         "listing" => &["listed", "ticker", "usable"],
-        "lists" => &["member", "classification", "industry"],
+        "lists" => &["member", "classification"],
         "series" => &["value"],
         "sessions" => &["session"],
         "point_value" => &["point_value"],
         "tick" => &["tick"],
+        "industry" => &["industry"],
         "commission" => &["commission"],
         _ => &[],
     }
@@ -1254,6 +1255,9 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>, s
     }
     if d.tick {
         need("tick", "tick".into(), None, None, false);
+    }
+    if d.industry {
+        need("industry", "industry".into(), None, None, false);
     }
     if d.commission {
         need("commission", "commission".into(), None, None, false);
