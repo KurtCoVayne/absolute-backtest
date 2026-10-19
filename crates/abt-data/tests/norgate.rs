@@ -204,6 +204,35 @@ fn several_lists_and_an_index_series() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A named ticker beyond the lists (E-100): asset 8 (OTH, a Russell 2000
+/// member only) joins the universe as a member of `ETF` over its listing.
+#[test]
+fn a_named_ticker_joins_the_universe_under_its_label() {
+    let dir = lake();
+    write(
+        &dir.join("registry/security_master/data.parquet"),
+        vec![
+            ("asset_id", Arc::new(Int64Array::from(vec![8, 9]))),
+            ("ticker", s(vec!["OTH", "OLD"])),
+            ("listing_date", dates(vec![Some(d(-500)), Some(d(-500))])),
+            ("delisting_date", dates(vec![None, Some(d(-300))])),
+        ],
+    );
+    let opts = LakeOptions {
+        tickers: vec![("oth".into(), "ETF".into()), ("OLD".into(), "ETF".into())],
+        ..LakeOptions::default()
+    };
+    let (f, _) = read_lake(&dir, &opts).unwrap();
+    let member = relation(&f, "equity.member");
+    let lists = member.column(2).as_string::<i32>();
+    let of8: Vec<&str> = (0..member.num_rows()).filter(|&i| rows(member)[i].0 == "8").map(|i| lists.value(i)).collect();
+    assert_eq!(of8.len(), 20, "a member every day of the span");
+    assert!(of8.iter().all(|l| *l == "ETF"));
+    // A ticker delisted before the span stays out.
+    assert!(f.securities.iter().all(|s| s.key != "9"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The adapter as a source of the resolver: a catalog's settings
 /// configure it, and its offers are its lists' and series'.
 #[test]

@@ -2419,6 +2419,17 @@ batch driver agree on every corpus program. Each bless since:
     - K-9.3 puts every case in `tests/options.rs`. The futures and the
       limits have their own files, as the migration's plan lists them
       (M-7).
+- **E-100 (D-7.7; assets beyond the index lists).** The Norgate adapter's
+  universe was the members of its index lists, so the lake's
+  exchange-traded products (QQQ, SPY, GLD, TLT, IWM, the sector SPDRs)
+  were never staged though their bars are in the lake. A `tickers`
+  setting (`--tickers 'QQQ=ETF;SPY=ETF'`) adds the asset of each named
+  ticker's latest listing, read from `registry/security_master`, as a
+  member of the label named over its listing span (`member(A, T, "ETF")`,
+  a label the equity catalog declares). [D] By name rather than every
+  exchange-traded product of the lake: the hot store's budget (ST-9) and
+  the adapter's in-memory read hold the named set, not the lake's
+  thousands.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

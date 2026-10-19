@@ -68,6 +68,11 @@ pub struct LakeOptions {
     /// The index series to read (the lake's ticker, `$SPXTR`), each with
     /// its name in the series class (`SPXTR`).
     pub series: Vec<(String, String)>,
+    /// Named assets beyond the index lists (`QQQ=ETF`), each a member of
+    /// the list label it names over its listing span, read from
+    /// `registry/security_master` (E-100: exchange-traded products the
+    /// universe of an idea names).
+    pub tickers: Vec<(String, String)>,
     /// The first and last day (days since 1970-01-01); the last defaults to
     /// the lake's last bar.
     pub from: i64,
@@ -85,6 +90,7 @@ impl Default for LakeOptions {
         LakeOptions {
             lists: vec![("S&P 500".into(), "SPX".into())],
             series: vec![],
+            tickers: vec![],
             from: days_of("2014-01-01").unwrap_or(0),
             to: None,
             limit: None,
@@ -284,6 +290,32 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
                 continue;
             }
             members.push((a, label, f, to[i]));
+        }
+    }
+    if !opts.tickers.is_empty() {
+        let want: BTreeMap<String, &str> = opts.tickers.iter().map(|(t, l)| (t.to_uppercase(), l.as_str())).collect();
+        // A ticker names the asset of its latest listing (a reused symbol's
+        // older assets are other instruments).
+        let mut pick: BTreeMap<String, (i64, i64, Option<i64>)> = BTreeMap::new();
+        for b in read(lake, "registry/security_master", &["asset_id", "ticker", "listing_date", "delisting_date"], |_| true)? {
+            let (asset, ticker, listed, delisted) = (ints(&b, "asset_id")?, strings(&b, "ticker")?, days(&b, "listing_date")?, days(&b, "delisting_date")?);
+            for i in 0..b.num_rows() {
+                let (Some(a), Some(t), Some(f)) = (asset[i], &ticker[i], listed[i]) else { continue };
+                let t = t.to_uppercase();
+                if !want.contains_key(&t) {
+                    continue;
+                }
+                let e = pick.entry(t).or_insert((a, f, delisted[i]));
+                if f > e.1 {
+                    *e = (a, f, delisted[i]);
+                }
+            }
+        }
+        for (t, (a, f, to)) in pick {
+            if to.is_some_and(|t| t <= opts.from) || opts.to.is_some_and(|t| f > t) {
+                continue;
+            }
+            members.push((a, want[&t], f, to));
         }
     }
     let mut ids: Vec<i64> = members.iter().map(|m| m.0).collect::<BTreeSet<_>>().into_iter().collect();
@@ -889,6 +921,7 @@ impl Norgate {
                 "lake" => {}
                 "lists" => opts.lists = pairs(k, v)?,
                 "series" => opts.series = pairs(k, v)?,
+                "tickers" => opts.tickers = pairs(k, v)?,
                 "from" => opts.from = date(k, v)?,
                 "to" => opts.to = Some(date(k, v)?),
                 "limit" => opts.limit = Some(v.parse().map_err(|_| DataError::Malformed(format!("the norgate setting `limit` is a count, not `{}`", v)))?),
