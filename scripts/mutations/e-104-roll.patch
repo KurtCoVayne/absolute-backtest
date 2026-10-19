@@ -1,0 +1,17 @@
+# proposition: E-104 (a fragment session cannot roll the series to a far month)
+# mutation: compare the contracts of the session before, whether or not the held one traded there
+# test: cargo test -p abt-data --test databento a_far_contract_alone_in_a_session_does_not_take_the_series
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+index 9ee5558..25ee363 100644
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -840,7 +840,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
+                 Roll::Volume => {
+                     let open = sessions[s].open;
+                     let prev = held.last().copied();
+-                    let k = prev.and_then(|p| (0..s).rev().find(|&k| per[k].contains_key(&p))).unwrap_or(s - 1);
++                    let k = s - 1;
+                     let live = |c: u32| expiry(c) >= open && prev.is_none_or(|p| expiry(c) >= expiry(p));
+                     let best = per[k].keys().copied().filter(|&c| live(c)).max_by(|&a, &b| {
+                         volume(k, a)
