@@ -95,6 +95,7 @@ The present `src/study/metrics.rs` and `validate.rs` move unchanged in substance
 | Book | gross, net and leverage over time; margin utilisation (`margin_req` over NAV); concentration (max weight, effective names); funding paid |
 | Options | premium collected and paid, assignment and exercise counts, days to expiry at entry and exit, net Greek exposure over time (Δ·S, Γ, V, Θ from the kernel's `greeks` relation times positions), realised versus implied volatility of the underlyings traded, P&L attribution to Δ, Γ, Θ, V by the discrete Taylor expansion over each bar with the residual reported |
 | Convention | both conventions (`--report-by day`, a reporting calendar) as today's `convention_metrics` |
+| Red flags | on the fixed base, `return` (the mean bar P&L over the base, a year) and `mar` (over the drawdown of the cumulative P&L as a share of the base); `drawdown_duration`; the round trips' `trades`, `profit_factor`, `hit_rate`, `avg_win_loss`, `avg_trade`, `avg_trade_to_cost` (over the round-turn commission per contract or share), `largest_loss`, `trade_skew`; the profit's concentration, `top_market_share` and `profitable_market_share`; `profit_before_1990_share`; the contribution by entity and by calendar year (E-95; the pipeline's guideline §12) |
 
 Every metric is a pure function of tables and is recorded with the tables' versions.
 
@@ -245,7 +246,8 @@ A report is a set of relations under `query.<plan>.report.*` and a text renderin
 | `contract` | the kernel's contract statuses per run (K-3.7), aggregated |
 | `warnings` | every warning raised by any layer for the plan's runs, with the bias it maps to and the count |
 | `biases` | the forty biases of B-4 to B-6 with their owner layer and status source, rows touched marked |
-| `surface`, `folds`, `subperiods` | as today |
+| `surface`, `folds`, `subperiods` | as today; `subperiods` also carries the best run's net profit and trades per calendar year (E-95) |
+| `contribution` | per run and entity: the net profit of its trades, its share of the run's, its trades and their hit rate (E-95) |
 | `feed`, `activation` | the tables of sections 6 and 7 the plan asked for |
 
 The forty-bias table's owners after the split: *data* (historical revision, point in time by receipt, latency: measurable because the store keeps `r`), *kernel* (look-ahead, bar resolution, execution timing, partial fill, transaction cost, slippage, impact, liquidity, spread, leverage, funding, shorting, borrow, corporate action, delisting, cash management, portfolio construction, rebalancing), *query* (survivorship and selection as feed statistics; data snooping, multiple testing, overfitting, parameter over-optimisation, p-hacking, false significance, short sample, out-of-sample, walk-forward, autocorrelation, non-stationarity, regime, tail risk, label and feature leakage through the embargo and the claims), *program* (universe leakage through `instruments` tables, W9). The report lists each with its status (`guaranteed`, `data-guaranteed`, `modeled`, `measured`, `warned`, `open`) and the source of that status.

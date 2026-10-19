@@ -20,7 +20,7 @@ use super::{At, Holdout, Normal, Plan, Point, Ref, Step};
 use crate::data::{Data, Error};
 use crate::kernel::{Kernel, Program, RunRequest, Sample};
 use crate::metrics::validate::{self, Embargo, Surface, WalkForward};
-use crate::metrics::{self, DeflatedSharpe, Pbo, ReturnMetrics, Returns, TradingMetrics};
+use crate::metrics::{self, DeflatedSharpe, Pbo, ReturnMetrics, Returns, TradeMetrics, TradingMetrics};
 use crate::run::Run;
 use crate::time::{format_timestamp, parse_timestamp};
 
@@ -117,6 +117,8 @@ pub struct Outcome {
     pub periods_per_year: f64,
     pub returns: ReturnMetrics,
     pub trading: TradingMetrics,
+    /// The fixed-base and round-trip rows the red flags read (E-95).
+    pub trades: TradeMetrics,
     /// The plan's objective's value (NaN when undefined).
     pub objective: f64,
     pub warnings: Vec<Warning>,
@@ -347,6 +349,7 @@ impl<'a> Executor<'a> {
             periods_per_year: 0.0,
             returns: ReturnMetrics::default(),
             trading: TradingMetrics::default(),
+            trades: TradeMetrics::default(),
             objective: f64::NAN,
             warnings: ran.report["warnings"]
                 .as_array()
@@ -368,7 +371,8 @@ impl<'a> Executor<'a> {
             o.periods_per_year = ppy;
             o.returns = metrics::return_metrics(&curve, ppy);
             o.trading = metrics::trading_metrics(&run, ppy);
-            o.objective = metrics::objective_value(&self.plan.objective, &o.returns, &o.trading).unwrap_or(f64::NAN);
+            o.trades = metrics::trade_metrics(&run, ppy, &|t| self.keeps(&a.keep, t));
+            o.objective = metrics::objective_value(&self.plan.objective, &o.returns, &o.trading, &o.trades).unwrap_or(f64::NAN);
             o.window = curve.first().zip(curve.last()).map(|(f, l)| (f.0, l.0));
             o.curve = curve;
         } else {
@@ -787,7 +791,7 @@ pub fn execute(plan: &Plan, prog: &Program, ends: &Endpoints, opts: &Options) ->
                         let values = by
                             .iter()
                             .map(|m| {
-                                metrics::objective_value(m, &o.returns, &o.trading)
+                                metrics::objective_value(m, &o.returns, &o.trading, &o.trades)
                                     .map(|v| (m.clone(), v))
                                     .ok_or_else(|| Error::Malformed(format!("compare {}: `{}` is not a metric ({})", name, m, metrics::METRIC_NAMES.join(", "))))
                             })

@@ -85,6 +85,8 @@ pub struct RunMetrics {
     pub capacity: Option<f64>,
     pub subperiods: Vec<(i64, f64)>,
     pub book: metrics::BookMetrics,
+    /// The fixed-base and round-trip rows the red flags read (E-95).
+    pub trades: metrics::TradeMetrics,
     /// Present when the run held an option (E-73).
     pub options: Option<metrics::OptionsMetrics>,
     pub versions: BTreeMap<String, String>,
@@ -104,6 +106,7 @@ pub fn run_metrics(data: &Data, run: &str) -> Result<RunMetrics, crate::data::Er
         capacity: metrics::capacity(&r, ppy, 0.05),
         subperiods: metrics::subperiod_sharpes(&r.metric_curve(), ppy, 20),
         book: metrics::book_metrics(&r),
+        trades: metrics::trade_metrics(&r, ppy, &|_| true),
         options: metrics::options_metrics(&r, ppy),
         versions: data.versions(&format!("kernel.{}.", run))?,
     })
@@ -221,6 +224,12 @@ pub fn metrics_main_io(args: &[String], conn: Connection, io: &mut dyn Io) -> i3
     for (y, s) in &m.subperiods {
         say!(io, "sharpe {}: {:.4}", y, s);
     }
+    let x = &m.trades;
+    say!(
+        io,
+        "trades on the base {:.0}: return {:.6} a year   max_drawdown {:.6} of the base   mar {:.4}   trades {}   profit_factor {:.3}   hit_rate {:.3}   avg_win_loss {:.3}   avg_trade {:.2} ({:.2} round-turn costs)   largest_loss {:.2}   trade_skew {:.4}   top_market_share {:.3}   profitable_market_share {:.3}   profit_before_1990_share {:.3}",
+        x.base, x.annual_return, x.max_drawdown_base, x.mar, x.trades, x.profit_factor, x.hit_rate, x.avg_win_loss, x.avg_trade, x.avg_trade_to_cost, x.largest_loss, x.trade_skew, x.top_market_share, x.profitable_market_share, x.profit_before_1990_share
+    );
     let b = &m.book;
     say!(
         io,

@@ -2404,6 +2404,62 @@ batch driver agree on every corpus program. Each bless since:
     refused) and `abt/tests/plan_cli.rs` (`abt plan check` prints each
     form). Falsified by `scripts/mutations/q-2.1-after-receipt.patch`
     (the kernel cuts by the label rather than the barrier's instant).
+- **E-95 (Q-3.1, Q-8; the metric rows the red flags need).** The
+  pipeline's rationale names every red flag that fires (guideline
+  sections 12 and 13, `absolute-pipeline/docs/design/agent-guidelines.md`;
+  PL-8.1), and the report block of its plan template asks for the rows
+  by name. The metrics library gains them (`metrics/trades.rs`,
+  `TradeMetrics`, computed in `plan::exec::run_one` over the bars and
+  fills a run's mask keeps, and in `abt metrics` over the whole run),
+  and `METRIC_NAMES` and `objective_value` know their names, so a
+  `report` block, a `compare` step and an `objective` take them:
+  - `return`: the mean bar P&L over the fixed base (the report block's
+    capital, else the first NAV kept), times the periods a year, which is
+    the guideline's "average return % a year on the fixed base";
+    `mar`: `return` over the deepest fall of the cumulative P&L from its
+    peak as a share of the base (NaN without a drawdown);
+    `drawdown_duration`: `max_drawdown_duration` under the name the
+    guideline uses.
+  - The round trips (`convention_metrics`'s: a security's position from
+    flat back to flat among the fills kept, its P&L the cash flows net
+    of commissions and fees, closed at its last fill): `trades`,
+    `profit_factor` (the winners' P&L over the losers'; ∞ without a
+    loss, NaN without a trade), `hit_rate` (a trade of exactly zero is
+    no win), `avg_win_loss`, `avg_trade`, `avg_trade_to_cost` (over
+    twice the fills' commissions and fees per unit filled, the
+    round-turn cost per contract or per share), `largest_loss` (a
+    positive number, 0 without a losing trade), `trade_skew`.
+  - The concentration: `top_market_share` (the largest entity's share
+    of the net profit over every trade) and `profitable_market_share`
+    (the share of entities traded whose trades made money);
+    `profit_before_1990_share` (of the bars' net profit, the part made
+    before 1990-01-01). A share of a net profit that is not positive is
+    NaN, which the report shows as null.
+  - **Tables.** `summary` shows the rows by name as any metric;
+    `contribution` is new (per run and entity, by ticker where the
+    store's `ticker` relation names the id: net profit, share, trades,
+    hit rate); `subperiods` keeps its columns and gains the best run's
+    `net_profit` and `trades` per calendar year. `abt metrics` prints a
+    `trades` line and carries the group as `trades` in `--json`.
+  - **Decisions.** The rows live in a struct of their own rather than
+    in `ReturnMetrics` or `TradingMetrics`, so the frozen records of
+    E-66 (`golden/study/*.json`, which serialise those two) and
+    `query.<plan>.outcomes` keep their shapes. A run's masked rows are
+    over the bars and fills kept: a position opened outside the mask
+    and closed inside never flattens inside it and is no trade. The
+    yearly net profit is the bars' (what the book earned), the yearly
+    trade count the round trips closed in the year; the contribution by
+    entity is the trades' (a bar's P&L has no entity). Rejected: the
+    yearly rows from trades alone (the book's open positions would
+    leave the years), and `profit_factor` per period (the guideline's
+    thin-edge row is a trade statistic; `convention_metrics` keeps both
+    under its own names).
+  - **Tests.** `abt-tests/tests/metrics.rs::the_red_flag_rows_are_computed_as_stated_from_hand_built_fills`
+    (six bars across 1990 and four round trips, every row against a
+    hand computation, the mask and the empty case) and
+    `report_tables.rs` (the three tables of a grid plan). Falsified by
+    `scripts/mutations/q-3.1-hit-rate.patch` (a flat trade counted as a
+    win).
 
 ## Layout
 

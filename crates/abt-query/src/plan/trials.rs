@@ -45,7 +45,7 @@ fn metric_columns(os: &[&Outcome]) -> Vec<(&'static str, Col)> {
         ("sharpe_se", n(&|o| o.returns.sharpe_se)),
         ("sharpe_period", n(&|o| o.returns.sharpe_period)),
         ("sortino", n(&|o| o.returns.sortino)),
-        ("calmar", n(&|o| crate::metrics::objective_value("calmar", &o.returns, &o.trading).unwrap_or(f64::NAN))),
+        ("calmar", n(&|o| crate::metrics::objective_value("calmar", &o.returns, &o.trading, &o.trades).unwrap_or(f64::NAN))),
         ("max_drawdown", n(&|o| o.returns.max_drawdown)),
         ("max_drawdown_duration", c(&|o| o.returns.max_drawdown_duration)),
         ("cvar_5", n(&|o| o.returns.cvar_5)),
