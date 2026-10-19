@@ -1,0 +1,17 @@
+# proposition: E-101 (a continuous series goes through a session without the contract held)
+# mutation: such a session ends the series again
+# test: cargo test -p abt-data --test databento a_session_without_the_held_contract_does_not_end_the_series
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+index 1bbdb56..1ddfbf0 100644
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -847,7 +847,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
+                 // Only contracts expiring before the one held traded this
+                 // session (a thin deferred month, E-101): the session keeps
+                 // the contract held and has no bar of it; the series goes on.
+-                (None, Some(p)) => held.push(p),
++                (None, Some(_)) => break,
+                 (None, None) => break,
+             }
+         }
