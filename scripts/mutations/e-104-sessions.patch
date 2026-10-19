@@ -1,0 +1,17 @@
+# proposition: E-104 (a thin night's gaps stay inside the trade date)
+# mutation: any gap over session_gap ends a session again
+# test: cargo test -p abt-data --test databento a_thin_nights_gaps_stay_inside_the_trade_date
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+index e3388c3..b66da9b 100644
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -870,7 +870,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
+         let mut sessions: Vec<Session> = Vec::new();
+         for b in &rbars {
+             match sessions.last_mut() {
+-                Some(s) if b.t - s.close <= opts.session_gap || !ends_session(s.close, b.start, opts.session_break) => {
++                Some(s) if b.t - s.close <= opts.session_gap => {
+                     s.close = s.close.max(b.t);
+                     s.open = s.open.min(b.start);
+                 }
