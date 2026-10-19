@@ -23,7 +23,7 @@ class equity {
   delisted(A: Equity, @T, Reason: Label) complete                   # a status from the delisting bar on
   member(A: Equity, @T, List: Label) complete
   classification(A: Equity, @T, Scheme: Label, Code: Label) complete
-  industry(A: Equity, @T, Group: Label, Industry: Label, SubIndustry: Label) complete   # GICS levels 2 to 4 of the classification's snapshot
+  industry(A: Equity, @T, Group: Label, Industry: Label, SubIndustry: Label) complete   # the GICS industry group, industry and sub-industry codes of the classification's snapshot
   margin(A: Equity, @T, Initial: Notional<USD>, Maintenance: Notional<USD>) complete   # per share, where the source publishes it (K-5.6)
 
   # Vocabularies (WF-15 checks a program's labels against them).
