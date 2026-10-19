@@ -2394,6 +2394,18 @@ batch driver agree on every corpus program. Each bless since:
     - K-9.3 puts every case in `tests/options.rs`. The futures and the
       limits have their own files, as the migration's plan lists them
       (M-7).
+- **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
+  adapter emitted only level 1 of `classification/classification_full`
+  (the sector), while the lake holds the four GICS levels of its snapshot.
+  A new relation `equity.industry(A, @T, Group, Industry, SubIndustry)`
+  carries levels 2 to 4 over the same days and membership intervals as
+  `equity.classification`, with the same `classification = snapshot DATE`
+  attribute; `need lists` brings it with `member` and `classification`.
+  [D] A relation of its own rather than three more columns of
+  `classification`: a program reading the sector keeps its arity. The
+  lake's classification is one snapshot (2026-09-21 today): no row exists
+  before its date, so an idea whose horizon precedes it cannot read an
+  industry, which is the point-in-time rule, not a gap.
 - **E-97 (Q-2.1, Q-2.3, P-3.4, A-4.1; the hold-out forms the pipeline
   needs: `after TIME`, `trailing:N%`, `trailing:Nmo`).** The pipeline
   design (`absolute-pipeline/docs/design/pipeline.md`, PL-6.6 item 2)

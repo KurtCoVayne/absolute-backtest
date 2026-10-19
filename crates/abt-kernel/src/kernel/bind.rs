@@ -1068,7 +1068,7 @@ fn need_relations(word: &str) -> &'static [&'static str] {
         "bars" => &["open", "high", "low", "close", "volume"],
         "actions" => &["split", "dividend", "special_dividend", "delisted"],
         "listing" => &["listed", "ticker", "usable"],
-        "lists" => &["member", "classification"],
+        "lists" => &["member", "classification", "industry"],
         "series" => &["value"],
         "sessions" => &["session"],
         "point_value" => &["point_value"],

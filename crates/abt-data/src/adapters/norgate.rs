@@ -602,6 +602,9 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     report.membership_intervals_split_at_missing_bars = membership.len().saturating_sub(clipped);
     // 8. Classification: the snapshot, from its date on.
     let mut classification: Vec<(i64, i64, Option<i64>, String)> = Vec::new();
+    // The deeper GICS levels of the same snapshot (industry group, industry,
+    // sub-industry), per asset; emitted as `equity.industry` (E-98).
+    let mut deeper: BTreeMap<i64, (i64, [Option<String>; 3])> = BTreeMap::new();
     let mut snapshot: Option<i64> = None;
     if let Ok(cb) = read(lake, "classification/classification_full", &["asset_id", "scheme", "level", "code", "snapshot_date"], |_| true) {
         for b in &cb {
@@ -614,6 +617,11 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
                     continue;
                 }
                 snapshot = Some(snapshot.map_or(d, |x| x.max(d)));
+                if (2..=4).contains(&l) && d <= last_day && idset.contains(&a) {
+                    let e = deeper.entry(a).or_insert((d, [None, None, None]));
+                    e.0 = e.0.max(d);
+                    e.1[(l - 2) as usize] = Some(c.clone());
+                }
                 if l != 1 || d > last_day || !idset.contains(&a) {
                     continue;
                 }
@@ -746,6 +754,32 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
         "equity.classification".into(),
         keyed(cls.0, cls.1, vec![("Scheme", schemes), ("Code", Arc::new(StringArray::from(cls.2)) as ArrayRef)])?,
     ));
+    // `equity.industry`: the snapshot's industry group, industry and
+    // sub-industry codes, over the same days and intervals as the sector.
+    let mut ind: (Vec<String>, Vec<i64>, [Vec<Option<String>>; 3]) = Default::default();
+    for (a, f, t, _) in &classification {
+        let Some((_, levels)) = deeper.get(a) else { continue };
+        for &d in days_all.iter().filter(|d| **d >= *f && t.is_none_or(|t| **d <= t)) {
+            ind.0.push(key(*a));
+            ind.1.push(t_of(d));
+            for (k, l) in levels.iter().enumerate() {
+                ind.2[k].push(l.clone());
+            }
+        }
+    }
+    let [g, i, sub] = ind.2;
+    relations.push((
+        "equity.industry".into(),
+        keyed(
+            ind.0,
+            ind.1,
+            vec![
+                ("Group", Arc::new(StringArray::from(g)) as ArrayRef),
+                ("Industry", Arc::new(StringArray::from(i)) as ArrayRef),
+                ("SubIndustry", Arc::new(StringArray::from(sub)) as ArrayRef),
+            ],
+        )?,
+    ));
     if !opts.series.is_empty() {
         for (_, name) in &opts.series {
             report.series_rows.insert(name.clone(), series.keys().filter(|(n, _)| n == name).count());
@@ -785,6 +819,7 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     per.entry("equity.delisted".into()).or_default().insert("delisting_reason".into(), "inferred".into());
     if let Some(s) = snapshot {
         per.entry("equity.classification".into()).or_default().insert("classification".into(), format!("snapshot {}", ymd(s)));
+        per.entry("equity.industry".into()).or_default().insert("classification".into(), format!("snapshot {}", ymd(s)));
     }
     Ok((
         Fetched {
@@ -868,7 +903,7 @@ impl Norgate {
 
 /// The equity relations the lake provides (the tickers also come with the
 /// securities, into the registry's `ticker` spans).
-pub const RELATIONS: [&str; 12] = [
+pub const RELATIONS: [&str; 13] = [
     "open",
     "high",
     "low",
@@ -881,6 +916,7 @@ pub const RELATIONS: [&str; 12] = [
     "delisted",
     "member",
     "classification",
+    "industry",
 ];
 
 impl Adapter for Norgate {

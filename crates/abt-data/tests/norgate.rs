@@ -309,6 +309,12 @@ fn the_lake_becomes_the_equity_class_with_its_decisions() {
     assert_eq!(of(cls, "1"), (12..20).collect::<Vec<_>>());
     assert_eq!(cls.column(3).as_string::<i32>().value(0), "45");
     assert_eq!(report.classification_snapshot.as_deref(), Some("2014-01-14"));
+    // The deeper levels of the same snapshot over the same days (E-98): the
+    // fixture has the industry group, not the industry or sub-industry.
+    let ind = relation(&f, "equity.industry");
+    assert_eq!(of(ind, "1"), (12..20).collect::<Vec<_>>());
+    assert_eq!(ind.column(2).as_string::<i32>().value(0), "4510");
+    assert!(ind.column(3).is_null(0) && ind.column(4).is_null(0));
     // The reviewed exception that names an exported symbol is kept.
     assert_eq!(report.exceptions, 1);
     assert!(f.attributes["reviewed_exceptions"].contains("\"key\":\"1\""), "{}", f.attributes["reviewed_exceptions"]);

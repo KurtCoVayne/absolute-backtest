@@ -165,6 +165,12 @@ pub fn classes() -> Vec<ClassDef> {
                         vec![
                             rel("member", vec![arg("A", "Equity"), at("T"), arg("List", "Label")], true, None),
                             rel("classification", vec![arg("A", "Equity"), at("T"), arg("Scheme", "Label"), arg("Code", "Label")], true, None),
+                            rel(
+                                "industry",
+                                vec![arg("A", "Equity"), at("T"), arg("Group", "Label"), arg("Industry", "Label"), arg("SubIndustry", "Label")],
+                                true,
+                                Some("the GICS industry group, industry and sub-industry codes of the classification's snapshot"),
+                            ),
                             margin("Equity", "per share, where the source publishes it (K-5.6)"),
                         ],
                     ]
