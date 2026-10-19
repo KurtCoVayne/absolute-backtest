@@ -276,7 +276,7 @@ Demand { class, needs: [Need], require: [Attribute], prefer: [Preference], budge
 Need        { relations: [name], calendar: ≼ C, span: [from, to], scope: all | list(L) | instruments([(id | symbol, from)]), attributes }
 DynamicNeed { relation: quote | greeks, underlying: Entity, filters: chain filters (4.4), spot: (relation, column), horizon: Duration }
 Budget      { money: Num = 0, bytes: Count = ∞, requests: Count = ∞, seconds: Num = ∞ }
-Preference  = tested | latest | version(v) | finest | fewest_sources | cheapest
+Preference  = tested | latest | version(v) | finest | fewest_sources | cheapest | source(s)
 ```
 
 A `Need` is satisfied by a source offering the relations on a calendar at least as fine as `C` (the coarser one being a derived view, 6.2) over a span covering [`from`, `to`], with the attributes (`reviewed = complete`, `receipt = recorded`); the kernel decides which attributes it requires (K-3.2), the resolver only matches them.

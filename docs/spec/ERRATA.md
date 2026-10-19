@@ -2579,8 +2579,8 @@ batch driver agree on every corpus program. Each bless since:
   (iteration 3); the Databento half of the sizing run on the full history
   (the bucket's per-day objects; `docs/iterations/01-foundation.md`).
 - **E-92 (ST-3.2, ST-5.1, ST-13, D-2.4, K-6.5, A-4.1, A-D52, A-D53,
-  A-D54, A-D55; iteration 1, phase 5).** Four findings of the phase 4 and
-  5 runs, each fixed with its test. The kernel service's `live-sim` arm took the
+  A-D54, A-D55, A-D56; iteration 1, phase 5).** Five findings of the
+  phase 4 and 5 runs, each fixed with its test. The kernel service's `live-sim` arm took the
   session from the request alone, so a run whose session the deployment's
   `recording stream` names was refused (phase 5's rehearsal went through
   the front, which resolved it): `kernel/service.rs` now derives it with
@@ -2620,3 +2620,20 @@ batch driver agree on every corpus program. Each bless since:
   `--replay-of` run replays, into π (`bind::run_step`); replay-sim runs
   over a binding alone keep their ids, so no golden moves
   (`replay.rs::a_run_id_names_the_session_it_reads_or_the_recording_it_replays`).
+  With its own id, that rehearsal ran through the kernel service to the
+  end, but the replay of its recording decided differently: the store
+  held three sessions of the same two instruments, and the resolver,
+  with no preference to go by, bound the first source by name (`s1`) for
+  the live run and its replay alike, so the replay read the oldest
+  session's rows under the newest's barriers. A-D56 adds `source(s)` to
+  the demand's preferences (`PreferenceKind::Source` on the wire, the
+  named source's versions first in `resolver/plan.rs`), the kernel
+  names its session in a live run and, in a replay, the session the
+  recording read, which `service.rs` now records by putting
+  `kernel.<run>.clock` under the session's name rather than `live`
+  (`bind::recorded_session`); the resolver also holds each current
+  version under the source it is current for, where it read the
+  version record's source, which two sessions' empty preludes (one
+  content, one version, one record) had made the same; `resolver.rs::a_source_preference_binds_that_source_first`
+  and `replay.rs::a_live_run_and_its_replay_bind_the_session_among_other_sources`
+  (a decoy source sorting first in the store).

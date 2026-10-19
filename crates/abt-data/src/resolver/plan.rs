@@ -278,12 +278,21 @@ fn relation_plan(
 ) -> Result<RelationPlan, DataError> {
     let require: Vec<Attribute> = demand.require.clone().unwrap_or_default();
     let reg = &store.registry;
-    let mut held: Vec<&VersionRecord> = match named {
+    // Each current version under the source it is current for: a version
+    // two sources share (the same content, as two sessions' empty preludes)
+    // is held under each name (A-D56).
+    let mut held: Vec<VersionRecord> = match named {
         Some(v) => reg
             .versions()
             .filter(|r| r.relation == rel && (r.version == v || (v.len() >= 8 && r.version.starts_with(v)) || r.attributes.get("version").map(String::as_str) == Some(v)))
+            .cloned()
             .collect(),
-        None => reg.currents().into_iter().filter(|(r, _, _)| r == rel).filter_map(|(_, _, v)| reg.version(&v)).collect(),
+        None => reg
+            .currents()
+            .into_iter()
+            .filter(|(r, _, _)| r == rel)
+            .filter_map(|(_, s, v)| reg.version(&v).map(|r| VersionRecord { source: s, ..r.clone() }))
+            .collect(),
     };
     held.sort_by(|a, b| (&a.source, &a.version).cmp(&(&b.source, &b.version)));
     // The offers that satisfy the need; none when a version is named (a
@@ -306,17 +315,18 @@ fn relation_plan(
         };
         return Err(DataError::Unresolved(format!("need `{}` of class {}: {}", label, demand.class, what)));
     }
-    let mut fits: Vec<&VersionRecord> = held
-        .iter()
-        .copied()
-        .filter(|v| lacks(version_calendar(store, v).as_deref(), &v.attributes, need, &require).is_empty())
-        .collect();
+    let mut fits: Vec<&VersionRecord> = held.iter().filter(|v| lacks(version_calendar(store, v).as_deref(), &v.attributes, need, &require).is_empty()).collect();
     // The preferences order the store's versions (each costs nothing).
     if prefer.contains(&PreferenceKind::Finest) {
         fits.sort_by_key(|v| version_calendar(store, v).as_deref().and_then(calendar_nanos).unwrap_or(i64::MAX));
     }
     if prefer.contains(&PreferenceKind::Reviewed) {
         fits.sort_by_key(|v| !v.attributes.contains_key("reviewed"));
+    }
+    // A named source first (a live run's session, A-D56); the others keep
+    // their order, so a need the source does not cover binds as before.
+    if let Some(src) = demand.prefer.iter().flatten().find(|p| p.kind == PreferenceKind::Source).and_then(|p| p.version.as_deref()) {
+        fits.sort_by_key(|v| v.source != src);
     }
     if fits.is_empty() && offers.is_empty() {
         let why: Vec<String> = held

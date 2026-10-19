@@ -246,8 +246,9 @@ Each with the alternative rejected (the rows in `00-architecture.md` 3 say why):
 | A-D53 | a continuous future's back-adjustment on the root's decimal grid: the Databento adapter takes the roll gaps, the sessions' adjustments and the adjusted prices as integers at the exponent of its prices and tick sizes, divided once | `f64` addition throughout (cent-grid prices came out an ulp off every grid after a roll; their blocks lost the exact view; the Databento subset failed S4) |
 | A-D54 | a value off every decimal grid keeps its bits in the `f64` view and counts as 0 in the summaries, cumulatives and decoded integers alike; its column has no exact view (`exact` and `ticks` refused naming it) | the block's base at the position (an unpatched decode: the structures and the rows disagreed), or refusing the whole relation (its other columns are exact) |
 | A-D55 | a run's id names the live session it reads or the recording it replays (π carries them; replay-sim runs over a binding keep their ids) | the mode alone (a second rehearsal on one binding got the first's id and the store refused its rows as a conflicting revision), or the session in β (a binding pins versions; a session's rows are none until recorded) |
+| A-D56 | a live run binds its session's versions and a replay those of the session its recording read: `prefer source(s)` in the demand, the run's clock recorded under the session's name | the resolver's default order (the first source by name: the rehearsal's replay read the oldest session's rows), requiring the session as an attribute of every need (needs the session does not cover would be unresolvable), or binding the replay to the live run's recorded pairs (which were the wrong session's too) |
 
-Errata E-83 to E-90 record how each of M-0 to M-2 was built against the documents' wording; E-91 records this iteration's phases 3 to 5, and E-92 the four findings of its runs (the kernel service's `live-sim` session, the Databento subset's S4 failure and its cause, the run id of a second rehearsal).
+Errata E-83 to E-90 record how each of M-0 to M-2 was built against the documents' wording; E-91 records this iteration's phases 3 to 5, and E-92 the five findings of its runs (the kernel service's `live-sim` session, the Databento subset's S4 failure and its cause, the run id of a second rehearsal, the session a rehearsal's replay binds).
 
 ### Open questions for the owner
 
@@ -256,6 +257,20 @@ Errata E-83 to E-90 record how each of M-0 to M-2 was built against the document
 3. **G1 on the v2 books.** `~/data/ref` and the books' bundles are the owner's; the stand-in is `tv_golden.rs`.
 4. **The ORATS samples** (ST-11) were not pulled: the encoding study's ORATS sections are skipped and said so.
 5. **The exponent a block takes, and the ladder's padded blocks** (phase 4): NDLake's prices are `f32` adjusted values with decimals to 10⁻⁸, so a 1,024-row block takes an exponent of 5 or 6 and 28 bits per value where the study's 184-row blocks took 13; the four daily ladder levels cost one padded block per instrument, level and column. The choices for iteration 2, the owner's since they touch ST-3 and ST-4: (a) a cost-based exponent per block with the off-grid values as raw-bit exceptions, which halves the base columns and refuses `exact` on such blocks under A-D49's rule, or a per-block `exact` refusal instead of per column; (b) shorter blocks, or the study's instrument-year blocks, for daily data; (c) a compact block for a level with fewer than 1,024 rows per instrument, or coarse levels built on demand. The measured store stands as the baseline either way.
+
+### Cadence rules for the next iterations
+
+Set by the owner after this iteration's phase 5, from what it cost:
+
+1. Cheap checks before expensive ones, always in this order: (a) the targeted test binaries of the crates touched (`cargo test -p <crate> --test <file>`); (b) the deployment rehearsal script with release binaries (minutes, no cargo); (c) the full workspace suite; (d) the socket-transport pass. Never start (c) before (a) and (b) are green for the whole batch of pending fixes.
+2. Batch fixes into one gated commit. A finding from a run goes into the current batch; the full suite runs once per batch, not once per fix. Each commit still passes the gate; a commit may carry several findings, listed in its message.
+3. Reproduce in-process before touching a deployment store: print the registry's versions (relation, source, rows, current) and the binding pairs of the run under test as the first debugging step, and write the reproducing test from those facts, not from a hypothesis.
+4. Rehearsals run on a fresh copy of the base store, one session per copy, named with the run's purpose. Never record a second session of the same instruments into a store already holding one.
+5. Wire-schema and shared-crate changes (`abt-wire`, `abt-codec`, `abt-agg`) are made first in a batch, once, since they force a rebuild of every test binary.
+6. After every full gate: delete `target/debug/incremental` and the stale duplicate test binaries in `target/debug/deps`, then record `df -h` in the gate log. Start no build under 5 GB free.
+7. Docs edits (spec, ERRATA, TRACE, report) are made while a gate compiles and written to the working tree at once, never held in a long-running script. Commit the docs with the code they describe.
+8. The final report's gate table cites one full run over the final tree plus one socket run; intermediate gates are listed by commit with their counts.
+9. Budget: one fix-and-gate cycle per finding at most. If a rehearsal finding survives one cycle, write it up as an open item with the reproducing test marked `#[ignore]` and its reason, and ship the PR.
 
 ### Iteration 2 (plan)
 

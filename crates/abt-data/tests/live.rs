@@ -145,10 +145,11 @@ fn a_live_stream_emits_its_barriers_after_the_bars_accepted_within_grace_and_rep
     assert!(tuples.windows(2).all(|w| w[0].3 <= w[1].3));
     // seq is gap-free from 1.
     assert!(live.iter().enumerate().all(|(i, e)| e.0 == i as u64 + 1));
-    // The recorded stream: the session's versions and the recorded clock.
+    // The recorded stream: the session's versions and the recorded clock,
+    // put under the session's name (A-D56).
     let recorded = {
         let st = svc.store();
-        let clock = st.registry.current("kernel.r1.clock", Some("live")).unwrap().to_string();
+        let clock = st.registry.current("kernel.r1.clock", Some("s1")).unwrap().to_string();
         assert_eq!(st.read_all(&clock).unwrap().num_rows(), 6);
         let mut relations: Vec<VersionRef> = ["equity.close", "equity.volume"]
             .iter()

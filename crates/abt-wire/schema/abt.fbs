@@ -269,7 +269,9 @@ table Budget {
   seconds: double = null;
 }
 
-enum PreferenceKind : ubyte { Reviewed = 0, Latest = 1, Version = 2, Finest = 3, FewestSources = 4, Cheapest = 5 }
+// Source: the versions of the source `version` names come first (a live
+// run's session, A-D56); the others keep their order.
+enum PreferenceKind : ubyte { Reviewed = 0, Latest = 1, Version = 2, Finest = 3, FewestSources = 4, Cheapest = 5, Source = 6 }
 
 table Preference {
   kind: PreferenceKind;

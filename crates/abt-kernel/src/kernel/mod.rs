@@ -3932,7 +3932,7 @@ pub enum Next {
 /// calendar's bars, the sample a plan places its hold-out and its
 /// walk-forward folds in (Q-2.3).
 pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig) -> Result<serde_json::Value, RunError> {
-    let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides))?;
+    let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides), None)?;
     let probe = Kernel::build(prog, &bound, cfg.clone())?;
     let labels: Vec<i64> = bind::calendars(&probe).pop().map(|(_, l)| l).unwrap_or_default();
     let relations: Vec<serde_json::Value> = bound
@@ -3968,7 +3968,14 @@ pub fn replay_observed<'p>(
     on_checkpoint: &mut dyn FnMut(Checkpoint),
     on_progress: &mut dyn FnMut(Progress, &mut Kernel<'p>, &RunResult) -> Result<Next, RunError>,
 ) -> Result<(RunResult, Kernel<'p>), RunError> {
-    let mut bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides))?;
+    // The versions a live run binds first are its session's, and a replay's
+    // those of the session its recording read (A-D56).
+    let preferred: Option<String> = match (&opts.replay_of, opts.mode.session()) {
+        (Some(run), _) => bind::recorded_session(client, run)?,
+        (None, Some(s)) => Some(s.to_string()),
+        (None, None) => None,
+    };
+    let mut bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides), preferred.as_deref())?;
     // A live-sim run's bars are its session's plan, which its data does not
     // hold yet; a replay of one reads the bars its stream recorded (K-6.2,
     // D-5.5). The data layer would answer a pushed aggregate at the bucket's

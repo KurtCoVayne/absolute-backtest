@@ -126,6 +126,28 @@ fn a_need_binds_the_version_that_satisfies_it() {
     assert_eq!(bound(&s, &d).unwrap()["equity.close"], raw);
 }
 
+/// A-D56: a `source` preference binds the named source's versions first
+/// where it holds the relation, and leaves every other need as it was.
+#[test]
+fn a_source_preference_binds_that_source_first() {
+    use abt_wire::generated::abt::wire::PreferenceKind;
+    let (s, reviewed, raw) = store();
+    let prefer = |src: &str| {
+        Some(Preference {
+            kind: PreferenceKind::Source,
+            version: Some(src.into()),
+        })
+    };
+    // `raw` sorts first by name; the preference puts `vendor` first.
+    let d = demand(vec![need(&["close"], None, &[])], false, prefer("vendor"));
+    assert_eq!(bound(&s, &d).unwrap()["equity.close"], reviewed);
+    let d = demand(vec![need(&["close"], None, &[])], false, prefer("raw"));
+    assert_eq!(bound(&s, &d).unwrap()["equity.close"], raw);
+    // A source holding no fitting version changes nothing.
+    let d = demand(vec![need(&["close"], None, &[])], false, prefer("nobody"));
+    assert_eq!(bound(&s, &d).unwrap()["equity.close"], raw);
+}
+
 #[test]
 fn an_unsatisfied_need_is_refused_with_what_each_version_lacks() {
     let (s, _, _) = store();

@@ -94,7 +94,7 @@ fn the_kernel_sends_the_demand_its_data_block_writes() {
     let src = trading("need bars @1d from 2020-01-01 complete   need listing   require reviewed   prefer version \"2026.10\"   budget { requests 5 }");
     let p = common::program(&src, "s");
     assert!(p.demand.require_reviewed);
-    let d = demand_of(&p, &|n| Some(format!("equity.{}", n)));
+    let d = demand_of(&p, &|n| Some(format!("equity.{}", n)), None);
     let needs = d.needs.clone().unwrap();
     let bars = needs.iter().find(|n| n.relations.contains(&"equity.close".to_string())).expect("the bars need");
     assert_eq!(bars.label.as_deref(), Some("bars @1d from 2020-01-01 complete"));

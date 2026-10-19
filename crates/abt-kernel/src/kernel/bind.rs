@@ -480,7 +480,7 @@ fn col<'b>(b: &'b RecordBatch, name: &str) -> Result<&'b ArrayRef, RunError> {
 /// The Bind stage: the binding of the program's demand and what the kernel
 /// reads before the stream.
 pub fn bind(prog: &Program, client: &DataClient) -> Result<Bound, RunError> {
-    bind_at(prog, client, &point_of(prog, &[]))
+    bind_at(prog, client, &point_of(prog, &[]), None)
 }
 
 /// The parameter point of a run (D-7.5): every parameter of the program at
@@ -501,7 +501,9 @@ pub fn point_of(prog: &Program, overrides: &[(String, crate::Lit)]) -> Vec<Param
 
 /// `bind` at a parameter point: the binding carries it (D-7.5), so two
 /// points are two bindings.
-pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Result<Bound, RunError> {
+/// `source` names the versions bound first where it holds the relation
+/// (a live run's session, a replay's recording: A-D56).
+pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source: Option<&str>) -> Result<Bound, RunError> {
     let all = client.schemas(None)?;
     let by_name: BTreeMap<String, RelationSchema> = all.iter().map(|s| (s.name.clone(), s.clone())).collect();
     // The store's name of a relation: the program's class's, else the one
@@ -521,7 +523,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue]) -> Res
         first.filter(|_| others.next().is_none())
     };
     let primitives: Vec<&str> = prog.relations.iter().filter(|(_, s)| matches!(s.kind, Kind::Primitive { .. })).map(|(n, _)| n.as_str()).collect();
-    let mut demand = demand_of(prog, &stored_name);
+    let mut demand = demand_of(prog, &stored_name, source);
     demand.point = Some(point.to_vec());
     let (binding, steps, notes) = client.resolve(demand)?;
     let mut warnings = binding_warnings(prog, &steps);
@@ -1083,7 +1085,7 @@ fn need_relations(word: &str) -> &'static [&'static str] {
 /// every version for a `reviewed` attribute (an empty value: any). A
 /// relation the store has no schema for is named in the program's class,
 /// so that the resolver refuses it by name.
-pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -> Demand {
+pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>, source: Option<&str>) -> Demand {
     let d = &prog.demand;
     let mut needs = Vec::new();
     let mut need = |word: &str, label: String, calendar: Option<String>, from: Option<i64>, complete: bool| {
@@ -1206,7 +1208,14 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>) -
                 value: String::new(),
             }]
         }),
-        prefer: Some(vec![prefer]),
+        prefer: Some(
+            std::iter::once(prefer)
+                .chain(source.map(|s| Preference {
+                    kind: PreferenceKind::Source,
+                    version: Some(s.to_string()),
+                }))
+                .collect(),
+        ),
         budget: Some(Box::new(Budget {
             money: d.budget.as_ref().and_then(|b| b.money).unwrap_or(0.0),
             bytes: d.budget.as_ref().and_then(|b| b.bytes).map(|x| x as i64),
@@ -1388,15 +1397,32 @@ pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) ->
 
 /// The current version of a relation, from the data layer's statistics.
 fn current_version(client: &DataClient, relation: &str) -> Result<Option<String>, RunError> {
+    Ok(current_version_source(client, relation)?.map(|(v, _)| v))
+}
+
+/// A relation's current version and the source it was put under.
+fn current_version_source(client: &DataClient, relation: &str) -> Result<Option<(String, String)>, RunError> {
     for b in client.stats()? {
-        let (rel, version, current) = (strings(col(&b, "relation")?)?, strings(col(&b, "version")?)?, col(&b, "current")?.as_boolean().clone());
+        let (rel, version, source, current) = (
+            strings(col(&b, "relation")?)?,
+            strings(col(&b, "version")?)?,
+            strings(col(&b, "source")?)?,
+            col(&b, "current")?.as_boolean().clone(),
+        );
         for i in 0..b.num_rows() {
             if rel[i].as_deref() == Some(relation) && current.value(i) {
-                return Ok(version[i].clone());
+                return Ok(version[i].clone().map(|v| (v, source[i].clone().unwrap_or_default())));
             }
         }
     }
     Ok(None)
+}
+
+/// The session a recorded run read: the source its recorded clock
+/// (`kernel.<run>.clock`) was put under (A-D56); `None` for a run that
+/// recorded no stream (`recorded_clock` refuses it, after the mode checks).
+pub fn recorded_session(client: &DataClient, run: &str) -> Result<Option<String>, RunError> {
+    Ok(current_version_source(client, &format!("kernel.{}.clock", run))?.map(|(_, source)| source).filter(|s| !s.is_empty()))
 }
 
 /// The labels of a clock relation's calendar (`base`), read at its current

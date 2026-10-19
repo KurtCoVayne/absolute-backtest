@@ -69,11 +69,25 @@ fn session(tag: &str, bars: i64) -> (Arc<DataService>, Arc<dyn Clock>, abt_data:
 
 /// `session` with the session's name given.
 fn session_named(tag: &str, name: &str, bars: i64) -> (Arc<DataService>, Arc<dyn Clock>, abt_data::live::Recording) {
+    session_with(tag, name, bars, None)
+}
+
+/// `session_named` over a store that, with `decoy`, already holds the
+/// same instruments from another feed (other prices, no bar) under that
+/// source name.
+fn session_with(tag: &str, name: &str, bars: i64, decoy: Option<&str>) -> (Arc<DataService>, Arc<dyn Clock>, abt_data::live::Recording) {
     let labels: Vec<i64> = (1..=bars).map(|k| abt_wire::scalar::parse_timestamp("2024-03-11T14:30:00").unwrap() + k * MIN).collect();
     let clock: Arc<dyn Clock> = Arc::new(ScaledClock::new(labels[0] - MIN / 2, RATE));
     let grace: BTreeMap<String, i64> = [("base".to_string(), 20_000_000_000)].into_iter().collect();
-    let svc = DataService::with_clock(Store::temporary(tag).unwrap(), Sources::store_only(), clock.clone(), grace);
     let feed = SyntheticFeed::new(clock.clone(), &["AAA", "BBB"], labels.clone(), 50_000_000, 11);
+    let mut store = Store::temporary(tag).unwrap();
+    if let Some(source) = decoy {
+        // The day before, so that no row of the decoy is one of the session's.
+        let earlier: Vec<i64> = labels.iter().map(|l| l - 24 * 60 * MIN).collect();
+        let other = SyntheticFeed::new(clock.clone(), &["AAA", "BBB"], earlier, 50_000_000, 12);
+        other.prelude().unwrap().ingest(&mut store, "synthetic", source, &BTreeMap::new()).unwrap();
+    }
+    let svc = DataService::with_clock(store, Sources::store_only(), clock.clone(), grace);
     svc.open_session(name, "synthetic", &feed.prelude().unwrap(), &labels).unwrap();
     let recorder = svc.record(name, "synthetic", Box::new(feed));
     (svc, clock, recorder)
@@ -139,6 +153,35 @@ fn a_run_id_names_the_session_it_reads_or_the_recording_it_replays() {
     assert_ne!(id(Some("s1"), None, "live-sim"), id(Some("s1"), None, "live-broker"));
     assert_ne!(id(None, Some(&a.run_id), "replay-sim"), id(None, Some(&b.run_id), "replay-sim"));
     assert_ne!(id(None, Some(&a.run_id), "replay-sim"), id(None, None, "replay-sim"));
+}
+
+/// A-D56: a live run binds its session's versions and its replay the
+/// same, whatever other sources the store holds: a decoy version of the
+/// session's relations from a source that sorts first (`a0`: the same
+/// instruments from another feed, no bar) is in the store before the
+/// session opens.
+#[test]
+fn a_live_run_and_its_replay_bind_the_session_among_other_sources() {
+    let prog = common::program(&source("late send"), "g4");
+    let (svc, clock, recorder) = session_with("g4-decoy", "s2", 6, Some("a0"));
+    let live_run = live_in(&prog, &svc, &clock, None, "s2");
+    recorder.join().unwrap().unwrap();
+    assert!(!live_run.fills.is_empty(), "the session trades: {:?}", events(&live_run));
+    let client = DataClient::connect(inproc(&svc)).unwrap();
+    let replayed = run_on(
+        &prog,
+        None,
+        &client,
+        ExecConfig::from_program(&prog),
+        &Replay {
+            replay_of: Some(live_run.run_id.clone()),
+            write_outputs: true,
+            ..Replay::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(events(&live_run), events(&replayed));
+    assert_eq!(live_run.bars, replayed.bars);
 }
 
 #[test]

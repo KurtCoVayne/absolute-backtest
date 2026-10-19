@@ -529,7 +529,9 @@ impl DataService {
                 let at = self.clock.now().max(state.last_r);
                 state.last_at = state.last_at.max(at);
                 let rows = live::clock_rows(&[(calendars[k].as_str(), label, at)]).map_err(data)?;
-                let (v, _) = self.store_mut().put(&clock_schema, &[rows], "live").map_err(data)?;
+                // Under the session's name: a replay of the run finds the
+                // session it read there (A-D56).
+                let (v, _) = self.store_mut().put(&clock_schema, &[rows], &name).map_err(data)?;
                 v
             };
             let res = Resolved {
