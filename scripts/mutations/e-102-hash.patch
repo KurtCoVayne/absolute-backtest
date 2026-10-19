@@ -1,0 +1,16 @@
+# proposition: E-102 (a new need leaves the hashes of programs not writing it unchanged)
+# mutation: the demand serializes tick: false into every program's hash view
+# test: cargo test -p abt-tests --test checkpoint program_hashes_are_stable
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/check/mod.rs b/crates/abt-kernel/src/check/mod.rs
+index 8cac31c..1d1f9a6 100644
+--- a/crates/abt-kernel/src/check/mod.rs
++++ b/crates/abt-kernel/src/check/mod.rs
+@@ -330,7 +330,6 @@ pub struct Demand {
+     /// `need tick`: a future's minimum price increment (E-102). Left out of
+     /// the serialized demand when false, so the hash of a program that does
+     /// not write it is the hash it had before the field existed.
+-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+     pub tick: bool,
+     /// `need industry`: the classification's deeper levels (E-98), a need
+     /// of its own so that a program writing `need lists` keeps its hash.
