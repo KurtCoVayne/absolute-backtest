@@ -1,0 +1,17 @@
+# proposition: E-110 (a derived relation writes no log segment)
+# mutation: every write logs its rows again
+# test: cargo test -p abt-data --test service a_classless_schema_listing_leaves_derived_relations_out
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store.rs b/crates/abt-data/src/store.rs
+index 68cfab7..0a6d789 100644
+--- a/crates/abt-data/src/store.rs
++++ b/crates/abt-data/src/store.rs
+@@ -485,7 +485,7 @@ impl Store {
+         let version = identity.canonical_hash().map_err(|e| DataError::Malformed(e.to_string()))?.hex();
+         // Write: the log segment (an ingested relation's), the partitions,
+         // the manifest, the registry.
+-        if all.num_rows() > 0 && !derived(&relation) {
++        if all.num_rows() > 0 {
+             self.append_log(&relation, source, &stored, &all, first_seq, last_seq)?;
+         }
+         for (p, bytes, index) in files {

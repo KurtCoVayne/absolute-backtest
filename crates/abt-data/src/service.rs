@@ -38,9 +38,6 @@ use crate::stream::{self, Resolved, Stream, BATCH_EVENTS, SUBSCRIPTION_WINDOW};
 /// Frames in flight per direction of an in-process connection.
 const INPROC_BOUND: usize = 64;
 
-/// The families of relations the layers derive rather than ingest: a run's
-/// outputs, the query layer's records, the aggregates' cache objects.
-const DERIVED: [&str; 3] = ["kernel.", "query.", "cache."];
 
 pub struct DataService {
     store: RwLock<Store>,
@@ -580,7 +577,7 @@ impl Service for DataService {
                         .registry
                         .schemas(r.class.as_deref())
                         .into_iter()
-                        .filter(|s| r.class.is_some() || !DERIVED.iter().any(|d| s.name.starts_with(d)))
+                        .filter(|s| r.class.is_some() || !crate::store::derived(&s.name))
                         .collect(),
                 };
                 out.respond(Message::SchemaResponse(Box::new(SchemaResponse { schemas: Some(schemas) }))).map_err(wire)

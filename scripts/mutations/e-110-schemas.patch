@@ -3,14 +3,14 @@
 # test: cargo test -p abt-data --test service a_classless_schema_listing_leaves_derived_relations_out
 # Applied by scripts/mutate.sh; the test must fail under it.
 diff --git a/crates/abt-data/src/service.rs b/crates/abt-data/src/service.rs
-index 852ca94..7db85d0 100644
+index 339a988..6f63009 100644
 --- a/crates/abt-data/src/service.rs
 +++ b/crates/abt-data/src/service.rs
-@@ -580,7 +580,7 @@ impl Service for DataService {
+@@ -577,7 +577,7 @@ impl Service for DataService {
                          .registry
                          .schemas(r.class.as_deref())
                          .into_iter()
--                        .filter(|s| r.class.is_some() || !DERIVED.iter().any(|d| s.name.starts_with(d)))
+-                        .filter(|s| r.class.is_some() || !crate::store::derived(&s.name))
 +                        .filter(|_| true)
                          .collect(),
                  };

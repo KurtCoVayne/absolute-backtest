@@ -469,7 +469,7 @@ fn errors_carry_their_codes() {
 /// layers derive (a cache object here; a run's outputs and the query layer's
 /// records alike), which a day of runs made pass the control payload's
 /// 1 MiB and refuse every binding; asked by name or by class, a derived
-/// relation's schema is answered.
+/// relation's schema is answered. Such a relation writes no log segment.
 #[test]
 fn a_classless_schema_listing_leaves_derived_relations_out() {
     let svc = service();
@@ -477,7 +477,10 @@ fn a_classless_schema_listing_leaves_derived_relations_out() {
         let mut st = svc.store_mut();
         let schema = st.schema("calendar_label").unwrap();
         st.cache_put(&abt_wire::Hash::of(b"an aggregate"), &schema, &[calendar_rows(&[T0])]).unwrap();
-        st.registry.schemas(None).into_iter().map(|s| s.name).find(|n| n.starts_with("cache.")).expect("the cache object's relation")
+        let name = st.registry.schemas(None).into_iter().map(|s| s.name).find(|n| n.starts_with("cache.")).expect("the cache object's relation");
+        // Its rows are in its partitions only: no log segment.
+        assert!(!st.root().join("log").join(&name).exists(), "a log for {}", name);
+        name
     };
     let c = client(inproc(&svc));
     let names = |class: Option<&str>, relation: Option<&str>| -> Vec<String> {

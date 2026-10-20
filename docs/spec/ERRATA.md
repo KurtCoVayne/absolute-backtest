@@ -2636,7 +2636,12 @@ batch driver agree on every corpus program. Each bless since:
   payload's 1 MiB (P-2.2), so every binding (which asks it and never read
   those families) was refused. The class-less listing leaves `kernel.*`,
   `query.*` and `cache.*` out; asked by name or by class they are
-  answered (`abt-data/tests/service.rs`). `abt-tests/tests/service_memory.rs`: a
+  answered (`abt-data/tests/service.rs`). Those relations also wrote
+  every row to the log as well as to their partitions: an aggregate's
+  cache object logged 30 to 45 MB, 20 GB of the Norgate store's 22 GB of
+  log in an evening, and no reader asks a log of them (only a hot
+  version replays its tails from it). They write their partitions
+  only. `abt-tests/tests/service_memory.rs`: a
   cross-sectional strategy over 300 names and 1,000 days, run and
   released through the kernel service; of the 360 to 414 MB each later
   run takes, at most a quarter stays (146 MB before run 2, 508 at its

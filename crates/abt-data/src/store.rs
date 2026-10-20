@@ -50,6 +50,18 @@ pub const CONSOLIDATE_BYTES: u64 = 512 << 20;
 const FILES_KEPT: usize = 8192;
 const MANIFESTS_KEPT: usize = 4096;
 
+/// The families of relations the layers derive rather than ingest (E-110):
+/// a run's outputs, the query layer's records, the aggregates' cache
+/// objects. They are no run's inputs, and their Parquet partitions are
+/// their only copy: no log segment is written for them (an aggregate's
+/// cache object logged some 30 MB of rows no reader asks of a log).
+pub const DERIVED: [&str; 3] = ["kernel.", "query.", "cache."];
+
+/// Whether a relation is one the layers derive (`DERIVED`).
+pub fn derived(relation: &str) -> bool {
+    DERIVED.iter().any(|d| relation.starts_with(d))
+}
+
 /// A partition of a version: one bucket's rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartitionRef {
@@ -471,8 +483,9 @@ impl Store {
             "attributes": attributes,
         });
         let version = identity.canonical_hash().map_err(|e| DataError::Malformed(e.to_string()))?.hex();
-        // Write: the log segment, the partitions, the manifest, the registry.
-        if all.num_rows() > 0 {
+        // Write: the log segment (an ingested relation's), the partitions,
+        // the manifest, the registry.
+        if all.num_rows() > 0 && !derived(&relation) {
             self.append_log(&relation, source, &stored, &all, first_seq, last_seq)?;
         }
         for (p, bytes, index) in files {
