@@ -2681,6 +2681,17 @@ batch driver agree on every corpus program. Each bless since:
   VIX1D, RVX, OVX, GVZ, VXEEM, VXEFA, VXEWZ and VXTLT at `@1d`, so that
   `need series "VXN" @1d` binds as `need series "VIX_D" @1d` does.
   `abt-tests/tests/needs.rs`.
+- **E-114 (Q-6.2; a trade open at a window's start).** The trade
+  metrics of a window (a reveal's out-of-sample bars, a plan's in-sample
+  ones) paired the window's fills alone into round trips: a window
+  opening on a held position read its exit as an entry, and the market's
+  position count stayed off for the rest of the window, so none of its
+  trades closed. A reveal over one market held across the boundary
+  reported 0 trades (17 by its NAV), and markets held at the boundary
+  vanished from the trade counts, profit factor, hit rate and per-entity
+  rows, their P&L still in the net profit. The round trips are the
+  run's, each the window's when the fill that closes it is, with the
+  whole round trip's P&L. `abt-query/tests/trades.rs`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

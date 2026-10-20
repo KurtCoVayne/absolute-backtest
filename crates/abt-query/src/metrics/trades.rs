@@ -123,20 +123,28 @@ struct Trade {
     closed: i64,
 }
 
-/// The round trips among the fills kept, in the order they close.
+/// The round trips of the run that close at a time `keep` admits, in the
+/// order they close, each with its whole P&L.
 fn round_trips(r: &Run, keep: &dyn Fn(i64) -> bool) -> Vec<Trade> {
     let mut open: BTreeMap<Option<u64>, (f64, f64)> = BTreeMap::new();
     let mut out = Vec::new();
-    for f in r.fills.iter().filter(|f| keep(f.t)) {
+    // Every fill of the run counts toward its round trip; a trade is the
+    // window's when the fill that closes it is (E-114). The fills were the
+    // window's alone: a window opening on a held position read its exit as
+    // an entry, and the market's trades never closed (a reveal over one
+    // market reported none, its P&L in the net profit all the same).
+    for f in &r.fills {
         let (pos, flow) = open.entry(f.instrument).or_insert((0.0, 0.0));
         *pos += f.quantity;
         *flow += -f.quantity * f.price * f.multiplier - f.commission - f.fee;
         if pos.abs() < 1e-9 {
-            out.push(Trade {
-                entity: f.instrument,
-                pnl: *flow,
-                closed: f.t,
-            });
+            if keep(f.t) {
+                out.push(Trade {
+                    entity: f.instrument,
+                    pnl: *flow,
+                    closed: f.t,
+                });
+            }
             open.remove(&f.instrument);
         }
     }
