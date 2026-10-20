@@ -1,0 +1,17 @@
+# proposition: E-118 (a compare step's metrics may be bracketed)
+# mutation: brackets kept, the list one metric's name again
+# test: cargo test -p abt-query --test plan a_compare_steps_metrics_may_be_bracketed
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-query/src/plan/parse.rs b/crates/abt-query/src/plan/parse.rs
+index 33378c1..1927a37 100644
+--- a/crates/abt-query/src/plan/parse.rs
++++ b/crates/abt-query/src/plan/parse.rs
+@@ -541,7 +541,7 @@ fn step(line: &str) -> Result<Step, String> {
+             // The metrics as a list or in brackets, as the house template
+             // writes them (`by [return, sharpe]`, E-118).
+             let by = by.trim();
+-            let by = by.strip_prefix('[').and_then(|b| b.strip_suffix(']')).unwrap_or(by);
++            let by = by.strip_prefix('{').and_then(|b| b.strip_suffix('}')).unwrap_or(by);
+             Step::Compare {
+                 name,
+                 runs: list(runs).iter().map(|r| Ref::parse(r)).collect(),
