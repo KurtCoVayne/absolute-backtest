@@ -98,6 +98,11 @@ impl fmt::Display for Resolution {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Cal {
     Base,
+    /// Periods of `n` minutes over a sub-daily base, counted from the
+    /// epoch in UTC: `minutes(n)`, `hours(n)` (`n` hours' minutes). A bar
+    /// is labelled at its close, so a period holds the bars labelled in
+    /// `(k·n, (k+1)·n]` minutes.
+    Minutes(u32),
     Days,
     Weeks(u32),
     Months(u32),
@@ -118,7 +123,7 @@ impl Cal {
             Cal::Weeks(_) => 2,
             Cal::Months(_) => 3,
             Cal::Years(_) => 4,
-            Cal::Sessions | Cal::SessionsOf(_) => return None,
+            Cal::Minutes(_) | Cal::Sessions | Cal::SessionsOf(_) => return None,
         })
     }
     /// `self` ≼ `other`: every class of `other` is a union of classes of
@@ -131,6 +136,12 @@ impl Cal {
         match (self, other) {
             (Cal::Weeks(a), Cal::Weeks(b)) | (Cal::Months(a), Cal::Months(b)) | (Cal::Years(a), Cal::Years(b)) => b % a == 0,
             (Cal::Months(a), Cal::Years(b)) => (12 * b) % a == 0,
+            // Minute periods nest when one's length divides the other's.
+            // They end at their bars' closes and a day at midnight, so a
+            // period ending at midnight is the next day's: no civil period
+            // is a union of them.
+            (Cal::Minutes(a), Cal::Minutes(b)) => *a > 0 && b % a == 0,
+            (Cal::Minutes(_), _) | (_, Cal::Minutes(_)) => false,
             (Cal::Sessions | Cal::SessionsOf(_), _) | (_, Cal::Sessions | Cal::SessionsOf(_)) => false,
             (a, b) => match (a.rank(), b.rank()) {
                 (Some(x), Some(y)) => x < y && !matches!((a, b), (Cal::Weeks(_), Cal::Months(_)) | (Cal::Weeks(_), Cal::Years(_))),
@@ -151,6 +162,8 @@ impl fmt::Display for Cal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Cal::Base => write!(f, "base"),
+            Cal::Minutes(n) if *n > 0 && n % 60 == 0 => write!(f, "hours({})", n / 60),
+            Cal::Minutes(n) => write!(f, "minutes({})", n),
             Cal::Days => write!(f, "days"),
             Cal::Weeks(n) => write!(f, "weeks({})", n),
             Cal::Months(n) => write!(f, "months({})", n),

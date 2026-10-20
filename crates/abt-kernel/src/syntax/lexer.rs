@@ -280,7 +280,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
             if text.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
                 let r = Resolution::parse(&text).ok_or_else(|| LexError {
                     span,
-                    message: format!("unknown resolution `@{}` (use @1m, @5m, @15m, @30m, @1h, @1d, @1w)", text),
+                    message: match n_hours_or_minutes(&text) {
+                        // N-hour and N-minute bars are a calendar over the
+                        // base, not a resolution a store holds.
+                        Some(cal) => format!(
+                            "unknown resolution `@{}` (use @1m, @5m, @15m, @30m, @1h, @1d, @1w): for {} bars, need bars at the base and declare a calendar, `calendars {{ c = {} }}`, then read `close@c(A, T, P)` or `decide on c`",
+                            text,
+                            text,
+                            cal
+                        ),
+                        None => format!("unknown resolution `@{}` (use @1m, @5m, @15m, @30m, @1h, @1d, @1w)", text),
+                    },
                 })?;
                 let k = j - i;
                 advance(&mut i, &mut line, &mut col, k);
@@ -363,6 +373,18 @@ pub fn date(y: i64, m: u32, d: u32) -> Option<i64> {
         return None;
     }
     Some(days_from_civil(y, m, d) * DAY)
+}
+
+/// `2h` as `hours(2)`, `90m` as `minutes(90)`: the calendar an N-hour or
+/// N-minute resolution names.
+fn n_hours_or_minutes(text: &str) -> Option<String> {
+    let (n, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit())?);
+    let n: u32 = n.parse().ok().filter(|n| *n > 0)?;
+    match unit {
+        "h" => Some(format!("hours({})", n)),
+        "m" | "min" => Some(format!("minutes({})", n)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

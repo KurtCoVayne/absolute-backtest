@@ -664,6 +664,8 @@ impl Parser {
         };
         Ok(match name.as_str() {
             "base" => Cal::Base,
+            "minutes" => Cal::Minutes(count(self)?),
+            "hours" => Cal::Minutes(count(self)?.saturating_mul(60)),
             "days" => Cal::Days,
             "weeks" => Cal::Weeks(count(self)?),
             "months" => Cal::Months(count(self)?),
@@ -678,7 +680,10 @@ impl Parser {
             _ => {
                 return Err(ParseError {
                     span: sp,
-                    message: format!("`{}` is not a calendar constructor (base, days, weeks(n), months(n), years(n), sessions, sessions of \"ROOT\")", name),
+                    message: format!(
+                        "`{}` is not a calendar constructor (base, minutes(n), hours(n), days, weeks(n), months(n), years(n), sessions, sessions of \"ROOT\")",
+                        name
+                    ),
                 })
             }
         })

@@ -70,6 +70,9 @@ pub fn year_key(t: i64) -> i64 {
 pub fn period_key(cal: &Cal, t: i64) -> i64 {
     match cal {
         Cal::Base => t,
+        // The period whose end is the ceiling of `t`: bars are labelled at
+        // their close.
+        Cal::Minutes(n) => floor_div(t.saturating_sub(1), (*n).max(1) as i64 * MIN) + 1,
         Cal::Days => day_key(t),
         Cal::Weeks(n) => floor_div(week_key(t), (*n).max(1) as i64),
         Cal::Months(n) => {

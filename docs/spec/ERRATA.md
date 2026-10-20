@@ -2848,6 +2848,28 @@ batch driver agree on every corpus program. Each bless since:
   binding in the service; a suspect race in
   `appends.rs::readers_at_a_sequence_keep_their_view_under_appends`,
   failing in two of four full runs, passing alone.
+- **E-124 (K-3.1, Definition 3.2; N-hour bars over a minute base).**
+  `need bars @2h` named no resolution (the lexer knows `@1m` to `@1w`),
+  and no calendar constructor counted hours or minutes, so a rule on
+  two-hour bars had no form: three posts blocked (`@2h`, a two-hour
+  calendar, `decide on base at session + 2h every 2h`). A calendar
+  `minutes(n)` (and `hours(n)`, `60n` minutes) groups a sub-daily base's
+  bars into periods of `n` minutes counted from the epoch in UTC. A bar is
+  labelled at its close, so a period holds the bars labelled in
+  `(k·n, (k+1)·n]`: the 14:00 bar closes the 12:00 to 14:00 period. Its
+  labels are each period's last bar, as a civil calendar's are; `x@c`
+  reads its bar views (the first open, the highest high, the lowest low,
+  the last close) and `decide on c` decides at those labels. It refines
+  the minute calendars whose length its own divides, and no civil one (a
+  period ending at midnight belongs to the next day). The checker refuses
+  one over a daily base, or not a whole number of the base's bars; `@2h`
+  stays no resolution, and its message names the calendar to declare.
+  `abt-tests/tests/hour_bars.rs`: five days of ES minute bars, 13:00 to
+  19:00 UTC; `hours(2)` decides at 14:00, 16:00, 18:00 and 19:00, and its
+  14:00 to 16:00 bar is the first open, extremes and last close of the
+  bars from 14:00 to 15:59 (under periods keyed on their start, the bar is
+  one minute off). [D] UTC-aligned periods, not session-aligned: a
+  session-relative N-hour clock is a later form.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

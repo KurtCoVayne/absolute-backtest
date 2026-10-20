@@ -1739,6 +1739,7 @@ pub fn window_capacity(cal: &Cal, base: Resolution, d: &Duration) -> i64 {
     use crate::kernel::time::DAY;
     let bar: i64 = match cal {
         Cal::Base => base.nanos().unwrap_or(DAY),
+        Cal::Minutes(n) => *n as i64 * crate::kernel::time::MIN,
         Cal::Days | Cal::Sessions | Cal::SessionsOf(_) => DAY,
         Cal::Weeks(n) => *n as i64 * 7 * DAY,
         Cal::Months(n) => *n as i64 * 28 * DAY,
