@@ -4,7 +4,8 @@
 //! E-106: `first(P) over (T1 in session(X, [5min, 10min)), …)` asked at a
 //! bar before minute 5 is the empty window (the kernel panicked: a range
 //! whose start passed its end). E-107: `month_start(T)` on a `decide on
-//! session` clock holds at a month's first session.
+//! session` clock holds at a month's first session, each instrument's when
+//! two roots' sessions close at different times.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,7 +14,9 @@ use abt_data::adapters::databento::{futures, Options, Raw};
 use abt_data::adapters::dbn::{self, rtype, Decoded, Header, InstrumentDef, Metadata, Record};
 use abt_data::service::{inproc, DataService};
 use abt_data::Store;
+use abt_kernel::compiler::{compile, CompileOptions};
 use abt_kernel::kernel::{DataClient, ExecConfig, Replay, RunResult};
+use abt_kernel::lower::{Lowered, Numerics};
 use abt_tests as common;
 
 const MIN: i64 = 60_000_000_000;
@@ -32,11 +35,15 @@ fn fixed(x: f64) -> i64 {
 }
 
 fn bar(start: i64, open: f64, close: f64) -> Decoded {
+    bar_of(1, start, open, close)
+}
+
+fn bar_of(id: u32, start: i64, open: f64, close: f64) -> Decoded {
     rec(Record::Ohlcv {
         hd: Header {
             rtype: rtype::OHLCV_1M,
             publisher_id: 1,
-            instrument_id: 1,
+            instrument_id: id,
             ts_event: start as u64,
         },
         open: fixed(open),
@@ -62,28 +69,36 @@ fn days() -> Vec<i64> {
     out
 }
 
-/// One ES contract: each session opens at 23:00 UTC the evening before with
-/// a bar every minute for twenty minutes, then bars at 14:30 and 21:00 UTC.
-fn serve() -> Arc<DataService> {
-    common::init();
-    let mut records = vec![rec(Record::InstrumentDef(Box::new(InstrumentDef {
+fn def(id: u32, symbol: &str, asset: &str, size: f64) -> Decoded {
+    rec(Record::InstrumentDef(Box::new(InstrumentDef {
         hd: Header {
             rtype: rtype::INSTRUMENT_DEF,
             publisher_id: 1,
-            instrument_id: 1,
+            instrument_id: id,
             ts_event: t("2023-12-01") as u64,
         },
         ts_recv: t("2023-12-01") as u64,
-        raw_symbol: "ESH4".into(),
-        asset: "ES".into(),
+        raw_symbol: symbol.into(),
+        asset: asset.into(),
         instrument_class: b'F',
         expiration: t("2024-03-15T13:30:00") as u64,
         activation: t("2023-06-01") as u64,
         min_price_increment: fixed(0.25),
-        unit_of_measure_qty: fixed(50.0),
+        unit_of_measure_qty: fixed(size),
         currency: "USD".into(),
         ..InstrumentDef::default()
-    })))];
+    })))
+}
+
+/// One ES contract: each session opens at 23:00 UTC the evening before with
+/// a bar every minute for twenty minutes, then bars at 14:30 and 21:00 UTC.
+/// With `nq`, an NQ contract too, its sessions' last bar at 20:00 UTC.
+fn serve(nq: bool) -> Arc<DataService> {
+    common::init();
+    let mut records = vec![def(1, "ESH4", "ES", 50.0)];
+    if nq {
+        records.push(def(2, "NQH4", "NQ", 20.0));
+    }
     for (n, day) in days().into_iter().enumerate() {
         let open = day - 60 * MIN;
         let base = 4800.0 + (n as f64 * 0.7).sin() * 20.0;
@@ -93,6 +108,12 @@ fn serve() -> Arc<DataService> {
         }
         records.push(bar(day + (14 * 60 + 30) * MIN, base + 1.0, base + 1.5));
         records.push(bar(day + 21 * 60 * MIN, base + 1.5, base + 2.0));
+        if nq {
+            for m in 0..20 {
+                records.push(bar_of(2, open + m as i64 * MIN, 3.0 * base - 0.5, 3.0 * base));
+            }
+            records.push(bar_of(2, day + 20 * 60 * MIN, 3.0 * base + 1.0, 3.0 * base + 1.5));
+        }
     }
     let meta = Metadata {
         version: 3,
@@ -112,7 +133,7 @@ fn serve() -> Arc<DataService> {
     };
     let mut raw = Raw::default();
     raw.add_dbn(&dbn::encode(&meta, &records), "fixture").unwrap();
-    let mut store = Store::temporary(&format!("session-window-{}", std::process::id())).unwrap();
+    let mut store = Store::temporary(&format!("session-window-{}-{}", nq, std::process::id())).unwrap();
     let reviewed: BTreeMap<String, String> = [("reviewed".to_string(), "complete".to_string())].into_iter().collect();
     let (fetched, _) = futures(&raw, &Options::default()).unwrap();
     fetched.ingest(&mut store, "databento", "databento", &reviewed).unwrap();
@@ -123,6 +144,28 @@ fn run(src: &str, name: &str, svc: &Arc<DataService>) -> RunResult {
     let prog = common::program(src, name);
     let client = DataClient::connect(inproc(svc)).unwrap();
     abt_kernel::kernel::run_on(&prog, None, &client, ExecConfig::from_program(&prog), &Replay::default()).unwrap_or_else(|e| panic!("{}: {}", name, e))
+}
+
+/// `run` on a plan: the written order, or the compiler's optimised plan
+/// (what `abt run` runs by default).
+fn run_plan(src: &str, name: &str, svc: &Arc<DataService>, optimised: bool) -> RunResult {
+    let prog = common::program(src, name);
+    let cfg = ExecConfig::from_program(&prog);
+    let numerics = Numerics::from_running_sums(cfg.running_sums);
+    let lowered = if optimised {
+        compile(
+            &prog,
+            &CompileOptions {
+                numerics,
+                ..CompileOptions::default()
+            },
+        )
+        .lowered
+    } else {
+        Lowered::written(&prog, numerics)
+    };
+    let client = DataClient::connect(inproc(svc)).unwrap();
+    abt_kernel::kernel::run_on(&prog, Some(&lowered), &client, cfg, &Replay::default()).unwrap_or_else(|e| panic!("{}: {}", name, e))
 }
 
 /// A program deciding at `session + offset` whether the close is above the
@@ -153,7 +196,7 @@ fn opening_window(name: &str, offset: &str) -> String {
 
 #[test]
 fn a_session_sub_interval_after_the_bar_asked_is_empty() {
-    let svc = serve();
+    let svc = serve(false);
     // At minute 3 the window [5min, 10min) has no bar yet: nothing decided,
     // and no panic.
     let early = run(&opening_window("open_window_early", "3min"), "open_window_early", &svc);
@@ -191,7 +234,7 @@ fn month_program(name: &str, head: &str, body: &str, decide_on: &str) -> String 
 
 #[test]
 fn month_start_holds_at_a_months_first_session() {
-    let svc = serve();
+    let svc = serve(false);
     // The months' first sessions, labelled at their last bar's close.
     let firsts = vec![t("2024-02-01T21:01:00"), t("2024-03-01T21:01:00")];
     for (name, head, body, on) in [
@@ -202,5 +245,26 @@ fn month_start_holds_at_a_months_first_session() {
         let at: Vec<i64> = r.decisions.iter().map(|d| d.t).filter(|t| *t > days()[0] + DAY).collect();
         eprintln!("{}: decisions at {:?}, the firsts {:?}", name, at, firsts);
         assert_eq!(at, firsts, "{}", name);
+    }
+}
+
+/// E-107: with two roots whose sessions close an hour apart (NQ at 20:01,
+/// ES at 21:01), the optimised plan placed `month_start(T)` before
+/// `session(A, T, _)` bound A, and it stepped over both roots' sessions:
+/// ES's month's first session followed NQ's of the same day and never
+/// began a month (on the served store, ES 2025 H1 decided 6 times on the
+/// written plan and never on the optimised one). On either plan each root
+/// now decides at its own months' first sessions.
+#[test]
+fn month_start_steps_over_the_head_instruments_own_sessions() {
+    let svc = serve(true);
+    let name = "ms_two_roots";
+    let src = month_program(name, "ms(A: Future, @T)", "ms(A, T) :- session(A, T, _), month_start(T).", "ms(A, T)");
+    let firsts = vec![t("2024-02-01T20:01:00"), t("2024-02-01T21:01:00"), t("2024-03-01T20:01:00"), t("2024-03-01T21:01:00")];
+    for optimised in [false, true] {
+        let r = run_plan(&src, name, &svc, optimised);
+        let mut at: Vec<i64> = r.decisions.iter().map(|d| d.t).filter(|t| *t > days()[0] + DAY).collect();
+        at.sort();
+        assert_eq!(at, firsts, "optimised: {}", optimised);
     }
 }

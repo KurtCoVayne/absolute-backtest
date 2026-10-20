@@ -2557,6 +2557,25 @@ batch driver agree on every corpus program. Each bless since:
   as the rule reading it then has no solution at that bar.
   `abt-tests/tests/session_window.rs`: the window is empty at minute 3 and
   read at minute 12, over minute bars the Databento adapter writes.
+- **E-107 (compiler design 5.3; a time builtin on the sessions calendar
+  ordered before its instrument).** `ms(A, T) :- session(A, T, _),
+  month_start(T).` on a `decide on session` clock decided 6 times on ES
+  2025 H1 through the served store with `--plan written` and never on the
+  default optimised plan. The search took `month_start(T)` as reading `T`
+  alone (the head's key, bound on entry) and placed it first, as the
+  cheapest literal; the kernel steps it over the sessions of the head's
+  instrument, which unbound there fell back to every instrument's
+  sessions at once, where another root's close the same day preceded ES's
+  month's first session. A time builtin (`prev`, `lag`, `month_start`,
+  `day_start`) or a duration window on the per-instrument sessions
+  calendar now reads the head's entity variable when a literal of the
+  rule binds it, so the search places it after that literal.
+  `abt-tests/tests/session_window.rs`: with ES and NQ closing an hour
+  apart, both roots decide at their months' first sessions on the
+  written and the optimised plans (the optimised one decided NQ's alone).
+  [D] Open: under `--plan written` a rule that writes the builtin before
+  the literal binding its instrument still steps over every instrument's
+  sessions there.
 - **E-108 (D-2.4, D-7.7; the daily break in CME's earlier hours).**
   E-104's defaults, a gap over `session_gap` (45 minutes, from close to
   close) that holds `session_break` (17:30 in New York), fit CME Globex's
