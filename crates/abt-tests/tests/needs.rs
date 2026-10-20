@@ -80,6 +80,12 @@ fn the_full_stores_lists_and_series_are_in_the_vocabulary() {
             "    rel calm(@T)\n    calm(T) :- value(\"VIX_D\", T, V), V < 20.\n",
             "calm(T)",
         ),
+        // E-113: Cboe's volatility indexes, daily.
+        (
+            "need bars @1d   need series \"VXN\", \"VIX9D\", \"VXTLT\" @1d",
+            "    rel calm(@T)\n    calm(T) :- value(\"VIX9D\", T, V), V < 20.\n",
+            "calm(T)",
+        ),
     ] {
         let (p, diags) = common::check(&equity_src(needs, rules, on), "vocab");
         assert!(p.is_some(), "{}: {}", needs, common::text(&diags));

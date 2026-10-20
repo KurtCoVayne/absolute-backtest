@@ -2666,6 +2666,21 @@ batch driver agree on every corpus program. Each bless since:
   open in 138 s where it had not in 504. `abt-data/tests/hot.rs`: two
   instruments at three decimals, one appended at six, read as their
   Parquet twin.
+- **E-112 (Q-5.1; a claim on one side of an interval).** The house
+  claim `survives_costs` (`bootstrap_sharpe on returns of base expect
+  interval excludes 0`) held for a reliably negative Sharpe: an
+  in-sample Sharpe of -0.36 with the interval [-0.70, -0.04] excludes 0.
+  `excludes` holds on either side, as Q-5.1 defines it; a claim that the
+  statistic is reliably above a value now says so: `interval OP VALUE`
+  holds when every point of the interval does (its lower end for `>`
+  and `>=`, its upper end for `<` and `<=`). The house claim reads
+  `expect interval > 0`. `abt-query/tests/claims.rs`.
+- **E-113 (D-2.5, WF-15; Cboe's volatility indexes).** The series
+  vocabulary names the daily Cboe volatility indexes the full store
+  stages as `series.value`: VXN, VVIX, VIX9D, VIX3M, VIX6M, VIX1Y,
+  VIX1D, RVX, OVX, GVZ, VXEEM, VXEFA, VXEWZ and VXTLT at `@1d`, so that
+  `need series "VXN" @1d` binds as `need series "VIX_D" @1d` does.
+  `abt-tests/tests/needs.rs`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

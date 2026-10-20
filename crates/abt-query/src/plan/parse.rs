@@ -328,9 +328,10 @@ pub fn claim(line: &str) -> Result<Claim, String> {
         Some("statistic") => (Expect::Statistic(op(words.get(1))?, num(words.get(2))?), 3),
         Some("effect") => (Expect::Effect(op(words.get(1))?, num(words.get(2))?), 3),
         Some("interval") if words.get(1) == Some(&"excludes") => (Expect::IntervalExcludes(num(words.get(2))?), 3),
+        Some("interval") => (Expect::Interval(op(words.get(1))?, num(words.get(2))?), 3),
         _ => {
             return Err(format!(
-                "claim {}: `{}` is not an outcome: reject, accept, statistic OP V, effect OP V or interval excludes V",
+                "claim {}: `{}` is not an outcome: reject, accept, statistic OP V, effect OP V, interval OP V or interval excludes V",
                 name, rest
             ))
         }

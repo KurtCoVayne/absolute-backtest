@@ -225,6 +225,10 @@ pub enum Expect {
     Statistic(Op, f64),
     Effect(Op, f64),
     IntervalExcludes(f64),
+    /// `interval OP V`: every point of the interval (E-112), as
+    /// `interval > 0` for a Sharpe reliably above zero; `excludes` holds
+    /// on either side.
+    Interval(Op, f64),
 }
 
 impl Expect {
@@ -235,6 +239,7 @@ impl Expect {
             Expect::Statistic(op, v) => format!("statistic {} {}", op.text(), v),
             Expect::Effect(op, v) => format!("effect {} {}", op.text(), v),
             Expect::IntervalExcludes(v) => format!("interval excludes {}", v),
+            Expect::Interval(op, v) => format!("interval {} {}", op.text(), v),
         }
     }
 }

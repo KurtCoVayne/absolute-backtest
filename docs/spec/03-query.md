@@ -180,7 +180,7 @@ claims {
   CLAIM_NAME : TEST on INPUT [over WINDOW] [with { param = value, ... }] expect OUTCOME [at LEVEL] [before | after] [warn | block]
 }
 INPUT   = feed RELATION[(entity filter)] | feature R of RUN|grid | returns of RUN|grid | events of RUN | ledger NAME
-OUTCOME = reject | accept | statistic OP VALUE | effect OP VALUE | interval excludes VALUE
+OUTCOME = reject | accept | statistic OP VALUE | effect OP VALUE | interval OP VALUE | interval excludes VALUE
 ```
 
 `before` claims run on the in-sample window before any run of the plan (a feed or a feature computed by a warm-up run with no decisions, `observe` only); `after` claims run on outcomes. A claim's failure policy is `warn` (default) or `block` (the steps that depend on it do not run and the report says why). Every claim is re-tested on every reveal, over the embargoed bars, and the pair (in-sample verdict, out-of-sample verdict) is a row of `verdicts`.
