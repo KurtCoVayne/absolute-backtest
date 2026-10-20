@@ -2652,6 +2652,20 @@ batch driver agree on every corpus program. Each bless since:
   released through the kernel service; of the 360 to 414 MB each later
   run takes, at most a quarter stays (146 MB before run 2, 508 at its
   peak, 102 after).
+- **E-111 (ST-7.2, ST-8.4; an append at a finer exponent).** An append
+  whose rows need a finer exponent than an instrument's stored ones (the
+  Norgate equities of 2015 onto 1990 to 2014, `equity.open` at six
+  decimals after three) rebuilds the instrument into a new run at the
+  finer exponent, and the version keeps the previous segments for the
+  instruments it did not touch, the rebuilt one's earlier run among them.
+  Opening the version checked every run against the presence's exponent
+  as it was read, before the new run superseded the earlier one, and
+  refused the version ("instrument 0's `O` run is at exponent 3, its
+  presence says 6"). The check now applies to the blocks each column
+  keeps. It was not new: the staging that E-109 made fast reached the
+  open in 138 s where it had not in 504. `abt-data/tests/hot.rs`: two
+  instruments at three decimals, one appended at six, read as their
+  Parquet twin.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

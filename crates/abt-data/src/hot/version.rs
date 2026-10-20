@@ -260,12 +260,6 @@ impl HotVersion {
                                 table.len()
                             )));
                         }
-                        if run.exponent != presence.instruments[inst].exponents[c] {
-                            return Err(DataError::Schema(format!(
-                                "`{}`: instrument {}'s `{}` run is at exponent {}, its presence says {}",
-                                manifest.relation, inst, col.name, run.exponent, presence.instruments[inst].exponents[c]
-                            )));
-                        }
                         let s = seg.segment();
                         for b in 0..run.blocks as usize {
                             let h = s.header(run, b);
@@ -276,6 +270,19 @@ impl HotVersion {
                                 n: h.n,
                             });
                         }
+                    }
+                }
+                // The blocks a column keeps are at the instrument's exponent.
+                // A run a later one superseded may not be: a rebuilt
+                // instrument's earlier run, at the exponent before, in a
+                // segment the version keeps for its other instruments
+                // (E-111).
+                for (i, table) in blocks.iter().enumerate() {
+                    if let Some(run) = table.iter().map(|l| &segments[l.seg as usize].runs[l.run as usize]).find(|run| run.exponent != presence.instruments[i].exponents[c]) {
+                        return Err(DataError::Schema(format!(
+                            "`{}`: instrument {}'s `{}` run is at exponent {}, its presence says {}",
+                            manifest.relation, i, col.name, run.exponent, presence.instruments[i].exponents[c]
+                        )));
                     }
                 }
                 let mut sparse = Vec::with_capacity(blocks.len());
