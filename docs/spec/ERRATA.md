@@ -1122,6 +1122,50 @@ batch driver agree on every corpus program. Each bless since:
     - **The document:** it parses, its hash ignores layout, and it says why
       when it is refused. The modes refuse a run with no deployment, a
       broker with no adapter, and a document on a replay.
+- **E-96 (K-2.2, A-D32; the house presets, and the execution grammar as
+  K-2.2 writes it).** The pipeline's guideline (section 15,
+  `absolute-pipeline/docs/design/agent-guidelines.md`) fixes two
+  execution presets every agent program names, `futures_house`
+  (`futures_fixed_base` plus 3.75 a contract a side, no slippage for
+  starters) and `equities_house` (half a cent a share, one dollar at the
+  least, a tenth of the book per name, clamped); both are appended to
+  `corpus-v2/lib/execution.dsl` as the guideline writes them, comments
+  included. The parser accepted less than K-2.2's grammar: it required
+  a currency after `per_share P`, `min M` and `per_contract P`
+  (`per_share 0.005 USD min 1 USD`), where K-2.2 writes none, and it
+  refused `numerics exact`, which K-2.2 lists first. Both are the
+  parser's now (`syntax/parser.rs`): a currency after an amount is
+  admitted and not required (the book is USD, A-D32; `abt show` prints
+  the block with it, as before), and `exact` is a word of `numerics`,
+  which the lowering already read as `two_pass` (D-6.3: exact over what
+  has no integer form is two-pass; the kernel's exact windows over
+  ticks are iteration 2's), so the normal form keeps the word and the
+  evaluation is `two_pass`'s until then. `limits { weight <= 0.10 per
+  name clamp }` was accepted as written (K-3.5). Nothing of the
+  guideline's text differs from what the library holds. Rejected:
+  writing the presets in the stricter syntax (every agent would have
+  to learn a unit the grammar does not ask for). One point stays the
+  owner's: by E-71, `commission per_contract P` is charged where the
+  catalog states no rate per contract, and the catalog's rate otherwise
+  (`sim/mod.rs::commission`), so on a store whose roots state one (the
+  Databento adapter's, D-2.3) `futures_house` pays the catalog's rate,
+  not 3.75; the guideline's "7.50 round-turn, half per side" reads the
+  written rate as the one paid, with `from catalog` the form that
+  defers. This tree keeps E-71's rule, since changing which rate a
+  program pays is a change of intent. A second: `equities_house` writes
+  `orders moo_moc`, an intraday order the checker admits under a
+  sub-daily base alone (WF-14), so a daily equity program names the
+  preset with the one-field variant the harness allows,
+  `equities_house with { orders moc }` (or `moo`, `market`); the owner
+  may rather have the preset say `moc`. Tests:
+  `abt-tests/tests/corpus_v2.rs::the_house_presets_check_clean_run_and_show_their_fields`
+  (R8L on `futures_house`, `opening_gap` on `equities_house` and
+  `momentum_top_n` on `equities_house with { orders moc }` check clean,
+  run on the synthetic market of their class, decide and fill, pay the
+  commission the rules above give, and `abt show` prints the preset's
+  fields expanded); the library check reads the presets. Falsified by
+  `scripts/mutations/k-2.2-commission-unit.patch` (the parser requires
+  the currency again, and the library no longer parses).
 
 ## Data layer and protocol
 
@@ -1735,6 +1779,89 @@ batch driver agree on every corpus program. Each bless since:
     (`running`) and 5.3 s (`two_pass`), from 5.6 s and 6.1 s. Writing the
     answer's log segment is 1.3 s of it: this VM's first write of fresh
     pages runs at about 190 MB/s.
+- **E-99 (D-7.2, D-5.1, P-3.1, K-4.5; a demand scoped to the instruments
+  a program names; protocol 1.2).** A futures run streamed every staged
+  root's minute bars whatever its universe: one root over eight years held
+  14.5 GB and the pipeline's machine killed its data service. `StreamSpec`
+  gains `entities` (optional, a minor change: protocol 1.2), the
+  instruments whose tuples the stream carries. The kernel fills it from
+  the program: the rows of its universe's `instruments` table and the
+  values of `need instruments where root | symbol | ticker = "…"`
+  (parsed since V-3.11, used nowhere until now), resolved through the
+  binding's ticker table to the data layer's ids, each futures root with
+  the contracts its continuous series holds. The data layer reads each
+  partition with those ids as the identity filter (a hot version skips
+  the other instruments' blocks; a Parquet partition reads through its
+  entity index; a relation keyed by no entity is read whole), and the
+  barrier index counts the same tuples, so `to_seq` (a hold-out's
+  truncation) numbers the scoped stream. The binding reads what it loads
+  per instrument (the base bars' times, the sessions, the prints a
+  session-offset clock needs, a root's `continuous` rows) as one series per
+  named instrument, which a hot version answers from that instrument's
+  blocks, and names are resolved within the program's class first (a
+  futures root and a stock can share a ticker: ES, CL). Pushed-down
+  aggregate answers of other instruments are dropped by the kernel; the data layer still
+  computes them (an `AggregateRequest` has no instrument filter yet). An
+  unscoped stream's canonical form, hence its id, is unchanged; a live
+  session carries every instrument it records. [D] The scope from the
+  program's own text rather than a run option: a program that names its
+  instruments reads only them, so its hash already fixes what it reads,
+  and a rule reading another instrument finds no rows, as a universe
+  outside the table would. Rejected: a scope in the binding (the binding
+  pins versions, not rows, and its id would change for every universe).
+- **E-94 (D-2.3, D-2.2, D-3.6, P-3.1; the `pipeline` class).** The
+  pipeline design (`absolute-pipeline/docs/design/pipeline.md`, PL-7.2)
+  puts the provenance of what its agents submit in the data layer
+  (A-D20): a class `pipeline` joins the `kernel` and `query` namespaces
+  of D-2.3, and, unlike them, is a class of the registry (`catalog.rs`
+  `classes()`, `corpus-v2/catalog/pipeline.dsl` its rendering, `abt data
+  catalog --class pipeline`), so a fresh store holds its five schemas
+  and the gateway writes against them rather than making its own up.
+  The relations, each with the receipt time `r` every stored row carries
+  (D-4.2; a put without it is received at its event time):
+  `document(DocId, Source, Author, @P, Size: Count)`;
+  `hypothesis(Id, DocIds, @H, Agent)`; `submission(Id, HypothesisId,
+  ProgramHash, PlanHash, Lineage, @H)`; `outcome(SubmissionId, @T,
+  Reveal: Count, ForwardFrom, ForwardTo: Timestamp, Status)`;
+  `audit(Job, @T, Kind, Subject, Bytes, DurationNs: Count, Outcome)`.
+  They are written only through `put` (D-3.6, P-3.1) like `kernel.*`
+  and read with `scan`, `series` and `catalog`; no program reads them,
+  and the class has no base calendar and no unit, like `series`.
+  - **Ids are labels, not bytes.** PL-7.2 leaves the ids' type open
+    (the task named `Bytes` or `Label`, whichever the put path keys
+    by). A row's identity is its entity and label columns with its time
+    (D-2.2): a label id keys the row, as `query.trials.trial_id` and
+    `query.plans.hash` already do, while a bytes column is a value
+    outside the identity, outside every predicate of the query forms
+    (`query.rs`) and never held hot. The class file is also read by the
+    kernel's checker, which has no bytes type (`Ty::parse`). `DocIds`,
+    the JSON list of a hypothesis's documents, is a label for the same
+    reason; its texts are as many as the hypotheses, as the trial ids
+    are as many as the runs. Rejected: a `Bytes` id (no identity, so a
+    second put of the same row would not be the same row), and a
+    numeric entity id (the ids are content hashes and ULIDs of the
+    pipeline, not the registry's instruments).
+  - **Event times.** Every relation needs one (`validate_schema`):
+    `document`'s is its publication `P`, `hypothesis`'s and
+    `submission`'s their horizon `H`, `outcome`'s and `audit`'s the
+    reveal's and the request's instant `T`, beside the listed columns.
+    The names are the class file's (`DocId`, `ForwardFrom`), as the
+    market classes' columns are (`A`, `T`, `P`, `BidSize`): D-2.3's
+    table writes them in lower case for every class.
+  - **The statuses** `insample_only`, `forward` and `retired` (PL-7.3)
+    are the `outcome` relation's note rather than a vocabulary: the
+    kernel's class grammar admits its own vocabularies only (`lists`,
+    `reasons`, `names`, ...), and no program checks a label against
+    them.
+  - **Tests.** `abt-tests/tests/pipeline_class.rs` (the class and its
+    five schemas in the catalog and the file; a row of each relation
+    put and read back in process and over a socket; a put without `r`),
+    `abt/tests/data_cli.rs::the_pipeline_class_file_renders_from_the_registry`,
+    `abt-data/tests/store.rs::the_class_files_render_from_the_registry`
+    (the file equals the rendering), and the corpus library check
+    (the kernel reads the file). Falsified by
+    `scripts/mutations/d-2.3-pipeline-schemas.patch` (the class is
+    rendered but its schemas are not registered with a fresh store).
 
 ## Aggregates
 
@@ -2297,6 +2424,510 @@ batch driver agree on every corpus program. Each bless since:
     - K-9.3 puts every case in `tests/options.rs`. The futures and the
       limits have their own files, as the migration's plan lists them
       (M-7).
+- **E-100 (D-7.7; assets beyond the index lists).** The Norgate adapter's
+  universe was the members of its index lists, so the lake's
+  exchange-traded products (QQQ, SPY, GLD, TLT, IWM, the sector SPDRs)
+  were never staged though their bars are in the lake. A `tickers`
+  setting (`--tickers 'QQQ=ETF;SPY=ETF'`) adds the asset of each named
+  ticker's latest listing, read from `registry/security_master`, as a
+  member of the label named over its listing span (`member(A, T, "ETF")`,
+  a label the equity catalog declares). [D] By name rather than every
+  exchange-traded product of the lake: the hot store's budget (ST-9) and
+  the adapter's in-memory read hold the named set, not the lake's
+  thousands.
+- **E-101 (D-2.4, D-7.7; a continuous series through a session without the
+  contract held).** The Databento adapter's volume roll picked, per
+  session, among the contracts that traded in it and expire no earlier
+  than the one held, and ended the root's series at the first session with
+  none: on a root whose deferred month trades thinly (SOL's monthly
+  contracts from the bucket's live prefix) the session after the roll
+  into J5, in which only the expiring H5 printed, ended the series, and
+  1.8 years of SOL bars became 364 (ETH's and BTC's extensions stopped
+  after their rolls the same way). Such a session now keeps the contract
+  held and has no bar of it, the series going on when that contract (or a
+  later one) trades again; a roll's gap is taken at the last session the
+  outgoing contract traded in. [D] No bar rather than a bar of the expiring
+  contract: the series holds one contract at a time and the roll was
+  decided on the session before; going back to H5 for a day would roll
+  twice and put an expiring contract's prices in the series.
+- **E-102 (D-2.3, D-7.2, K-2.1; a future's tick, and the need that admits
+  it).** The future class exposed `point_value` but not the tick, so the
+  house sizing floor `ATR$ = point_value x max(ATR20, 10 x tick)` could not
+  be written. A relation `tick(A: Future, @T, Size: Price<USD>) complete`
+  holds the minimum price increment of the contract the root's series holds
+  (the definition's `min_price_increment`, which A-D53 reads for the grid),
+  stated at each session's day like `point_value`, through the roll and
+  through a session without a bar of the held contract (E-101). It is
+  admitted by a need of its own, `need tick`. [D] Rejected: bringing it with
+  `need point_value`, since every class relation is a primitive of every
+  program of the class, so every program writing `need point_value` would
+  demand `future.tick` and fail to bind on a store staged before this
+  erratum. E-98's `industry` likewise gets a need of its own, `need
+  industry` (no need admitted it: a program reading it was refused). Both
+  are left out of the demand's serialized form when false, and neither is
+  a primitive of a program that does not write its need: a program's hash
+  covers its demand and its primitives (`hash_view`), and admitting
+  `industry` under `need lists` changed the hash of every program writing
+  `need lists` (MW14 among them; `checkpoint.rs::program_hashes_are_stable`
+  on the machine's Rust 1.99 caught it), which would have cut every such
+  program's lineage.
+- **E-103 (D-2.5, WF-15; the lists and series the full store stages).**
+  The equity class's `lists` vocabulary held the parity bundle's labels
+  and `SPX`, and the series class's `names` held `SPXTR`, `VIX` and
+  `VIX_MA4`, so WF-15 refused programs naming the index lists and daily
+  index series the Norgate adapter stages from the lake. The `lists`
+  vocabulary gains `SP1500`, `SP100`, `R3000`, `R1000`, `R2000`, `RMID`,
+  `RMICRO`, `RTOP200`, `RALL`, `NASDAQ`, `NDX`, `NBI`, `NYSE`, `DJIA` and
+  `SPDA`; the `names` vocabulary gains, each `@1d`, `SPX`, `NDX`, `NDXTR`,
+  `RUT`, `RUTTR`, `VIX_D`, `DJI`, `DJITR`, `RUA`, `RUATR`, `COMP`, `XCMP`,
+  `SML`, `MID` and `OEX` (`NDX` is a list and a series: two vocabularies).
+  [D] `VIX` stays the parity bundle's weekly close and the lake's daily
+  `$VIX` is `VIX_D`: MW14 reads `series "VIX" @1w` over weekly rows
+  (`rows[vix_rows]`), and a daily series under the same name would make
+  its four rows four days on a store staged from the lake, silently.
+  Rejected: the daily one as `VIX` with MW14 rewritten to a weekly view
+  (the parity book is G1's and does not change for a store's naming).
+  With it, a fixture's demand under `need lists` notes `industry` with
+  `classification` (`abt-tests/tests/labels.rs`).
+- **E-104 (D-2.4, D-7.7; the volume roll against fragment sessions, and
+  spreads named as spreads).** RB's continuous series from the bucket held
+  56,832 of 36,460,210 bars over 5,273 sessions and rolled 70 times in
+  sixteen years (`2010-07-11 RBU0 -> RBZ0`, `2010-07-20 RBZ0 -> RBM1`): at a
+  session in which only a far month printed (a fragment of a session, a
+  thin holiday), the roll compared the contracts printing in that session
+  by their volume in the session before, the far month was the only
+  candidate and became the series, and the rule that a roll never goes to
+  an earlier expiry kept it there. The roll now compares, in the latest
+  session in which the contract held traded, the contracts that traded
+  there and have not expired by the session's open; with nothing traded
+  then, the contract held stays while it has not expired, and an expired
+  one gives way to the nearest live contract printing. The 22,326,635 bars
+  reported `no_definition` were spreads (the bucket's definition files
+  hold the outrights only; 105 sampled days of RB, and samples of HO, CL,
+  ZB, NG, GC and ES, show no outright bar without its definition): a bar
+  whose symbol names a spread is now counted `not_an_outright_future`.
+  The fragments themselves came from the sessions: a gap over
+  `session_gap` (45 minutes) ended one, and RB's thin nights (51, 60, 82
+  minutes without a trade around 04:00 UTC) split each trade date, 5,273
+  sessions in sixteen years. A gap now ends a session only when it holds
+  the middle of the venue's daily break, `session_break` (17:30 in New
+  York, CME's break being 17:00 to 18:00 there, US daylight saving
+  applied), as every gap between two trade dates does, a weekend's
+  included; a long gap inside a trade date stays in it. On RB 2010-06-07
+  to 2012-12-31 the series keeps 495,107 bars (20,140 before) over 664
+  sessions with 31 monthly rolls, each to the contract d20-research's
+  daily volumes name, 29 on the same day or the next and two within two
+  days (near-equal volumes). [D] Rejected: synthesizing contracts for
+  undefined bars from their symbols (no outright bar lacks a definition
+  in the bucket); the previous session's volumes over every contract (a
+  fragment's volumes still name the far month); a UTC window for the
+  break (21:00 to 23:00 covers both offsets, and in summer its second
+  hour is the evening's trading).
+- **E-105 (D-7.2, D-7.4, A-D46, V-3.3; a daily futures program reads session
+  bars).** A daily futures program (a `decide on session` clock, `@session`
+  views, windows over sessions) streamed every minute bar of its roots,
+  which made a house-universe plan of fifteen runs take most of an hour.
+  The hot store's 1d ladder level cannot stand in: its buckets are UTC
+  dates (E-89) and a CME session runs from about 22:00 UTC the evening
+  before to 21:00 UTC, so a UTC day holds parts of two trade dates and
+  `@session` views would change. What stands in exactly is the session's
+  bar: the Databento adapter's `level session` (`--level session`) writes
+  one bar per root and session from the held contract's bars (the first
+  open, the highest high, the lowest low, the last close, the summed
+  volume, back-adjusted as the minutes are), labelled at the session's
+  close and received with its last bar, which is what a `@session` view of
+  the minutes computes; its versions say `calendar = 1d` and `bars =
+  session` (a day being the trade date's session, A-D46), under a source
+  of their own beside the minutes. The resolver now orders a need's fitting
+  versions coarsest first (the finest under `prefer base finest`), so
+  `need bars @1d` binds the session bars and `need bars @1m` the minutes.
+  `abt-tests/tests/session_level.rs`: Connors' Double Seven on two roots
+  over forty sessions decides, fills and ends with the same cash, bit for
+  bit, on either level, reading one close a session against eight. A
+  finding the test makes visible and does not fix: no run over
+  adapter-ingested contracts emits a roll (K-5.4's two fills and
+  commissions), on either level. [D] Rejected: the UTC-day ladder level
+  (not the session); building session bars in the kernel from the minutes
+  (the stream would still carry every minute).
+- **E-106 (V-3.5, K-4.3; a session sub-interval not yet begun).** `T1 in
+  session(X, [a, b))` asked at a bar before minute `a` of its session
+  (`[5min, 10min)` at a clock of `session + 3min`) aborted the kernel: the
+  base bars' range started past its end ("range start is greater than
+  range end in BTreeSet"). Such a window has no bar yet and is now empty,
+  as the rule reading it then has no solution at that bar.
+  `abt-tests/tests/session_window.rs`: the window is empty at minute 3 and
+  read at minute 12, over minute bars the Databento adapter writes.
+- **E-107 (compiler design 5.3; a time builtin on the sessions calendar
+  ordered before its instrument).** `ms(A, T) :- session(A, T, _),
+  month_start(T).` on a `decide on session` clock decided 6 times on ES
+  2025 H1 through the served store with `--plan written` and never on the
+  default optimised plan. The search took `month_start(T)` as reading `T`
+  alone (the head's key, bound on entry) and placed it first, as the
+  cheapest literal; the kernel steps it over the sessions of the head's
+  instrument, which unbound there fell back to every instrument's
+  sessions at once, where another root's close the same day preceded ES's
+  month's first session. A time builtin (`prev`, `lag`, `month_start`,
+  `day_start`) or a duration window on the per-instrument sessions
+  calendar now reads the head's entity variable when a literal of the
+  rule binds it, so the search places it after that literal.
+  `abt-tests/tests/session_window.rs`: with ES and NQ closing an hour
+  apart, both roots decide at their months' first sessions on the
+  written and the optimised plans (the optimised one decided NQ's alone).
+  [D] Open: under `--plan written` a rule that writes the builtin before
+  the literal binding its instrument still steps over every instrument's
+  sessions there.
+- **E-108 (D-2.4, D-7.7; the daily break in CME's earlier hours).**
+  E-104's defaults, a gap over `session_gap` (45 minutes, from close to
+  close) that holds `session_break` (17:30 in New York), fit CME Globex's
+  break since 2015, 17:00 to 18:00. ES's minutes show the earlier ones:
+  until 2012-11-16 the equity indexes broke 17:30 to 18:00, the 17:29
+  bar's close 31 minutes before the reopening's, a gap neither over 45
+  minutes nor holding 17:30, where it starts; until 2015 they broke 17:15
+  to 18:00, and a bar printing in its first minute (2013-07-08) left 45.
+  ES's session bars over 2010-06-07 to 2026-09-30 were 3,693 sessions,
+  weekly to 2012-11 (34, 58 and 81 in 2010 to 2012) and 16 of two days
+  from 2012-12 to 2015-08; a volume roll then came a week late, the
+  series holding the expiring contract through its expiry (ESM0 to ESU0
+  on 2010-06-25, a week after ESM0's last day). The defaults are now
+  17:45, inside every break since 2010, and 20 minutes, under the
+  shortest's 31: ES has 4,200 sessions, one per trade date of the
+  bucket's files (149 in 2010 from June, 250 to 259 a year after), none
+  over 30 hours; its ten rolls to 2012-09 move to the Monday of the roll
+  week (2010-06-14), the 56 after keep their dates. NQ and NKD have 4,200
+  sessions too, GC 4,195, ZN 4,204 and RTY 2,385 from 2017-07, none over
+  30 hours. The rule is unchanged, so an ingest by an earlier binary
+  given `--session-break 17:45 --session-gap 20` stages the same
+  sessions. [D] Rejected: a gap starting at the break's middle counted
+  as holding it (17:30 would then serve 2010's break with no room, and
+  the 45-minute gap would still keep 2013's print).
+- **E-109 (ST-5.3, A-D46; a ladder level's index of its buckets).**
+  Staging a minute relation's ladder looked each bar of a source level up
+  in an index of that level's bucket keys rebuilt for the bar: from the
+  15-minute level up, bars times labels, quadratic in a root's history.
+  The pipeline's GLBX roots never finished staging (CL spent 23 minutes
+  on one core in `ladder::index_of` after `future.open`'s presence, some
+  17 hours for that relation's 15-minute level alone). Each level's index
+  is now built once with the level and kept beside its labels: a lookup
+  is logarithmic, and staging builds one index per level and relation.
+  `abt-data/tests/ladder_index.rs`: 20,000 minute bars of one root stage
+  with at most 200 indexes built (4,000 per relation at the 15-minute
+  level before).
+- **E-110 (P-2.1, P-3.1, P-3.4, D-3.4; the memory a request or a run
+  freed).** The services handle each request on a thread of its own, and
+  the kernel each run; glibc gives a thread a heap arena of its own (up to
+  eight per core) and keeps the pages an allocation frees inside it for
+  that arena's next one. Every arena kept the peak of the largest request
+  or run it had served: the data service of the pipeline's store held
+  18.2 GB of anonymous memory with a resident budget of 6 GiB, the Norgate
+  futures one 10.5 GB with 2 GiB (98 arena heaps of 64 MB and 68 partly
+  grown, 41 MB in the main heap), and a plan's trials grew `abt plan run`
+  by gigabytes each. A request's thread now returns the free pages of
+  every arena when it ends (`malloc_trim`, at most every 100 ms), and a
+  run's thread when the run is released. A query over more than one atom
+  of a run that ended no longer leaks the kernel it ran for the answer
+  (`mem::forget`). The store's maps of open partition files and of
+  manifests were never evicted: every run a service writes adds versions
+  of its outputs and of its aggregates' cache objects, read once, and the
+  Norgate service held 69,457 index maps; they start over past 8,192
+  files and 4,096 manifests. And a schema listing without a class named
+  every relation of the store, the runs' outputs, the query layer's
+  records and the cache objects included: on the Norgate store 4,354
+  schemas (3,376 `kernel.*`), a 1,050,903-byte response past the control
+  payload's 1 MiB (P-2.2), so every binding (which asks it and never read
+  those families) was refused. The class-less listing leaves `kernel.*`,
+  `query.*` and `cache.*` out; asked by name or by class they are
+  answered (`abt-data/tests/service.rs`). Those relations also wrote
+  every row to the log as well as to their partitions: an aggregate's
+  cache object logged 30 to 45 MB, 20 GB of the Norgate store's 22 GB of
+  log in an evening, and no reader asks a log of them (only a hot
+  version replays its tails from it). They write their partitions
+  only. And nothing removed them: a store keeps the outputs of its last
+  256 runs and its last 512 cache objects, the oldest past these (and an
+  eighth more) dropped with their manifests, partitions and logs when a
+  derived relation is written; a pinned version keeps its relation and
+  the query layer's records (plans, lineages) stay
+  (`abt-data/tests/store.rs`). A plan that reads a trial's outputs long
+  after it ran, past 256 later runs, reruns it. `abt-tests/tests/service_memory.rs`: a
+  cross-sectional strategy over 300 names and 1,000 days, run and
+  released through the kernel service; of the 360 to 414 MB each later
+  run takes, at most a quarter stays (146 MB before run 2, 508 at its
+  peak, 102 after).
+- **E-111 (ST-7.2, ST-8.4; an append at a finer exponent).** An append
+  whose rows need a finer exponent than an instrument's stored ones (the
+  Norgate equities of 2015 onto 1990 to 2014, `equity.open` at six
+  decimals after three) rebuilds the instrument into a new run at the
+  finer exponent, and the version keeps the previous segments for the
+  instruments it did not touch, the rebuilt one's earlier run among them.
+  Opening the version checked every run against the presence's exponent
+  as it was read, before the new run superseded the earlier one, and
+  refused the version ("instrument 0's `O` run is at exponent 3, its
+  presence says 6"). The check now applies to the blocks each column
+  keeps. It was not new: the staging that E-109 made fast reached the
+  open in 138 s where it had not in 504. `abt-data/tests/hot.rs`: three
+  instruments at three decimals; an ingest that is no pure append (one
+  instrument's next days at six decimals, another's row revised) stages a
+  version that rebuilds the first at the finer exponent and keeps the
+  third in the previous segments; it opens and reads as its Parquet twin.
+  (A pure append joins the tails under the published version and stages
+  nothing; the first form of this test appended only and checked
+  nothing.)
+- **E-112 (Q-5.1; a claim on one side of an interval).** The house
+  claim `survives_costs` (`bootstrap_sharpe on returns of base expect
+  interval excludes 0`) held for a reliably negative Sharpe: an
+  in-sample Sharpe of -0.36 with the interval [-0.70, -0.04] excludes 0.
+  `excludes` holds on either side, as Q-5.1 defines it; a claim that the
+  statistic is reliably above a value now says so: `interval OP VALUE`
+  holds when every point of the interval does (its lower end for `>`
+  and `>=`, its upper end for `<` and `<=`). The house claim reads
+  `expect interval > 0`. `abt-query/tests/claims.rs`.
+- **E-113 (D-2.5, WF-15; Cboe's volatility indexes).** The series
+  vocabulary names the daily Cboe volatility indexes the full store
+  stages as `series.value`: VXN, VVIX, VIX9D, VIX3M, VIX6M, VIX1Y,
+  VIX1D, RVX, OVX, GVZ, VXEEM, VXEFA, VXEWZ and VXTLT at `@1d`, so that
+  `need series "VXN" @1d` binds as `need series "VIX_D" @1d` does.
+  `abt-tests/tests/needs.rs`.
+- **E-114 (Q-6.2; a trade open at a window's start).** The trade
+  metrics of a window (a reveal's out-of-sample bars, a plan's in-sample
+  ones) paired the window's fills alone into round trips: a window
+  opening on a held position read its exit as an entry, and the market's
+  position count stayed off for the rest of the window, so none of its
+  trades closed. A reveal over one market held across the boundary
+  reported 0 trades (17 by its NAV), and markets held at the boundary
+  vanished from the trade counts, profit factor, hit rate and per-entity
+  rows, their P&L still in the net profit. The round trips are the
+  run's, each the window's when the fill that closes it is, with the
+  whole round trip's P&L. `abt-query/tests/trades.rs`.
+- **E-115 (compiler design 3.8, 4.2, 4.6; a run at a parameter point).**
+  The compiler read a parameter as its default: the analysis took a
+  parameter without a range as the point of its default, so a guard on
+  it (`side > 0`, `member_gate = 0`) never held there and R2 dropped the
+  rule, and R6 folded an expression over it (`1 - weekly_tf`) at the
+  default. A run at another point (`--param`, a plan's point, a grid's
+  cell, `at { }`) then ran the default's rules: grids and variants over
+  such a parameter repeated the default, silently (`weekly_tf * Dw + (1 -
+  weekly_tf) * Dd` was 0 at every bar of a run at `weekly_tf = 1`; a
+  rule gated by `member_gate = 0, only_coin = 1` derived nothing, while
+  the explanation, evaluating at the point, said it fired). A compilation
+  for a run now reads the run's point (`CompileOptions::params`, the
+  program at that point for the analysis, the rewrites and the plan);
+  the normal form and its hash stay the program's. `abt run`, the kernel
+  service's runs (every plan's trials) and its answers over a run pass
+  the point; `show plan` and `verify` without one describe the defaults.
+  `abt-tests/tests/param_point.rs`.
+- **E-116 (K-5.4; a roll between two barriers).** The executor rolled a
+  held root only where a `continuous` entry fell on the barrier itself and
+  changed contract from the entry before. A minute store's entries change
+  contract at a minute inside a session: on a session clock no barrier
+  saw a change, and a position held across some 34 quarterly rolls paid
+  the commissions of its entry and its exit alone (the house charges per
+  contract, per side and per roll). The executor now keeps each root's
+  entry at the last barrier and rolls when the barrier's entry names
+  another contract, with the two fills and two commissions K-5.4 states.
+  A root's entry at a barrier is found by a search, not a scan of a
+  minute store's entry per bar. `abt-tests/tests/futures.rs`: the
+  entries six hours after each bar, the roll charged at the next
+  barrier.
+- **E-117 (K-2.1, W6; a ticker that lists after the bundle date).** A
+  ticker literal resolved to the security carrying it at the bundle date,
+  and none was refused: a plan whose instruments table names a root that
+  lists after its in-sample end (`ETH_N`, from 2021, in a study whose
+  in-sample run ends in 2017) refused to bind. A ticker no security
+  carries at the bundle date now resolves to the first security carrying
+  it after: the root enters the universe when it lists. A ticker carried
+  at the date resolves to its carrier then, as before.
+  `abt-kernel/src/kernel/mod.rs` (ticker_tests).
+- **E-118 (Q-2.2; a compare step's metrics bracketed).** `compare NAME:
+  RUNS by [m1, m2]`, as the house template writes it, took `[m1, m2]` for
+  one metric's name and was refused; the list may be bracketed.
+  `abt-query/tests/plan.rs`.
+- **E-119 (K-3.5, K-9.3; a held position past a weight limit).** The
+  invariant `inv.position_limits` checked every position of the book the
+  bar's accepted orders would leave against a weight limit, the positions
+  no order touched and those an order reduced included, while a `clamp`
+  scales only what an order adds. A position bought at the bound that a
+  price rise carried past it halted the run at the next bar with any
+  order ("… 100977.45 after the accepted orders, above `weight <= 0.1 per
+  name clamp`"). The limit being pre-trade, the invariant now judges the
+  positions the bar's orders grow. Growth was then measured from the
+  book before the bar's fills: an entry sized to the bound at a bar's
+  close, filled at the next bar's open (`moo`) and marked at its close,
+  counted as the next bar's growth, and a rise from close to close halted
+  the run ("138863 at 103388.49 after the accepted orders, above `weight
+  <= 0.1 per name clamp`": six posts of one evening, and a share added to
+  a name already past the bound, which the clamp had in fact zeroed). The
+  executor now states, with the book a bar's orders would leave, the
+  instruments those orders grow from the book the limits sized them
+  against, and the invariant judges those: the clamp holds at entry and a
+  drift past the bound stands. `abt-tests/tests/limits.rs`: five names
+  bought at a tenth, reduced by a share a bar while their prices drift
+  past it; the same entered `moo` (under the growth from the book before
+  the fills, the second halts at its first bar).
+- **E-121 (ST-7, ST-8.1; a rebuild drops the instruments appended since
+  publication).** An instrument a hot relation's published version does
+  not hold is, when ingested, an append: its rows join the overlay (the
+  append files, the journal, the tails) under that version. A later
+  ingest that is no append (a revision, a late row, the retry of an
+  ingest killed mid-write, whose rows meet its own earlier ones) stages a
+  new version from the published instruments and the input, S2 iterating
+  the version's presence alone: an instrument in the overlay alone was
+  never planned, and the version dropped it with every row it held. A
+  Databento futures store, one version published for its first root and
+  every later root appended, lost all roots but four from `high` and
+  `low` at two retries (17.8 million rows of 102.4; `close` and `volume`,
+  never rebuilt, kept them). S2 now plans the overlay's instruments too,
+  rebuilt from their rows as read, and an input instrument the overlay
+  alone holds is classified against those rows.
+  `abt-data/tests/appends.rs`: one instrument published, a second
+  appended, a revision of the first; both keep their 20 rows and the
+  version reads as its Parquet twin (under the mutation the second keeps
+  none).
+- **E-120 (D-4, P-3.1; what one binding costs the data service).** A
+  run's binding on a store of every US equity 1990 to 2026 took the
+  service past 44 GB and the machine down (a 16 GB scope kills it, from
+  2014 too). Three of its requests read whole relations: `Distinct` of
+  every label column of the bound relations (`equity.member`, 183 million
+  rows of every list: read, answered as strings, keyed row by row, three
+  copies), `stats` (each version's figures opened every hot version of
+  the store, the superseded ones of each ingest chunk included), and the
+  contract's data checks (`pre.actions`, `pre.membership`: every close,
+  every membership row). `Distinct` now reads a version bucket by bucket
+  and keeps the values seen; the service's `stats` reports a hot version
+  it has not opened from its manifest; `ABT_TRACE_REQUESTS=1` traces each
+  request with its time and the service's memory. A universe whose every
+  rule reads `member(A, T, "L")` of its instrument (or keeps one the book
+  holds) is gated by those lists: its binding is scoped to the instruments
+  they ever held and those the program names by ticker, and the binding's
+  reads, its stream and the contract's checks read those alone (a scan
+  whose predicate keeps some instruments reads their blocks through the
+  store's identity filter); `pre.membership` reads the program's lists'
+  rows. `abt-tests/tests/list_scope.rs`: a list-gated universe binds its
+  three members of six and runs as the same universe through a derived
+  relation, bound to every instrument, does. [D] Open: a hard bound per
+  binding in the service; a suspect race in
+  `appends.rs::readers_at_a_sequence_keep_their_view_under_appends`,
+  failing in two of four full runs, passing alone.
+- **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
+  adapter emitted only level 1 of `classification/classification_full`
+  (the sector), while the lake holds the four GICS levels of its snapshot.
+  A new relation `equity.industry(A, @T, Group, Industry, SubIndustry)`
+  carries levels 2 to 4 over the same days and membership intervals as
+  `equity.classification`, with the same `classification = snapshot DATE`
+  attribute; `need lists` brings it with `member` and `classification`.
+  [D] A relation of its own rather than three more columns of
+  `classification`: a program reading the sector keeps its arity. The
+  lake's classification is one snapshot (2026-09-21 today): no row exists
+  before its date, so an idea whose horizon precedes it cannot read an
+  industry, which is the point-in-time rule, not a gap.
+- **E-97 (Q-2.1, Q-2.3, P-3.4, A-4.1; the hold-out forms the pipeline
+  needs: `after TIME`, `trailing:N%`, `trailing:Nmo`).** The pipeline
+  design (`absolute-pipeline/docs/design/pipeline.md`, PL-6.6 item 2)
+  asks for a forward hold-out on everything received after a time and a
+  trailing hold-out sized from the window. Q-2.1's grammar gains
+  `holdout after TIME`, `trailing:N%` and `trailing:Nmo` beside
+  `trailing:Ny` (`plan::Holdout::{After, TrailingShare, Trailing}`,
+  `parse::holdout`); Proposition Q-2.1 holds unchanged, since every form
+  but `blocks` truncates the stream.
+  - **`after TIME`.** TIME is an ISO-8601 date or datetime, UTC, with
+    optional nanoseconds (`abt_wire::scalar::parse_timestamp`), written
+    back as the kernel prints a time, so one instant has one text in the
+    normal form. The embargo begins at the last barrier whose receipt
+    time is at or before TIME: the kernel's run request (P-3.4) gains
+    `received_by`, which it turns into `to_seq` through `stream_index`
+    (the last decision barrier whose `at` is ≤ TIME; `kernel/mod.rs`),
+    exactly as `horizon` is turned into one, taking the earlier seq when
+    a request gives both; the query layer sends an `after` plan's runs
+    `received_by` alone, so the receipt is what truncates them.
+    `received_by` is in π (`bind::run_step`), so a run truncated by
+    receipt is its own run (A-4.1). `show binding` takes
+    `received_by` too and answers `embargo_from`, the first decision bar
+    whose barrier closes after TIME (`bind::barrier_at`, E-13), which is
+    where the query layer's embargo begins (`validate::after_embargo`):
+    its masks, its reveal (`Keep::Inside`) and its claims read the same
+    boundary the kernel truncates at. A daily bar labelled at midnight
+    closes at its day's end, so `after 2023-09-15` embargoes the bar of
+    the 15th. A TIME after the sample embargoes nothing (a reveal is
+    refused: nothing to reveal); one before it leaves no bar to read.
+    Rejected: computing the boundary in the query layer from the labels
+    (it does not know the calendars' bucket rule, which the kernel and
+    the data layer share), and truncating by the label alone (a bar
+    received after TIME would be read when its label precedes it).
+  - **`trailing:N%`.** N is between 1 and 99. The embargo is the last N
+    % of the span between the first and last decision bars of the plan's
+    window (`validate::trailing_share_embargo`, the tail rounded up to
+    the nanosecond): the window's ends clipped to the sample's when the
+    plan has one, the sample's otherwise. `trailing:Ny` and `trailing:Nmo`
+    keep counting back from the sample's last bar, as E-59 built them,
+    so no existing plan's embargo moves. Rejected: a percentage of the
+    sample whatever the window (the guideline sizes the hold-out from
+    the span before H, which is the window).
+  - **`trailing:Nmo`.** Months, as `blocks` and `walk_forward` already
+    count them (`validate::trailing_months_embargo`); `Holdout::Trailing`
+    holds months, and a whole number of years is still written
+    `trailing:Ny` (`describe`), so `trailing:24mo` and `trailing:2y` are
+    one plan and every existing normal form is unchanged.
+  - **Tests.** `abt-tests/tests/plan_holdout.rs` (every run under `after`
+    reads no bar received after TIME and the reveal reports exactly the
+    bars after it; the percentage embargoes its share of the sample and
+    of the window; the forms parse, round-trip and the malformed are
+    refused) and `abt/tests/plan_cli.rs` (`abt plan check` prints each
+    form). Falsified by `scripts/mutations/q-2.1-after-receipt.patch`
+    (the kernel cuts by the label rather than the barrier's instant).
+- **E-95 (Q-3.1, Q-8; the metric rows the red flags need).** The
+  pipeline's rationale names every red flag that fires (guideline
+  sections 12 and 13, `absolute-pipeline/docs/design/agent-guidelines.md`;
+  PL-8.1), and the report block of its plan template asks for the rows
+  by name. The metrics library gains them (`metrics/trades.rs`,
+  `TradeMetrics`, computed in `plan::exec::run_one` over the bars and
+  fills a run's mask keeps, and in `abt metrics` over the whole run),
+  and `METRIC_NAMES` and `objective_value` know their names, so a
+  `report` block, a `compare` step and an `objective` take them:
+  - `return`: the mean bar P&L over the fixed base (the report block's
+    capital, else the first NAV kept), times the periods a year, which is
+    the guideline's "average return % a year on the fixed base";
+    `mar`: `return` over the deepest fall of the cumulative P&L from its
+    peak as a share of the base (NaN without a drawdown);
+    `drawdown_duration`: `max_drawdown_duration` under the name the
+    guideline uses.
+  - The round trips (`convention_metrics`'s: a security's position from
+    flat back to flat among the fills kept, its P&L the cash flows net
+    of commissions and fees, closed at its last fill): `trades`,
+    `profit_factor` (the winners' P&L over the losers'; ∞ without a
+    loss, NaN without a trade), `hit_rate` (a trade of exactly zero is
+    no win), `avg_win_loss`, `avg_trade`, `avg_trade_to_cost` (over
+    twice the fills' commissions and fees per unit filled, the
+    round-turn cost per contract or per share), `largest_loss` (a
+    positive number, 0 without a losing trade), `trade_skew`.
+  - The concentration: `top_market_share` (the largest entity's share
+    of the net profit over every trade) and `profitable_market_share`
+    (the share of entities traded whose trades made money);
+    `profit_before_1990_share` (of the bars' net profit, the part made
+    before 1990-01-01). A share of a net profit that is not positive is
+    NaN, which the report shows as null.
+  - **Tables.** `summary` shows the rows by name as any metric;
+    `contribution` is new (per run and entity, by ticker where the
+    store's `ticker` relation names the id: net profit, share, trades,
+    hit rate); `subperiods` keeps its columns and gains the best run's
+    `net_profit` and `trades` per calendar year. `abt metrics` prints a
+    `trades` line and carries the group as `trades` in `--json`.
+  - **Decisions.** The rows live in a struct of their own rather than
+    in `ReturnMetrics` or `TradingMetrics`, so the frozen records of
+    E-66 (`golden/study/*.json`, which serialise those two) and
+    `query.<plan>.outcomes` keep their shapes. A run's masked rows are
+    over the bars and fills kept: a position opened outside the mask
+    and closed inside never flattens inside it and is no trade. The
+    yearly net profit is the bars' (what the book earned), the yearly
+    trade count the round trips closed in the year; the contribution by
+    entity is the trades' (a bar's P&L has no entity). Rejected: the
+    yearly rows from trades alone (the book's open positions would
+    leave the years), and `profit_factor` per period (the guideline's
+    thin-edge row is a trade statistic; `convention_metrics` keeps both
+    under its own names).
+  - **Tests.** `abt-tests/tests/metrics.rs::the_red_flag_rows_are_computed_as_stated_from_hand_built_fills`
+    (six bars across 1990 and four round trips, every row against a
+    hand computation, the mask and the empty case) and
+    `report_tables.rs` (the three tables of a grid plan). Falsified by
+    `scripts/mutations/q-3.1-hit-rate.patch` (a flat trade counted as a
+    win).
 
 ## Layout
 

@@ -222,7 +222,89 @@ fn plan(store: &Store, form: &QueryForm, r_max: Option<i64>, as_of: Option<u64>)
         QueryForm::Catalog(p) => p.relation.clone(),
         QueryForm::Chain(_) => String::new(),
     };
+    // A scan whose predicate keeps some instruments reads theirs alone
+    // (E-120): a hot version their blocks, a partition through its index;
+    // the predicate still applies.
+    if let (QueryForm::Scan(sc), None) = (form, &f.identity) {
+        if let (Some(p), Ok(schema)) = (sc.predicate.as_deref(), store.schema(&relation)) {
+            f.identity = entity_ids(&schema, p);
+        }
+    }
     Ok((relation, f))
+}
+
+/// The instruments a predicate keeps when one of its conjuncts is an
+/// `=` or `in` of entities on the relation's entity column, sorted.
+fn entity_ids(schema: &RelationSchema, p: &Predicate) -> Option<Vec<u64>> {
+    let entity = schema.columns.iter().find(|c| c.role == abt_wire::generated::abt::wire::Role::Entity)?;
+    p.all.iter().flatten().find_map(|d| match d.atoms.as_slice() {
+        [a] if a.column == entity.name && matches!(a.op, Op::Eq | Op::In) => {
+            let values = a.values.as_ref()?;
+            if values.iter().any(|v| v.kind != ConstantKind::Entity) {
+                return None;
+            }
+            let mut ids: Vec<u64> = values.iter().map(|v| v.int as u64).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            Some(ids)
+        }
+        _ => None,
+    })
+}
+
+/// `Distinct` over a version read one bucket at a time in time order: each
+/// value's first row, in (t, identity) order as the whole read gives it,
+/// answered as the column's values (E-120).
+fn distinct_by_bucket(
+    store: &Store,
+    version: &str,
+    schema: &abt_wire::generated::abt::wire::RelationSchema,
+    filter: &crate::store::RowFilter,
+    d: &abt_wire::generated::abt::wire::Distinct,
+) -> Result<(SchemaRef, Vec<RecordBatch>), DataError> {
+    let ci = schema
+        .columns
+        .iter()
+        .position(|c| c.name == d.column)
+        .ok_or_else(|| DataError::Malformed(format!("`{}` has no column `{}`", schema.name, d.column)))?;
+    let m = store.manifest(version)?;
+    let mut spans: Vec<(i64, i64)> = m
+        .partitions
+        .iter()
+        .filter(|p| !(filter.t0.is_some_and(|t0| p.t_max < t0) || filter.t1.is_some_and(|t1| p.t_min > t1)))
+        .map(|p| (p.t_min, p.t_max))
+        .collect();
+    spans.sort_unstable();
+    spans.dedup();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut picked: Vec<RecordBatch> = Vec::new();
+    let mut converter: Option<arrow::row::RowConverter> = None;
+    for (t_min, t_max) in spans {
+        let f = crate::store::RowFilter {
+            t0: Some(filter.t0.map_or(t_min, |t0| t0.max(t_min))),
+            t1: Some(filter.t1.map_or(t_max, |t1| t1.min(t_max))),
+            ..filter.clone()
+        };
+        for b in store.read(version, &f)? {
+            let col = b.column(ci).clone();
+            let conv = match &converter {
+                Some(c) => c,
+                None => converter.insert(arrow::row::RowConverter::new(vec![arrow::row::SortField::new(col.data_type().clone())])?),
+            };
+            let keys = conv.convert_columns(std::slice::from_ref(&col))?;
+            let keep: Vec<u32> = (0..col.len()).filter(|&i| seen.insert(keys.row(i).as_ref().to_vec())).map(|i| i as u32).collect();
+            if !keep.is_empty() {
+                picked.push(arrow::compute::take_record_batch(&b, &arrow::array::UInt32Array::from(keep))?);
+            }
+        }
+    }
+    let stored = stored_schema(schema);
+    let layout_schema = picked.first().map(|b| b.schema()).unwrap_or_else(|| stored.clone());
+    let rows = rows::concat(&layout_schema, &picked)?;
+    let ans = rows::answer(schema, &rows, store.registry.labels(), false)?;
+    let col = ans.column(ci).clone();
+    let out = Arc::new(Schema::new(vec![Field::new(&d.column, col.data_type().clone(), true)]));
+    Ok((out.clone(), vec![RecordBatch::try_new(out, vec![col])?]))
 }
 
 fn predicate_of(form: &QueryForm) -> Option<&Predicate> {
@@ -250,6 +332,13 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
     }
     let version = view.version(store, &relation)?;
     let schema = store.manifest(&version)?.schema;
+    // A column's distinct values, bucket by bucket: only the values seen
+    // are kept (E-120). Read whole, the membership of every list in a store
+    // of every US equity (183 million rows) held three copies of itself in
+    // the service, past 20 GB, at each run's binding.
+    if let QueryForm::Distinct(d) = form {
+        return distinct_by_bucket(store, &version, &schema, &filter, d);
+    }
     let stored = stored_schema(&schema);
     let lay = layout(&schema);
     // `latest` of an identity that fixes the key reads back from `t_max` to

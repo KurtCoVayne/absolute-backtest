@@ -1,0 +1,17 @@
+# proposition: E-119 (a held position drifting past a weight limit holds)
+# mutation: every position the bar leaves checked again
+# test: cargo test -p abt-tests --test limits a_held_position_drifting_past_a_weight_limit_holds
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/contract/check.rs b/crates/abt-kernel/src/contract/check.rs
+index 3cea712..40bd476 100644
+--- a/crates/abt-kernel/src/contract/check.rs
++++ b/crates/abt-kernel/src/contract/check.rs
+@@ -626,7 +626,7 @@ impl Invariants {
+                         // adds, so a held position a price rise carried past
+                         // the bound, or one an order reduces, holds.
+                         let grown = |s: Sym, q: f64| q.abs() > self.shadow.position(s).abs() * (1.0 + 1e-12) + 1e-12;
+-                        if let Some((s, q, pm)) = e.positions.iter().find(|(s, q, pm)| grown(*s, *q) && (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
++                        if let Some((s, q, pm)) = e.positions.iter().find(|(s, q, pm)| (grown(*s, *q) || true) && (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
+                             position_limits = Some(format!("{} at {} after the accepted orders, above `{}`", k.symbols.name(*s), (q * pm).abs(), l));
+                         }
+                     }

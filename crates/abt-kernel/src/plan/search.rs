@@ -166,6 +166,38 @@ pub fn literal_deps(prog: &Program, rule: usize) -> RuleDeps {
         }
         literals.push(LitDeps { reads, binds });
     }
+    // A time builtin or a duration window on the per-instrument sessions
+    // calendar steps over the sessions of the head's instrument (the
+    // kernel's `domain_of_term`): it reads the head's entity variable, so it
+    // waits for the literal that binds it. Placed before it, the instrument
+    // unbound, it stepped over every instrument's sessions at once (E-107).
+    let entity = prog.relations.get(&r.head.name).and_then(|sig| {
+        sig.args.iter().zip(&r.head.terms).find_map(|(a, t)| match t {
+            Term::Var(v, _) if a.ty.is_entity() => Some(v.clone()),
+            _ => None,
+        })
+    });
+    if let Some(e) = entity.filter(|e| initially_bound.contains(e) || literals.iter().any(|d| d.binds.contains(e))) {
+        for (lit, d) in r.body.iter().zip(literals.iter_mut()) {
+            let t = match lit {
+                Literal::Builtin(Builtin::Prev { t, .. } | Builtin::Lag { t, .. } | Builtin::MonthStart { t } | Builtin::DayStart { t }, _) => t,
+                Literal::Window {
+                    kind: WindowKind::Window | WindowKind::Prior,
+                    base,
+                    ..
+                } => base,
+                _ => continue,
+            };
+            let cal = match t {
+                Term::Var(v, _) => prog.var_cals.get(rule).and_then(|m| m.get(v)).cloned(),
+                _ => None,
+            }
+            .unwrap_or_else(|| prog.infos[rule].cal.clone());
+            if cal.per_entity() && !d.reads.contains(&e) && !d.binds.contains(&e) {
+                d.reads.push(e.clone());
+            }
+        }
+    }
     RuleDeps { initially_bound, literals }
 }
 

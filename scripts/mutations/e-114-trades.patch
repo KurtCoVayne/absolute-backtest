@@ -1,0 +1,17 @@
+# proposition: E-114 (a window's round trips are the run's that close in it)
+# mutation: the window's fills alone again
+# test: cargo test -p abt-query --test trades
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-query/src/metrics/trades.rs b/crates/abt-query/src/metrics/trades.rs
+index db9c74b..abfdb08 100644
+--- a/crates/abt-query/src/metrics/trades.rs
++++ b/crates/abt-query/src/metrics/trades.rs
+@@ -133,7 +133,7 @@ fn round_trips(r: &Run, keep: &dyn Fn(i64) -> bool) -> Vec<Trade> {
+     // window's alone: a window opening on a held position read its exit as
+     // an entry, and the market's trades never closed (a reveal over one
+     // market reported none, its P&L in the net profit all the same).
+-    for f in &r.fills {
++    for f in r.fills.iter().filter(|f| keep(f.t)) {
+         let (pos, flow) = open.entry(f.instrument).or_insert((0.0, 0.0));
+         *pos += f.quantity;
+         *flow += -f.quantity * f.price * f.multiplier - f.commission - f.fee;

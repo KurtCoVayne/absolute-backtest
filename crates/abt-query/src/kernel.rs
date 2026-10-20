@@ -46,6 +46,9 @@ pub struct Sample {
     pub bars: usize,
     pub first: Option<i64>,
     pub last: Option<i64>,
+    /// With a receipt time asked for: the first decision bar whose barrier
+    /// closes after it, where a `holdout after TIME` begins (E-97).
+    pub embargo_from: Option<i64>,
 }
 
 /// A run to ask for.
@@ -56,6 +59,9 @@ pub struct RunRequest {
     pub end: Option<i64>,
     /// Stop after the decision at this bar (Q-2.3's truncation).
     pub horizon: Option<i64>,
+    /// Stop after the last decision barrier whose instant is at or before
+    /// this receipt time (`holdout after TIME`, Q-2.3).
+    pub received_by: Option<i64>,
     /// π, canonical JSON (Q-2.5).
     pub plan_step: Option<serde_json::Value>,
     /// A block hold-out's spans, `[from, to)`.
@@ -95,6 +101,7 @@ fn request(op: KernelOp) -> KernelRequest {
         checkpoint_every: None,
         from_checkpoint: None,
         horizon: None,
+        received_by: None,
         plan_step: None,
         embargo_mask: None,
         observe: None,
@@ -166,9 +173,16 @@ impl Kernel {
 
     /// The binding a run at `at` would get now, and its decision bars' span.
     pub fn sample(&self, prog: &Program, at: &Point) -> Result<Sample, Error> {
+        self.sample_received_by(prog, at, None)
+    }
+
+    /// `sample`, and, given a receipt time, the first decision bar after it
+    /// (`holdout after TIME`, E-97).
+    pub fn sample_received_by(&self, prog: &Program, at: &Point, received_by: Option<i64>) -> Result<Sample, Error> {
         let mut r = Self::of(prog, KernelOp::Show);
         r.what = Some("binding".into());
         r.point = Some(point(at));
+        r.received_by = received_by;
         let (m, _) = self.ask(r)?;
         let v: serde_json::Value = serde_json::from_str(m.text.as_deref().unwrap_or("null")).map_err(|e| Error::Malformed(format!("show binding: {}", e)))?;
         Ok(Sample {
@@ -185,6 +199,7 @@ impl Kernel {
             bars: v["bars"].as_u64().unwrap_or(0) as usize,
             first: v["first"].as_i64(),
             last: v["last"].as_i64(),
+            embargo_from: v["embargo_from"].as_i64(),
         })
     }
 
@@ -195,6 +210,7 @@ impl Kernel {
         r.start = run.start;
         r.end = run.end;
         r.horizon = run.horizon;
+        r.received_by = run.received_by;
         r.plan_step = run.plan_step.as_ref().map(|v| abt_wire::to_canonical_json(v).unwrap_or_default());
         if !run.mask.is_empty() {
             r.embargo_mask = Some(run.mask.iter().map(|&(from, to)| Span { from, to }).collect());

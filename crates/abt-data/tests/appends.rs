@@ -668,3 +668,45 @@ fn stats_carry_the_hot_figures_and_the_process_row() {
     let rel = b.column_by_name("relation").unwrap().as_string::<i32>();
     assert!((0..b.num_rows()).all(|i| rel.value(i) == REL));
 }
+
+/// E-121: an instrument appended since publication as a new one lives in
+/// the overlay alone; an ingest that is no append (a revision of another
+/// instrument, the retry of an ingest killed mid-write) stages a version
+/// from the published instruments and the input, and dropped it with every
+/// row it held. A futures store lost every root ingested after the first
+/// from `high` and `low` this way (17.8 million rows of 102.4). Every
+/// instrument's rows survive, and the version reads as its Parquet twin.
+#[test]
+fn a_rebuild_keeps_the_instruments_appended_since_publication() {
+    let day = |d: i64| (19_000 + d) * NANOS_PER_DAY;
+    let first: Vec<(u64, i64, i64, f64)> = (0..20).map(|d| (1u64, day(d), day(d), 10.5 + d as f64)).collect();
+    let second: Vec<(u64, i64, i64, f64)> = (0..20).map(|d| (2u64, day(d), day(d), 20.25 + d as f64)).collect();
+    let revision = vec![(1u64, day(3), day(25), 99.5)];
+    let mut a = Store::temporary("rebuild-overlay").unwrap();
+    let mut b = Store::temporary("rebuild-twin").unwrap();
+    let v1 = a.ingest(REL, &[close_rows(&first)], "test", hot()).unwrap();
+    b.ingest(REL, &[close_rows(&first)], "test", BTreeMap::new()).unwrap();
+    // A new instrument: an append, under the published version.
+    assert_eq!(a.ingest(REL, &[close_rows(&second)], "test", hot()).unwrap(), v1, "an append keeps the version");
+    b.ingest(REL, &[close_rows(&second)], "test", BTreeMap::new()).unwrap();
+    // A revision: no append, a new version.
+    let va = a.ingest(REL, &[close_rows(&revision)], "test", hot()).unwrap();
+    let vb = b.ingest(REL, &[close_rows(&revision)], "test", BTreeMap::new()).unwrap();
+    assert_ne!(va, v1, "a new version");
+    let rows_of = |id: u64| {
+        a.read(
+            &va,
+            &RowFilter {
+                identity: Some(vec![id]),
+                latest_only: true,
+                ..RowFilter::default()
+            },
+        )
+        .unwrap()
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>()
+    };
+    assert_eq!((rows_of(1), rows_of(2)), (20, 20), "every instrument's rows");
+    same_reads(&a, &va, &b, &vb, &mut Rng(4), &[1, 2], 19_000, 26);
+}

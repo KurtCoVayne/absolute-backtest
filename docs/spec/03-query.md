@@ -23,7 +23,7 @@ study NAME {
   program    PATH | NAME                       # the strategy; its normal form fixes the lineage
   params     { k = v; ... }                    # the base point (overrides the program's defaults within their ranges)
   grid       { k = v1, v2, ...; ... }          # axes; the Cartesian product is the set of points
-  holdout    none | trailing:Ny | blocks:K:Nmo[:seed]
+  holdout    none | trailing:Ny | trailing:Nmo | trailing:N% | after TIME | blocks:K:Nmo[:seed]
   walk_forward anchored:TRAIN:TEST | rolling:TRAIN:TEST       # optional
   window     DATE .. DATE                      # the report window of every run (overrides the program's report block)
   budget     { money X; bytes Y; requests Z }  # what the plan's demands may spend (D-7.2)
@@ -49,7 +49,7 @@ A plan with no `steps` block has the default steps: `before` claims, `grid` (or 
 | `reveal` | `reveal NAME of RUN|best(GRID)` | a committed point (one the plan has run) | a run over the whole sample reporting the embargoed bars only | yes, as a reveal |
 | `test` | `test NAME: TEST on INPUT [params] [over WINDOW]` | a feed relation, a ledger, an outcome | `query.<plan>.tests` | yes |
 | `claim` | the claims block, run `before` or `after` | as `test` | `query.<plan>.verdicts` | yes |
-| `compare` | `compare NAME: RUNS by METRICS` | outcomes | a table | no |
+| `compare` | `compare NAME: RUNS by METRICS` (the metrics a list, bracketed or not) | outcomes | a table | no |
 | `ledger` | `ledger NAME: R of RUN into TABLE` | the kernel's observation of `R` | a relation | no |
 | `feed` | `feed NAME: STATISTIC on RELATION [over WINDOW]` | the binding | a table (section 7) | no |
 | `activation` | `activation NAME of RUN` | the kernel's C and F tables and `decide` ledgers | the tables of section 8 | no |
@@ -59,7 +59,7 @@ A step's inputs name earlier steps; the steps form a DAG and are executed in top
 
 ### 2.3 Hold-out and embargo
 
-A `trailing:Ny` hold-out truncates every run's stream at the last barrier before the embargo (`--to SEQ` on the kernel, D-5.5), so the kernel never sees the embargoed bars: the embargo is enforced by data, not by discipline. A `blocks` hold-out lets runs cross the blocks (the book's state must) and withholds every metric, test input and ledger row inside them: the query layer applies the block mask to every table it reads from the run, and the kernel's observation ledgers for the run are written only outside the blocks (the kernel is told the mask with the run request, P-3.4). A `reveal` lifts the embargo for one committed point and is logged as a reveal.
+A `trailing:Ny` hold-out truncates every run's stream at the last barrier before the embargo (`--to SEQ` on the kernel, D-5.5), so the kernel never sees the embargoed bars: the embargo is enforced by data, not by discipline. A `trailing:Nmo` hold-out counts months, a `trailing:N%` hold-out embargoes the last N % of the span between the first and last decision bars of the plan's window, and `after TIME` (an ISO-8601 date or datetime, UTC, nanoseconds admitted) begins the embargo at the last barrier whose receipt time is at or before TIME, so that no non-reveal run reads anything received after it and a reveal reports the bars after it (E-97). A `blocks` hold-out lets runs cross the blocks (the book's state must) and withholds every metric, test input and ledger row inside them: the query layer applies the block mask to every table it reads from the run, and the kernel's observation ledgers for the run are written only outside the blocks (the kernel is told the mask with the run request, P-3.4). A `reveal` lifts the embargo for one committed point and is logged as a reveal.
 
 **Proposition 2.1 [N] (the embargo is enforced).** Under `trailing`, no decision, fill, ledger row or metric of a non-reveal run depends on embargoed data. *Proof.* The stream is truncated at the embargo's first barrier (D-5.5); by K-4.1 every output depends on events at or before the barriers consumed. ∎ Under `blocks` the book crosses the blocks by design, and what is withheld is every statistic over them; the proposition does not hold and the report says so, which is the honest status of a block hold-out.
 
@@ -95,6 +95,7 @@ The present `src/study/metrics.rs` and `validate.rs` move unchanged in substance
 | Book | gross, net and leverage over time; margin utilisation (`margin_req` over NAV); concentration (max weight, effective names); funding paid |
 | Options | premium collected and paid, assignment and exercise counts, days to expiry at entry and exit, net Greek exposure over time (Δ·S, Γ, V, Θ from the kernel's `greeks` relation times positions), realised versus implied volatility of the underlyings traded, P&L attribution to Δ, Γ, Θ, V by the discrete Taylor expansion over each bar with the residual reported |
 | Convention | both conventions (`--report-by day`, a reporting calendar) as today's `convention_metrics` |
+| Red flags | on the fixed base, `return` (the mean bar P&L over the base, a year) and `mar` (over the drawdown of the cumulative P&L as a share of the base); `drawdown_duration`; the round trips' `trades`, `profit_factor`, `hit_rate`, `avg_win_loss`, `avg_trade`, `avg_trade_to_cost` (over the round-turn commission per contract or share), `largest_loss`, `trade_skew`; the profit's concentration, `top_market_share` and `profitable_market_share`; `profit_before_1990_share`; the contribution by entity and by calendar year (E-95; the pipeline's guideline §12) |
 
 Every metric is a pure function of tables and is recorded with the tables' versions.
 
@@ -179,7 +180,7 @@ claims {
   CLAIM_NAME : TEST on INPUT [over WINDOW] [with { param = value, ... }] expect OUTCOME [at LEVEL] [before | after] [warn | block]
 }
 INPUT   = feed RELATION[(entity filter)] | feature R of RUN|grid | returns of RUN|grid | events of RUN | ledger NAME
-OUTCOME = reject | accept | statistic OP VALUE | effect OP VALUE | interval excludes VALUE
+OUTCOME = reject | accept | statistic OP VALUE | effect OP VALUE | interval OP VALUE | interval excludes VALUE
 ```
 
 `before` claims run on the in-sample window before any run of the plan (a feed or a feature computed by a warm-up run with no decisions, `observe` only); `after` claims run on outcomes. A claim's failure policy is `warn` (default) or `block` (the steps that depend on it do not run and the report says why). Every claim is re-tested on every reveal, over the embargoed bars, and the pair (in-sample verdict, out-of-sample verdict) is a row of `verdicts`.
@@ -245,7 +246,8 @@ A report is a set of relations under `query.<plan>.report.*` and a text renderin
 | `contract` | the kernel's contract statuses per run (K-3.7), aggregated |
 | `warnings` | every warning raised by any layer for the plan's runs, with the bias it maps to and the count |
 | `biases` | the forty biases of B-4 to B-6 with their owner layer and status source, rows touched marked |
-| `surface`, `folds`, `subperiods` | as today |
+| `surface`, `folds`, `subperiods` | as today; `subperiods` also carries the best run's net profit and trades per calendar year (E-95) |
+| `contribution` | per run and entity: the net profit of its trades, its share of the run's, its trades and their hit rate (E-95) |
 | `feed`, `activation` | the tables of sections 6 and 7 the plan asked for |
 
 The forty-bias table's owners after the split: *data* (historical revision, point in time by receipt, latency: measurable because the store keeps `r`), *kernel* (look-ahead, bar resolution, execution timing, partial fill, transaction cost, slippage, impact, liquidity, spread, leverage, funding, shorting, borrow, corporate action, delisting, cash management, portfolio construction, rebalancing), *query* (survivorship and selection as feed statistics; data snooping, multiple testing, overfitting, parameter over-optimisation, p-hacking, false significance, short sample, out-of-sample, walk-forward, autocorrelation, non-stationarity, regime, tail risk, label and feature leakage through the embargo and the claims), *program* (universe leakage through `instruments` tables, W9). The report lists each with its status (`guaranteed`, `data-guaranteed`, `modeled`, `measured`, `warned`, `open`) and the source of that status.

@@ -122,11 +122,16 @@ pub struct Security {
     pub to: Option<i64>,
 }
 
-/// The security carrying `ticker` at `as_of`, in a table.
+/// The security carrying `ticker` at `as_of`, in a table; when none does
+/// yet, the first to carry it after (E-117): a root of an instruments table
+/// that lists after a plan's in-sample end (ETH_N, from 2021, in a study
+/// whose in-sample ends in 2017) enters the universe when it lists, and the
+/// plan binds.
 pub fn resolve_ticker(securities: &[Security], ticker: &str, as_of: i64) -> Result<Sym, String> {
-    securities
-        .iter()
-        .find(|s| s.ticker == ticker && s.from <= as_of && s.to.map(|to| as_of < to).unwrap_or(true))
+    let carrying = || securities.iter().filter(|s| s.ticker == ticker);
+    carrying()
+        .find(|s| s.from <= as_of && s.to.map(|to| as_of < to).unwrap_or(true))
+        .or_else(|| carrying().filter(|s| s.from > as_of).min_by_key(|s| s.from))
         .map(|s| s.id)
         .ok_or_else(|| {
             format!(
@@ -3610,7 +3615,7 @@ pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols, eq
     }
 }
 
-fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
+pub(crate) fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
     fn term(t: &Term, f: &mut dyn FnMut(&Lit)) {
         match t {
             Term::Lit(l, _) => f(l),
@@ -3872,6 +3877,10 @@ pub struct Replay {
     /// Stop after the decision at this bar: what the data received by its
     /// barrier decides (the stream truncated at that barrier's seq).
     pub horizon: Option<i64>,
+    /// Stop after the last decision barrier whose instant is at or before
+    /// this receipt time (`holdout after TIME`, Q-2.3): the run reads
+    /// nothing received after it.
+    pub received_by: Option<i64>,
     pub checkpoint_every: Option<CheckpointEvery>,
     pub from: Option<Checkpoint>,
     /// Record the windowed groups' summaries (the `summary` state table).
@@ -3930,11 +3939,14 @@ pub enum Next {
 /// What a run of the program would read now, without a run (P-3.4's `show
 /// binding`, E-59): the binding, its relations' versions, and the decision
 /// calendar's bars, the sample a plan places its hold-out and its
-/// walk-forward folds in (Q-2.3).
-pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig) -> Result<serde_json::Value, RunError> {
+/// walk-forward folds in (Q-2.3). With `received_by`, the first decision
+/// bar whose barrier closes after that receipt time (`embargo_from`, where
+/// a `holdout after TIME` begins; E-97), null when none does.
+pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig, received_by: Option<i64>) -> Result<serde_json::Value, RunError> {
     let bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides), None)?;
     let probe = Kernel::build(prog, &bound, cfg.clone())?;
     let labels: Vec<i64> = bind::calendars(&probe).pop().map(|(_, l)| l).unwrap_or_default();
+    let embargo_from = received_by.and_then(|rb| labels.iter().copied().find(|&l| bind::barrier_at(prog, l) > rb));
     let relations: Vec<serde_json::Value> = bound
         .binding
         .pairs
@@ -3951,6 +3963,7 @@ pub fn sample(prog: &Program, client: &DataClient, cfg: &ExecConfig) -> Result<s
         "bars": labels.len(),
         "first": labels.first(),
         "last": labels.last(),
+        "embargo_from": embargo_from,
     }))
 }
 
@@ -3991,7 +4004,7 @@ pub fn replay_observed<'p>(
         return Err(RunError::Config("a live-broker run takes its deployment document (K-6.5)".into()));
     }
     if let Some(session) = opts.mode.session() {
-        if opts.horizon.is_some() || opts.to_seq.is_some() || opts.from.is_some() {
+        if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() || opts.from.is_some() {
             return Err(RunError::Config(format!(
                 "a {} run reads its session from now on: no horizon, truncation or resumption",
                 opts.mode.name()
@@ -4030,7 +4043,15 @@ pub fn replay_observed<'p>(
     let run = bind::run_id(
         &identity.program_hash,
         &identity.binding_id,
-        &bind::plan_step(opts.plan_step.as_ref(), &cfg, opts.to_seq, opts.horizon, opts.mode.session(), opts.replay_of.as_deref()),
+        &bind::plan_step(
+            opts.plan_step.as_ref(),
+            &cfg,
+            opts.to_seq,
+            opts.horizon,
+            opts.received_by,
+            opts.mode.session(),
+            opts.replay_of.as_deref(),
+        ),
         &identity.mode,
     );
     let identity = Identity { run_id: run.clone(), ..identity };
@@ -4044,12 +4065,21 @@ pub fn replay_observed<'p>(
     }
     let mut to_seq = opts.to_seq;
     let mut end_label: Option<i64> = None;
-    if opts.horizon.is_some() || opts.to_seq.is_some() {
+    if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() {
         let dcal = prog.decision_cal.to_string();
         let index = client.stream_index(spec.clone())?;
+        let mut cut = |at: Option<&bind::IndexRow>| {
+            let seq = at.map(|r| r.seq).unwrap_or(0);
+            to_seq = Some(to_seq.map_or(seq, |s| s.min(seq)));
+        };
         if let Some(h) = opts.horizon {
-            let at = index.iter().rfind(|r| r.calendar == dcal && r.label <= h);
-            to_seq = Some(to_seq.map_or(at.map(|r| r.seq).unwrap_or(0), |s| s.min(at.map(|r| r.seq).unwrap_or(0))));
+            cut(index.iter().rfind(|r| r.calendar == dcal && r.label <= h));
+        }
+        // `holdout after TIME`: the last decision barrier whose instant is
+        // at or before the receipt time, so nothing received after it is
+        // read (Q-2.3, E-97).
+        if let Some(rb) = opts.received_by {
+            cut(index.iter().rfind(|r| r.calendar == dcal && r.at <= rb));
         }
         end_label = index.iter().filter(|r| to_seq.is_none_or(|s| r.seq <= s)).map(|r| r.label).max();
     }
@@ -4403,5 +4433,42 @@ mod store_tests {
         assert_eq!(s.lookup(KEY, None).len(), 2);
         s.insert_received(KEY, tu(1, 21.0), &IDENTITY, 200);
         assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0)]);
+    }
+}
+
+#[cfg(test)]
+mod ticker_tests {
+    use super::*;
+
+    /// E-117: a ticker no security carries at the bundle date resolves to
+    /// the first security carrying it after; one carried at the date to its
+    /// carrier then.
+    #[test]
+    fn a_ticker_listed_after_the_bundle_date_is_its_first_carrier() {
+        let table = vec![
+            Security {
+                id: 1,
+                ticker: "OLD".into(),
+                from: 0,
+                to: Some(100),
+            },
+            Security {
+                id: 2,
+                ticker: "OLD".into(),
+                from: 200,
+                to: None,
+            },
+            Security {
+                id: 3,
+                ticker: "NEW".into(),
+                from: 500,
+                to: None,
+            },
+        ];
+        assert_eq!(resolve_ticker(&table, "OLD", 50), Ok(1));
+        assert_eq!(resolve_ticker(&table, "OLD", 250), Ok(2));
+        assert_eq!(resolve_ticker(&table, "OLD", 150), Ok(2), "between two carriers, the next");
+        assert_eq!(resolve_ticker(&table, "NEW", 10), Ok(3), "listed after the bundle date");
+        assert!(resolve_ticker(&table, "NONE", 10).is_err());
     }
 }

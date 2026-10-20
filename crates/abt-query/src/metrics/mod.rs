@@ -39,9 +39,11 @@ use crate::run::Run;
 use crate::time;
 
 pub mod options;
+pub mod trades;
 pub mod validate;
 
 pub use options::{options_metrics, OptionsMetrics};
+pub use trades::{trade_metrics, Contribution, TradeMetrics, YearRow};
 pub use validate::{subperiod_sharpes, surface, Surface};
 
 /// Autocorrelations beyond this lag are taken as zero in Lo's adjustment.
@@ -879,8 +881,10 @@ pub fn convention_metrics_on(r: &Run, periods_per_year: f64, by_day: bool, calen
 // ---- metrics by name ----
 
 /// The metrics a plan may optimise or a report show by name (Q-2.1's
-/// `objective`).
-pub const METRIC_NAMES: [&str; 13] = [
+/// `objective`): the return and trading groups, and the rows the red flags
+/// read (E-95: `return` and `mar` on the fixed base, the round trips'
+/// statistics, the concentration by entity and the profit before 1990).
+pub const METRIC_NAMES: [&str; 27] = [
     "sharpe",
     "sharpe_lo",
     "cagr",
@@ -894,6 +898,20 @@ pub const METRIC_NAMES: [&str; 13] = [
     "worst_month",
     "turnover",
     "max_leverage",
+    "return",
+    "mar",
+    "drawdown_duration",
+    "trades",
+    "profit_factor",
+    "hit_rate",
+    "avg_win_loss",
+    "avg_trade",
+    "avg_trade_to_cost",
+    "largest_loss",
+    "trade_skew",
+    "top_market_share",
+    "profitable_market_share",
+    "profit_before_1990_share",
 ];
 
 /// A NAV curve's first and last value, its total return and its deepest
@@ -917,8 +935,9 @@ pub fn summary(curve: &[(i64, f64)]) -> BTreeMap<&'static str, f64> {
 }
 
 /// A named metric's value for a run; Calmar is the CAGR over the maximum
-/// drawdown (Q-3.1), undefined without a drawdown.
-pub fn objective_value(name: &str, m: &ReturnMetrics, t: &TradingMetrics) -> Option<f64> {
+/// drawdown (Q-3.1), undefined without a drawdown; `drawdown_duration` is
+/// `max_drawdown_duration` under the name the red flags use (E-95).
+pub fn objective_value(name: &str, m: &ReturnMetrics, t: &TradingMetrics, x: &TradeMetrics) -> Option<f64> {
     Some(match name {
         "sharpe" => m.sharpe,
         "sharpe_lo" => m.sharpe_lo,
@@ -934,19 +953,36 @@ pub fn objective_value(name: &str, m: &ReturnMetrics, t: &TradingMetrics) -> Opt
         }
         "volatility" => m.volatility,
         "max_drawdown" => m.max_drawdown,
-        "max_drawdown_duration" => m.max_drawdown_duration as f64,
+        "max_drawdown_duration" | "drawdown_duration" => m.max_drawdown_duration as f64,
         "cvar_5" => m.cvar_5,
         "worst_month" => m.worst_month,
         "turnover" => t.turnover,
         "max_leverage" => t.max_leverage,
+        "return" => x.annual_return,
+        "mar" => x.mar,
+        "trades" => x.trades as f64,
+        "profit_factor" => x.profit_factor,
+        "hit_rate" => x.hit_rate,
+        "avg_win_loss" => x.avg_win_loss,
+        "avg_trade" => x.avg_trade,
+        "avg_trade_to_cost" => x.avg_trade_to_cost,
+        "largest_loss" => x.largest_loss,
+        "trade_skew" => x.trade_skew,
+        "top_market_share" => x.top_market_share,
+        "profitable_market_share" => x.profitable_market_share,
+        "profit_before_1990_share" => x.profit_before_1990_share,
         _ => return None,
     })
 }
 
 /// Whether a higher value of the metric is better (drawdowns, volatility,
-/// CVaR, turnover and leverage are costs).
+/// CVaR, turnover, leverage, the largest loss, and the shares of the profit
+/// one market or the years before 1990 carry are costs).
 pub fn higher_is_better(name: &str) -> bool {
-    !matches!(name, "volatility" | "max_drawdown" | "max_drawdown_duration" | "cvar_5" | "turnover" | "max_leverage")
+    !matches!(
+        name,
+        "volatility" | "max_drawdown" | "max_drawdown_duration" | "drawdown_duration" | "cvar_5" | "turnover" | "max_leverage" | "largest_loss" | "top_market_share" | "profit_before_1990_share"
+    )
 }
 
 #[cfg(test)]

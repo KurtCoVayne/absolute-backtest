@@ -1,0 +1,17 @@
+# proposition: E-110 (a released run's memory goes back to the system)
+# mutation: trim returns nothing again; the arenas keep each run's peak
+# test: cargo test -p abt-tests --test service_memory
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-wire/src/memory.rs b/crates/abt-wire/src/memory.rs
+index 30214d8..27de07e 100644
+--- a/crates/abt-wire/src/memory.rs
++++ b/crates/abt-wire/src/memory.rs
+@@ -30,7 +30,7 @@ pub fn trim() {
+ /// `trim` without the interval: a run that ended, whose memory is the
+ /// largest a process frees at once.
+ pub fn trim_now() {
+-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
++    #[cfg(any())]
+     {
+         extern "C" {
+             fn malloc_trim(pad: usize) -> std::os::raw::c_int;

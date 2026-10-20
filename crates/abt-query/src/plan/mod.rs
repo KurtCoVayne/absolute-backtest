@@ -21,13 +21,25 @@ pub enum ProgramRef {
     Name(String),
 }
 
-/// The hold-out policy (Q-2.3).
+/// The hold-out policy (Q-2.3; the forms of E-97).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Holdout {
     None,
-    /// The last `years` of the sample are embargoed by truncation.
+    /// The last `months` of the sample are embargoed by truncation
+    /// (`trailing:Ny`, `trailing:Nmo`).
     Trailing {
-        years: u32,
+        months: u32,
+    },
+    /// The last `percent` of the span between the first and last decision
+    /// bars of the plan's window, embargoed by truncation (`trailing:N%`).
+    TrailingShare {
+        percent: u32,
+    },
+    /// Everything received after `time` is embargoed: every run is
+    /// truncated at the last barrier whose instant is at or before it
+    /// (`after TIME`, nanoseconds since the epoch, UTC).
+    After {
+        time: i64,
     },
     /// `count` random blocks of `months` months, masked; drawn by `seed`.
     Blocks {
@@ -38,10 +50,15 @@ pub enum Holdout {
 }
 
 impl Holdout {
+    /// As written, one text per hold-out (`trailing:24mo` is
+    /// `trailing:2y`; a time is written as the kernel prints it).
     pub fn describe(&self) -> String {
         match self {
             Holdout::None => "none".into(),
-            Holdout::Trailing { years } => format!("trailing:{}y", years),
+            Holdout::Trailing { months } if months % 12 == 0 => format!("trailing:{}y", months / 12),
+            Holdout::Trailing { months } => format!("trailing:{}mo", months),
+            Holdout::TrailingShare { percent } => format!("trailing:{}%", percent),
+            Holdout::After { time } => format!("after {}", crate::time::format_timestamp(*time)),
             Holdout::Blocks { count, months, seed } => format!("blocks:{}:{}mo:{}", count, months, seed),
         }
     }
@@ -208,6 +225,10 @@ pub enum Expect {
     Statistic(Op, f64),
     Effect(Op, f64),
     IntervalExcludes(f64),
+    /// `interval OP V`: every point of the interval (E-112), as
+    /// `interval > 0` for a Sharpe reliably above zero; `excludes` holds
+    /// on either side.
+    Interval(Op, f64),
 }
 
 impl Expect {
@@ -218,6 +239,7 @@ impl Expect {
             Expect::Statistic(op, v) => format!("statistic {} {}", op.text(), v),
             Expect::Effect(op, v) => format!("effect {} {}", op.text(), v),
             Expect::IntervalExcludes(v) => format!("interval excludes {}", v),
+            Expect::Interval(op, v) => format!("interval {} {}", op.text(), v),
         }
     }
 }

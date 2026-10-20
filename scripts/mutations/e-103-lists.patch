@@ -1,0 +1,17 @@
+# proposition: E-103 (the full store's lists are in the vocabulary the checker reads)
+# mutation: R2000 out of the equity class file's lists
+# test: cargo test -p abt-tests --test needs the_full_stores_lists_and_series_are_in_the_vocabulary
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/catalog/equity.dsl b/corpus-v2/catalog/equity.dsl
+index 0a104cb..ffbb45e 100644
+--- a/corpus-v2/catalog/equity.dsl
++++ b/corpus-v2/catalog/equity.dsl
+@@ -27,7 +27,7 @@ class equity {
+   margin(A: Equity, @T, Initial: Notional<USD>, Maintenance: Notional<USD>) complete   # per share, where the source publishes it (K-5.6)
+ 
+   # Vocabularies (WF-15 checks a program's labels against them).
+-  lists   "SPX", "SP500", "SP400", "SP600", "ETF", "SP1500", "SP100", "R3000", "R1000", "R2000", "RMID", "RMICRO", "RTOP200", "RALL", "NASDAQ", "NDX", "NBI", "NYSE", "DJIA", "SPDA"
++  lists   "SPX", "SP500", "SP400", "SP600", "ETF", "SP1500", "SP100", "R3000", "R1000", "RMID", "RMICRO", "RTOP200", "RALL", "NASDAQ", "NDX", "NBI", "NYSE", "DJIA", "SPDA"
+   reasons "bankruptcy", "acquisition", "voluntary", "regulatory"
+   schemes "sector"
+ }

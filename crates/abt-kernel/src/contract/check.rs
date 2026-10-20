@@ -175,6 +175,33 @@ pub fn state_bound(prog: &Program, instruments: usize) -> u64 {
     total
 }
 
+/// A predicate keeping a bound relation's rows labelled with one of
+/// `labels` (its label column's), none when it names none.
+fn labels_in(bound: &Bound, relation: &str, labels: &[String]) -> Option<abt_wire::generated::abt::wire::Predicate> {
+    use abt_wire::generated::abt::wire::{Atom, ColumnType, Constant, ConstantKind, Disjunction, Op, Predicate};
+    let (_, schema) = bound.stored.get(relation)?;
+    let column = schema.columns.iter().find(|c| c.ty == ColumnType::Label)?;
+    (!labels.is_empty()).then(|| Predicate {
+        all: Some(vec![Disjunction {
+            atoms: vec![Atom {
+                column: column.name.clone(),
+                op: Op::In,
+                values: Some(
+                    labels
+                        .iter()
+                        .map(|l| Constant {
+                            kind: ConstantKind::Label,
+                            num: 0.0,
+                            int: 0,
+                            text: Some(l.clone()),
+                        })
+                        .collect(),
+                ),
+            }],
+        }]),
+    })
+}
+
 fn le_zero(column: &str) -> abt_wire::generated::abt::wire::Predicate {
     use abt_wire::generated::abt::wire::{Atom, Constant, ConstantKind, Disjunction, Op, Predicate};
     Predicate {
@@ -362,7 +389,10 @@ pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &D
         );
     }
     if !listed.is_empty() && bound.stored.contains_key("member") {
-        let members: Vec<(Sym, i64)> = bound.scan(client, "member", None)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect();
+        // The program's lists' rows alone (E-120): a store's membership of
+        // every list is two orders larger.
+        let lists = labels_in(bound, "member", &prog.demand.lists);
+        let members: Vec<(Sym, i64)> = bound.scan(client, "member", lists)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect();
         let on: BTreeSet<(Sym, i64)> = listed.iter().cloned().collect();
         let problems = membership_problems(&members, &on, &name);
         warned_or_checked(c, "pre.membership", &problems, &mut warnings, "survivorship");
@@ -621,7 +651,14 @@ impl Invariants {
                     }
                     LimitKind::Weight => {
                         let bound = l.bound * e.capital;
-                        if let Some((s, q, pm)) = e.positions.iter().find(|(_, q, pm)| (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
+                        // A position the accepted orders grew from the book
+                        // the limits sized them against (E-119): the limit is
+                        // pre-trade and a clamp scales what an order adds, so
+                        // a held position a price rise carried past the
+                        // bound, one an order reduces, and the bar before's
+                        // fill at this bar's open marked at its close hold.
+                        let grown = |s: Sym| e.grown.contains(&s);
+                        if let Some((s, q, pm)) = e.positions.iter().find(|(s, q, pm)| grown(*s) && (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
                             position_limits = Some(format!("{} at {} after the accepted orders, above `{}`", k.symbols.name(*s), (q * pm).abs(), l));
                         }
                     }

@@ -61,6 +61,9 @@ struct Market {
     settlement: Vec<(&'static str, usize, f64)>,
     /// (root key, day, contract key, adjustment)
     continuous: Vec<(&'static str, usize, &'static str, f64)>,
+    /// Nanoseconds after its day's bar each `continuous` row sits (a minute
+    /// store's rows fall between a session clock's barriers).
+    continuous_offset: i64,
     /// (contract key, root, expiry day, last trade day, cash settled)
     specs: Vec<(&'static str, &'static str, usize, usize, bool)>,
     /// (key, day, initial, maintenance)
@@ -131,10 +134,10 @@ fn serve(m: &Market) -> Arc<DataService> {
                 ])),
                 vec![
                     Arc::new(StringArray::from(c.iter().map(|x| x.0).collect::<Vec<_>>())),
-                    Arc::new(TimestampNanosecondArray::from(c.iter().map(|x| d(x.1)).collect::<Vec<_>>())),
+                    Arc::new(TimestampNanosecondArray::from(c.iter().map(|x| d(x.1) + m.continuous_offset).collect::<Vec<_>>())),
                     Arc::new(StringArray::from(c.iter().map(|x| x.2).collect::<Vec<_>>())),
                     Arc::new(Float64Array::from(c.iter().map(|x| x.3).collect::<Vec<_>>())),
-                    Arc::new(TimestampNanosecondArray::from(c.iter().map(|x| d(x.1)).collect::<Vec<_>>())),
+                    Arc::new(TimestampNanosecondArray::from(c.iter().map(|x| d(x.1) + m.continuous_offset).collect::<Vec<_>>())),
                 ],
             )
             .unwrap(),
@@ -373,6 +376,43 @@ fn a_roll_records_two_fills_and_two_commissions_and_carries_the_position() {
     assert!(close(real, 2.0 * 50.0 * (5029.0 - 4994.0)));
     // `contract` names the contract the series holds.
     assert_eq!(contract_at, (Some(Value::Equity(sym(&r, "ESH4"))), Some(Value::Equity(sym(&r, "ESM4")))));
+}
+
+/// E-116: a roll between two barriers (a minute store's `continuous` rows
+/// on a session clock) is the next barrier's roll, with its two fills and
+/// two commissions. The executor rolled only where a row fell on the
+/// barrier itself: a position held across some 34 quarterly rolls of a
+/// minute store paid its entry's and exit's commissions alone.
+#[test]
+fn a_roll_between_barriers_is_charged_at_the_next() {
+    let m = Market {
+        instruments: vec![
+            ("ES.v.0", "ES", 50.0, vec![5004.0, 5014.0, 4994.0, 5029.0, 5044.0]),
+            ("ESH4", "ESH4", 50.0, vec![5000.0, 5010.0, 4990.0]),
+            ("ESM4", "ESM4", 50.0, vec![5004.0, 5014.0, 4994.0, 5029.0, 5044.0]),
+        ],
+        // ESM4 from six hours after d2's bar: seen at d3's barrier.
+        continuous: vec![
+            ("ES.v.0", 0, "ESH4", 4.0),
+            ("ES.v.0", 1, "ESH4", 4.0),
+            ("ES.v.0", 2, "ESM4", 0.0),
+            ("ES.v.0", 3, "ESM4", 0.0),
+            ("ES.v.0", 4, "ESM4", 0.0),
+        ],
+        continuous_offset: 6 * 3_600_000_000_000,
+        specs: vec![("ESH4", "ES", 9, 9, true), ("ESM4", "ES", 9, 9, true)],
+        commission: 2.25,
+        ..Market::default()
+    };
+    let svc = serve(&m);
+    let prog = program(&buy_at_d0("ES"), &[("settlement", "none")]);
+    let r = run(&prog, &svc);
+    let rolls = events(&r, "roll");
+    assert_eq!(rolls.len(), 1, "{:#?}", r.events);
+    let EventKind::Roll { from, to, quantity, commissions, .. } = &rolls[0].kind else { panic!() };
+    assert_eq!((rolls[0].t, *from, *to, *quantity), (d(3), sym(&r, "ESH4"), sym(&r, "ESM4"), 2.0));
+    assert!(close(*commissions, 2.0 * 2.25 * 2.0));
+    assert_eq!(r.final_positions.get(&sym(&r, "ES.v.0")), Some(&2.0));
 }
 
 #[test]

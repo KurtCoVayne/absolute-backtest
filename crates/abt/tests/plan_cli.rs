@@ -151,3 +151,47 @@ fn the_compilers_plan_is_show_plan() {
     assert_eq!(o.status.code(), Some(0), "{}\n{}", out, err);
     assert!(out.contains("sma_crossover::above"), "{}", out);
 }
+
+#[test]
+fn a_plan_check_prints_the_after_and_percentage_hold_outs() {
+    let dir = scratch("holdouts");
+    let store = dir.join("store").to_string_lossy().to_string();
+    let mut args = vec!["data", "ingest", "--store", &store, "--adapter", "synthetic", "--class", "equity", "--days", "400"];
+    args.extend(LIBRARY);
+    assert_eq!(abt(&args).status.code(), Some(0));
+    let program = abt_tests::repo_root().join("corpus-v2/strategies/sma_crossover.dsl");
+    let plan = dir.join("holdouts.plan");
+    let plan_text = plan.to_string_lossy().to_string();
+    let check = |holdout: &str| {
+        std::fs::write(
+            &plan,
+            format!(
+                "study h {{\n  program {}\n  holdout {}\n  steps {{ run main\n reveal later of main }}\n}}\n",
+                program.display(),
+                holdout
+            ),
+        )
+        .unwrap();
+        let mut a = vec!["plan", "check", plan_text.as_str()];
+        a.extend(LIBRARY);
+        a.extend(["--store", store.as_str()]);
+        abt(&a)
+    };
+    // The forms of E-97, each in the normal form as one text.
+    for (written, shown) in [
+        ("after 2023-01-02", "holdout after 2023-01-02"),
+        ("after 2023-01-02T09:30:00.000000001", "holdout after 2023-01-02T09:30:00.000000001"),
+        ("trailing:20%", "holdout trailing:20%"),
+        ("trailing:6mo", "holdout trailing:6mo"),
+        ("trailing:24mo", "holdout trailing:2y"),
+    ] {
+        let o = check(written);
+        let (out, err) = text(&o);
+        assert_eq!(o.status.code(), Some(0), "{}: {}\n{}", written, out, err);
+        assert!(out.contains(shown), "{}: {}", written, out);
+    }
+    let o = check("after soon");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o).1.contains("not a time"), "{:?}", text(&o));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

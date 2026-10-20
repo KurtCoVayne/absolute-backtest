@@ -70,6 +70,17 @@ fn every_expectation_has_its_verdict() {
     assert_eq!(verdict(&c("x : ic on returns of m expect effect < 0.3"), &r, None), Verdict::Holds);
     assert_eq!(verdict(&c("x : ic on returns of m expect interval excludes 0"), &r, None), Verdict::Holds);
     assert_eq!(verdict(&c("x : ic on returns of m expect interval excludes 0.2"), &r, None), Verdict::Fails);
+    // E-112: an interval on one side of a value, every point of it; a
+    // reliably negative Sharpe excludes 0 and is not above it.
+    assert_eq!(verdict(&c("x : ic on returns of m expect interval > 0"), &r, None), Verdict::Holds);
+    assert_eq!(verdict(&c("x : ic on returns of m expect interval > 0.2"), &r, None), Verdict::Fails);
+    assert_eq!(verdict(&c("x : ic on returns of m expect interval < 0.3"), &r, None), Verdict::Fails);
+    assert_eq!(verdict(&c("x : ic on returns of m expect interval <= 0.3"), &r, None), Verdict::Holds);
+    let negative = result(-0.36, None, None, Some((-0.70, -0.04, 0.95)));
+    assert_eq!(verdict(&c("x : bootstrap_sharpe on returns of m expect interval excludes 0"), &negative, None), Verdict::Holds);
+    assert_eq!(verdict(&c("x : bootstrap_sharpe on returns of m expect interval > 0"), &negative, None), Verdict::Fails);
+    assert_eq!(verdict(&c("x : bootstrap_sharpe on returns of m expect interval < 0"), &negative, None), Verdict::Holds);
+    assert_eq!(c("x : ic on returns of m expect interval > 0").expect.render(), "interval > 0");
     // What the result lacks makes the claim undecidable, with the reason.
     let bare = result(f64::NAN, None, None, None);
     for (text, why) in [

@@ -13,6 +13,7 @@ class future {
 
   session(A: Future, @S, Open: Timestamp) complete                  # one per root and session, labelled at the session's close
   point_value(A: Future, @T, V: Scalar) complete                    # currency per point per contract
+  tick(A: Future, @T, Size: Price<USD>) complete                    # the minimum price increment of the contract the series holds, in price units
   commission(A: Future, @T, C: Notional<USD>) complete              # per contract per side
   member(A: Future, @T, List: Label) complete
   usable(A: Future, @T) complete                                    # a research-defined availability, from the bundle's review

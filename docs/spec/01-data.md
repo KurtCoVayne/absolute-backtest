@@ -45,7 +45,7 @@ The **schema registry** holds every schema by (class, name). A class catalog fil
 
 ### 2.3 Classes
 
-A class is a label grouping relations that share an entity sort and a unit: `equity`, `future`, `option`, `series`, and the namespaces of the other layers (`kernel`, `query`). The registry carries, per class, the entity sort name (`Equity`, `Future`, `Option`, `Name`) and the unit (`shares`, `contracts`, `contracts`, none). The relations of the market classes:
+A class is a label grouping relations that share an entity sort and a unit: `equity`, `future`, `option`, `series`, `pipeline` (the provenance the pipeline's gateway writes, E-94), and the namespaces of the other layers (`kernel`, `query`). The registry carries, per class, the entity sort name (`Equity`, `Future`, `Option`, `Name`) and the unit (`shares`, `contracts`, `contracts`, none). The relations of the market classes:
 
 | Class | Relations at the base calendar | Reference relations | Supplied by |
 | --- | --- | --- | --- |
@@ -53,6 +53,7 @@ A class is a label grouping relations that share an entity sort and a unit: `equ
 | `future` | `open`, `high`, `low`, `close`, `volume`, `open_interest`; `settlement(entity, t, r, price)` | `future_spec`, `continuous`, `session`, `member`, `margin` | Databento adapter |
 | `option` | `quote(entity, t, r, bid, ask, bid_size, ask_size, last, volume, open_interest)`; `greeks(entity, t, r, iv, delta, gamma, theta, vega, rho)` | `option_spec`, `chain_index`, `session`, `margin` | ORATS adapter |
 | `series` | `value(name: Label, t, r, v)` | — | Norgate (index series), ORATS (underlying quotes) |
+| `pipeline` | `document(doc_id: Label, source: Label, author: Label, p, r, size: Count)`; `hypothesis(id: Label, doc_ids: Label (a JSON list), H, agent: Label, r)`; `submission(id: Label, hypothesis_id: Label, program_hash: Label, plan_hash: Label, lineage: Label, H, r)`; `outcome(submission_id: Label, t, reveal: Count, r, forward_from, forward_to, status: Label)`; `audit(job: Label, t, kind: Label, subject: Label, bytes: Count, duration_ns: Count, outcome: Label, r)` | — | the pipeline's gateway, through `put` (PL-7.2; E-94) |
 
 Columns beyond the identity are the adapter's declaration; a strategy reads them through the schema the kernel is given.
 

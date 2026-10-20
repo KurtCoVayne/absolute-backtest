@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use super::inputs::{self, Keep};
-use super::{Claim, Expect, Input, Phase, Point, Policy, Ref};
+use super::{Claim, Expect, Input, Op, Phase, Point, Policy, Ref};
 use crate::data::{Data, Error};
 use crate::tests::{self, Param, ParamKind, Params, Table, Test, TestResult};
 
@@ -252,6 +252,15 @@ pub fn verdict(c: &Claim, r: &TestResult, p_adjusted: Option<f64>) -> Verdict {
         Expect::IntervalExcludes(v) => match r.interval {
             None => Verdict::Undecidable("the test reports no interval".into()),
             Some((lo, hi, _)) => of(*v < lo || *v > hi),
+        },
+        // Every point of the interval: its lower end for > and >=, its
+        // upper end for < and <= (E-112).
+        Expect::Interval(op, v) => match r.interval {
+            None => Verdict::Undecidable("the test reports no interval".into()),
+            Some((lo, hi, _)) => of(match op {
+                Op::Gt | Op::Ge => op.holds(lo, *v),
+                Op::Lt | Op::Le => op.holds(hi, *v),
+            }),
         },
     }
 }

@@ -1,0 +1,17 @@
+# proposition: E-107 (month_start on the sessions calendar steps over the head instrument's sessions)
+# mutation: the time builtins read no instrument again; the optimised plan places month_start first
+# test: cargo test -p abt-tests --test session_window month_start_steps_over_the_head_instruments_own_sessions
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/plan/search.rs b/crates/abt-kernel/src/plan/search.rs
+index 979f5d1..784d49f 100644
+--- a/crates/abt-kernel/src/plan/search.rs
++++ b/crates/abt-kernel/src/plan/search.rs
+@@ -177,7 +177,7 @@ pub fn literal_deps(prog: &Program, rule: usize) -> RuleDeps {
+             _ => None,
+         })
+     });
+-    if let Some(e) = entity.filter(|e| initially_bound.contains(e) || literals.iter().any(|d| d.binds.contains(e))) {
++    if let Some(e) = entity.filter(|_| false) {
+         for (lit, d) in r.body.iter().zip(literals.iter_mut()) {
+             let t = match lit {
+                 Literal::Builtin(Builtin::Prev { t, .. } | Builtin::Lag { t, .. } | Builtin::MonthStart { t } | Builtin::DayStart { t }, _) => t,

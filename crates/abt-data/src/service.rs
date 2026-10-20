@@ -299,7 +299,7 @@ impl DataService {
         let mut rows: Vec<Row> = recs
             .iter()
             .map(|v| {
-                let hot = st.hot_figures(&v.version);
+                let hot = st.hot_figures_if_open(&v.version);
                 Row {
                     relation: v.relation.clone(),
                     source: v.source.clone(),
@@ -511,6 +511,9 @@ impl DataService {
                 clocks: vec![],
                 calendars: calendars.clone(),
                 r_max: None,
+                // A live session carries every instrument it records (E-99
+                // scopes replayed streams only).
+                entities: None,
             };
             Stream::open(&st, res).map_err(data)?.schema()
         };
@@ -539,6 +542,7 @@ impl DataService {
                 clocks: vec![version],
                 calendars: calendars.clone(),
                 r_max: None,
+                entities: None,
             };
             let last = stream::index(&self.store(), &res).map_err(data)?.last().map_or(0, |(_, _, seq)| *seq);
             let mut s = Stream::open(&self.store(), res).map_err(data)?;
@@ -557,12 +561,40 @@ impl Service for DataService {
     }
 
     fn handle(&self, request: Request, out: &Responder) -> Result<(), ErrorMessage> {
+        // `ABT_TRACE_REQUESTS=1`: each request on stderr, with its time and
+        // the service's anonymous memory before and after (E-120).
+        if std::env::var_os("ABT_TRACE_REQUESTS").is_some() {
+            let what: String = format!("{:?}", request.message).chars().take(240).collect();
+            let mb = || abt_wire::memory::anonymous_bytes().unwrap_or(0) >> 20;
+            let (before, started) = (mb(), std::time::Instant::now());
+            eprintln!("request at {} MB: {}", before, what);
+            let r = self.handle_request(request, out);
+            eprintln!("request {} ms, anon {} -> {} MB: {}", started.elapsed().as_millis(), before, mb(), what);
+            return r;
+        }
+        self.handle_request(request, out)
+    }
+}
+
+impl DataService {
+    fn handle_request(&self, request: Request, out: &Responder) -> Result<(), ErrorMessage> {
         match request.message {
             Message::SchemaRequest(r) => {
                 let st = self.store();
+                // A listing without a class leaves out what runs write: the
+                // kernel's outputs, the query layer's records and the cache
+                // objects (E-110). They are no run's inputs, and a day of
+                // runs made the listing pass the control payload's 1 MiB
+                // (P-2.2), refusing every binding; asked by name or by
+                // class, they are answered.
                 let schemas = match &r.relation {
                     Some(rel) => vec![st.schema(rel).map_err(data)?],
-                    None => st.registry.schemas(r.class.as_deref()),
+                    None => st
+                        .registry
+                        .schemas(r.class.as_deref())
+                        .into_iter()
+                        .filter(|s| r.class.is_some() || !crate::store::derived(&s.name))
+                        .collect(),
                 };
                 out.respond(Message::SchemaResponse(Box::new(SchemaResponse { schemas: Some(schemas) }))).map_err(wire)
             }

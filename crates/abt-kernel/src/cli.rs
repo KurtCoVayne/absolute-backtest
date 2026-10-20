@@ -1605,6 +1605,7 @@ fn compile_options_with(args: &Args, prog: &crate::check::Program, loaded: Optio
         stats,
         solver: args.opts.get("solver").cloned(),
         replay_dir: args.opts.get("replay-dir").map(PathBuf::from),
+        params: exec_config(args, prog).param_overrides,
         ..CompileOptions::default()
     }
 }

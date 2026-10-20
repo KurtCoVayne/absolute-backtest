@@ -297,6 +297,238 @@ fn futures_roll_by_volume_into_a_back_adjusted_series() {
     assert!(ins.iter().any(|i| i.key == "1") && ins.iter().any(|i| i.key == "2"));
 }
 
+/// E-101: a root whose deferred month trades thinly (SOL, monthly crypto
+/// contracts): after the roll into J5, a session in which only the expiring
+/// H5 printed kept the series from going on: no contract expiring at or after
+/// the one held traded, and the loop ended the root there. Such a session
+/// keeps the contract held and has no bar; the series continues when J5
+/// trades again.
+#[test]
+fn a_session_without_the_held_contract_does_not_end_the_series() {
+    let mut records = vec![def_of(1, "SOLH5", "SOL", b'F', "2025-03-28T15:00:00", 0.5), def_of(2, "SOLJ5", "SOL", b'F', "2025-04-25T15:00:00", 0.5)];
+    // H5 trades most the first day, J5 the second (the roll is on the
+    // third); on the fourth only H5 prints; on the fifth J5 trades again.
+    let days = ["2025-03-20", "2025-03-21", "2025-03-24", "2025-03-25", "2025-03-26"];
+    for (d, day) in days.iter().enumerate() {
+        for m in 0..5 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            let (v1, v2) = match d {
+                0 => (Some(900), Some(10)),
+                1 => (Some(100), Some(800)),
+                2 => (Some(50), Some(900)),
+                3 => (Some(40), None),
+                _ => (None, Some(700)),
+            };
+            if let Some(v) = v1 {
+                records.push(bar(1, start, 130.0 + d as f64 + m as f64 * 0.5, v));
+            }
+            if let Some(v) = v2 {
+                records.push(bar(2, start, 131.0 + d as f64 + m as f64 * 0.5, v));
+            }
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "sol").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    let sol = &report.roots["SOL"];
+    assert_eq!(sol.sessions, 5, "{:?}", sol);
+    assert_eq!(sol.rolls.len(), 1, "{:?}", sol.rolls);
+    assert!(sol.rolls[0].starts_with("2025-03-24 SOLH5 -> SOLJ5"), "{:?}", sol.rolls);
+    let close = relation(&f, "future.close");
+    let ts = times(close, "T");
+    // H5's two sessions, J5's roll session, no bar on the fourth, J5's fifth.
+    assert_eq!(close.num_rows(), 20, "{:?}", ts);
+    assert_eq!(*ts.last().unwrap(), t("2025-03-26") + 14 * 60 * MIN + 35 * MIN);
+    assert!(!ts.iter().any(|x| (*x - t("2025-03-25")).div_euclid(DAY) == 0), "no bar of the held contract on the fourth day");
+    assert_eq!(strings(relation(&f, "continuous"), "contract_id").last().unwrap(), "2");
+    // The five sessions are the root's, the fourth among them.
+    assert_eq!(relation(&f, "future.session").num_rows(), 5);
+}
+
+/// E-102: `future.tick` is the minimum price increment of the contract the
+/// series holds, at each session's day, beside `point_value`: it follows
+/// the roll, and a session without a bar of the held contract still states
+/// it.
+#[test]
+fn the_tick_is_the_held_contracts_minimum_increment() {
+    let mut records = vec![def_of(1, "SOLH5", "SOL", b'F', "2025-03-28T15:00:00", 0.5), def_of(2, "SOLJ5", "SOL", b'F', "2025-04-25T15:00:00", 1.0)];
+    let days = ["2025-03-20", "2025-03-21", "2025-03-24", "2025-03-25"];
+    for (d, day) in days.iter().enumerate() {
+        for m in 0..3 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            let (v1, v2) = match d {
+                0 => (Some(900), Some(10)),
+                1 => (Some(100), Some(800)),
+                2 => (Some(50), Some(900)),
+                _ => (Some(40), None),
+            };
+            if let Some(v) = v1 {
+                records.push(bar(1, start, 130.0 + d as f64, v));
+            }
+            if let Some(v) = v2 {
+                records.push(bar(2, start, 131.0 + d as f64, v));
+            }
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "sol").unwrap();
+    let (f, _) = futures(&raw, &Options::default()).unwrap();
+    let tick = relation(&f, "future.tick");
+    // Four sessions: H5 held on the first two, J5 from the roll on the third,
+    // and on the fourth (no bar of J5) still J5's.
+    assert_eq!(column(tick, "Size"), vec![0.5, 0.5, 1.0, 1.0]);
+    assert_eq!(times(tick, "T"), days.iter().map(|d| t(d)).collect::<Vec<_>>());
+    assert!(strings(tick, "A").iter().all(|k| k == "SOL.v.0"));
+    assert_eq!(times(tick, "T"), times(relation(&f, "future.point_value"), "T"), "stated where the point value is");
+}
+
+/// E-104: a session in which only a far contract prints (a fragment of a
+/// session, a holiday's thin trading) must not roll the series to it. The
+/// volume roll compared the contracts printing in the session at hand by
+/// their volume in the session before, so the far month RBZ0, alone in a
+/// fragment, became the series, and the rule that a roll never goes to an
+/// earlier expiry kept it there: RB's series held sparse far months. The
+/// roll now compares, in the latest session the held contract traded in,
+/// the contracts that traded there and have not expired; and a spread's bar
+/// without a definition is counted as a spread, not as undefined.
+#[test]
+fn a_far_contract_alone_in_a_session_does_not_take_the_series() {
+    let mut records = vec![
+        def_of(1, "RBQ0", "RB", b'F', "2010-07-30T18:30:00", 0.0001),
+        def_of(2, "RBU0", "RB", b'F', "2010-08-31T18:30:00", 0.0001),
+        def_of(3, "RBZ0", "RB", b'F', "2010-11-30T18:30:00", 0.0001),
+    ];
+    let price = |id: u32, d: usize| 2.0 + id as f64 * 0.01 + d as f64 * 0.001;
+    // Q0 front and heavy; on the second day only Z0 prints (a fragment);
+    // U0 overtakes Q0 on the fourth day, so the series rolls on the fifth.
+    let days = ["2010-07-06", "2010-07-07", "2010-07-08", "2010-07-09", "2010-07-12"];
+    for (d, day) in days.iter().enumerate() {
+        let vols: Vec<(u32, u64)> = match d {
+            0 => vec![(1, 900), (2, 100), (3, 5)],
+            1 => vec![(3, 3)],
+            2 => vec![(1, 800), (2, 300)],
+            3 => vec![(1, 200), (2, 900), (3, 10)],
+            _ => vec![(1, 100), (2, 950)],
+        };
+        for m in 0..3 {
+            let start = t(day) + 14 * 60 * MIN + 30 * MIN + m * MIN;
+            for &(id, v) in &vols {
+                records.push(bar(id, start, price(id, d), v));
+            }
+        }
+    }
+    // A spread's bar whose instrument has no definition (the bucket's
+    // definition files hold the outrights only), named by its symbol.
+    let start = t("2010-07-06") + 14 * 60 * MIN + 30 * MIN;
+    records.push(bar(77, start, 0.01, 50));
+    let mappings = vec![dbn::SymbolMapping {
+        raw_symbol: "RBQ0-RBU0".into(),
+        intervals: vec![dbn::MappingInterval {
+            start_date: 20100701,
+            end_date: 20100801,
+            symbol: "77".into(),
+        }],
+    }];
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), mappings), &records), "rb").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    let rb = &report.roots["RB"];
+    assert_eq!(rb.rolls.len(), 1, "{:?}", rb.rolls);
+    assert!(rb.rolls[0].starts_with("2010-07-12 RBQ0 -> RBU0"), "{:?}", rb.rolls);
+    let held: Vec<String> = strings(relation(&f, "continuous"), "contract_id");
+    assert!(!held.contains(&"3".to_string()), "the far month never held: {:?}", held);
+    // Q0's three bars on days one and three and four, U0's on day five; none
+    // on the fragment.
+    assert_eq!(relation(&f, "future.close").num_rows(), 12);
+    assert_eq!(report.dropped.get("no_definition"), None, "{:?}", report.dropped);
+    assert_eq!(report.dropped["not_an_outright_future"], 1);
+}
+
+/// E-104: a session ends at a gap that holds the middle of the venue's daily
+/// break (17:45 in New York by default, E-108: CME's 17:00 to 18:00, 21:45
+/// UTC in June), not at any gap over `session_gap`: RB's thin nights (an hour
+/// without a trade at 04:00) split each trade date into fragments. A long
+/// gap inside a trade date (an illiquid root's afternoon) stays in it.
+#[test]
+fn a_thin_nights_gaps_stay_inside_the_trade_date() {
+    let mut records = vec![def_of(1, "RBQ0", "RB", b'F', "2010-07-30T18:30:00", 0.0001)];
+    // Two trade dates: each opens at 22:00 UTC the evening before, trades at
+    // 22:01 and 03:30, pauses 82 minutes, trades at 04:52, then not for seven
+    // hours (an illiquid stretch), at 12:00 and 16:00, and closes at 21:14
+    // before the break.
+    for (d, day) in ["2010-06-13", "2010-06-14"].iter().enumerate() {
+        let eve = t(day) + 22 * 60 * MIN;
+        for (k, offset) in [0, 1, 5 * 60 + 30, 6 * 60 + 52, 14 * 60, 18 * 60, 23 * 60 + 14].iter().enumerate() {
+            records.push(bar(1, eve + offset * MIN, 2.0 + d as f64 * 0.01 + k as f64 * 0.001, 10));
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "rb").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    assert_eq!(report.roots["RB"].sessions, 2, "{:?}", report.roots["RB"]);
+    let sessions = relation(&f, "future.session");
+    assert_eq!(times(sessions, "Open"), vec![t("2010-06-13") + 22 * 60 * MIN, t("2010-06-14") + 22 * 60 * MIN]);
+    // With a break whose middle the 82-minute gap holds (00:00 in New York,
+    // 04:00 UTC in June), it ends sessions and the evening's gap does not:
+    // three sessions, the option being the venue's.
+    let (_, r2) = futures(
+        &raw,
+        &Options {
+            session_break: 0,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r2.roots["RB"].sessions, 3, "{:?}", r2.roots["RB"]);
+}
+
+/// E-108: one session per trade date in each era of CME Globex's hours for
+/// the equity indexes. Until 2012-11 ES traded 18:00 to 16:15 New York with a
+/// halt to 16:30, then to 17:30, its break 17:30 to 18:00 (30 minutes, 31
+/// from close to close); then to 17:15, a print in the break's first minute
+/// on some days (2013-07-08's last bar closes at 17:16, 45 minutes from the
+/// reopening's close); since 2015 to 17:00. A break starting at 17:30 does
+/// not hold 17:30, and 31 or 45 minutes are not over 45: the defaults before
+/// merged 2010-06 to 2012-11 into weekly sessions.
+#[test]
+fn the_daily_break_ends_a_session_in_every_era_of_cme_hours() {
+    let mut records = vec![
+        def(1, "ESU0", b'F', "2010-09-17T13:30:00"),
+        def(2, "ESU3", b'F', "2013-09-20T13:30:00"),
+        def(3, "ESH6", b'F', "2016-03-18T13:30:00"),
+    ];
+    // (contract, trade dates, the evening's open and the minutes after it
+    // that print, in UTC): New York is four hours behind in June and July,
+    // five in March.
+    let eras: [(u32, [&str; 3], i64, &[i64]); 3] = [
+        // 22:00 open; 20:14 the last bar before the halt (16:15), 20:30 to
+        // 21:29 after it, nothing from 21:30 (17:30 New York) to 22:00.
+        (1, ["2010-06-06", "2010-06-07", "2010-06-08"], 22 * 60, &[0, 1, 10 * 60, 22 * 60 + 14, 22 * 60 + 30, 23 * 60 + 29]),
+        // 22:00 open; the last bar 21:14 (17:14), and on the first day one
+        // in the break's first minute, 21:15.
+        (2, ["2013-07-07", "2013-07-08", "2013-07-09"], 22 * 60, &[0, 1, 10 * 60, 23 * 60 + 14]),
+        // 23:00 open (18:00 EST); the last bar 21:59 (16:59).
+        (3, ["2016-02-28", "2016-02-29", "2016-03-01"], 23 * 60, &[0, 1, 10 * 60, 22 * 60 + 59]),
+    ];
+    for &(id, days, open, minutes) in &eras {
+        for (d, day) in days.iter().enumerate() {
+            let eve = t(day) + open * MIN;
+            for (k, m) in minutes.iter().enumerate() {
+                records.push(bar(id, eve + m * MIN, 1000.0 + d as f64 + k as f64 * 0.25, 10));
+            }
+            if id == 2 && d == 0 {
+                records.push(bar(id, eve + (23 * 60 + 15) * MIN, 1000.0, 1));
+            }
+        }
+    }
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "es").unwrap();
+    let (f, report) = futures(&raw, &Options::default()).unwrap();
+    assert_eq!(report.roots["ES"].sessions, 9, "{:?}", report.roots["ES"]);
+    let opens: Vec<i64> = eras.iter().flat_map(|&(_, days, open, _)| days.map(|day| t(day) + open * MIN)).collect();
+    assert_eq!(times(relation(&f, "future.session"), "Open"), opens);
+}
+
 #[test]
 fn a_futures_bar_without_its_definition_is_refused_naming_it() {
     let records = vec![

@@ -1,0 +1,17 @@
+# proposition: E-117 (a ticker listed after the bundle date resolves to its first carrier)
+# mutation: the bundle date's carrier alone again
+# test: cargo test -p abt-kernel --lib ticker_tests
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+index e3a1b6d..da18531 100644
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -131,7 +131,7 @@ pub fn resolve_ticker(securities: &[Security], ticker: &str, as_of: i64) -> Resu
+     let carrying = || securities.iter().filter(|s| s.ticker == ticker);
+     carrying()
+         .find(|s| s.from <= as_of && s.to.map(|to| as_of < to).unwrap_or(true))
+-        .or_else(|| carrying().filter(|s| s.from > as_of).min_by_key(|s| s.from))
++        .or_else(|| carrying().filter(|s| s.from > as_of && false).min_by_key(|s| s.from))
+         .map(|s| s.id)
+         .ok_or_else(|| {
+             format!(

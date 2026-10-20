@@ -145,7 +145,7 @@ fn a_run_id_names_the_session_it_reads_or_the_recording_it_replays() {
     assert_ne!(ra, a.run_id, "two modes, two runs");
     // The identity function itself, over one program and binding.
     let cfg = ExecConfig::from_program(&prog);
-    let step = |session: Option<&str>, of: Option<&str>| plan_step(None, &cfg, None, None, session, of);
+    let step = |session: Option<&str>, of: Option<&str>| plan_step(None, &cfg, None, None, None, session, of);
     let id = |session: Option<&str>, of: Option<&str>, mode: &str| run_id("H", "B", &step(session, of), mode);
     assert_eq!(step(None, None), serde_json::Value::Null, "a run over the whole stream has no π: its id is as before");
     assert_eq!(id(Some("s1"), None, "live-sim"), id(Some("s1"), None, "live-sim"));

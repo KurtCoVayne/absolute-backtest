@@ -327,6 +327,15 @@ pub struct Demand {
     pub series_complete: bool,
     pub sessions: bool,
     pub point_value: bool,
+    /// `need tick`: a future's minimum price increment (E-102). Left out of
+    /// the serialized demand when false, so the hash of a program that does
+    /// not write it is the hash it had before the field existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tick: bool,
+    /// `need industry`: the classification's deeper levels (E-98), a need
+    /// of its own so that a program writing `need lists` keeps its hash.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub industry: bool,
     pub commission: bool,
     pub usable: bool,
     pub instruments_where: Vec<(String, String)>,
@@ -378,8 +387,10 @@ impl Demand {
             "value" => "series",
             "session" => "sessions",
             "point_value" => "point_value",
+            "tick" => "tick",
             "commission" => "commission",
             "classification" => "classification",
+            "industry" => "industry",
             "usable" => "usable",
             _ => "",
         }
@@ -393,6 +404,8 @@ impl Demand {
             "series" => !self.series.is_empty(),
             "sessions" => self.sessions,
             "point_value" => self.point_value,
+            "tick" => self.tick,
+            "industry" => self.industry,
             "commission" => self.commission,
             "classification" => self.classification,
             "usable" => self.usable,
@@ -495,6 +508,30 @@ impl Program {
     }
     pub fn param(&self, unit: &str, name: &str) -> Option<&Param> {
         self.params.get(unit).and_then(|m| m.get(name)).or_else(|| self.params.get(&self.strategy).and_then(|m| m.get(name)))
+    }
+    /// The program at a parameter point (E-115): each named parameter's
+    /// value the point's (`name`, or `unit::name` for a library's), a
+    /// ticker or label string read by the parameter's type as the kernel
+    /// reads an override. What the compiler analyses, folds and plans for
+    /// a run, whose point is not the defaults.
+    pub fn at_point(&self, point: &[(String, Lit)]) -> Program {
+        let mut p = self.clone();
+        for (key, value) in point {
+            let (unit, name) = key.split_once("::").unwrap_or((self.strategy.as_str(), key.as_str()));
+            let unit = if p.params.get(unit).is_some_and(|m| m.contains_key(name)) {
+                unit.to_string()
+            } else {
+                self.strategy.clone()
+            };
+            if let Some(param) = p.params.get_mut(&unit).and_then(|m| m.get_mut(name)) {
+                param.value = match value {
+                    Lit::Str(s) if param.ty == Ty::Label => Lit::Label(s.clone()),
+                    Lit::Str(s) => Lit::Entity(s.clone()),
+                    other => other.clone(),
+                };
+            }
+        }
+        p
     }
     pub fn rule_label(&self, i: usize) -> String {
         rule_label(&self.rules, i)
@@ -674,7 +711,7 @@ struct ClassStrategy {
 fn class_strategy_source(ws: &Workspace, cls: &ast::Class, base: Option<Resolution>, parts: &ClassStrategy) -> String {
     let class = &cls.name;
     let mut needs: Vec<String> = vec![format!("need bars{}", base.map(|r| format!(" {}", r)).unwrap_or_default())];
-    for word in ["actions", "listing", "sessions", "point_value", "commission"] {
+    for word in ["actions", "listing", "sessions", "point_value", "tick", "commission"] {
         if cls.rels.iter().any(|r| Demand::need_for(&r.name) == word) {
             needs.push(format!("need {}", word));
         }
@@ -1228,6 +1265,8 @@ impl<'a> Checker<'a> {
                             NeedKind::Series(_) => self.demand.series.is_empty(),
                             NeedKind::Sessions => !self.demand.sessions,
                             NeedKind::PointValue => !self.demand.point_value,
+                            NeedKind::Tick => !self.demand.tick,
+                            NeedKind::Industry => !self.demand.industry,
                             NeedKind::Commission => !self.demand.commission,
                             NeedKind::Instruments { .. } => false,
                             NeedKind::Chain(_) => self.demand.chains.is_empty(),
@@ -1241,6 +1280,8 @@ impl<'a> Checker<'a> {
                                 NeedKind::Series(_) => "series",
                                 NeedKind::Sessions => "sessions",
                                 NeedKind::PointValue => "point_value",
+                                NeedKind::Tick => "tick",
+                                NeedKind::Industry => "industry",
                                 NeedKind::Commission => "commission",
                                 NeedKind::Instruments { .. } => "instruments",
                                 NeedKind::Chain(_) => "chain",
@@ -1609,6 +1650,8 @@ impl<'a> Checker<'a> {
                 }
                 NeedKind::Sessions => d.sessions = true,
                 NeedKind::PointValue => d.point_value = true,
+                NeedKind::Tick => d.tick = true,
+                NeedKind::Industry => d.industry = true,
                 NeedKind::Commission => d.commission = true,
                 NeedKind::Instruments { attr, value } => d.instruments_where.push((attr.clone(), value.clone())),
                 NeedKind::Chain(c) => {
@@ -1677,7 +1720,7 @@ impl<'a> Checker<'a> {
                 Code::Q,
                 data.span,
                 format!(
-                    "the data block of `{}` has no `need`: a demand is a conjunctive query over the catalog with at least one need (bars, actions, listing, lists, series, sessions, point_value, commission)",
+                    "the data block of `{}` has no `need`: a demand is a conjunctive query over the catalog with at least one need (bars, actions, listing, lists, series, sessions, point_value, tick, industry, commission)",
                     root_name
                 ),
             );

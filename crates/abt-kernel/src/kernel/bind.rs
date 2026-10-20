@@ -22,6 +22,7 @@ use abt_wire::generated::abt::wire::{
     AggregateCall, AggregateRequest, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, ParamValue, PlanStep, Preference,
     PreferenceKind, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
 };
+use abt_wire::generated::abt::wire::{Constant, ConstantKind, Identity, Series};
 use abt_wire::rpc::{Client, Reply, WireError};
 use abt_wire::transport::Connection;
 use arrow::array::{Array, ArrayRef, AsArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
@@ -29,7 +30,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 
 use super::{time, Contract, Dataset, Kernel, RunError, RunWarning, Security, Sym, Symbols, Tuple, Value};
 use crate::check::Program;
-use crate::ir::{Cal, Kind, Ty};
+use crate::ir::{Cal, Kind, Lit, Literal, Rule, Term, Ty};
 
 fn wire(e: WireError) -> RunError {
     RunError::Config(format!("the data service: {}", e))
@@ -359,6 +360,9 @@ pub struct Bound {
     /// r, [iv, delta, gamma, theta, vega, rho])`, admitted at a barrier by
     /// their receipt as the stream admits its rows (ERRATA E-71).
     pub greeks: BTreeMap<Sym, Vec<(i64, i64, [f64; 6])>>,
+    /// The data layer's ids of the instruments the program names, each
+    /// futures root with its contracts (E-99); `None` when it names none.
+    pub scope: Option<Vec<u64>>,
 }
 
 /// A bar of a futures root's continuous series and the contract it holds.
@@ -410,6 +414,16 @@ impl Bound {
         let entity = column_of(schema, Role::Entity).map(|c| c.name.clone());
         let time = column_of(schema, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
         let values: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role == Role::Value).collect();
+        // A scoped binding's rows are its instruments' (E-120).
+        let predicate = match (predicate, self.scope.as_ref().and_then(|ids| entity_in(schema, ids))) {
+            (Some(mut p), Some(s)) => {
+                let mut all = p.all.take().unwrap_or_default();
+                all.extend(s.all.unwrap_or_default());
+                p.all = Some(all);
+                Some(p)
+            }
+            (p, s) => p.or(s),
+        };
         let batches = client.query(
             &self.view,
             QueryForm::Scan(Box::new(Scan {
@@ -582,6 +596,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
     let mut ids: Vec<u64> = Vec::new();
     let mut by_id: HashMap<u64, Sym> = HashMap::new();
     let mut contracts = BTreeMap::new();
+    let mut class_of: HashMap<Sym, String> = HashMap::new();
     if pairs.contains_key("instrument") {
         for b in client.query(
             &view,
@@ -606,6 +621,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
                     ids.resize(sym as usize + 1, 0);
                 }
                 ids[sym as usize] = id;
+                class_of.insert(sym, class.clone().unwrap_or_default());
                 if !mult.is_null(i) {
                     contracts.insert(
                         sym,
@@ -688,6 +704,114 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
             .and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>())
             .and_then(|c| by_id.get(&c.value(i)).copied())
     };
+    // The instruments the program names (E-99), resolved within its class
+    // (a futures root and a stock may share a ticker): the binding's
+    // per-instrument reads below cover them only, and so does the stream.
+    let named: Option<Vec<u64>> = named_instruments(prog).map(|names| {
+        let at = last_time.unwrap_or(0);
+        let mut out = BTreeSet::new();
+        for n in names {
+            let live = |s: &&Security| s.ticker == n && s.from <= at && s.to.is_none_or(|to| at < to);
+            let sym = securities
+                .iter()
+                .filter(live)
+                .find(|s| class_of.get(&s.id).is_some_and(|c| *c == prog.class))
+                .or_else(|| securities.iter().find(live))
+                .map(|s| s.id)
+                .or_else(|| symbols.get(n));
+            if let Some(&id) = sym.and_then(|s| ids.get(s as usize)) {
+                out.insert(id);
+            }
+        }
+        out.into_iter().collect()
+    });
+    // A universe its lists gate (E-120): the instruments those lists ever
+    // held, with those the program names by ticker, are every instrument it
+    // can hold; the binding reads and streams them alone. Read whole, a
+    // store of every US equity took the data service past 16 GB at one
+    // run's binding.
+    let named: Option<Vec<u64>> = match (named, universe_lists(prog), stored.get("member")) {
+        (Some(n), _, _) => Some(n),
+        (None, Some(lists), Some((member_rel, member_schema))) => {
+            let mut out: BTreeSet<u64> = list_members(client, &view, member_rel, member_schema, &lists)?;
+            let at = last_time.unwrap_or(0);
+            let mut tickers: BTreeSet<String> = BTreeSet::new();
+            for rule in &prog.rules {
+                super::for_each_lit(rule, &mut |l| {
+                    if let Lit::Entity(t) = l {
+                        tickers.insert(t.clone());
+                    }
+                });
+            }
+            for unit in prog.params.values() {
+                for p in unit.values() {
+                    if let Lit::Entity(t) | Lit::Str(t) = &p.value {
+                        if p.ty.is_entity() || matches!(p.value, Lit::Entity(_)) {
+                            tickers.insert(t.clone());
+                        }
+                    }
+                }
+            }
+            for n in &tickers {
+                let live = |s: &&Security| &s.ticker == n && s.from <= at && s.to.is_none_or(|to| at < to);
+                if let Some(&id) = securities.iter().find(live).map(|s| s.id).or_else(|| symbols.get(n)).and_then(|s| ids.get(s as usize)) {
+                    out.insert(id);
+                }
+            }
+            Some(out.into_iter().collect())
+        }
+        (None, _, _) => None,
+    };
+    // A relation's rows: every instrument's, or the named ones' (one series
+    // each, which a hot version reads from their blocks only).
+    let rows_of = |stored_rel: &str| -> Result<Vec<RecordBatch>, RunError> {
+        match &named {
+            None => client.query(
+                &view,
+                QueryForm::Scan(Box::new(Scan {
+                    relation: stored_rel.to_string(),
+                    t0: i64::MIN,
+                    t1: i64::MAX,
+                    predicate: None,
+                    columns: None,
+                })),
+            ),
+            // Many instruments (a list's members): one scan, its entity
+            // predicate the store's identity filter (E-120).
+            Some(ids) if ids.len() > NAMED_SERIES => client.query(
+                &view,
+                QueryForm::Scan(Box::new(Scan {
+                    relation: stored_rel.to_string(),
+                    t0: i64::MIN,
+                    t1: i64::MAX,
+                    predicate: by_name.get(stored_rel).and_then(|s| entity_in(s, ids)).map(Box::new),
+                    columns: None,
+                })),
+            ),
+            Some(ids) => {
+                let mut out = Vec::new();
+                for &id in ids {
+                    out.extend(client.query(
+                        &view,
+                        QueryForm::Series(Box::new(Series {
+                            relation: stored_rel.to_string(),
+                            identity: Some(Box::new(Identity {
+                                values: vec![Constant {
+                                    kind: ConstantKind::Entity,
+                                    num: 0.0,
+                                    int: id as i64,
+                                    text: None,
+                                }],
+                            })),
+                            t0: i64::MIN,
+                            t1: i64::MAX,
+                        })),
+                    )?);
+                }
+                Ok(out)
+            }
+        }
+    };
     let mut base_bars = BTreeSet::new();
     for (name, (stored_rel, s)) in &stored {
         let sig = &prog.relations[name];
@@ -695,6 +819,12 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
             continue;
         }
         let t = column_of(s, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
+        if named.as_ref().is_some_and(|n| n.len() <= NAMED_SERIES) {
+            for b in rows_of(stored_rel)? {
+                base_bars.extend(times(col(&b, &t)?).into_iter().flatten());
+            }
+            continue;
+        }
         let form = QueryForm::Distinct(Box::new(Distinct {
             relation: stored_rel.clone(),
             column: t,
@@ -705,18 +835,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
             base_bars.extend(times(b.column(0)).into_iter().flatten());
         }
     }
-    let scan = |stored_rel: &str| -> Result<Vec<RecordBatch>, RunError> {
-        client.query(
-            &view,
-            QueryForm::Scan(Box::new(Scan {
-                relation: stored_rel.to_string(),
-                t0: i64::MIN,
-                t1: i64::MAX,
-                predicate: None,
-                columns: None,
-            })),
-        )
-    };
+    let scan = |stored_rel: &str| -> Result<Vec<RecordBatch>, RunError> { rows_of(stored_rel) };
     let mut sessions = Vec::new();
     if let Some((stored_rel, s)) = stored.get("session") {
         let e = column_of(s, Role::Entity).map(|c| c.name.clone()).unwrap_or_default();
@@ -847,7 +966,11 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
         }
     }
     let mut rolls: BTreeMap<Sym, Vec<Roll>> = BTreeMap::new();
-    for b in catalog("continuous")? {
+    let continuous = match &named {
+        Some(_) if pairs.contains_key("continuous") => rows_of("continuous")?,
+        _ => catalog("continuous")?,
+    };
+    for b in continuous {
         let (roots, cons) = (ids_of(&b, "root_id")?, ids_of(&b, "contract_id")?);
         let (ts, rs) = (times(col(&b, "t")?), times(col(&b, "r")?));
         let adj = floats(&b, "adjustment")?;
@@ -885,6 +1008,20 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
             v.sort_by_key(|x| (x.0, x.1));
         }
     }
+    // The scope: the named instruments and, for a futures root, the
+    // contracts its series holds.
+    let scope = named.map(|named| {
+        let mut out: BTreeSet<u64> = named.iter().copied().collect();
+        for &id in &named {
+            let Some(&root) = by_id.get(&id) else { continue };
+            for r in rolls.get(&root).into_iter().flatten() {
+                if let Some(&c) = ids.get(r.contract as usize) {
+                    out.insert(c);
+                }
+            }
+        }
+        out.into_iter().collect()
+    });
     Ok(Bound {
         binding,
         view,
@@ -904,6 +1041,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
         chains,
         rolls,
         greeks,
+        scope,
     })
 }
 
@@ -913,8 +1051,139 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
 /// numerics; its answer is held by (instrument, label) for the evaluator. A
 /// literal the layer cannot answer is evaluated here; the result says which
 /// and why.
+/// Up to this many named instruments a relation is read one series each
+/// (E-99); past it, one scan with an entity predicate (E-120).
+const NAMED_SERIES: usize = 64;
+
+/// A predicate keeping the rows of `ids` in a relation keyed by an entity.
+pub(crate) fn entity_in(schema: &RelationSchema, ids: &[u64]) -> Option<abt_wire::generated::abt::wire::Predicate> {
+    use abt_wire::generated::abt::wire::{Atom, Disjunction, Op, Predicate};
+    let entity = column_of(schema, Role::Entity)?;
+    Some(Predicate {
+        all: Some(vec![Disjunction {
+            atoms: vec![Atom {
+                column: entity.name.clone(),
+                op: Op::In,
+                values: Some(
+                    ids.iter()
+                        .map(|&id| Constant {
+                            kind: ConstantKind::Entity,
+                            num: 0.0,
+                            int: id as i64,
+                            text: None,
+                        })
+                        .collect(),
+                ),
+            }],
+        }]),
+    })
+}
+
+/// The lists a universe draws its instruments from (E-120): when every
+/// rule of `universe` reads `member(A, T, "L")` of its instrument, or keeps
+/// one the book holds (`position`, `held`, `in_book`), those lists; none
+/// otherwise, the universe ranging over every instrument the data holds.
+fn universe_lists(prog: &Program) -> Option<Vec<String>> {
+    let rules: Vec<&Rule> = prog.rules.iter().filter(|r| r.head.name == "universe").collect();
+    if rules.is_empty() {
+        return None;
+    }
+    let mut lists = BTreeSet::new();
+    for r in rules {
+        let Some(Term::Var(a, _)) = r.head.terms.first() else { return None };
+        let mut gated = false;
+        for l in &r.body {
+            let Literal::Atom(at) = l else { continue };
+            if !matches!(at.terms.first(), Some(Term::Var(v, _)) if v == a) {
+                continue;
+            }
+            match at.name.as_str() {
+                "member" => {
+                    if let Some(Term::Lit(Lit::Label(s) | Lit::Str(s), _)) = at.terms.get(2) {
+                        lists.insert(s.clone());
+                        gated = true;
+                    }
+                }
+                "position" | "held" | "in_book" => gated = true,
+                _ => {}
+            }
+        }
+        if !gated {
+            return None;
+        }
+    }
+    (!lists.is_empty()).then(|| lists.into_iter().collect())
+}
+
+/// The instruments a membership relation ever lists under `lists`.
+fn list_members(client: &DataClient, view: &View, member_rel: &str, schema: &RelationSchema, lists: &[String]) -> Result<BTreeSet<u64>, RunError> {
+    use abt_wire::generated::abt::wire::{Atom, Disjunction, Op, Predicate};
+    let entity = column_of(schema, Role::Entity).map(|c| c.name.clone()).unwrap_or_default();
+    let label = schema.columns.iter().find(|c| c.ty == ColumnType::Label).map(|c| c.name.clone()).unwrap_or_default();
+    let predicate = Predicate {
+        all: Some(vec![Disjunction {
+            atoms: vec![Atom {
+                column: label,
+                op: Op::In,
+                values: Some(
+                    lists
+                        .iter()
+                        .map(|l| Constant {
+                            kind: ConstantKind::Label,
+                            num: 0.0,
+                            int: 0,
+                            text: Some(l.clone()),
+                        })
+                        .collect(),
+                ),
+            }],
+        }]),
+    };
+    let mut out = BTreeSet::new();
+    for b in client.query(
+        view,
+        QueryForm::Scan(Box::new(Scan {
+            relation: member_rel.to_string(),
+            t0: i64::MIN,
+            t1: i64::MAX,
+            predicate: Some(Box::new(predicate)),
+            columns: Some(vec![entity.clone()]),
+        })),
+    )? {
+        if let Some(c) = b.column_by_name(&entity).and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>()) {
+            out.extend(c.iter().flatten());
+        }
+    }
+    Ok(out)
+}
+
+/// The instruments a program names (ERRATA E-99): the rows of its
+/// universe's `instruments` table and the values of its `need instruments
+/// where root | symbol | ticker = "…"`, as the data layer's ids, each
+/// futures root with the contracts its continuous series holds. `None`
+/// when it names none: the run reads every instrument the binding holds.
+/// A named instrument the data does not hold names nothing.
+pub fn scope_entities(_prog: &Program, bound: &Bound) -> Option<Vec<u64>> {
+    bound.scope.clone()
+}
+
+/// The names a program gives its instruments: its universe's `instruments`
+/// table and its `need instruments where root | symbol | ticker = "…"`.
+fn named_instruments(prog: &Program) -> Option<Vec<&str>> {
+    let mut names: Vec<&str> = prog.instruments.iter().map(|(s, _)| s.as_str()).collect();
+    for (attr, value) in &prog.demand.instruments_where {
+        if matches!(attr.as_str(), "root" | "symbol" | "ticker") {
+            names.push(value.as_str());
+        }
+    }
+    (!names.is_empty()).then_some(names)
+}
+
 pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &StreamSpec) -> Result<Vec<String>, RunError> {
     let mut notes = Vec::new();
+    // A scoped run keeps the answers of its instruments only, as its stream
+    // carries their tuples only (E-99).
+    let scope: Option<BTreeSet<u64>> = spec.entities.as_ref().map(|e| e.iter().copied().collect());
     if !k.cfg.pushdown {
         return Ok(notes);
     }
@@ -1016,6 +1285,9 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
             let error = col(b, "error")?.clone();
             for i in 0..b.num_rows() {
                 let (Some(t), Some(r)) = (ts[i], rs[i]) else { continue };
+                if scope.as_ref().is_some_and(|s| !s.contains(&ids.value(i))) {
+                    continue;
+                }
                 let Some(&sym) = by_id.get(&ids.value(i)) else {
                     unmapped = true;
                     continue;
@@ -1072,6 +1344,8 @@ fn need_relations(word: &str) -> &'static [&'static str] {
         "series" => &["value"],
         "sessions" => &["session"],
         "point_value" => &["point_value"],
+        "tick" => &["tick"],
+        "industry" => &["industry"],
         "commission" => &["commission"],
         _ => &[],
     }
@@ -1142,6 +1416,12 @@ pub fn demand_of(prog: &Program, stored_name: &dyn Fn(&str) -> Option<String>, s
     }
     if d.point_value {
         need("point_value", "point_value".into(), None, None, false);
+    }
+    if d.tick {
+        need("tick", "tick".into(), None, None, false);
+    }
+    if d.industry {
+        need("industry", "industry".into(), None, None, false);
     }
     if d.commission {
         need("commission", "commission".into(), None, None, false);
@@ -1390,6 +1670,7 @@ pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) ->
             receipt_filter: None,
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
             session: None,
+            entities: scope_entities(k.prog, bound),
         },
         cal_of,
     ))
@@ -1651,13 +1932,14 @@ pub fn run_id(program_hash: &str, binding_id: &str, step: &serde_json::Value, mo
 /// the binding, changes what it decides: its window, truncation and bundle
 /// date (E-56), the live session it reads or the recording it replays
 /// (A-D55); none for a run over the whole stream.
-pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>, session: Option<&str>, replay_of: Option<&str>) -> serde_json::Value {
+pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>, received_by: Option<i64>, session: Option<&str>, replay_of: Option<&str>) -> serde_json::Value {
     let fields = [
         ("start", cfg.start.map(|t| serde_json::json!(t))),
         ("end", cfg.end.map(|t| serde_json::json!(t))),
         ("as_of", cfg.as_of.map(|t| serde_json::json!(t))),
         ("to_seq", to_seq.map(|s| serde_json::json!(s))),
         ("horizon", horizon.map(|t| serde_json::json!(t))),
+        ("received_by", received_by.map(|t| serde_json::json!(t))),
         ("fault", cfg.inject.as_ref().map(|(c, t)| serde_json::json!([c, t]))),
         ("mask", (!cfg.embargo_mask.is_empty()).then(|| serde_json::json!(cfg.embargo_mask))),
         ("session", session.map(|s| serde_json::json!(s))),
@@ -1674,8 +1956,16 @@ pub fn run_step(cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i6
 /// π of a run (Q-2.5): the plan step that asked for it, with what of the
 /// request beyond the step changes what it decides; a run outside a plan
 /// has `run_step`'s alone.
-pub fn plan_step(step: Option<&serde_json::Value>, cfg: &super::ExecConfig, to_seq: Option<u64>, horizon: Option<i64>, session: Option<&str>, replay_of: Option<&str>) -> serde_json::Value {
-    let own = run_step(cfg, to_seq, horizon, session, replay_of);
+pub fn plan_step(
+    step: Option<&serde_json::Value>,
+    cfg: &super::ExecConfig,
+    to_seq: Option<u64>,
+    horizon: Option<i64>,
+    received_by: Option<i64>,
+    session: Option<&str>,
+    replay_of: Option<&str>,
+) -> serde_json::Value {
+    let own = run_step(cfg, to_seq, horizon, received_by, session, replay_of);
     match (step, own) {
         (None, own) => own,
         (Some(pi), serde_json::Value::Object(extra)) => {

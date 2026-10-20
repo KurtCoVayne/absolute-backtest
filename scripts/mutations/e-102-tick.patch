@@ -1,0 +1,17 @@
+# proposition: E-102 (future.tick is the held contract's minimum price increment)
+# mutation: the first contract's tick for every session
+# test: cargo test -p abt-data --test databento the_tick_is_the_held_contracts_minimum_increment
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+index 8459d48..c2b4f8d 100644
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -998,7 +998,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
+             }
+             // The held contract's minimum price increment (E-102), stated
+             // like the point value at the session's day.
+-            if let Some(tk) = raw.defs[&c].tick.filter(|x| x.is_finite() && *x > 0.0) {
++            if let Some(tk) = raw.defs[&held[0]].tick.filter(|x| x.is_finite() && *x > 0.0) {
+                 tick_rows.keys.push(root_key.clone());
+                 tick_rows.t.push(day);
+                 tick_rows.r.push(day);

@@ -316,9 +316,15 @@ fn relation_plan(
         return Err(DataError::Unresolved(format!("need `{}` of class {}: {}", label, demand.class, what)));
     }
     let mut fits: Vec<&VersionRecord> = held.iter().filter(|v| lacks(version_calendar(store, v).as_deref(), &v.attributes, need, &require).is_empty()).collect();
-    // The preferences order the store's versions (each costs nothing).
+    // The preferences order the store's versions (each costs nothing):
+    // the finest calendar under `finest`, else the coarsest that still
+    // satisfies the need (E-105: a daily program binds the session bars,
+    // not the minutes it would only read as a view; the sort is stable, so
+    // versions of one calendar keep their order).
     if prefer.contains(&PreferenceKind::Finest) {
         fits.sort_by_key(|v| version_calendar(store, v).as_deref().and_then(calendar_nanos).unwrap_or(i64::MAX));
+    } else if need.calendar.is_some() {
+        fits.sort_by_key(|v| std::cmp::Reverse(version_calendar(store, v).as_deref().and_then(calendar_nanos).unwrap_or(0)));
     }
     if prefer.contains(&PreferenceKind::Reviewed) {
         fits.sort_by_key(|v| !v.attributes.contains_key("reviewed"));

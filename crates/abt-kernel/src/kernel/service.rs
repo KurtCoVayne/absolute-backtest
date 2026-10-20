@@ -185,6 +185,7 @@ impl KernelService {
             write_outputs: true,
             to_seq: r.to_seq,
             horizon: r.horizon,
+            received_by: r.received_by,
             plan_step: match &r.plan_step {
                 Some(t) => Some(serde_json::from_str(t).map_err(|e| refused(format!("plan_step is not JSON: {}", e)))?),
                 None => None,
@@ -359,7 +360,7 @@ impl Service for KernelService {
                     let cfg = Self::config(&prog, &r)?;
                     let client = (self.connect)().map_err(run_error)?;
                     let mut m = response(KernelOp::Show);
-                    m.text = Some(super::sample(&prog, &client, &cfg).map_err(run_error)?.to_string());
+                    m.text = Some(super::sample(&prog, &client, &cfg, r.received_by).map_err(run_error)?.to_string());
                     return respond(m);
                 }
                 let text = match crate::query::parse(&format!("show {}", what)).map_err(refused)? {
@@ -509,9 +510,28 @@ fn report(r: &RunResult, status: &str) -> String {
 }
 
 /// A run held by its thread: runs it, then answers queries until the
-/// service drops it.
+/// service drops it (`control release`); its memory then goes back to the
+/// system, not to the thread's arena (E-110).
 #[allow(clippy::too_many_arguments)]
 fn hold(
+    ws: Workspace,
+    prog: Program,
+    cfg: ExecConfig,
+    opts: Replay,
+    exec: Box<dyn Executor + Send>,
+    client: DataClient,
+    connect: Arc<Connect>,
+    rx: mpsc::Receiver<Ask>,
+    ptx: mpsc::Sender<Frame>,
+    state: Arc<Mutex<RunState>>,
+    every: u64,
+) {
+    hold_run(ws, prog, cfg, opts, exec, client, connect, rx, ptx, state, every);
+    abt_wire::memory::trim_now();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hold_run(
     ws: Workspace,
     prog: Program,
     cfg: ExecConfig,
@@ -524,7 +544,13 @@ fn hold(
     state: Arc<Mutex<RunState>>,
     every: u64,
 ) {
-    let compiled = crate::compiler::compile(&prog, &crate::compiler::CompileOptions::default());
+    let compiled = crate::compiler::compile(
+        &prog,
+        &crate::compiler::CompileOptions {
+            params: cfg.param_overrides.clone(),
+            ..Default::default()
+        },
+    );
     let mode = opts.mode.name();
     let mut barriers = 0u64;
     // A checkpoint is written through the data layer as it is taken; the
@@ -678,7 +704,13 @@ fn answer_held(
     let prepared = query::prepare(ws, &prog.strategy, prog, std::slice::from_ref(&q)).map_err(RunError::Request)?;
     let p = &prepared.program;
     let client = connect()?;
-    let compiled = crate::compiler::compile(p, &crate::compiler::CompileOptions::default());
+    let compiled = crate::compiler::compile(
+        p,
+        &crate::compiler::CompileOptions {
+            params: cfg.param_overrides.clone(),
+            ..Default::default()
+        },
+    );
     let mut exec = SimExecutor::new(cfg.clone());
     let (r, mut k2) = super::replay(p, Some(&compiled.lowered), &client, cfg.clone(), &mut exec, &Replay::default(), &mut |_| {})?;
     if r.binding_id != result.binding_id {
@@ -694,9 +726,7 @@ fn answer_held(
         plan: Some(&compiled.plan),
         out: None,
     };
-    let a = query::answer(&mut k2, &cx, 0, &q);
-    std::mem::forget(k2);
-    a
+    query::answer(&mut k2, &cx, 0, &q)
 }
 
 /// A connection to the service in this process, the service's end served on

@@ -1,0 +1,17 @@
+# proposition: E-110 (the oldest runs' outputs and cache objects are pruned)
+# mutation: a derived write prunes nothing again
+# test: cargo test -p abt-data --test store the_oldest_runs_outputs_and_cache_objects_are_pruned
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store.rs b/crates/abt-data/src/store.rs
+index 039101f..9ae3d9b 100644
+--- a/crates/abt-data/src/store.rs
++++ b/crates/abt-data/src/store.rs
+@@ -601,7 +601,7 @@ impl Store {
+             log_prefix: None,
+         });
+         self.registry.set_current(&relation, source, &version);
+-        if derived(&relation) {
++        if derived(&relation) && relation.is_empty() {
+             self.prune_derived()?;
+         }
+         self.registry.save()?;

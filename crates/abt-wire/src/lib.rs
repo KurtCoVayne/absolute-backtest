@@ -15,6 +15,7 @@ pub mod chain;
 pub mod convert;
 pub mod frame;
 pub mod hash;
+pub mod memory;
 pub mod rpc;
 pub mod scalar;
 pub mod table;
@@ -34,4 +35,4 @@ pub use hash::{BindingId, Hash, PlanHash, RunId, TrialId, VersionId};
 pub use scalar::{Entity, Label, Seq, Time};
 
 /// The protocol version a peer announces in `Hello` (P-2.3, P-7).
-pub const PROTOCOL: &str = "1.1";
+pub const PROTOCOL: &str = "1.2";

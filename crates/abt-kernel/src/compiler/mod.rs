@@ -38,6 +38,10 @@ pub struct CompileOptions {
     pub replay_dir: Option<PathBuf>,
     /// The dead-literal margin of section 6.8, as a power of two (−40).
     pub margin_log2: i32,
+    /// The run's parameter point (`--param`, a plan's point), which the
+    /// analysis, the rewrites and the plan read instead of the defaults
+    /// (E-115); the normal form and its hash stay the program's.
+    pub params: Vec<(String, crate::ir::Lit)>,
 }
 
 impl Default for CompileOptions {
@@ -52,6 +56,7 @@ impl Default for CompileOptions {
             chc_budget_ms: 10_000,
             replay_dir: None,
             margin_log2: -40,
+            params: Vec::new(),
         }
     }
 }
@@ -117,6 +122,13 @@ fn pipeline(prog: &Program, opts: &CompileOptions, nir: Nir, analysis: crate::an
 /// tier runs here.
 pub fn compile_with(prog: &Program, opts: &CompileOptions, dead: &[crate::rewrite::DeadVerdict]) -> Compiled {
     let nir = normalise(prog);
+    let pointed;
+    let prog = if opts.params.is_empty() {
+        prog
+    } else {
+        pointed = prog.at_point(&opts.params);
+        &pointed
+    };
     let analysis = crate::analysis::analyse(prog, &nir, opts.stats.as_ref(), opts.margin_log2);
     pipeline(prog, opts, nir, analysis, dead, Vec::new())
 }
@@ -126,6 +138,18 @@ pub fn compile_with(prog: &Program, opts: &CompileOptions, dead: &[crate::rewrit
 /// verdicts license R2, then Rewrite, Plan and Lower.
 pub fn compile(prog: &Program, opts: &CompileOptions) -> Compiled {
     let nir = normalise(prog);
+    // The analysis (whose never-true literals R2 drops), constant folding
+    // (R6) and the plan read the run's point: at the defaults, a guard on a
+    // parameter (`side > 0`, `member_gate = 0`) was judged and an
+    // expression over one (`1 - w`) folded at the default, and the run at
+    // another point ran the default's rules (E-115).
+    let pointed;
+    let prog = if opts.params.is_empty() {
+        prog
+    } else {
+        pointed = prog.at_point(&opts.params);
+        &pointed
+    };
     let analysis = crate::analysis::analyse(prog, &nir, opts.stats.as_ref(), opts.margin_log2);
     let t2 = crate::verify::obligations::tier2(prog, &analysis, opts.margin_log2);
     let mut dead = t2.dead_verdicts();

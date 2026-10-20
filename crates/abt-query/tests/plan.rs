@@ -52,7 +52,7 @@ fn a_study_parses_to_its_plan() {
     assert_eq!(p.grid.len(), 2);
     assert_eq!(p.grid_points().len(), 6);
     assert!(p.grid_points().iter().all(|q| q.len() == 2), "{:?}", p.grid_points());
-    assert_eq!(p.holdout, Holdout::Trailing { years: 2 });
+    assert_eq!(p.holdout, Holdout::Trailing { months: 24 });
     assert_eq!(p.walk_forward.as_ref().map(|w| (w.anchored, w.train_months, w.test_months)), Some((false, 24, 6)));
     assert_eq!(p.window.as_ref().map(|w| w.describe()), Some("2005-01-03 .. 2020-12-31".into()));
     assert_eq!(p.objective, "calmar");
@@ -160,9 +160,9 @@ study long = sweep(PROG = a.dsl, LB = 100, YEARS = 3y)
     assert_eq!(units.len(), 3);
     let s = plan::plan(&units, "short").unwrap();
     assert_eq!(s.grid, vec![("lookback".to_string(), vec!["10".to_string()])]);
-    assert_eq!(s.holdout, Holdout::Trailing { years: 1 });
+    assert_eq!(s.holdout, Holdout::Trailing { months: 12 });
     let l = plan::plan(&units, "long").unwrap();
-    assert_eq!(l.holdout, Holdout::Trailing { years: 3 });
+    assert_eq!(l.holdout, Holdout::Trailing { months: 36 });
     // A template is not a plan.
     assert!(plan::plan(&units, "sweep").is_err_and(|e| e.contains("no study `sweep`")));
     let missing = "template t(A, B) { program A }\nstudy x = t(A = p.dsl)";
@@ -256,4 +256,23 @@ fn what_a_step_or_claim_reads_must_be_a_step_of_its_kind() {
     assert!(one("study s { grid { a = 1 } }", "s").is_err_and(|e| e.contains("names no program")));
     assert!(one("study s { program p.dsl\n window 2020-01-01 .. 2019-01-01 }", "s").is_err_and(|e| e.contains("ends before")));
     assert!(one("study s { program p.dsl\n claims { c : adf on returns of main expect maybe } }", "s").is_err_and(|e| e.contains("not an outcome")));
+}
+
+/// E-118: a compare step's metrics bracketed, as the house template writes
+/// them, are its metrics; `[return, ...]` was taken for one metric's name.
+#[test]
+fn a_compare_steps_metrics_may_be_bracketed() {
+    let study = |by: &str| {
+        format!(
+            "study s {{\n  program  p.dsl\n  steps {{\n    run base\n    run alt at {{ n = 2 }}\n    compare variants: base, alt by {}\n  }}\n}}\n",
+            by
+        )
+    };
+    for by in ["[return, max_drawdown, sharpe]", "return, max_drawdown, sharpe"] {
+        let p = one(&study(by), "s").unwrap();
+        let Some(Step::Compare { by, .. }) = p.steps.iter().find(|s| s.kind() == "compare") else {
+            panic!("{:?}", p.steps)
+        };
+        assert_eq!(by, &vec!["return".to_string(), "max_drawdown".to_string(), "sharpe".to_string()]);
+    }
 }

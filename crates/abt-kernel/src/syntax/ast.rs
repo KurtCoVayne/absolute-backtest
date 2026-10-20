@@ -142,6 +142,8 @@ pub enum NeedKind {
     Series(Vec<(String, Option<Resolution>)>),
     Sessions,
     PointValue,
+    Tick,
+    Industry,
     Commission,
     Instruments { attr: String, value: String },
     Chain(ChainNeed),

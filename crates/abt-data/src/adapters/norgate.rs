@@ -68,6 +68,11 @@ pub struct LakeOptions {
     /// The index series to read (the lake's ticker, `$SPXTR`), each with
     /// its name in the series class (`SPXTR`).
     pub series: Vec<(String, String)>,
+    /// Named assets beyond the index lists (`QQQ=ETF`), each a member of
+    /// the list label it names over its listing span, read from
+    /// `registry/security_master` (E-100: exchange-traded products the
+    /// universe of an idea names).
+    pub tickers: Vec<(String, String)>,
     /// The first and last day (days since 1970-01-01); the last defaults to
     /// the lake's last bar.
     pub from: i64,
@@ -85,6 +90,7 @@ impl Default for LakeOptions {
         LakeOptions {
             lists: vec![("S&P 500".into(), "SPX".into())],
             series: vec![],
+            tickers: vec![],
             from: days_of("2014-01-01").unwrap_or(0),
             to: None,
             limit: None,
@@ -284,6 +290,32 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
                 continue;
             }
             members.push((a, label, f, to[i]));
+        }
+    }
+    if !opts.tickers.is_empty() {
+        let want: BTreeMap<String, &str> = opts.tickers.iter().map(|(t, l)| (t.to_uppercase(), l.as_str())).collect();
+        // A ticker names the asset of its latest listing (a reused symbol's
+        // older assets are other instruments).
+        let mut pick: BTreeMap<String, (i64, i64, Option<i64>)> = BTreeMap::new();
+        for b in read(lake, "registry/security_master", &["asset_id", "ticker", "listing_date", "delisting_date"], |_| true)? {
+            let (asset, ticker, listed, delisted) = (ints(&b, "asset_id")?, strings(&b, "ticker")?, days(&b, "listing_date")?, days(&b, "delisting_date")?);
+            for i in 0..b.num_rows() {
+                let (Some(a), Some(t), Some(f)) = (asset[i], &ticker[i], listed[i]) else { continue };
+                let t = t.to_uppercase();
+                if !want.contains_key(&t) {
+                    continue;
+                }
+                let e = pick.entry(t).or_insert((a, f, delisted[i]));
+                if f > e.1 {
+                    *e = (a, f, delisted[i]);
+                }
+            }
+        }
+        for (t, (a, f, to)) in pick {
+            if to.is_some_and(|t| t <= opts.from) || opts.to.is_some_and(|t| f > t) {
+                continue;
+            }
+            members.push((a, want[&t], f, to));
         }
     }
     let mut ids: Vec<i64> = members.iter().map(|m| m.0).collect::<BTreeSet<_>>().into_iter().collect();
@@ -602,6 +634,9 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     report.membership_intervals_split_at_missing_bars = membership.len().saturating_sub(clipped);
     // 8. Classification: the snapshot, from its date on.
     let mut classification: Vec<(i64, i64, Option<i64>, String)> = Vec::new();
+    // The deeper GICS levels of the same snapshot (industry group, industry,
+    // sub-industry), per asset; emitted as `equity.industry` (E-98).
+    let mut deeper: BTreeMap<i64, (i64, [Option<String>; 3])> = BTreeMap::new();
     let mut snapshot: Option<i64> = None;
     if let Ok(cb) = read(lake, "classification/classification_full", &["asset_id", "scheme", "level", "code", "snapshot_date"], |_| true) {
         for b in &cb {
@@ -614,6 +649,11 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
                     continue;
                 }
                 snapshot = Some(snapshot.map_or(d, |x| x.max(d)));
+                if (2..=4).contains(&l) && d <= last_day && idset.contains(&a) {
+                    let e = deeper.entry(a).or_insert((d, [None, None, None]));
+                    e.0 = e.0.max(d);
+                    e.1[(l - 2) as usize] = Some(c.clone());
+                }
                 if l != 1 || d > last_day || !idset.contains(&a) {
                     continue;
                 }
@@ -746,6 +786,32 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
         "equity.classification".into(),
         keyed(cls.0, cls.1, vec![("Scheme", schemes), ("Code", Arc::new(StringArray::from(cls.2)) as ArrayRef)])?,
     ));
+    // `equity.industry`: the snapshot's industry group, industry and
+    // sub-industry codes, over the same days and intervals as the sector.
+    let mut ind: (Vec<String>, Vec<i64>, [Vec<Option<String>>; 3]) = Default::default();
+    for (a, f, t, _) in &classification {
+        let Some((_, levels)) = deeper.get(a) else { continue };
+        for &d in days_all.iter().filter(|d| **d >= *f && t.is_none_or(|t| **d <= t)) {
+            ind.0.push(key(*a));
+            ind.1.push(t_of(d));
+            for (k, l) in levels.iter().enumerate() {
+                ind.2[k].push(l.clone());
+            }
+        }
+    }
+    let [g, i, sub] = ind.2;
+    relations.push((
+        "equity.industry".into(),
+        keyed(
+            ind.0,
+            ind.1,
+            vec![
+                ("Group", Arc::new(StringArray::from(g)) as ArrayRef),
+                ("Industry", Arc::new(StringArray::from(i)) as ArrayRef),
+                ("SubIndustry", Arc::new(StringArray::from(sub)) as ArrayRef),
+            ],
+        )?,
+    ));
     if !opts.series.is_empty() {
         for (_, name) in &opts.series {
             report.series_rows.insert(name.clone(), series.keys().filter(|(n, _)| n == name).count());
@@ -785,6 +851,7 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     per.entry("equity.delisted".into()).or_default().insert("delisting_reason".into(), "inferred".into());
     if let Some(s) = snapshot {
         per.entry("equity.classification".into()).or_default().insert("classification".into(), format!("snapshot {}", ymd(s)));
+        per.entry("equity.industry".into()).or_default().insert("classification".into(), format!("snapshot {}", ymd(s)));
     }
     Ok((
         Fetched {
@@ -854,6 +921,7 @@ impl Norgate {
                 "lake" => {}
                 "lists" => opts.lists = pairs(k, v)?,
                 "series" => opts.series = pairs(k, v)?,
+                "tickers" => opts.tickers = pairs(k, v)?,
                 "from" => opts.from = date(k, v)?,
                 "to" => opts.to = Some(date(k, v)?),
                 "limit" => opts.limit = Some(v.parse().map_err(|_| DataError::Malformed(format!("the norgate setting `limit` is a count, not `{}`", v)))?),
@@ -868,7 +936,7 @@ impl Norgate {
 
 /// The equity relations the lake provides (the tickers also come with the
 /// securities, into the registry's `ticker` spans).
-pub const RELATIONS: [&str; 12] = [
+pub const RELATIONS: [&str; 13] = [
     "open",
     "high",
     "low",
@@ -881,6 +949,7 @@ pub const RELATIONS: [&str; 12] = [
     "delisted",
     "member",
     "classification",
+    "industry",
 ];
 
 impl Adapter for Norgate {

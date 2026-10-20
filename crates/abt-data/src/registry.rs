@@ -347,6 +347,15 @@ impl Registry {
         self.state.versions.remove(id);
         self.state.cache.retain(|_, (_, v)| v != id);
     }
+
+    /// Forgets a relation: its schema, its versions, its currents and the
+    /// cache records naming it (a derived relation pruned, E-110).
+    pub fn drop_relation(&mut self, relation: &str) {
+        self.state.schemas.remove(relation);
+        self.state.current.remove(relation);
+        self.state.versions.retain(|_, v| v.relation != relation);
+        self.state.cache.retain(|_, (r, _)| r != relation);
+    }
 }
 
 /// Definition D-2.1: exactly one event time, at most one receipt time, named

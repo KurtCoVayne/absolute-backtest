@@ -42,7 +42,10 @@ impl Kernel<'_> {
     fn roll_at(&self, root: Sym, t: i64) -> Option<(usize, &crate::kernel::bind::Roll)> {
         let rolls = self.rolls.get(&root)?;
         let now = self.now;
-        rolls.iter().enumerate().rev().find(|(_, r)| r.t <= t && r.r <= now)
+        // The entries at or before `t` (sorted by t), the last received:
+        // a search, not a scan, over a minute store's row per bar.
+        let end = rolls.partition_point(|r| r.t <= t);
+        rolls[..end].iter().enumerate().rev().find(|(_, r)| r.r <= now)
     }
 }
 
@@ -144,14 +147,28 @@ impl SimExecutor {
     /// new one less its own. The bar's P&L over the two contracts is then
     /// the series'; the change of adjustment is not P&L.
     pub(super) fn rolls(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
-        let held: Vec<(Sym, f64)> = self.book.positions.iter().filter(|(s, _)| k.rolls.contains_key(*s)).map(|(s, q)| (*s, *q)).collect();
         let mut changed = false;
-        for (root, q) in held {
+        let roots: Vec<Sym> = k.rolls.keys().copied().collect();
+        for root in roots {
             let Some((i, now)) = k.roll_at(root, t).map(|(i, r)| (i, r.clone())) else { continue };
-            if now.t != t || i == 0 {
+            // The series' entry at the last barrier, against which a change
+            // of contract is a roll (E-116): a minute store's change falls
+            // between a session clock's barriers, and a roll asked for an
+            // entry at the barrier itself was never charged. Without one (a
+            // run's first barrier, a resumed run), the entry before.
+            let j = match self.roll_seen.insert(root, i) {
+                Some(j) => j,
+                None if now.t == t && i > 0 => i - 1,
+                None => continue,
+            };
+            let q = match self.book.positions.get(&root) {
+                Some(&q) if q != 0.0 => q,
+                _ => continue,
+            };
+            if j == i {
                 continue;
             }
-            let before = k.rolls[&root][i - 1].clone();
+            let before = k.rolls[&root][j].clone();
             if before.contract == now.contract {
                 continue;
             }

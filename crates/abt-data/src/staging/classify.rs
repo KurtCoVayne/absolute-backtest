@@ -35,13 +35,14 @@ pub struct Planned {
     pub rebuild: bool,
 }
 
-/// A stored instrument's rows and revisions, as rows.
-fn stored_rows(prev: &HotVersion, ordinal: usize) -> (Vec<Row>, Vec<Row>) {
-    let inst = &prev.presence().instruments[ordinal];
+/// A stored instrument's rows and revisions, as rows: one the version's
+/// runs hold, or one only its overlay holds (appended since publication as
+/// a new instrument, E-121).
+fn stored_rows(prev: &HotVersion, id: u64) -> (Vec<Row>, Vec<Row>) {
     // The current row of each label (the superseded ones come from the
     // revision table, not from the read, or they would count twice).
     let f = crate::store::RowFilter {
-        identity: Some(vec![inst.id]),
+        identity: Some(vec![id]),
         latest_only: true,
         ..crate::store::RowFilter::default()
     };
@@ -66,7 +67,7 @@ fn stored_rows(prev: &HotVersion, ordinal: usize) -> (Vec<Row>, Vec<Row>) {
         .manifest
         .revisions
         .iter()
-        .filter(|x| x.id == inst.id)
+        .filter(|x| x.id == id)
         .map(|x| Row {
             t: x.label,
             r: x.r,
@@ -92,9 +93,9 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
         ov.by_id.get(&id).is_some_and(|&o| ov.instruments[o].rows() > 0)
     };
     if let Some(p) = prev {
-        for (o, inst) in p.presence().instruments.iter().enumerate() {
+        for inst in p.presence().instruments.iter() {
             if !input.by_id.contains_key(&inst.id) {
-                let (rows, _) = stored_rows(p, o);
+                let (rows, _) = stored_rows(p, inst.id);
                 let revisions = p.manifest.revisions.iter().filter(|x| x.id == inst.id).cloned().collect();
                 let rebuild = appended(p, inst.id);
                 planned.insert(
@@ -113,11 +114,38 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
                 }
             }
         }
+        // The instruments appended since publication as new ones: in the
+        // overlay alone, so the loop above, over the published ones, never
+        // saw them, and the version dropped their rows, every row of every
+        // futures root ingested after the first when a later ingest was no
+        // append (E-121). Rebuilt from their rows as read.
+        let overlay_only: Vec<u64> = {
+            let ov = p.overlay.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ids: Vec<u64> = ov.by_id.keys().copied().filter(|id| p.presence().ordinal(*id).is_none() && !input.by_id.contains_key(id)).collect();
+            ids.sort_unstable();
+            ids
+        };
+        for id in overlay_only {
+            let (rows, _) = stored_rows(p, id);
+            if rows.is_empty() {
+                continue;
+            }
+            planned.insert(
+                id,
+                Planned {
+                    id,
+                    rows,
+                    revisions: Vec::new(),
+                    rebuild: true,
+                },
+            );
+            counts.instruments_rebuilt += 1;
+        }
     }
     for (&id, rows) in &input.by_id {
-        let (stored, superseded) = match prev.and_then(|p| p.presence().ordinal(id).map(|o| (p, o))) {
-            Some((p, o)) => stored_rows(p, o as usize),
-            None => (Vec::new(), Vec::new()),
+        let (stored, superseded) = match prev {
+            Some(p) if p.presence().ordinal(id).is_some() || appended(p, id) => stored_rows(p, id),
+            _ => (Vec::new(), Vec::new()),
         };
         let fresh = stored.is_empty();
         let last_label = stored.last().map(|x| x.t);

@@ -1,0 +1,17 @@
+# proposition: E-119 (an entry filled at the next open and marked past the bound holds)
+# mutation: growth measured from the book before the bar's fills again
+# test: cargo test -p abt-tests --test limits an_entry_filled_at_the_next_open_and_marked_past_the_bound_holds
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/contract/check.rs b/crates/abt-kernel/src/contract/check.rs
+index e745ea6..494126f 100644
+--- a/crates/abt-kernel/src/contract/check.rs
++++ b/crates/abt-kernel/src/contract/check.rs
+@@ -657,7 +657,7 @@ impl Invariants {
+                         // a held position a price rise carried past the
+                         // bound, one an order reduces, and the bar before's
+                         // fill at this bar's open marked at its close hold.
+-                        let grown = |s: Sym| e.grown.contains(&s);
++                        let grown = |s: Sym| e.grown.contains(&s) || e.positions.iter().any(|(x, q, _)| *x == s && q.abs() > self.shadow.position(s).abs() * (1.0 + 1e-12) + 1e-12);
+                         if let Some((s, q, pm)) = e.positions.iter().find(|(s, q, pm)| grown(*s) && (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
+                             position_limits = Some(format!("{} at {} after the accepted orders, above `{}`", k.symbols.name(*s), (q * pm).abs(), l));
+                         }

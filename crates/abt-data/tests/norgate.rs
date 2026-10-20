@@ -204,6 +204,35 @@ fn several_lists_and_an_index_series() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A named ticker beyond the lists (E-100): asset 8 (OTH, a Russell 2000
+/// member only) joins the universe as a member of `ETF` over its listing.
+#[test]
+fn a_named_ticker_joins_the_universe_under_its_label() {
+    let dir = lake();
+    write(
+        &dir.join("registry/security_master/data.parquet"),
+        vec![
+            ("asset_id", Arc::new(Int64Array::from(vec![8, 9]))),
+            ("ticker", s(vec!["OTH", "OLD"])),
+            ("listing_date", dates(vec![Some(d(-500)), Some(d(-500))])),
+            ("delisting_date", dates(vec![None, Some(d(-300))])),
+        ],
+    );
+    let opts = LakeOptions {
+        tickers: vec![("oth".into(), "ETF".into()), ("OLD".into(), "ETF".into())],
+        ..LakeOptions::default()
+    };
+    let (f, _) = read_lake(&dir, &opts).unwrap();
+    let member = relation(&f, "equity.member");
+    let lists = member.column(2).as_string::<i32>();
+    let of8: Vec<&str> = (0..member.num_rows()).filter(|&i| rows(member)[i].0 == "8").map(|i| lists.value(i)).collect();
+    assert_eq!(of8.len(), 20, "a member every day of the span");
+    assert!(of8.iter().all(|l| *l == "ETF"));
+    // A ticker delisted before the span stays out.
+    assert!(f.securities.iter().all(|s| s.key != "9"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The adapter as a source of the resolver: a catalog's settings
 /// configure it, and its offers are its lists' and series'.
 #[test]
@@ -309,6 +338,12 @@ fn the_lake_becomes_the_equity_class_with_its_decisions() {
     assert_eq!(of(cls, "1"), (12..20).collect::<Vec<_>>());
     assert_eq!(cls.column(3).as_string::<i32>().value(0), "45");
     assert_eq!(report.classification_snapshot.as_deref(), Some("2014-01-14"));
+    // The deeper levels of the same snapshot over the same days (E-98): the
+    // fixture has the industry group, not the industry or sub-industry.
+    let ind = relation(&f, "equity.industry");
+    assert_eq!(of(ind, "1"), (12..20).collect::<Vec<_>>());
+    assert_eq!(ind.column(2).as_string::<i32>().value(0), "4510");
+    assert!(ind.column(3).is_null(0) && ind.column(4).is_null(0));
     // The reviewed exception that names an exported symbol is kept.
     assert_eq!(report.exceptions, 1);
     assert!(f.attributes["reviewed_exceptions"].contains("\"key\":\"1\""), "{}", f.attributes["reviewed_exceptions"]);

@@ -17,6 +17,7 @@
 //! futures sessions of iteration 3, ST-5.3's `session` level).
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use abt_wire::scalar::{civil_from_days, days_from_civil, NANOS_PER_DAY, NANOS_PER_MINUTE};
 
@@ -261,9 +262,19 @@ pub fn receipt(label: i64, last_row_label: i64, last_row_r: i64, max_r: i64) -> 
     (label + (last_row_r - last_row_label)).max(max_r)
 }
 
+/// How many label indexes `index_of` built in this process: staging builds
+/// one per level and relation, not one per bar of the level above (E-109).
+static INDEXES_BUILT: AtomicU64 = AtomicU64::new(0);
+
 /// Per bucket key, the index of its label in the level's label list.
 pub fn index_of(labels: &[(i64, i64)]) -> BTreeMap<i64, u32> {
+    INDEXES_BUILT.fetch_add(1, Ordering::Relaxed);
     labels.iter().enumerate().map(|(i, (k, _))| (*k, i as u32)).collect()
+}
+
+/// The label indexes built so far in this process (E-109's test).
+pub fn indexes_built() -> u64 {
+    INDEXES_BUILT.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

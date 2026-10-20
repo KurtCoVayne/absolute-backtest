@@ -58,6 +58,11 @@ pub struct Resolved {
     /// The calendars barriers are emitted on, in their order at one instant.
     pub calendars: Vec<String>,
     pub r_max: Option<i64>,
+    /// The instruments whose tuples the stream carries, sorted, when the
+    /// spec names them (ERRATA E-99); a stream without them is every
+    /// instrument's, and its canonical form, hence its id, is as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entities: Option<Vec<u64>>,
 }
 
 impl Resolved {
@@ -102,11 +107,17 @@ pub fn resolve(store: &Store, spec: &StreamSpec) -> Result<Resolved, DataError> 
             .ok_or_else(|| DataError::NotFound("the stream names calendars and the store has no calendar labels".into()))?;
         clocks.push(v.to_string());
     }
+    let entities = spec.entities.clone().map(|mut e| {
+        e.sort_unstable();
+        e.dedup();
+        e
+    });
     Ok(Resolved {
         relations,
         clocks,
         calendars,
         r_max: spec.receipt_filter.as_ref().and_then(|f| f.r_max),
+        entities,
     })
 }
 
@@ -293,8 +304,14 @@ impl Stream {
     fn open_partition(&mut self, store: &Store, j: u32, p: u32) -> Result<(), DataError> {
         let m = &self.manifests[j as usize];
         let part = &m.partitions[p as usize];
+        // A stream scoped to named instruments reads only their rows: a hot
+        // version skips the other instruments' blocks, a partition reads
+        // through its entity index (E-99). A relation keyed by no entity
+        // (a series by label) is read whole.
+        let keyed_by_entity = entity_column(&m.schema).is_some();
         let f = RowFilter {
             r_max: self.res.r_max,
+            identity: if keyed_by_entity { self.res.entities.clone() } else { None },
             ..RowFilter::default()
         };
         let batch = store.read_partition_rows(m, part, &f)?;
@@ -521,8 +538,11 @@ pub fn index(store: &Store, res: &Resolved) -> Result<Vec<(String, Barrier, u64)
     for (_, v) in &res.relations {
         let m = store.manifest(v)?;
         let lay = layout(&m.schema);
+        // The tuples the stream carries, as `open_partition` reads them, so
+        // the index numbers the scoped stream (E-99).
         let f = RowFilter {
             r_max: res.r_max,
+            identity: if entity_column(&m.schema).is_some() { res.entities.clone() } else { None },
             ..RowFilter::default()
         };
         for p in &m.partitions {

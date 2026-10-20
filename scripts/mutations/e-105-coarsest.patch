@@ -1,0 +1,17 @@
+# proposition: E-105 (need bars @1d binds the session bars)
+# mutation: the resolver keeps its source order among fitting versions
+# test: cargo test -p abt-tests --test session_level
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/resolver/plan.rs b/crates/abt-data/src/resolver/plan.rs
+index 68284ab..0257b21 100644
+--- a/crates/abt-data/src/resolver/plan.rs
++++ b/crates/abt-data/src/resolver/plan.rs
+@@ -323,8 +323,6 @@ fn relation_plan(
+     // versions of one calendar keep their order).
+     if prefer.contains(&PreferenceKind::Finest) {
+         fits.sort_by_key(|v| version_calendar(store, v).as_deref().and_then(calendar_nanos).unwrap_or(i64::MAX));
+-    } else if need.calendar.is_some() {
+-        fits.sort_by_key(|v| std::cmp::Reverse(version_calendar(store, v).as_deref().and_then(calendar_nanos).unwrap_or(0)));
+     }
+     if prefer.contains(&PreferenceKind::Reviewed) {
+         fits.sort_by_key(|v| !v.attributes.contains_key("reviewed"));

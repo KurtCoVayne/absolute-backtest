@@ -1,0 +1,17 @@
+# proposition: E-116 (a roll between two barriers is charged at the next)
+# mutation: a roll only where an entry falls on the barrier again
+# test: cargo test -p abt-tests --test futures a_roll_between_barriers_is_charged_at_the_next
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/sim/future.rs b/crates/abt-kernel/src/sim/future.rs
+index 1144aeb..ffb0e72 100644
+--- a/crates/abt-kernel/src/sim/future.rs
++++ b/crates/abt-kernel/src/sim/future.rs
+@@ -156,7 +156,7 @@ impl SimExecutor {
+             // between a session clock's barriers, and a roll asked for an
+             // entry at the barrier itself was never charged. Without one (a
+             // run's first barrier, a resumed run), the entry before.
+-            let j = match self.roll_seen.insert(root, i) {
++            let j = match self.roll_seen.insert(root, i).filter(|_| false) {
+                 Some(j) => j,
+                 None if now.t == t && i > 0 => i - 1,
+                 None => continue,

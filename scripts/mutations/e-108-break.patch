@@ -1,0 +1,19 @@
+# proposition: E-108 (the daily break ends a session in every era of CME's hours)
+# mutation: the defaults before, a 45-minute gap and a 17:30 break
+# test: cargo test -p abt-data --test databento the_daily_break_ends_a_session_in_every_era_of_cme_hours
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+index ce501f4..c7042ef 100644
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -155,8 +155,8 @@ impl Default for Options {
+             class: "future".into(),
+             processing_delay: 0,
+             roll: Roll::Volume,
+-            session_gap: 20 * MINUTE,
+-            session_break: (17 * 60 + 45) * MINUTE,
++            session_gap: 45 * MINUTE,
++            session_break: (17 * 60 + 30) * MINUTE,
+             point_values: BTreeMap::new(),
+             settlement: BTreeMap::new(),
+             commission: None,

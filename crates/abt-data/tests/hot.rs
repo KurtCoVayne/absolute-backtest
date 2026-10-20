@@ -368,3 +368,41 @@ fn the_ladder_bars_equal_their_buckets_recomputed_from_base_rows() {
     // first instrument is row 78 × 3.
     assert_eq!((counts.value(0), counts.value(78 * 3)), (4, 1));
 }
+
+/// E-111: an ingest whose rows need a finer exponent for one instrument
+/// than its stored ones (six decimals after three), and that is no pure
+/// append (another instrument's row revised), stages a new version: the
+/// instrument rebuilt at the finer exponent, an untouched one kept in the
+/// previous segments, which hold the rebuilt instrument's earlier run too.
+/// The open checked that run against the presence before the new run
+/// superseded it and refused the version (`equity.open`, Norgate 2015 onto
+/// 1990–2014). The version opens and reads as its Parquet twin.
+#[test]
+fn a_finer_exponent_in_a_new_version_opens() {
+    let day = |d: i64| (19_000 + d) * NANOS_PER_DAY;
+    let rows: Vec<(u64, i64, i64, f64)> = (0..20)
+        .flat_map(|d| {
+            [
+                (1u64, day(d), day(d), 10.125 + d as f64),
+                (2u64, day(d), day(d), 20.5 + d as f64),
+                (3u64, day(d), day(d), 30.25 + d as f64),
+            ]
+        })
+        .collect();
+    // Instrument 1's next days at six decimals; instrument 2's day 3 revised
+    // (received on day 22), so the ingest is no append; instrument 3 kept.
+    let mut more: Vec<(u64, i64, i64, f64)> = (20..25).map(|d| (1u64, day(d), day(d), 30.123456 + d as f64)).collect();
+    more.push((2u64, day(3), day(22), 99.5));
+    more.sort_by_key(|r| (r.1, r.0));
+    let mut a = Store::temporary("hot-exponent-a").unwrap();
+    let mut b = Store::temporary("hot-exponent-b").unwrap();
+    let v1 = a.ingest("equity.close", &[close_rows(&rows)], "test", hot()).unwrap();
+    b.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+    let va = a.ingest("equity.close", &[close_rows(&more)], "test", hot()).unwrap();
+    let vb = b.ingest("equity.close", &[close_rows(&more)], "test", BTreeMap::new()).unwrap();
+    assert_ne!(v1, va, "a new version");
+    let h = a.hot(&va).unwrap();
+    let o = h.presence().ordinal(1).unwrap() as usize;
+    assert!(h.presence().instruments[o].exponents[0] > 3, "instrument 1 at a finer exponent than its stored three");
+    same_reads(&a, &va, &b, &vb, &mut Rng(2), &[1, 2, 3], 19_000, 25);
+}

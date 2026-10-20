@@ -135,7 +135,7 @@ fn a_reused_ticker_resolves_by_the_bundle_date() {
 }
 
 #[test]
-fn a_ticker_nobody_carries_at_the_bundle_date_is_a_configuration_error() {
+fn a_ticker_no_security_ever_carries_is_a_configuration_error() {
     let ds = market();
     let p = hold_named("ZZZ");
     let err = run(&p, &ds, ExecConfig::frictionless()).err().unwrap();
@@ -143,19 +143,21 @@ fn a_ticker_nobody_carries_at_the_bundle_date_is_a_configuration_error() {
         RunError::Config(m) => assert!(m.contains("ZZZ") && m.contains("2024-01-15"), "{}", m),
         e => panic!("expected a configuration error, got {}", e),
     }
-    // BBX exists only from day 4: as of day 2 it is unknown.
+    // BBX is carried from day 4, by E2: as of day 2 it names the security
+    // that first carries it after (E-117: a root that lists after the
+    // bundle date enters the universe when it lists).
     let p = hold_named("BBX");
-    let err = run(
+    let r = run(
         &p,
         &ds,
         ExecConfig {
+            initial_cash: 10_000.0,
             as_of: Some(day(&ds, 1)),
             ..ExecConfig::frictionless()
         },
     )
-    .err()
     .unwrap();
-    assert!(err.to_string().contains("BBX"), "{}", err);
+    assert_eq!(r.symbols[r.fills[0].equity as usize], "E2", "BBX's first carrier");
     // A dataset without a security table is the old world: the ticker is the id.
     let mut legacy = Dataset::new();
     let (aaa, bbb) = (legacy.intern("AAA"), legacy.intern("BBB"));

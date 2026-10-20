@@ -180,3 +180,22 @@ fn a_demand_is_planned_and_bound_against_the_store_and_the_catalog() {
     assert!(!out.contains("to buy"), "{}", out);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_pipeline_class_file_renders_from_the_registry() {
+    let dir = scratch("pipeline");
+    let store = dir.to_string_lossy().to_string();
+    // A fresh store holds the class (E-94); its file is the registry's
+    // rendering, like the market classes'.
+    let o = abt(&["data", "catalog", "--store", &store, "--class", "pipeline"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o).1);
+    let want = std::fs::read_to_string(abt_tests::repo_root().join("corpus-v2/catalog/pipeline.dsl")).unwrap();
+    assert_eq!(text(&o).0, want);
+    assert!(want.contains("pipeline.") || want.contains("class pipeline {"), "{}", want);
+    let o = abt(&["data", "catalog", "--store", &store]);
+    let out = text(&o).0;
+    for rel in ["document", "hypothesis", "submission", "outcome", "audit"] {
+        assert!(out.contains(&format!("pipeline.{} (pipeline)", rel)), "{}", out);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

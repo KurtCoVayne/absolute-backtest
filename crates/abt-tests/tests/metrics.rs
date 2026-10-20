@@ -268,3 +268,152 @@ fn a_fixed_base_book_reports_compounded_and_additive_conventions() {
     // By day, each week is its own day.
     assert_eq!(period_returns(&r, true).len(), 4);
 }
+
+/// The rows the red flags read (Q-3.1, ERRATA E-95), each against a hand
+/// computation over six bars on a fixed base of 100 across the turn of
+/// 1990 and four round trips (a win, a loss, a win, a flat one) among
+/// three securities, with one position left open.
+#[test]
+fn the_red_flag_rows_are_computed_as_stated_from_hand_built_fills() {
+    use abt_query::metrics::{objective_value, skewness, trade_metrics, ReturnMetrics, TradingMetrics, METRIC_NAMES};
+    use abt_query::run::{BookRow, Fill, Run};
+    let t: Vec<i64> = ["1989-12-27", "1989-12-28", "1989-12-29", "1990-01-02", "1990-01-03", "1990-01-04"]
+        .iter()
+        .map(|d| parse_timestamp(d).unwrap())
+        .collect();
+    let nav = [100.0, 104.0, 101.0, 103.0, 108.0, 106.0];
+    let fill = |seq: u64, t: i64, instrument: u64, q: f64, p: f64, commission: f64, multiplier: f64| Fill {
+        seq,
+        t,
+        instrument: Some(instrument),
+        quantity: q,
+        price: p,
+        commission,
+        fee: 0.0,
+        slippage: 0.0,
+        impact: 0.0,
+        participation: 0.0,
+        multiplier,
+    };
+    let r = Run {
+        id: "by hand".into(),
+        book: t
+            .iter()
+            .zip(nav)
+            .map(|(&t, nav)| BookRow {
+                t,
+                cash: nav,
+                nav,
+                gross: 0.0,
+                net: 0.0,
+                leverage: 0.0,
+                receivables: 0.0,
+                capital: 100.0,
+                margin_initial: 0.0,
+                margin_maintenance: 0.0,
+                variation: 0.0,
+            })
+            .collect(),
+        fills: vec![
+            // A: a future worth 2 a point, bought at 10 and sold at 12, half
+            // a unit of commission a side: 2 x 2 - 1 = +3, closed in 1989.
+            fill(1, t[0], 0, 1.0, 10.0, 0.5, 2.0),
+            fill(2, t[1], 0, -1.0, 12.0, 0.5, 2.0),
+            // B: two shares bought at 5 and sold at 4: -2 - 0.5 = -2.5.
+            fill(3, t[1], 1, 2.0, 5.0, 0.25, 1.0),
+            fill(4, t[3], 1, -2.0, 4.0, 0.25, 1.0),
+            // C: the future sold at 12 and covered at 11: 2 - 1 = +1.
+            fill(5, t[3], 0, -1.0, 12.0, 0.5, 2.0),
+            fill(6, t[4], 0, 1.0, 11.0, 0.5, 2.0),
+            // D: bought and sold at 7 with no commission: exactly 0.
+            fill(7, t[4], 2, 1.0, 7.0, 0.0, 1.0),
+            fill(8, t[5], 2, -1.0, 7.0, 0.0, 1.0),
+            // Still open at the end: no trade.
+            fill(9, t[5], 1, 1.0, 4.0, 0.25, 1.0),
+        ],
+        decisions: 9,
+        dropped: 0,
+        report: [("base_capital".to_string(), serde_json::json!(100.0))].into_iter().collect(),
+        ..Run::default()
+    };
+    let m = trade_metrics(&r, 252.0, &|_| true);
+    // The bars' P&L: +4, -3, +2, +5, -2 = 6 over five bars on 100.
+    assert_eq!(m.base, 100.0);
+    assert!(close(m.net_profit, 6.0, 1e-12));
+    assert!(close(m.annual_return, 6.0 / 5.0 / 100.0 * 252.0, 1e-12), "{}", m.annual_return);
+    // The cumulative P&L 4, 1, 3, 8, 6 falls 3 from its peak of 4.
+    assert!(close(m.max_drawdown_base, 0.03, 1e-12));
+    assert!(close(m.mar, 3.024 / 0.03, 1e-9), "{}", m.mar);
+    // 1989's two bars made 4 - 3 = 1 of the 6.
+    assert!(close(m.profit_before_1990_share, 1.0 / 6.0, 1e-12));
+    assert_eq!(m.by_year.iter().map(|y| (y.year, y.trades)).collect::<Vec<_>>(), vec![(1989, 1), (1990, 3)]);
+    assert!(close(m.by_year[0].net_profit, 1.0, 1e-12) && close(m.by_year[1].net_profit, 5.0, 1e-12));
+    // The trades: +3, -2.5, +1, 0.
+    assert_eq!(m.trades, 4);
+    assert!(close(m.profit_factor, 4.0 / 2.5, 1e-12));
+    assert_eq!(m.hit_rate, 0.5, "a flat trade is no win");
+    assert!(close(m.avg_win_loss, 2.0 / 2.5, 1e-12));
+    assert!(close(m.avg_trade, 1.5 / 4.0, 1e-12));
+    // Commissions 2.75 over 11 units filled, twice.
+    assert!(close(m.round_turn_cost, 0.5, 1e-12), "{}", m.round_turn_cost);
+    assert!(close(m.avg_trade_to_cost, 0.75, 1e-12));
+    assert_eq!(m.largest_loss, 2.5);
+    let pnls = [3.0, -2.5, 1.0, 0.0];
+    let m3 = -1.37109375;
+    let m2: f64 = 3.921875;
+    assert!(close(m.trade_skew, m3 / m2.powf(1.5), 1e-12), "{}", m.trade_skew);
+    assert!(close(m.trade_skew, skewness(&pnls), 1e-15));
+    // By entity: the future +4 over two trades, the share -2.5, the flat
+    // one 0; the net profit over every trade is 1.5.
+    let by: Vec<(Option<u64>, f64, usize, f64)> = m.by_entity.iter().map(|c| (c.entity, c.net_profit, c.trades, c.hit_rate)).collect();
+    assert_eq!(by, vec![(Some(0), 4.0, 2, 1.0), (Some(1), -2.5, 1, 0.0), (Some(2), 0.0, 1, 0.0)]);
+    assert!(close(m.by_entity[0].share, 4.0 / 1.5, 1e-12));
+    assert!(close(m.top_market_share, 4.0 / 1.5, 1e-12));
+    assert!(close(m.profitable_market_share, 1.0 / 3.0, 1e-12));
+    // Every row has its name, and `drawdown_duration` is the drawdown's.
+    let (rm, tm) = (
+        ReturnMetrics {
+            max_drawdown_duration: 7,
+            ..Default::default()
+        },
+        TradingMetrics::default(),
+    );
+    for name in [
+        "return",
+        "mar",
+        "drawdown_duration",
+        "trades",
+        "profit_factor",
+        "hit_rate",
+        "avg_win_loss",
+        "avg_trade",
+        "avg_trade_to_cost",
+        "largest_loss",
+        "trade_skew",
+        "top_market_share",
+        "profitable_market_share",
+        "profit_before_1990_share",
+    ] {
+        assert!(METRIC_NAMES.contains(&name), "{}", name);
+        assert!(objective_value(name, &rm, &tm, &m).is_some(), "{}", name);
+    }
+    assert_eq!(objective_value("return", &rm, &tm, &m), Some(m.annual_return));
+    assert_eq!(objective_value("drawdown_duration", &rm, &tm, &m), Some(7.0));
+    assert_eq!(objective_value("trades", &rm, &tm, &m), Some(4.0));
+    assert!(!abt_query::metrics::higher_is_better("largest_loss") && !abt_query::metrics::higher_is_better("top_market_share"));
+    assert!(abt_query::metrics::higher_is_better("mar") && abt_query::metrics::higher_is_better("profit_factor"));
+    // Kept bars only: 1990's three bars; the trades closing in 1990, B's
+    // among them although it opened in 1989 (E-114: a window's round trips
+    // are the run's that close in it; before, B's open was left out and B
+    // never closed).
+    let k = trade_metrics(&r, 252.0, &|t| t >= parse_timestamp("1990-01-01").unwrap());
+    assert!(close(k.net_profit, 5.0, 1e-12));
+    assert!(close(k.annual_return, 5.0 / 3.0 / 100.0 * 252.0, 1e-12));
+    assert_eq!(k.trades, 3);
+    assert_eq!(k.profit_before_1990_share, 0.0);
+    assert_eq!(k.by_year.iter().map(|y| (y.year, y.trades)).collect::<Vec<_>>(), vec![(1990, 3)]);
+    // No trade: the ratios are undefined, the counts zero.
+    let e = trade_metrics(&r, 252.0, &|_| false);
+    assert_eq!((e.trades, e.hit_rate, e.largest_loss), (0, 0.0, 0.0));
+    assert!(e.profit_factor.is_nan() && e.avg_trade.is_nan() && e.top_market_share.is_nan() && e.mar.is_nan());
+}

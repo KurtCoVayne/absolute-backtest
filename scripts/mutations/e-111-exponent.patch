@@ -1,0 +1,18 @@
+# proposition: E-111 (an append at a finer exponent rebuilds the instrument and opens)
+# mutation: every run checked against the presence, a superseded one included, again
+# test: cargo test -p abt-data --test hot a_finer_exponent_in_a_new_version_opens
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/version.rs b/crates/abt-data/src/hot/version.rs
+index 0cc03e6..dd9ba98 100644
+--- a/crates/abt-data/src/hot/version.rs
++++ b/crates/abt-data/src/hot/version.rs
+@@ -260,6 +260,9 @@ impl HotVersion {
+                                 table.len()
+                             )));
+                         }
++                        if run.exponent != presence.instruments[inst].exponents[c] {
++                            return Err(DataError::Schema(format!("`{}`: instrument {}'s run is at exponent {}", manifest.relation, inst, run.exponent)));
++                        }
+                         let s = seg.segment();
+                         for b in 0..run.blocks as usize {
+                             let h = s.header(run, b);

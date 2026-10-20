@@ -5,9 +5,10 @@
 //! p-values (`claims`), the test steps (`tests`), the kernel's contract
 //! statuses over the runs (`contract`), every warning with its bias
 //! (`warnings`), the forty biases with the layer that owns each and what
-//! its status rests on (`biases`), and the grid's `surface`, the
-//! walk-forward's `folds`, the `subperiods`, and the feed and activation
-//! steps' tables.
+//! its status rests on (`biases`), the profit of every run by entity
+//! (`contribution`, E-95), and the grid's `surface`, the walk-forward's
+//! `folds`, the `subperiods` (the best run's Sharpe ratio, net profit and
+//! trades per calendar year), and the feed and activation steps' tables.
 
 use std::collections::BTreeMap;
 
@@ -204,11 +205,39 @@ pub fn build(data: &Data, ex: &Execution, spec: &ReportSpec) -> Result<Report, E
             Cell::text(o.status.clone()),
         ];
         for m in &metrics {
-            row.push(crate::metrics::objective_value(m, &o.returns, &o.trading).map(Cell::num).unwrap_or(Cell::Null));
+            row.push(crate::metrics::objective_value(m, &o.returns, &o.trading, &o.trades).map(Cell::num).unwrap_or(Cell::Null));
         }
         summary.push(row);
     }
     tables.push(summary);
+    // contribution: per run and entity, where the profit came from (E-95),
+    // entities named by their ticker where the store has one.
+    let tickers: BTreeMap<u64, String> = match relation::read(data, "ticker")? {
+        Some(b) => {
+            let (ids, symbols) = (relation::ints(&b, "id")?, relation::texts(&b, "symbol")?);
+            ids.into_iter().zip(symbols).filter_map(|(i, s)| Some((i? as u64, s?))).collect()
+        }
+        None => BTreeMap::new(),
+    };
+    let mut contribution = Sheet::new("contribution", &["step", "run", "entity", "net_profit", "share", "trades", "hit_rate"]);
+    for o in &ex.outcomes {
+        for c in &o.trades.by_entity {
+            let entity = match c.entity {
+                Some(id) => tickers.get(&id).cloned().unwrap_or_else(|| id.to_string()),
+                None => "-".to_string(),
+            };
+            contribution.push(vec![
+                Cell::text(o.step.clone()),
+                Cell::text(o.run_id.clone()),
+                Cell::text(entity),
+                Cell::num(c.net_profit),
+                Cell::num(c.share),
+                Cell::Int(c.trades as i64),
+                Cell::num(c.hit_rate),
+            ]);
+        }
+    }
+    tables.push(contribution);
     // trials
     let mut trials = Sheet::new("trials", &["what", "value"]);
     trials.push(vec![Cell::text("lineage"), Cell::text(ex.lineage.clone())]);
@@ -264,7 +293,9 @@ pub fn build(data: &Data, ex: &Execution, spec: &ReportSpec) -> Result<Report, E
     tables.push(biases);
     // surface, folds, sub-periods
     let mut surface = Sheet::new("surface", &["grid", "best", "best_value", "neighbours", "stability", "tolerance", "pbo"]);
-    let mut subperiods = Sheet::new("subperiods", &["grid", "year", "sharpe"]);
+    // The sub-periods keep their columns and gain the best run's net profit
+    // and trades per calendar year (E-95).
+    let mut subperiods = Sheet::new("subperiods", &["grid", "year", "sharpe", "net_profit", "trades"]);
     for g in &ex.grids {
         let best = &ex.outcomes[g.runs[g.best]];
         surface.push(vec![
@@ -277,7 +308,14 @@ pub fn build(data: &Data, ex: &Execution, spec: &ReportSpec) -> Result<Report, E
             g.pbo.as_ref().map(|p| Cell::num(p.pbo)).unwrap_or(Cell::Null),
         ]);
         for (y, s) in &g.subperiods {
-            subperiods.push(vec![Cell::text(g.step.clone()), Cell::Int(*y), Cell::num(*s)]);
+            let year = best.trades.by_year.iter().find(|r| r.year == *y);
+            subperiods.push(vec![
+                Cell::text(g.step.clone()),
+                Cell::Int(*y),
+                Cell::num(*s),
+                year.map(|r| Cell::num(r.net_profit)).unwrap_or(Cell::Null),
+                year.map(|r| Cell::Int(r.trades as i64)).unwrap_or(Cell::Null),
+            ]);
         }
     }
     tables.push(surface);

@@ -24,9 +24,15 @@
 //!   entity of the class's bars, keyed by Databento's continuous symbol
 //!   (`ES.v.0` rolled by volume, `ES.c.0` by expiry):
 //!   - the root's sessions are its bars' runs, a gap longer than
-//!     `session_gap` (45 minutes: CME Globex's daily break is an hour)
-//!     ending one; a session is labelled at its last bar's close and opens
-//!     at its first bar's start (`session(A, S, Open)`);
+//!     `session_gap` (20 minutes from close to close) ending one when it
+//!     holds the middle of the venue's daily break (`session_break`, 17:45
+//!     in New York, US daylight saving applied: CME Globex's break is
+//!     17:00 to 18:00 there, and was 17:30 to 18:00 for the equity indexes
+//!     until 2012-11 and 17:15 to 18:00 after, E-108), as every gap between
+//!     two trade dates does, so a thin night's gaps stay inside the trade
+//!     date (E-104); a session is
+//!     labelled at its last bar's close and opens at its first bar's start
+//!     (`session(A, S, Open)`);
 //!   - by volume, a session holds the contract that traded the most in the
 //!     session before, never one expiring before the contract held; by
 //!     expiry, the contract nearest its expiry that trades in the session;
@@ -99,8 +105,15 @@ pub struct Options {
     /// Added to every row's receipt time (B-10), in nanoseconds.
     pub processing_delay: i64,
     pub roll: Roll,
-    /// The longest gap within a session, in nanoseconds.
+    /// The longest gap within a session, from a bar's close to the next
+    /// one's, in nanoseconds: below the shortest daily break (CME's equity
+    /// indexes' 30 minutes until 2012-11, 31 from close to close, E-108).
     pub session_gap: i64,
+    /// The middle of the venue's daily break, in New York local time, in
+    /// nanoseconds after midnight: a gap ends a session only when it holds
+    /// that instant of some day (E-104); 17:45, inside every break CME
+    /// Globex has had since 2010 (E-108).
+    pub session_break: i64,
     /// A root's currency per point, where its contracts' size is not it.
     pub point_values: BTreeMap<String, f64>,
     /// A root's settlement (`cash`, `physical`).
@@ -114,6 +127,18 @@ pub struct Options {
     /// default) or dropped and counted (`dropped.no_definition`), for
     /// files whose definitions do not cover every instrument they hold.
     pub undefined: Undefined,
+    /// The bars written: the vendor's or one per session (E-105).
+    pub level: Level,
+}
+
+/// The bars a futures read writes (E-105): the vendor's (each minute), or one
+/// per root and session from the held contract's bars, which a daily
+/// program reads as it would read the minutes' `@session` view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Level {
+    #[default]
+    Bars,
+    Session,
 }
 
 /// What a bar without a definition does to an ingest.
@@ -130,13 +155,15 @@ impl Default for Options {
             class: "future".into(),
             processing_delay: 0,
             roll: Roll::Volume,
-            session_gap: 45 * MINUTE,
+            session_gap: 20 * MINUTE,
+            session_break: (17 * 60 + 45) * MINUTE,
             point_values: BTreeMap::new(),
             settlement: BTreeMap::new(),
             commission: None,
             from: None,
             to: None,
             undefined: Undefined::Refuse,
+            level: Level::Bars,
         }
     }
 }
@@ -221,6 +248,60 @@ pub struct Raw {
     mappings: Vec<(u32, i64, i64, String)>,
     dataset: Option<String>,
     files: usize,
+}
+
+/// Whether the gap from `a` to `b` (no bar in between) ends a session: it
+/// holds the break's middle (`at`, New York local time) of some day, as a
+/// weekend's or a holiday's gap does too (E-104).
+fn ends_session(a: i64, b: i64, at: i64) -> bool {
+    let first = a.div_euclid(DAY) - 1;
+    (first..=b.div_euclid(DAY) + 1).any(|day| {
+        let x = day * DAY + at + new_york_offset(day);
+        a < x && x < b
+    })
+}
+
+/// New York's offset from UTC on a civil day (days since the epoch), in
+/// nanoseconds to add to local time: four hours under US daylight saving
+/// (the second Sunday of March to the first Sunday of November, the rule
+/// since 2007), five otherwise. The day's afternoon is what matters here,
+/// after the 02:00 changes.
+fn new_york_offset(day: i64) -> i64 {
+    let (y, _, _) = civil(day);
+    let sunday_on_or_after = |y: i64, m: u32, d: u32| {
+        let x = days_from_civil(y, m, d);
+        // 1970-01-01 was a Thursday: (x + 4) mod 7 is 0 on a Sunday.
+        x + (7 - (x + 4).rem_euclid(7)) % 7
+    };
+    let start = sunday_on_or_after(y, 3, 8);
+    let end = sunday_on_or_after(y, 11, 1);
+    if start <= day && day < end {
+        4 * 60 * MINUTE
+    } else {
+        5 * 60 * MINUTE
+    }
+}
+
+/// Days since the epoch of a civil date, and back (Howard Hinnant's).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+}
+
+fn civil(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
 fn ts(x: u64) -> Option<i64> {
@@ -749,6 +830,13 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     for b in &bars {
         let d = match raw.defs.get(&b.id) {
             Some(d) => d,
+            // A spread's bar without a definition (the bucket's definition
+            // files hold the outrights only, E-104): a spread, never a leg of
+            // a continuous series, counted as one.
+            None if b.symbol.as_deref().or_else(|| raw.symbol_at(b.id, b.start)).is_some_and(|s| s.contains('-') || s.contains(':')) => {
+                *report.dropped.entry("not_an_outright_future".into()).or_default() += 1;
+                continue;
+            }
             None if opts.undefined == Undefined::Drop => {
                 *report.dropped.entry("no_definition".into()).or_default() += 1;
                 continue;
@@ -785,6 +873,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     let mut cont = Rows::default();
     let mut sessions_rows = Rows::default();
     let mut point_rows = Rows::default();
+    let mut tick_rows = Rows::default();
     let mut commission_rows = Rows::default();
     let mut settle_rows = Rows::default();
     let mut oi_rows = Rows::default();
@@ -793,11 +882,12 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     for (root, mut rbars) in by_root {
         rbars.sort_by_key(|b| (b.t, b.id));
         intervals.extend(rbars.iter().map(|b| b.t - b.start));
-        // Sessions: runs of the root's bars.
+        // Sessions: runs of the root's bars, a gap ending one when it covers
+        // the venue's daily break or is long (E-104).
         let mut sessions: Vec<Session> = Vec::new();
         for b in &rbars {
             match sessions.last_mut() {
-                Some(s) if b.t - s.close <= opts.session_gap => {
+                Some(s) if b.t - s.close <= opts.session_gap || !ends_session(s.close, b.start, opts.session_break) => {
                     s.close = s.close.max(b.t);
                     s.open = s.open.min(b.start);
                 }
@@ -824,29 +914,41 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 // expiry, as the volume of the session itself is not known
                 // until it ends.
                 Roll::Volume if s == 0 => cands.iter().copied().min_by_key(|&c| (expiry(c), c)),
+                // The volumes compared are the latest session's in which the
+                // contract held traded (E-104): a session in which it did not
+                // (a fragment, a thin holiday) cannot roll the series to a
+                // far month printing alone there, which the rule that a roll
+                // never returns to an earlier expiry would then keep.
                 Roll::Volume => {
+                    let open = sessions[s].open;
                     let prev = held.last().copied();
-                    let best = cands.iter().copied().max_by(|&a, &b| {
-                        volume(s - 1, a)
-                            .partial_cmp(&volume(s - 1, b))
+                    let k = prev.and_then(|p| (0..s).rev().find(|&k| per[k].contains_key(&p))).unwrap_or(s - 1);
+                    let live = |c: u32| expiry(c) >= open && prev.is_none_or(|p| expiry(c) >= expiry(p));
+                    let best = per[k].keys().copied().filter(|&c| live(c)).max_by(|&a, &b| {
+                        volume(k, a)
+                            .partial_cmp(&volume(k, b))
                             .unwrap_or(std::cmp::Ordering::Equal)
                             .then(expiry(b).cmp(&expiry(a)))
                             .then(b.cmp(&a))
                     });
                     match (best, prev) {
-                        // Nothing traded the session before: stay, when the
-                        // contract held still trades.
-                        (Some(b), Some(p)) if volume(s - 1, b) == 0.0 && cands.contains(&p) => Some(p),
-                        (Some(b), _) => Some(b),
-                        (None, _) => None,
+                        (Some(b), _) if volume(k, b) > 0.0 => Some(b),
+                        // Nothing traded then: stay while the contract held
+                        // has not expired.
+                        (_, Some(p)) if live(p) => Some(p),
+                        // The contract held expired: the nearest live
+                        // contract printing now.
+                        _ => cands.iter().copied().filter(|&c| expiry(c) >= open).min_by_key(|&c| (expiry(c), c)),
                     }
                 }
             };
-            match pick {
-                Some(c) => held.push(c),
-                // Only contracts expiring before the one held trade: the
-                // series ends.
-                None => break,
+            match (pick, held.last().copied()) {
+                (Some(c), _) => held.push(c),
+                // Only contracts expiring before the one held traded this
+                // session (a thin deferred month, E-101): the session keeps
+                // the contract held and has no bar of it; the series goes on.
+                (None, Some(p)) => held.push(p),
+                (None, None) => break,
             }
         }
         let sessions = &sessions[..held.len()];
@@ -875,8 +977,11 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
             if o == n {
                 continue;
             }
-            let o_last = per[s - 1][&o].last().map(|b| b.close).unwrap_or(f64::NAN);
-            let n_at = match per[s - 1].get(&n).and_then(|v| v.last()) {
+            // The gap at the last session the outgoing contract traded in
+            // (it may hold sessions without a bar of its own, E-101).
+            let k = (0..s).rev().find(|&k| per[k].get(&o).is_some_and(|v| !v.is_empty())).unwrap_or(s - 1);
+            let o_last = per[k].get(&o).and_then(|v| v.last()).map(|b| b.close).unwrap_or(f64::NAN);
+            let n_at = match per[k].get(&n).and_then(|v| v.last()) {
                 Some(nb) => nb.close,
                 None => per[s][&n][0].open,
             };
@@ -955,7 +1060,29 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
         for (s, sess) in sessions.iter().enumerate() {
             let c = held[s];
             let adj = adjustment[s];
-            for b in &per[s][&c] {
+            let held_bars: &[&Bar] = per[s].get(&c).map(|v| v.as_slice()).unwrap_or(&[]);
+            if opts.level == Level::Session {
+                // One bar for the session (E-105): the held contract's first
+                // open, highest high, lowest low, last close and summed
+                // volume, labelled at the session's close and received with
+                // its last bar, as the minutes' `@session` view is.
+                if let (Some(first), Some(last)) = (held_bars.first(), held_bars.last()) {
+                    let r = held_bars.iter().map(|b| received(b, opts.processing_delay)).max().unwrap_or(sess.close);
+                    let high = held_bars.iter().map(|b| adjusted(b.high, s)).fold(f64::NEG_INFINITY, f64::max);
+                    let low = held_bars.iter().map(|b| adjusted(b.low, s)).fold(f64::INFINITY, f64::min);
+                    let volume: f64 = held_bars.iter().map(|b| b.volume).sum();
+                    series.keys.push(root_key.clone());
+                    series.t.push(sess.close);
+                    series.r.push(r);
+                    series.nums.push(vec![adjusted(first.open, s), high, low, adjusted(last.close, s), volume]);
+                    cont.keys.push(root_key.clone());
+                    cont.t.push(sess.close);
+                    cont.r.push(r);
+                    cont.others.push(c.to_string());
+                    cont.nums.push(vec![adj]);
+                }
+            }
+            for b in held_bars.iter().filter(|_| opts.level == Level::Bars) {
                 let r = received(b, opts.processing_delay);
                 series.keys.push(root_key.clone());
                 series.t.push(b.t);
@@ -967,7 +1094,7 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 cont.others.push(c.to_string());
                 cont.nums.push(vec![adj]);
             }
-            let last = per[s][&c].last().map(|b| received(b, opts.processing_delay)).unwrap_or(sess.close);
+            let last = per[s].get(&c).and_then(|v| v.last()).map(|b| received(b, opts.processing_delay)).unwrap_or(sess.close);
             sessions_rows.keys.push(root_key.clone());
             sessions_rows.t.push(sess.close);
             sessions_rows.times.push(sess.open);
@@ -989,6 +1116,14 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
                 point_rows.t.push(day);
                 point_rows.r.push(day);
                 point_rows.nums.push(vec![pv]);
+            }
+            // The held contract's minimum price increment (E-102), stated
+            // like the point value at the session's day.
+            if let Some(tk) = raw.defs[&c].tick.filter(|x| x.is_finite() && *x > 0.0) {
+                tick_rows.keys.push(root_key.clone());
+                tick_rows.t.push(day);
+                tick_rows.r.push(day);
+                tick_rows.nums.push(vec![tk]);
             }
             if let Some(cm) = opts.commission {
                 commission_rows.keys.push(root_key.clone());
@@ -1034,6 +1169,10 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     relations.push((
         "future.point_value".to_string(),
         keyed("T", point_rows.keys.clone(), point_rows.t.clone(), vec![("V", col(&point_rows, 0))], point_rows.r.clone())?,
+    ));
+    relations.push((
+        "future.tick".to_string(),
+        keyed("T", tick_rows.keys.clone(), tick_rows.t.clone(), vec![("Size", col(&tick_rows, 0))], tick_rows.r.clone())?,
     ));
     if !settle_rows.keys.is_empty() {
         relations.push((
@@ -1111,6 +1250,12 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     let mut attributes = BTreeMap::new();
     if let Some(i) = intervals.iter().next() {
         attributes.insert("calendar".to_string(), calendar_of(*i));
+    }
+    if opts.level == Level::Session {
+        // A day's bar is the trade date's session (A-D46), so a need of
+        // `bars @1d` binds it (E-105).
+        attributes.insert("calendar".to_string(), "1d".to_string());
+        attributes.insert("bars".to_string(), "session".to_string());
     }
     if let Some(d) = &raw.dataset {
         attributes.insert("dataset".to_string(), d.clone());
@@ -1213,6 +1358,20 @@ impl Databento {
                     }
                 }
                 "session_gap" => opts.session_gap = v.parse::<i64>().map_err(|_| bad(k, v, "a number of minutes"))? * MINUTE,
+                "level" => {
+                    opts.level = match v.as_str() {
+                        "bars" | "minute" => Level::Bars,
+                        "session" => Level::Session,
+                        _ => return Err(bad(k, v, "bars or session")),
+                    }
+                }
+                "session_break" => {
+                    let hm = |x: &str| -> Option<i64> {
+                        let (h, m) = x.trim().split_once(':')?;
+                        Some((h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?) * MINUTE)
+                    };
+                    opts.session_break = hm(v).ok_or_else(|| bad(k, v, "HH:MM in New York"))?;
+                }
                 "point_values" => {
                     for (r, x) in pairs(k, v)? {
                         opts.point_values.insert(r, x.parse().map_err(|_| bad(k, &x, "a number"))?);
@@ -1262,7 +1421,7 @@ impl Databento {
 }
 
 /// The future relations the adapter provides.
-pub const FUTURE_RELATIONS: [&str; 7] = ["open", "high", "low", "close", "volume", "session", "point_value"];
+pub const FUTURE_RELATIONS: [&str; 8] = ["open", "high", "low", "close", "volume", "session", "point_value", "tick"];
 /// The equity relations.
 pub const EQUITY_RELATIONS: [&str; 5] = ["open", "high", "low", "close", "volume"];
 

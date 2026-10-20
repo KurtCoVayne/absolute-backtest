@@ -1,0 +1,17 @@
+# proposition: E-120 (a list-gated universe binds its lists' members)
+# mutation: no universe recognised as gated by its lists again
+# test: cargo test -p abt-tests --test list_scope
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+index e7bd804..1d52a3c 100644
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1112,7 +1112,7 @@ fn universe_lists(prog: &Program) -> Option<Vec<String>> {
+             return None;
+         }
+     }
+-    (!lists.is_empty()).then(|| lists.into_iter().collect())
++    (!lists.is_empty() && false).then(|| lists.into_iter().collect())
+ }
+ 
+ /// The instruments a membership relation ever lists under `lists`.

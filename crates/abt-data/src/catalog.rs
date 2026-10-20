@@ -165,6 +165,12 @@ pub fn classes() -> Vec<ClassDef> {
                         vec![
                             rel("member", vec![arg("A", "Equity"), at("T"), arg("List", "Label")], true, None),
                             rel("classification", vec![arg("A", "Equity"), at("T"), arg("Scheme", "Label"), arg("Code", "Label")], true, None),
+                            rel(
+                                "industry",
+                                vec![arg("A", "Equity"), at("T"), arg("Group", "Label"), arg("Industry", "Label"), arg("SubIndustry", "Label")],
+                                true,
+                                Some("the GICS industry group, industry and sub-industry codes of the classification's snapshot"),
+                            ),
                             margin("Equity", "per share, where the source publishes it (K-5.6)"),
                         ],
                     ]
@@ -175,7 +181,31 @@ pub fn classes() -> Vec<ClassDef> {
             vocabularies: vec![
                 Vocabulary {
                     name: "lists",
-                    values: vec![("SPX", None), ("SP500", None), ("SP400", None), ("SP600", None), ("ETF", None)],
+                    // The index lists the Norgate adapter stages (E-103): `SPX`
+                    // is the S&P 500 as the lake's membership names it, `SP500`
+                    // and `ETF` the parity bundle's.
+                    values: vec![
+                        ("SPX", None),
+                        ("SP500", None),
+                        ("SP400", None),
+                        ("SP600", None),
+                        ("ETF", None),
+                        ("SP1500", None),
+                        ("SP100", None),
+                        ("R3000", None),
+                        ("R1000", None),
+                        ("R2000", None),
+                        ("RMID", None),
+                        ("RMICRO", None),
+                        ("RTOP200", None),
+                        ("RALL", None),
+                        ("NASDAQ", None),
+                        ("NDX", None),
+                        ("NBI", None),
+                        ("NYSE", None),
+                        ("DJIA", None),
+                        ("SPDA", None),
+                    ],
                 },
                 Vocabulary {
                     name: "reasons",
@@ -212,6 +242,12 @@ pub fn classes() -> Vec<ClassDef> {
                             Some("one per root and session, labelled at the session's close"),
                         ),
                         rel("point_value", vec![arg("A", "Future"), at("T"), arg("V", "Scalar")], true, Some("currency per point per contract")),
+                        rel(
+                            "tick",
+                            vec![arg("A", "Future"), at("T"), arg("Size", "Price<USD>")],
+                            true,
+                            Some("the minimum price increment of the contract the series holds, in price units"),
+                        ),
                         rel("commission", vec![arg("A", "Future"), at("T"), arg("C", "Notional<USD>")], true, Some("per contract per side")),
                         rel("member", vec![arg("A", "Future"), at("T"), arg("List", "Label")], true, None),
                         rel("usable", vec![arg("A", "Future"), at("T")], true, Some("a research-defined availability, from the bundle's review")),
@@ -327,8 +363,128 @@ pub fn classes() -> Vec<ClassDef> {
             vocabulary_comment: None,
             vocabularies: vec![Vocabulary {
                 name: "names",
-                values: vec![("SPXTR", Some("1d")), ("VIX", Some("1w")), ("VIX_MA4", Some("1w"))],
+                // `VIX` is the parity bundle's weekly close (MW14 reads it over
+                // weekly rows); the lake's daily `$VIX` is `VIX_D` (E-103).
+                values: vec![
+                    ("SPXTR", Some("1d")),
+                    ("VIX", Some("1w")),
+                    ("VIX_MA4", Some("1w")),
+                    ("SPX", Some("1d")),
+                    ("NDX", Some("1d")),
+                    ("NDXTR", Some("1d")),
+                    ("RUT", Some("1d")),
+                    ("RUTTR", Some("1d")),
+                    ("VIX_D", Some("1d")),
+                    ("DJI", Some("1d")),
+                    ("DJITR", Some("1d")),
+                    ("RUA", Some("1d")),
+                    ("RUATR", Some("1d")),
+                    ("COMP", Some("1d")),
+                    ("XCMP", Some("1d")),
+                    ("SML", Some("1d")),
+                    ("MID", Some("1d")),
+                    ("OEX", Some("1d")),
+                    // Cboe's volatility indexes, daily (E-113).
+                    ("VXN", Some("1d")),
+                    ("VVIX", Some("1d")),
+                    ("VIX9D", Some("1d")),
+                    ("VIX3M", Some("1d")),
+                    ("VIX6M", Some("1d")),
+                    ("VIX1Y", Some("1d")),
+                    ("VIX1D", Some("1d")),
+                    ("RVX", Some("1d")),
+                    ("OVX", Some("1d")),
+                    ("GVZ", Some("1d")),
+                    ("VXEEM", Some("1d")),
+                    ("VXEFA", Some("1d")),
+                    ("VXEWZ", Some("1d")),
+                    ("VXTLT", Some("1d")),
+                ],
             }],
+        },
+        // The pipeline's provenance (absolute-pipeline PL-7.2; ERRATA E-94):
+        // written by its gateway alone through `put` (P-3.1), like the
+        // other layers' namespaces, and read with scan, series and catalog;
+        // no program reads it. Ids are labels, since a row's identity is its
+        // label columns with its time (D-2.2).
+        ClassDef {
+            name: "pipeline",
+            header: vec![
+                "The pipeline class (PL-7.2): the provenance of what the agents submit, from",
+                "the document a hypothesis came from to the forward reveals of its",
+                "submission, and the gateway's audit. Written by the gateway alone through",
+                "`put`, like the kernel's and the query layer's namespaces; no program reads",
+                "it. Ids are labels: a row's identity is its labels with its time (D-2.2).",
+            ],
+            base: None,
+            unit: None,
+            entity_sort: "Label",
+            groups: vec![
+                Group {
+                    comment: Some("A document, the hypotheses it led to, and the submissions that test them."),
+                    relations: vec![
+                        rel(
+                            "document",
+                            vec![arg("DocId", "Label"), arg("Source", "Label"), arg("Author", "Label"), at("P"), arg("Size", "Count")],
+                            true,
+                            Some("published at P, Size bytes; the text stays in the ingest store"),
+                        ),
+                        rel(
+                            "hypothesis",
+                            vec![arg("Id", "Label"), arg("DocIds", "Label"), at("H"), arg("Agent", "Label")],
+                            true,
+                            Some("DocIds is the JSON list of its documents; H its horizon"),
+                        ),
+                        rel(
+                            "submission",
+                            vec![
+                                arg("Id", "Label"),
+                                arg("HypothesisId", "Label"),
+                                arg("ProgramHash", "Label"),
+                                arg("PlanHash", "Label"),
+                                arg("Lineage", "Label"),
+                                at("H"),
+                            ],
+                            true,
+                            Some("written once, at submit (PL-6.6): H(P), H(Π), the lineage and H"),
+                        ),
+                    ],
+                },
+                Group {
+                    comment: Some("The forward reveals of a submission, and the gateway's audit (PL-7.1)."),
+                    relations: vec![
+                        rel(
+                            "outcome",
+                            vec![
+                                arg("SubmissionId", "Label"),
+                                at("T"),
+                                arg("Reveal", "Count"),
+                                arg("ForwardFrom", "Timestamp"),
+                                arg("ForwardTo", "Timestamp"),
+                                arg("Status", "Label"),
+                            ],
+                            true,
+                            Some("the Reveal-th reveal, at T, over (ForwardFrom, ForwardTo]; Status insample_only, forward or retired"),
+                        ),
+                        rel(
+                            "audit",
+                            vec![
+                                arg("Job", "Label"),
+                                at("T"),
+                                arg("Kind", "Label"),
+                                arg("Subject", "Label"),
+                                arg("Bytes", "Count"),
+                                arg("DurationNs", "Count"),
+                                arg("Outcome", "Label"),
+                            ],
+                            true,
+                            Some("one per request at T: its kind, the relation or plan, the bytes, the time it took"),
+                        ),
+                    ],
+                },
+            ],
+            vocabulary_comment: None,
+            vocabularies: vec![],
         },
     ]
 }

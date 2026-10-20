@@ -1,0 +1,17 @@
+# proposition: Q-3.1 (the red-flag rows of E-95: a trade of exactly zero is neither a win nor a loss)
+# mutation: a flat trade counts as a win, so the hit rate and the average win rise
+# test: cargo test -p abt-tests --test metrics the_red_flag_rows_are_computed_as_stated_from_hand_built_fills
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-query/src/metrics/trades.rs b/crates/abt-query/src/metrics/trades.rs
+index b40c0df..c9dd5bb 100644
+--- a/crates/abt-query/src/metrics/trades.rs
++++ b/crates/abt-query/src/metrics/trades.rs
+@@ -174,7 +174,7 @@ pub fn trade_metrics(r: &Run, periods_per_year: f64, keep: &dyn Fn(i64) -> bool)
+     // The trades.
+     let trades = round_trips(r, keep);
+     let pnls: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
+-    let wins: Vec<f64> = pnls.iter().copied().filter(|p| *p > 0.0).collect();
++    let wins: Vec<f64> = pnls.iter().copied().filter(|p| *p >= 0.0).collect();
+     let losses: Vec<f64> = pnls.iter().copied().filter(|p| *p < 0.0).collect();
+     m.trades = trades.len();
+     let (gain, loss) = (wins.iter().sum::<f64>(), -losses.iter().sum::<f64>());

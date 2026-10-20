@@ -1,0 +1,17 @@
+# proposition: E-121 (a rebuild keeps the instruments appended since publication)
+# mutation: the overlay-only instruments left out of the plan again
+# test: cargo test -p abt-data --test appends a_rebuild_keeps_the_instruments_appended_since_publication
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/staging/classify.rs b/crates/abt-data/src/staging/classify.rs
+index 56c5e2b..8f774ae 100644
+--- a/crates/abt-data/src/staging/classify.rs
++++ b/crates/abt-data/src/staging/classify.rs
+@@ -121,7 +121,7 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
+         // append (E-121). Rebuilt from their rows as read.
+         let overlay_only: Vec<u64> = {
+             let ov = p.overlay.lock().unwrap_or_else(|e| e.into_inner());
+-            let mut ids: Vec<u64> = ov.by_id.keys().copied().filter(|id| p.presence().ordinal(*id).is_none() && !input.by_id.contains_key(id)).collect();
++            let mut ids: Vec<u64> = ov.by_id.keys().copied().filter(|id| p.presence().ordinal(*id).is_none() && !input.by_id.contains_key(id) && false).collect();
+             ids.sort_unstable();
+             ids
+         };

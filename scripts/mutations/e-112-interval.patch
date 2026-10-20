@@ -1,0 +1,20 @@
+# proposition: E-112 (interval OP V holds for every point of the interval)
+# mutation: interval > V holds when the interval excludes V on either side again
+# test: cargo test -p abt-query --test claims every_expectation_has_its_verdict
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-query/src/plan/claims.rs b/crates/abt-query/src/plan/claims.rs
+index 6d1f519..1c36d51 100644
+--- a/crates/abt-query/src/plan/claims.rs
++++ b/crates/abt-query/src/plan/claims.rs
+@@ -257,10 +257,7 @@ pub fn verdict(c: &Claim, r: &TestResult, p_adjusted: Option<f64>) -> Verdict {
+         // upper end for < and <= (E-112).
+         Expect::Interval(op, v) => match r.interval {
+             None => Verdict::Undecidable("the test reports no interval".into()),
+-            Some((lo, hi, _)) => of(match op {
+-                Op::Gt | Op::Ge => op.holds(lo, *v),
+-                Op::Lt | Op::Le => op.holds(hi, *v),
+-            }),
++            Some((lo, hi, _)) => of(*v < lo || *v > hi || matches!(op, Op::Gt) && false),
+         },
+     }
+ }
