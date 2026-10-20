@@ -2722,6 +2722,19 @@ batch driver agree on every corpus program. Each bless since:
   minute store's entry per bar. `abt-tests/tests/futures.rs`: the
   entries six hours after each bar, the roll charged at the next
   barrier.
+- **E-117 (K-2.1, W6; a ticker that lists after the bundle date).** A
+  ticker literal resolved to the security carrying it at the bundle date,
+  and none was refused: a plan whose instruments table names a root that
+  lists after its in-sample end (`ETH_N`, from 2021, in a study whose
+  in-sample run ends in 2017) refused to bind. A ticker no security
+  carries at the bundle date now resolves to the first security carrying
+  it after: the root enters the universe when it lists. A ticker carried
+  at the date resolves to its carrier then, as before.
+  `abt-kernel/src/kernel/mod.rs` (ticker_tests).
+- **E-118 (Q-2.2; a compare step's metrics bracketed).** `compare NAME:
+  RUNS by [m1, m2]`, as the house template writes it, took `[m1, m2]` for
+  one metric's name and was refused; the list may be bracketed.
+  `abt-query/tests/plan.rs`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

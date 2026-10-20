@@ -122,11 +122,16 @@ pub struct Security {
     pub to: Option<i64>,
 }
 
-/// The security carrying `ticker` at `as_of`, in a table.
+/// The security carrying `ticker` at `as_of`, in a table; when none does
+/// yet, the first to carry it after (E-117): a root of an instruments table
+/// that lists after a plan's in-sample end (ETH_N, from 2021, in a study
+/// whose in-sample ends in 2017) enters the universe when it lists, and the
+/// plan binds.
 pub fn resolve_ticker(securities: &[Security], ticker: &str, as_of: i64) -> Result<Sym, String> {
-    securities
-        .iter()
-        .find(|s| s.ticker == ticker && s.from <= as_of && s.to.map(|to| as_of < to).unwrap_or(true))
+    let carrying = || securities.iter().filter(|s| s.ticker == ticker);
+    carrying()
+        .find(|s| s.from <= as_of && s.to.map(|to| as_of < to).unwrap_or(true))
+        .or_else(|| carrying().filter(|s| s.from > as_of).min_by_key(|s| s.from))
         .map(|s| s.id)
         .ok_or_else(|| {
             format!(
@@ -4428,5 +4433,27 @@ mod store_tests {
         assert_eq!(s.lookup(KEY, None).len(), 2);
         s.insert_received(KEY, tu(1, 21.0), &IDENTITY, 200);
         assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0)]);
+    }
+}
+
+#[cfg(test)]
+mod ticker_tests {
+    use super::*;
+
+    /// E-117: a ticker no security carries at the bundle date resolves to
+    /// the first security carrying it after; one carried at the date to its
+    /// carrier then.
+    #[test]
+    fn a_ticker_listed_after_the_bundle_date_is_its_first_carrier() {
+        let table = vec![
+            Security { id: 1, ticker: "OLD".into(), from: 0, to: Some(100) },
+            Security { id: 2, ticker: "OLD".into(), from: 200, to: None },
+            Security { id: 3, ticker: "NEW".into(), from: 500, to: None },
+        ];
+        assert_eq!(resolve_ticker(&table, "OLD", 50), Ok(1));
+        assert_eq!(resolve_ticker(&table, "OLD", 250), Ok(2));
+        assert_eq!(resolve_ticker(&table, "OLD", 150), Ok(2), "between two carriers, the next");
+        assert_eq!(resolve_ticker(&table, "NEW", 10), Ok(3), "listed after the bundle date");
+        assert!(resolve_ticker(&table, "NONE", 10).is_err());
     }
 }

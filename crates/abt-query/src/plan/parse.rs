@@ -538,6 +538,10 @@ fn step(line: &str) -> Result<Step, String> {
         "compare" => {
             let (name, body) = colon("compare")?;
             let (runs, by) = body.split_once(" by ").ok_or_else(|| format!("`{}`: compare NAME: RUNS by METRICS", line))?;
+            // The metrics as a list or in brackets, as the house template
+            // writes them (`by [return, sharpe]`, E-118).
+            let by = by.trim();
+            let by = by.strip_prefix('[').and_then(|b| b.strip_suffix(']')).unwrap_or(by);
             Step::Compare {
                 name,
                 runs: list(runs).iter().map(|r| Ref::parse(r)).collect(),

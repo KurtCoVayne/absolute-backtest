@@ -49,7 +49,7 @@ A plan with no `steps` block has the default steps: `before` claims, `grid` (or 
 | `reveal` | `reveal NAME of RUN|best(GRID)` | a committed point (one the plan has run) | a run over the whole sample reporting the embargoed bars only | yes, as a reveal |
 | `test` | `test NAME: TEST on INPUT [params] [over WINDOW]` | a feed relation, a ledger, an outcome | `query.<plan>.tests` | yes |
 | `claim` | the claims block, run `before` or `after` | as `test` | `query.<plan>.verdicts` | yes |
-| `compare` | `compare NAME: RUNS by METRICS` | outcomes | a table | no |
+| `compare` | `compare NAME: RUNS by METRICS` (the metrics a list, bracketed or not) | outcomes | a table | no |
 | `ledger` | `ledger NAME: R of RUN into TABLE` | the kernel's observation of `R` | a relation | no |
 | `feed` | `feed NAME: STATISTIC on RELATION [over WINDOW]` | the binding | a table (section 7) | no |
 | `activation` | `activation NAME of RUN` | the kernel's C and F tables and `decide` ledgers | the tables of section 8 | no |

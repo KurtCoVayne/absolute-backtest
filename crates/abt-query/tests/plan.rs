@@ -257,3 +257,20 @@ fn what_a_step_or_claim_reads_must_be_a_step_of_its_kind() {
     assert!(one("study s { program p.dsl\n window 2020-01-01 .. 2019-01-01 }", "s").is_err_and(|e| e.contains("ends before")));
     assert!(one("study s { program p.dsl\n claims { c : adf on returns of main expect maybe } }", "s").is_err_and(|e| e.contains("not an outcome")));
 }
+
+/// E-118: a compare step's metrics bracketed, as the house template writes
+/// them, are its metrics; `[return, ...]` was taken for one metric's name.
+#[test]
+fn a_compare_steps_metrics_may_be_bracketed() {
+    let study = |by: &str| {
+        format!(
+            "study s {{\n  program  p.dsl\n  steps {{\n    run base\n    run alt at {{ n = 2 }}\n    compare variants: base, alt by {}\n  }}\n}}\n",
+            by
+        )
+    };
+    for by in ["[return, max_drawdown, sharpe]", "return, max_drawdown, sharpe"] {
+        let p = one(&study(by), "s").unwrap();
+        let Some(Step::Compare { by, .. }) = p.steps.iter().find(|s| s.kind() == "compare") else { panic!("{:?}", p.steps) };
+        assert_eq!(by, &vec!["return".to_string(), "max_drawdown".to_string(), "sharpe".to_string()]);
+    }
+}
