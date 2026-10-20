@@ -2709,6 +2709,19 @@ batch driver agree on every corpus program. Each bless since:
   service's runs (every plan's trials) and its answers over a run pass
   the point; `show plan` and `verify` without one describe the defaults.
   `abt-tests/tests/param_point.rs`.
+- **E-116 (K-5.4; a roll between two barriers).** The executor rolled a
+  held root only where a `continuous` entry fell on the barrier itself and
+  changed contract from the entry before. A minute store's entries change
+  contract at a minute inside a session: on a session clock no barrier
+  saw a change, and a position held across some 34 quarterly rolls paid
+  the commissions of its entry and its exit alone (the house charges per
+  contract, per side and per roll). The executor now keeps each root's
+  entry at the last barrier and rolls when the barrier's entry names
+  another contract, with the two fills and two commissions K-5.4 states.
+  A root's entry at a barrier is found by a search, not a scan of a
+  minute store's entry per bar. `abt-tests/tests/futures.rs`: the
+  entries six hours after each bar, the roll charged at the next
+  barrier.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

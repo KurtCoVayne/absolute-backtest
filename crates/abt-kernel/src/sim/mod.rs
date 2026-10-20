@@ -116,6 +116,9 @@ pub struct SimExecutor {
     /// Orders working beyond the bar after their decision.
     #[serde(default)]
     working: BTreeMap<Sym, Working>,
+    /// Each futures root's `continuous` entry at the last barrier (E-116).
+    #[serde(default)]
+    roll_seen: BTreeMap<Sym, usize>,
     /// The next order's id.
     #[serde(default)]
     next_order: OrderId,
@@ -168,6 +171,7 @@ impl SimExecutor {
             pending_t: None,
             open_targets: BTreeMap::new(),
             working: BTreeMap::new(),
+            roll_seen: BTreeMap::new(),
             next_order: 0,
             limit_state: LimitState::default(),
             expected: Expected::default(),
