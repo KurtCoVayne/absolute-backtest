@@ -147,3 +147,30 @@ fn a_held_position_drifting_past_a_weight_limit_holds() {
     assert!(over, "no held name drifted past a tenth: the test checks nothing");
     assert!(!matches!(r.contract.get("inv.position_limits").map(|c| &c.status), Some(Status::Violated { .. })));
 }
+
+/// E-119: an entry sized to the bound at a bar's close, filled at the next
+/// bar's open (`moo`) and marked at its close, is no growth of the next
+/// bar's orders, which reduce. The invariant measured growth from the book
+/// before the bar's fills, so the fill of the bar before counted, and a
+/// rise from close to close halted the run ("138863 at 103388.49 after the
+/// accepted orders, above `weight <= 0.1 per name clamp`"), six posts.
+#[test]
+fn an_entry_filled_at_the_next_open_and_marked_past_the_bound_holds() {
+    let src = StrategyParts {
+        name: "moo_drift".into(),
+        params: "    w : Scalar = 0.1".into(),
+        orders: "moo".into(),
+        decides: "    decide(T, hold(A, w)) :- universe(A, T), flat(A, T).\n    decide(T, trade(A, -1 shares)) :- universe(A, T), held(A, T, Q), Q > 1000 shares.".into(),
+        execution: "equity_default with { orders moo   leverage unconstrained   limits { weight <= 0.1 per name clamp } }".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "moo_drift");
+    let ds = abt_kernel::data::synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "EEE"], (2022, 1, 3), 60, 5);
+    let r = run(&p, &ds, ExecConfig::from_program(&p)).unwrap_or_else(|e| panic!("{}", e));
+    let over = r.holdings.iter().any(|h| {
+        let x = r.exposure.iter().find(|x| x.t == h.t).unwrap();
+        h.position * h.mark.unwrap() / x.capital > 0.1 + 1e-6
+    });
+    assert!(over, "no held name past a tenth: the test checks nothing");
+}

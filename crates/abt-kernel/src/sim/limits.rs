@@ -321,7 +321,8 @@ impl SimExecutor {
                 }
             }
         }
-        self.expected = Expected { t, capital, positions };
+        let grown: Vec<Sym> = orders.iter().filter(|o| o.increasing()).map(|o| o.sym).collect();
+        self.expected = Expected { t, capital, positions, grown };
         Ok(())
     }
 

@@ -2748,12 +2748,20 @@ batch driver agree on every corpus program. Each bless since:
   price rise carried past it halted the run at the next bar with any
   order ("… 100977.45 after the accepted orders, above `weight <= 0.1 per
   name clamp`"). The limit being pre-trade, the invariant now judges the
-  positions the bar's orders grow. `abt-tests/tests/limits.rs`: five
-  names bought at a tenth, reduced by a share a bar while their prices
-  drift past it. [D] Open: an order growing a position already past the
-  bound by its price (a share added to 2,081 at 48.17 against 100,000)
-  was not scaled by the clamp in one case, and the invariant then fails
-  as it should; under study.
+  positions the bar's orders grow. Growth was then measured from the
+  book before the bar's fills: an entry sized to the bound at a bar's
+  close, filled at the next bar's open (`moo`) and marked at its close,
+  counted as the next bar's growth, and a rise from close to close halted
+  the run ("138863 at 103388.49 after the accepted orders, above `weight
+  <= 0.1 per name clamp`": six posts of one evening, and a share added to
+  a name already past the bound, which the clamp had in fact zeroed). The
+  executor now states, with the book a bar's orders would leave, the
+  instruments those orders grow from the book the limits sized them
+  against, and the invariant judges those: the clamp holds at entry and a
+  drift past the bound stands. `abt-tests/tests/limits.rs`: five names
+  bought at a tenth, reduced by a share a bar while their prices drift
+  past it; the same entered `moo` (under the growth from the book before
+  the fills, the second halts at its first bar).
 - **E-121 (ST-7, ST-8.1; a rebuild drops the instruments appended since
   publication).** An instrument a hot relation's published version does
   not hold is, when ingested, an append: its rows join the overlay (the

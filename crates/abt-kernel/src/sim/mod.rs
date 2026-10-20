@@ -94,6 +94,11 @@ pub struct Expected {
     pub capital: f64,
     /// Instrument, quantity, the unit's value (price times multiplier).
     pub positions: Vec<(Sym, f64, f64)>,
+    /// The instruments the accepted orders grow from the book the limits
+    /// sized them against (E-119): a pre-trade limit judges these alone. A
+    /// fill of the bar before, at the bar's open, is no growth of the bar's.
+    #[serde(default)]
+    pub grown: Vec<Sym>,
 }
 
 /// The simulated executor: the book, the open targets, the working orders
