@@ -402,14 +402,16 @@ fn the_red_flag_rows_are_computed_as_stated_from_hand_built_fills() {
     assert_eq!(objective_value("trades", &rm, &tm, &m), Some(4.0));
     assert!(!abt_query::metrics::higher_is_better("largest_loss") && !abt_query::metrics::higher_is_better("top_market_share"));
     assert!(abt_query::metrics::higher_is_better("mar") && abt_query::metrics::higher_is_better("profit_factor"));
-    // Kept bars only: 1990's three bars and the fills on them (B's open
-    // in 1989 is left out, so B never closes; C and D do).
+    // Kept bars only: 1990's three bars; the trades closing in 1990, B's
+    // among them although it opened in 1989 (E-114: a window's round trips
+    // are the run's that close in it; before, B's open was left out and B
+    // never closed).
     let k = trade_metrics(&r, 252.0, &|t| t >= parse_timestamp("1990-01-01").unwrap());
     assert!(close(k.net_profit, 5.0, 1e-12));
     assert!(close(k.annual_return, 5.0 / 3.0 / 100.0 * 252.0, 1e-12));
-    assert_eq!(k.trades, 2);
+    assert_eq!(k.trades, 3);
     assert_eq!(k.profit_before_1990_share, 0.0);
-    assert_eq!(k.by_year.iter().map(|y| (y.year, y.trades)).collect::<Vec<_>>(), vec![(1990, 2)]);
+    assert_eq!(k.by_year.iter().map(|y| (y.year, y.trades)).collect::<Vec<_>>(), vec![(1990, 3)]);
     // No trade: the ratios are undefined, the counts zero.
     let e = trade_metrics(&r, 252.0, &|_| false);
     assert_eq!((e.trades, e.hit_rate, e.largest_loss), (0, 0.0, 0.0));
