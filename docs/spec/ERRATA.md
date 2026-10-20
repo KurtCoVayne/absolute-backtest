@@ -2692,6 +2692,23 @@ batch driver agree on every corpus program. Each bless since:
   rows, their P&L still in the net profit. The round trips are the
   run's, each the window's when the fill that closes it is, with the
   whole round trip's P&L. `abt-query/tests/trades.rs`.
+- **E-115 (compiler design 3.8, 4.2, 4.6; a run at a parameter point).**
+  The compiler read a parameter as its default: the analysis took a
+  parameter without a range as the point of its default, so a guard on
+  it (`side > 0`, `member_gate = 0`) never held there and R2 dropped the
+  rule, and R6 folded an expression over it (`1 - weekly_tf`) at the
+  default. A run at another point (`--param`, a plan's point, a grid's
+  cell, `at { }`) then ran the default's rules: grids and variants over
+  such a parameter repeated the default, silently (`weekly_tf * Dw + (1 -
+  weekly_tf) * Dd` was 0 at every bar of a run at `weekly_tf = 1`; a
+  rule gated by `member_gate = 0, only_coin = 1` derived nothing, while
+  the explanation, evaluating at the point, said it fired). A compilation
+  for a run now reads the run's point (`CompileOptions::params`, the
+  program at that point for the analysis, the rewrites and the plan);
+  the normal form and its hash stay the program's. `abt run`, the kernel
+  service's runs (every plan's trials) and its answers over a run pass
+  the point; `show plan` and `verify` without one describe the defaults.
+  `abt-tests/tests/param_point.rs`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

@@ -544,7 +544,13 @@ fn hold_run(
     state: Arc<Mutex<RunState>>,
     every: u64,
 ) {
-    let compiled = crate::compiler::compile(&prog, &crate::compiler::CompileOptions::default());
+    let compiled = crate::compiler::compile(
+        &prog,
+        &crate::compiler::CompileOptions {
+            params: cfg.param_overrides.clone(),
+            ..Default::default()
+        },
+    );
     let mode = opts.mode.name();
     let mut barriers = 0u64;
     // A checkpoint is written through the data layer as it is taken; the
@@ -698,7 +704,13 @@ fn answer_held(
     let prepared = query::prepare(ws, &prog.strategy, prog, std::slice::from_ref(&q)).map_err(RunError::Request)?;
     let p = &prepared.program;
     let client = connect()?;
-    let compiled = crate::compiler::compile(p, &crate::compiler::CompileOptions::default());
+    let compiled = crate::compiler::compile(
+        p,
+        &crate::compiler::CompileOptions {
+            params: cfg.param_overrides.clone(),
+            ..Default::default()
+        },
+    );
     let mut exec = SimExecutor::new(cfg.clone());
     let (r, mut k2) = super::replay(p, Some(&compiled.lowered), &client, cfg.clone(), &mut exec, &Replay::default(), &mut |_| {})?;
     if r.binding_id != result.binding_id {

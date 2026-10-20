@@ -509,6 +509,26 @@ impl Program {
     pub fn param(&self, unit: &str, name: &str) -> Option<&Param> {
         self.params.get(unit).and_then(|m| m.get(name)).or_else(|| self.params.get(&self.strategy).and_then(|m| m.get(name)))
     }
+    /// The program at a parameter point (E-115): each named parameter's
+    /// value the point's (`name`, or `unit::name` for a library's), a
+    /// ticker or label string read by the parameter's type as the kernel
+    /// reads an override. What the compiler analyses, folds and plans for
+    /// a run, whose point is not the defaults.
+    pub fn at_point(&self, point: &[(String, Lit)]) -> Program {
+        let mut p = self.clone();
+        for (key, value) in point {
+            let (unit, name) = key.split_once("::").unwrap_or((self.strategy.as_str(), key.as_str()));
+            let unit = if p.params.get(unit).is_some_and(|m| m.contains_key(name)) { unit.to_string() } else { self.strategy.clone() };
+            if let Some(param) = p.params.get_mut(&unit).and_then(|m| m.get_mut(name)) {
+                param.value = match value {
+                    Lit::Str(s) if param.ty == Ty::Label => Lit::Label(s.clone()),
+                    Lit::Str(s) => Lit::Entity(s.clone()),
+                    other => other.clone(),
+                };
+            }
+        }
+        p
+    }
     pub fn rule_label(&self, i: usize) -> String {
         rule_label(&self.rules, i)
     }
