@@ -2641,7 +2641,13 @@ batch driver agree on every corpus program. Each bless since:
   cache object logged 30 to 45 MB, 20 GB of the Norgate store's 22 GB of
   log in an evening, and no reader asks a log of them (only a hot
   version replays its tails from it). They write their partitions
-  only. `abt-tests/tests/service_memory.rs`: a
+  only. And nothing removed them: a store keeps the outputs of its last
+  256 runs and its last 512 cache objects, the oldest past these (and an
+  eighth more) dropped with their manifests, partitions and logs when a
+  derived relation is written; a pinned version keeps its relation and
+  the query layer's records (plans, lineages) stay
+  (`abt-data/tests/store.rs`). A plan that reads a trial's outputs long
+  after it ran, past 256 later runs, reruns it. `abt-tests/tests/service_memory.rs`: a
   cross-sectional strategy over 300 names and 1,000 days, run and
   released through the kernel service; of the 360 to 414 MB each later
   run takes, at most a quarter stays (146 MB before run 2, 508 at its

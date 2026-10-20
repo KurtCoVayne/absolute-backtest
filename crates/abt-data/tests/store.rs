@@ -423,3 +423,58 @@ fn the_temporary_stores_of_ended_processes_are_reaped() {
     assert!(alive.exists(), "a running process's store is kept");
     let _ = std::fs::remove_dir_all(&alive);
 }
+
+/// E-110: past the runs a store keeps, the oldest runs' outputs go with
+/// their manifests, partitions and logs, as do the oldest cache objects
+/// past theirs; the query layer's records stay. A day of a pipeline's runs
+/// left 13,748 `kernel.*` relations in one store.
+#[test]
+fn the_oldest_runs_outputs_and_cache_objects_are_pruned() {
+    let mut s = Store::temporary("prune").unwrap();
+    s.set_derived_kept(4, 3);
+    let t = 19_000 * DAY;
+    let col = |name: &str, ty: ColumnType, role: Role| ColumnSpec {
+        name: name.into(),
+        ty,
+        role,
+        dimension: None,
+    };
+    let schema = |name: String, class: &str| RelationSchema {
+        name,
+        class: class.into(),
+        columns: vec![
+            col("A", ColumnType::Entity, Role::Entity),
+            col("T", ColumnType::Time, Role::EventTime),
+            col("P", ColumnType::Num, Role::Value),
+            col("r", ColumnType::Time, Role::ReceiptTime),
+        ],
+        calendar: None,
+        constraints: None,
+        attributes: None,
+        schema_version: Some("1.0".into()),
+    };
+    // Ten runs of two outputs each, ten cache objects, ten query records.
+    for k in 0..10u64 {
+        for out in ["decisions", "fills"] {
+            s.put(&schema(format!("kernel.run{}.{}", k, out), "kernel"), &[close_rows(&[(1, t, t, k as f64)])], "kernel").unwrap();
+        }
+        s.cache_put(&Hash::of(format!("request {}", k).as_bytes()), &schema("x".into(), "kernel"), &[close_rows(&[(1, t, t, k as f64)])]).unwrap();
+        s.put(&schema(format!("query.plan{}", k), "query"), &[close_rows(&[(1, t, t, k as f64)])], "query").unwrap();
+    }
+    let names: Vec<String> = s.registry.schemas(None).into_iter().map(|r| r.name).collect();
+    let runs: std::collections::BTreeSet<&str> = names.iter().filter_map(|n| n.strip_prefix("kernel.")).map(|r| r.split('.').next().unwrap()).collect();
+    // At most the kept and an eighth more; the newest always among them.
+    assert!((4..=4 + 4 / 8).contains(&runs.len()), "{:?}", runs);
+    assert!(runs.contains("run9") && !runs.contains("run0"), "{:?}", runs);
+    assert!(names.contains(&"kernel.run9.decisions".to_string()) && names.contains(&"kernel.run9.fills".to_string()));
+    let caches = names.iter().filter(|n| n.starts_with("cache.")).count();
+    assert!((3..=3 + 3 / 8).contains(&caches), "{} cache objects", caches);
+    assert_eq!(names.iter().filter(|n| n.starts_with("query.")).count(), 10);
+    // A dropped run's files are gone; a kept run's are there.
+    assert!(!s.root().join("manifest").join("kernel.run0.decisions").exists());
+    assert!(!s.root().join("part").join("kernel.run0.decisions").exists());
+    assert!(s.root().join("manifest").join("kernel.run9.decisions").exists());
+    // A kept cache object is still answered by its key; a dropped one not.
+    assert!(s.cache_get(&Hash::of(b"request 9")).is_some());
+    assert!(s.cache_get(&Hash::of(b"request 0")).is_none());
+}

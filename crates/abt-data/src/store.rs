@@ -62,6 +62,15 @@ pub fn derived(relation: &str) -> bool {
     DERIVED.iter().any(|d| relation.starts_with(d))
 }
 
+/// The runs whose outputs a store keeps, and the aggregates' cache objects
+/// (E-110): past these (and an eighth more, so that a prune is not one per
+/// write) the oldest go when a derived relation is written. A day of a
+/// pipeline's runs left 13,748 `kernel.*` relations in a store, 25 GB and
+/// a 10 MB registry rewritten on every write. The query layer's records
+/// (plans, lineages) are kept.
+pub const KERNEL_RUNS_KEPT: usize = 256;
+pub const CACHE_OBJECTS_KEPT: usize = 512;
+
 /// A partition of a version: one bucket's rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartitionRef {
@@ -161,6 +170,9 @@ pub struct Store {
     residency: Residency,
     /// Append files beyond which an append consolidates its relation.
     consolidate_bytes: u64,
+    /// The runs' outputs and the cache objects kept (`KERNEL_RUNS_KEPT`,
+    /// `CACHE_OBJECTS_KEPT`).
+    derived_kept: (usize, usize),
 }
 
 /// A partition file's row groups (their rows, in order) and its entity
@@ -256,6 +268,7 @@ impl Store {
             hot: Mutex::new(HashMap::new()),
             residency: Residency::off(),
             consolidate_bytes: CONSOLIDATE_BYTES,
+            derived_kept: (KERNEL_RUNS_KEPT, CACHE_OBJECTS_KEPT),
         })
     }
 
@@ -279,6 +292,68 @@ impl Store {
     /// relation (ST-8.7; `CONSOLIDATE_BYTES` by default).
     pub fn set_consolidate_bytes(&mut self, bytes: u64) {
         self.consolidate_bytes = bytes;
+    }
+
+    /// Sets how many runs' outputs and cache objects the store keeps
+    /// (E-110; `KERNEL_RUNS_KEPT` and `CACHE_OBJECTS_KEPT` by default).
+    pub fn set_derived_kept(&mut self, runs: usize, cache_objects: usize) {
+        self.derived_kept = (runs, cache_objects);
+    }
+
+    /// Drops the oldest runs' outputs and cache objects past what the store
+    /// keeps (E-110): their schemas, versions, currents and cache records,
+    /// and their manifests, partitions and logs. A relation with a pinned
+    /// version stays. The relations dropped.
+    pub fn prune_derived(&mut self) -> Result<Vec<String>, DataError> {
+        let ordinal = |v: &VersionRecord| v.attributes.get("_ordinal").and_then(|o| o.parse::<u64>().ok()).unwrap_or(0);
+        // A run's outputs (`kernel.<run>.<name>`) go together; each cache
+        // object alone. Each group's newest write orders it.
+        let mut runs: BTreeMap<String, (u64, BTreeSet<String>)> = BTreeMap::new();
+        let mut caches: BTreeMap<String, (u64, BTreeSet<String>)> = BTreeMap::new();
+        for v in self.registry.versions() {
+            let (groups, key) = match v.relation.strip_prefix("kernel.") {
+                Some(rest) => (&mut runs, rest.split('.').next().unwrap_or(rest).to_string()),
+                None if v.relation.starts_with("cache.") => (&mut caches, v.relation.clone()),
+                None => continue,
+            };
+            let g = groups.entry(key).or_insert((0, BTreeSet::new()));
+            g.0 = g.0.max(ordinal(v));
+            g.1.insert(v.relation.clone());
+        }
+        let mut dropped = Vec::new();
+        for (groups, kept) in [(runs, self.derived_kept.0), (caches, self.derived_kept.1)] {
+            if groups.len() <= kept + kept / 8 {
+                continue;
+            }
+            let mut by_age: Vec<(u64, BTreeSet<String>)> = groups.into_values().collect();
+            by_age.sort();
+            let n = by_age.len() - kept;
+            for (_, relations) in by_age.into_iter().take(n) {
+                for rel in relations {
+                    if self.registry.versions().any(|v| v.relation == rel && self.registry.pinned(&v.version)) {
+                        continue;
+                    }
+                    self.registry.drop_relation(&rel);
+                    for dir in ["manifest", "part", "log"] {
+                        let p = self.root.join(dir).join(&rel);
+                        if p.exists() {
+                            fs::remove_dir_all(&p)?;
+                        }
+                    }
+                    dropped.push(rel);
+                }
+            }
+        }
+        if !dropped.is_empty() {
+            // The maps of open files and manifests name some of them.
+            if let Ok(mut f) = self.files.lock() {
+                f.clear();
+            }
+            if let Ok(mut m) = self.manifests.lock() {
+                m.clear();
+            }
+        }
+        Ok(dropped)
     }
 
     /// Sets the resident budget in bytes (0 decodes every read from its
@@ -526,6 +601,9 @@ impl Store {
             log_prefix: None,
         });
         self.registry.set_current(&relation, source, &version);
+        if derived(&relation) {
+            self.prune_derived()?;
+        }
         self.registry.save()?;
         self.next_seq.insert(key, last_seq + 1);
         Ok((version, (first_seq, last_seq)))
