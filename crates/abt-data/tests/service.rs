@@ -464,3 +464,37 @@ fn errors_carry_their_codes() {
         other => panic!("{:?}", other.map(|_| ())),
     }
 }
+
+/// E-110: a schema listing without a class leaves out the relations the
+/// layers derive (a cache object here; a run's outputs and the query layer's
+/// records alike), which a day of runs made pass the control payload's
+/// 1 MiB and refuse every binding; asked by name or by class, a derived
+/// relation's schema is answered.
+#[test]
+fn a_classless_schema_listing_leaves_derived_relations_out() {
+    let svc = service();
+    let name = {
+        let mut st = svc.store_mut();
+        let schema = st.schema("calendar_label").unwrap();
+        st.cache_put(&abt_wire::Hash::of(b"an aggregate"), &schema, &[calendar_rows(&[T0])]).unwrap();
+        st.registry.schemas(None).into_iter().map(|s| s.name).find(|n| n.starts_with("cache.")).expect("the cache object's relation")
+    };
+    let c = client(inproc(&svc));
+    let names = |class: Option<&str>, relation: Option<&str>| -> Vec<String> {
+        let Message::SchemaResponse(r) = c
+            .request(Message::SchemaRequest(Box::new(SchemaRequest {
+                class: class.map(str::to_string),
+                relation: relation.map(str::to_string),
+            })))
+            .unwrap()
+        else {
+            panic!("not a schema response")
+        };
+        r.schemas.unwrap_or_default().into_iter().map(|s| s.name).collect()
+    };
+    let all = names(None, None);
+    assert!(all.contains(&"equity.close".to_string()), "{:?}", all);
+    assert!(!all.iter().any(|n| n.starts_with("cache.") || n.starts_with("kernel.") || n.starts_with("query.")), "{:?}", all);
+    assert_eq!(names(None, Some(&name)), vec![name.clone()]);
+    assert_eq!(names(Some("cache"), None), vec![name]);
+}

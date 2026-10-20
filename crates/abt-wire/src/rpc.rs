@@ -280,6 +280,10 @@ pub fn serve(conn: Connection, service: Arc<dyn Service>) -> Result<(), WireErro
                 let _ = out.error(e);
             }
             flows.lock().expect("the flow table").remove(&correlation);
+            drop(out);
+            // The request's thread ends: what it freed goes back to the
+            // system rather than staying in its arena (E-110).
+            crate::memory::trim();
         }));
     };
     let flow_of = |correlation: u64| flows.lock().expect("the flow table").get(&correlation).cloned();

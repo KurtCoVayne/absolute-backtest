@@ -510,9 +510,28 @@ fn report(r: &RunResult, status: &str) -> String {
 }
 
 /// A run held by its thread: runs it, then answers queries until the
-/// service drops it.
+/// service drops it (`control release`); its memory then goes back to the
+/// system, not to the thread's arena (E-110).
 #[allow(clippy::too_many_arguments)]
 fn hold(
+    ws: Workspace,
+    prog: Program,
+    cfg: ExecConfig,
+    opts: Replay,
+    exec: Box<dyn Executor + Send>,
+    client: DataClient,
+    connect: Arc<Connect>,
+    rx: mpsc::Receiver<Ask>,
+    ptx: mpsc::Sender<Frame>,
+    state: Arc<Mutex<RunState>>,
+    every: u64,
+) {
+    hold_run(ws, prog, cfg, opts, exec, client, connect, rx, ptx, state, every);
+    abt_wire::memory::trim_now();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hold_run(
     ws: Workspace,
     prog: Program,
     cfg: ExecConfig,
@@ -695,9 +714,7 @@ fn answer_held(
         plan: Some(&compiled.plan),
         out: None,
     };
-    let a = query::answer(&mut k2, &cx, 0, &q);
-    std::mem::forget(k2);
-    a
+    query::answer(&mut k2, &cx, 0, &q)
 }
 
 /// A connection to the service in this process, the service's end served on

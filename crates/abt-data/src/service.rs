@@ -38,6 +38,10 @@ use crate::stream::{self, Resolved, Stream, BATCH_EVENTS, SUBSCRIPTION_WINDOW};
 /// Frames in flight per direction of an in-process connection.
 const INPROC_BOUND: usize = 64;
 
+/// The families of relations the layers derive rather than ingest: a run's
+/// outputs, the query layer's records, the aggregates' cache objects.
+const DERIVED: [&str; 3] = ["kernel.", "query.", "cache."];
+
 pub struct DataService {
     store: RwLock<Store>,
     /// A subscription's window of unacknowledged events (D-5.6).
@@ -564,9 +568,20 @@ impl Service for DataService {
         match request.message {
             Message::SchemaRequest(r) => {
                 let st = self.store();
+                // A listing without a class leaves out what runs write: the
+                // kernel's outputs, the query layer's records and the cache
+                // objects (E-110). They are no run's inputs, and a day of
+                // runs made the listing pass the control payload's 1 MiB
+                // (P-2.2), refusing every binding; asked by name or by
+                // class, they are answered.
                 let schemas = match &r.relation {
                     Some(rel) => vec![st.schema(rel).map_err(data)?],
-                    None => st.registry.schemas(r.class.as_deref()),
+                    None => st
+                        .registry
+                        .schemas(r.class.as_deref())
+                        .into_iter()
+                        .filter(|s| r.class.is_some() || !DERIVED.iter().any(|d| s.name.starts_with(d)))
+                        .collect(),
                 };
                 out.respond(Message::SchemaResponse(Box::new(SchemaResponse { schemas: Some(schemas) }))).map_err(wire)
             }

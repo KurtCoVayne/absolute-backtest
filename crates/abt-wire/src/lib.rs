@@ -15,6 +15,7 @@ pub mod chain;
 pub mod convert;
 pub mod frame;
 pub mod hash;
+pub mod memory;
 pub mod rpc;
 pub mod scalar;
 pub mod table;

@@ -2612,6 +2612,35 @@ batch driver agree on every corpus program. Each bless since:
   `abt-data/tests/ladder_index.rs`: 20,000 minute bars of one root stage
   with at most 200 indexes built (4,000 per relation at the 15-minute
   level before).
+- **E-110 (P-2.1, P-3.1, P-3.4, D-3.4; the memory a request or a run
+  freed).** The services handle each request on a thread of its own, and
+  the kernel each run; glibc gives a thread a heap arena of its own (up to
+  eight per core) and keeps the pages an allocation frees inside it for
+  that arena's next one. Every arena kept the peak of the largest request
+  or run it had served: the data service of the pipeline's store held
+  18.2 GB of anonymous memory with a resident budget of 6 GiB, the Norgate
+  futures one 10.5 GB with 2 GiB (98 arena heaps of 64 MB and 68 partly
+  grown, 41 MB in the main heap), and a plan's trials grew `abt plan run`
+  by gigabytes each. A request's thread now returns the free pages of
+  every arena when it ends (`malloc_trim`, at most every 100 ms), and a
+  run's thread when the run is released. A query over more than one atom
+  of a run that ended no longer leaks the kernel it ran for the answer
+  (`mem::forget`). The store's maps of open partition files and of
+  manifests were never evicted: every run a service writes adds versions
+  of its outputs and of its aggregates' cache objects, read once, and the
+  Norgate service held 69,457 index maps; they start over past 8,192
+  files and 4,096 manifests. And a schema listing without a class named
+  every relation of the store, the runs' outputs, the query layer's
+  records and the cache objects included: on the Norgate store 4,354
+  schemas (3,376 `kernel.*`), a 1,050,903-byte response past the control
+  payload's 1 MiB (P-2.2), so every binding (which asks it and never read
+  those families) was refused. The class-less listing leaves `kernel.*`,
+  `query.*` and `cache.*` out; asked by name or by class they are
+  answered (`abt-data/tests/service.rs`). `abt-tests/tests/service_memory.rs`: a
+  cross-sectional strategy over 300 names and 1,000 days, run and
+  released through the kernel service; of the 360 to 414 MB each later
+  run takes, at most a quarter stays (146 MB before run 2, 508 at its
+  peak, 102 after).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

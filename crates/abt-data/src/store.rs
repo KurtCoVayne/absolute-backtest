@@ -43,6 +43,13 @@ const ROW_GROUP: usize = 65_536;
 /// Append files beyond which a relation is consolidated (ST-8.7).
 pub const CONSOLIDATE_BYTES: u64 = 512 << 20;
 
+/// The partition files and the manifests a store keeps open (E-110): past
+/// these, the maps start over. Every run a service writes adds a version
+/// of each of its outputs and of each aggregate's cache object, read once;
+/// kept for good, they held 69,000 index maps in a day's service.
+const FILES_KEPT: usize = 8192;
+const MANIFESTS_KEPT: usize = 4096;
+
 /// A partition of a version: one bucket's rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartitionRef {
@@ -132,7 +139,7 @@ pub struct Store {
     /// Decoded row groups resident under the budget (D-3.2, ERRATA E-74).
     resident: Resident,
     /// Each partition file's row groups and its entity offset index,
-    /// memory-mapped: read once per file.
+    /// memory-mapped: read once per file while kept (`FILES_KEPT`).
     files: Mutex<HashMap<PathBuf, Arc<FileInfo>>>,
     /// The manifests read, by version.
     manifests: Mutex<HashMap<String, Arc<Manifest>>>,
@@ -600,6 +607,9 @@ impl Store {
         let path = self.root.join("manifest").join(&rec.relation).join(format!("{}.json", version));
         let m: Manifest = serde_json::from_slice(&fs::read(&path)?)?;
         if let Ok(mut c) = self.manifests.lock() {
+            if c.len() >= MANIFESTS_KEPT {
+                c.clear();
+            }
             c.insert(version.to_string(), Arc::new(m.clone()));
         }
         Ok(self.with_appends(m))
@@ -669,6 +679,9 @@ impl Store {
         };
         let info = Arc::new(FileInfo { groups, index });
         if let Ok(mut f) = self.files.lock() {
+            if f.len() >= FILES_KEPT {
+                f.clear();
+            }
             f.insert(path.to_path_buf(), info.clone());
         }
         Ok(info)
