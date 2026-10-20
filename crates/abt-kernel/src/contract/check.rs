@@ -621,7 +621,12 @@ impl Invariants {
                     }
                     LimitKind::Weight => {
                         let bound = l.bound * e.capital;
-                        if let Some((s, q, pm)) = e.positions.iter().find(|(_, q, pm)| (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
+                        // A position the accepted orders grew (E-119): the
+                        // limit is pre-trade and a clamp scales what an order
+                        // adds, so a held position a price rise carried past
+                        // the bound, or one an order reduces, holds.
+                        let grown = |s: Sym, q: f64| q.abs() > self.shadow.position(s).abs() * (1.0 + 1e-12) + 1e-12;
+                        if let Some((s, q, pm)) = e.positions.iter().find(|(s, q, pm)| grown(*s, *q) && (q * pm).abs() > bound * (1.0 + 1e-9) + 1e-9) {
                             position_limits = Some(format!("{} at {} after the accepted orders, above `{}`", k.symbols.name(*s), (q * pm).abs(), l));
                         }
                     }

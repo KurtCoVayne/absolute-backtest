@@ -2735,6 +2735,20 @@ batch driver agree on every corpus program. Each bless since:
   RUNS by [m1, m2]`, as the house template writes it, took `[m1, m2]` for
   one metric's name and was refused; the list may be bracketed.
   `abt-query/tests/plan.rs`.
+- **E-119 (K-3.5, K-9.3; a held position past a weight limit).** The
+  invariant `inv.position_limits` checked every position of the book the
+  bar's accepted orders would leave against a weight limit, the positions
+  no order touched and those an order reduced included, while a `clamp`
+  scales only what an order adds. A position bought at the bound that a
+  price rise carried past it halted the run at the next bar with any
+  order ("… 100977.45 after the accepted orders, above `weight <= 0.1 per
+  name clamp`"). The limit being pre-trade, the invariant now judges the
+  positions the bar's orders grow. `abt-tests/tests/limits.rs`: five
+  names bought at a tenth, reduced by a share a bar while their prices
+  drift past it. [D] Open: an order growing a position already past the
+  bound by its price (a share added to 2,081 at 48.17 against 100,000)
+  was not scaled by the clamp in one case, and the invariant then fails
+  as it should; under study.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

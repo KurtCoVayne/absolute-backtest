@@ -117,3 +117,33 @@ fn a_drawdown_limit_of_a_tenth_after_a_twelve_percent_fall_rejects_increases_and
     assert_eq!(rejected[0].0, day("2024-01-16"));
     assert!(rejected[0].1.contains("limit `drawdown <= 0.1 reject`"), "{}", rejected[0].1);
 }
+
+/// E-119: positions bought at a weight limit's bound that a price rise
+/// carries past it do not halt the run when the bar's orders only reduce.
+/// The invariant checked every position of the book the bar's orders would
+/// leave, the held ones and the reduced ones included, while a clamp only
+/// scales what an order adds: the next bar with any order halted ("… above
+/// `weight <= 0.1 per name clamp`"). A position an order grows past the
+/// bound still fails.
+#[test]
+fn a_held_position_drifting_past_a_weight_limit_holds() {
+    let src = StrategyParts {
+        name: "drift".into(),
+        params: "    w : Scalar = 0.1".into(),
+        decides: "    decide(T, hold(A, w)) :- universe(A, T), flat(A, T).\n    decide(T, trade(A, -1 shares)) :- universe(A, T), held(A, T, Q), Q > 1000 shares.".into(),
+        execution: "equity_default with { leverage unconstrained   limits { weight <= 0.1 per name clamp } }".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "drift");
+    let ds = abt_kernel::data::synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "EEE"], (2022, 1, 3), 60, 5);
+    // The run reaches its end (a violated invariant halts it).
+    let r = run(&p, &ds, ExecConfig::from_program(&p)).unwrap_or_else(|e| panic!("{}", e));
+    // Some name's weight went past the bound while held.
+    let over = r.holdings.iter().any(|h| {
+        let x = r.exposure.iter().find(|x| x.t == h.t).unwrap();
+        h.position * h.mark.unwrap() / x.capital > 0.1 + 1e-6
+    });
+    assert!(over, "no held name drifted past a tenth: the test checks nothing");
+    assert!(!matches!(r.contract.get("inv.position_limits").map(|c| &c.status), Some(Status::Violated { .. })));
+}
