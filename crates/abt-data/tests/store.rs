@@ -464,12 +464,12 @@ fn the_oldest_runs_outputs_and_cache_objects_are_pruned() {
     }
     let names: Vec<String> = s.registry.schemas(None).into_iter().map(|r| r.name).collect();
     let runs: std::collections::BTreeSet<&str> = names.iter().filter_map(|n| n.strip_prefix("kernel.")).map(|r| r.split('.').next().unwrap()).collect();
-    // At most the kept and an eighth more; the newest always among them.
-    assert!((4..=4 + 4 / 8).contains(&runs.len()), "{:?}", runs);
+    // The kept (an eighth more is none at four); the newest among them.
+    assert_eq!(runs.len(), 4, "{:?}", runs);
     assert!(runs.contains("run9") && !runs.contains("run0"), "{:?}", runs);
     assert!(names.contains(&"kernel.run9.decisions".to_string()) && names.contains(&"kernel.run9.fills".to_string()));
     let caches = names.iter().filter(|n| n.starts_with("cache.")).count();
-    assert!((3..=3 + 3 / 8).contains(&caches), "{} cache objects", caches);
+    assert_eq!(caches, 3, "{} cache objects", caches);
     assert_eq!(names.iter().filter(|n| n.starts_with("query.")).count(), 10);
     // A dropped run's files are gone; a kept run's are there.
     assert!(!s.root().join("manifest").join("kernel.run0.decisions").exists());

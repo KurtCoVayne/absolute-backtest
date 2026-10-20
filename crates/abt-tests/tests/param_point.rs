@@ -6,6 +6,8 @@
 //! over such a parameter repeated the default. Through the kernel service,
 //! as a plan's trials run.
 
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use abt_kernel::kernel::service::{inproc, KernelService};

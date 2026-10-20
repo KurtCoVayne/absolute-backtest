@@ -5,6 +5,8 @@
 //! services held 10 and 18 GB past their resident budgets). One test in its
 //! own binary: it reads the process's resident anonymous memory.
 
+#![allow(clippy::result_large_err)]
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
