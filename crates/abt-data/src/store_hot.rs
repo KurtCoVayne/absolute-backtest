@@ -371,6 +371,28 @@ impl Store {
         Ok(Some((version, done)))
     }
 
+    /// `hot_figures` without opening a version that is not open (E-120): a
+    /// service's stats request opened every hot version of its store, the
+    /// superseded ones of each ingest chunk included, each mapped, parsed
+    /// and its tails replayed, past 16 GB. A version not open has its
+    /// manifest's segment bytes; what its overlay holds is known once open.
+    pub fn hot_figures_if_open(&self, version: &str) -> Option<HotFigures> {
+        if self.hot.lock().is_ok_and(|c| c.contains_key(version)) {
+            return self.hot_figures(version);
+        }
+        // Not `manifest`, which opens a hot version for its appends.
+        let rec = self.registry.version(version)?;
+        let path = self.root.join(crate::hot::manifest::HotManifest::dir(&rec.relation, version)).join("manifest.json");
+        let hm: crate::hot::manifest::HotManifest = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        Some(HotFigures {
+            segment_bytes: hm.segments().iter().map(|s| s.bytes).sum(),
+            append_bytes: 0,
+            tail_rows: 0,
+            journal_records: 0,
+            generation: hm.generation,
+        })
+    }
+
     /// The figures of a hot version for `stats`: bytes of its segments,
     /// of its append files, the rows its tails hold, the journal's records
     /// and its generation.

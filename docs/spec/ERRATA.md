@@ -2754,6 +2754,39 @@ batch driver agree on every corpus program. Each bless since:
   bound by its price (a share added to 2,081 at 48.17 against 100,000)
   was not scaled by the clamp in one case, and the invariant then fails
   as it should; under study.
+- **E-121 (ST-7, ST-8.1; a rebuild drops the instruments appended since
+  publication).** An instrument a hot relation's published version does
+  not hold is, when ingested, an append: its rows join the overlay (the
+  append files, the journal, the tails) under that version. A later
+  ingest that is no append (a revision, a late row, the retry of an
+  ingest killed mid-write, whose rows meet its own earlier ones) stages a
+  new version from the published instruments and the input, S2 iterating
+  the version's presence alone: an instrument in the overlay alone was
+  never planned, and the version dropped it with every row it held. A
+  Databento futures store, one version published for its first root and
+  every later root appended, lost all roots but four from `high` and
+  `low` at two retries (17.8 million rows of 102.4; `close` and `volume`,
+  never rebuilt, kept them). S2 now plans the overlay's instruments too,
+  rebuilt from their rows as read, and an input instrument the overlay
+  alone holds is classified against those rows.
+  `abt-data/tests/appends.rs`: one instrument published, a second
+  appended, a revision of the first; both keep their 20 rows and the
+  version reads as its Parquet twin (under the mutation the second keeps
+  none).
+- **E-120 (D-4, P-3.1; what one binding costs the data service).** A
+  run's binding on a store of every US equity 1990 to 2026 took the
+  service past 44 GB and the machine down (a 16 GB scope kills it, from
+  2014 too). Three of its requests read whole relations: `Distinct` of
+  every label column of the bound relations (`equity.member`, 183 million
+  rows of every list: read, answered as strings, keyed row by row, three
+  copies), `stats` (each version's figures opened every hot version of
+  the store, the superseded ones of each ingest chunk included), and the
+  contract's data checks (`pre.actions`, `pre.membership`: every close,
+  every membership row). `Distinct` now reads a version bucket by bucket
+  and keeps the values seen; the service's `stats` reports a hot version
+  it has not opened from its manifest; `ABT_TRACE_REQUESTS=1` traces each
+  request with its time and the service's memory. [D] Open: the binding
+  scoped to the instruments its lists hold (and its checks with it).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

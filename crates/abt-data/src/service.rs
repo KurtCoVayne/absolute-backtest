@@ -300,7 +300,7 @@ impl DataService {
         let mut rows: Vec<Row> = recs
             .iter()
             .map(|v| {
-                let hot = st.hot_figures(&v.version);
+                let hot = st.hot_figures_if_open(&v.version);
                 Row {
                     relation: v.relation.clone(),
                     source: v.source.clone(),
@@ -562,6 +562,23 @@ impl Service for DataService {
     }
 
     fn handle(&self, request: Request, out: &Responder) -> Result<(), ErrorMessage> {
+        // `ABT_TRACE_REQUESTS=1`: each request on stderr, with its time and
+        // the service's anonymous memory before and after (E-120).
+        if std::env::var_os("ABT_TRACE_REQUESTS").is_some() {
+            let what: String = format!("{:?}", request.message).chars().take(240).collect();
+            let mb = || abt_wire::memory::anonymous_bytes().unwrap_or(0) >> 20;
+            let (before, started) = (mb(), std::time::Instant::now());
+            eprintln!("request at {} MB: {}", before, what);
+            let r = self.handle_request(request, out);
+            eprintln!("request {} ms, anon {} -> {} MB: {}", started.elapsed().as_millis(), before, mb(), what);
+            return r;
+        }
+        self.handle_request(request, out)
+    }
+}
+
+impl DataService {
+    fn handle_request(&self, request: Request, out: &Responder) -> Result<(), ErrorMessage> {
         match request.message {
             Message::SchemaRequest(r) => {
                 let st = self.store();
