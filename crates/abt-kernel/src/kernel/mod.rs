@@ -3615,7 +3615,7 @@ pub(crate) fn lit_value(l: &Lit, symbols: &mut Symbols, labels: &mut Symbols, eq
     }
 }
 
-fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
+pub(crate) fn for_each_lit(rule: &Rule, f: &mut dyn FnMut(&Lit)) {
     fn term(t: &Term, f: &mut dyn FnMut(&Lit)) {
         match t {
             Term::Lit(l, _) => f(l),

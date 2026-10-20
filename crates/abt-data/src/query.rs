@@ -222,7 +222,34 @@ fn plan(store: &Store, form: &QueryForm, r_max: Option<i64>, as_of: Option<u64>)
         QueryForm::Catalog(p) => p.relation.clone(),
         QueryForm::Chain(_) => String::new(),
     };
+    // A scan whose predicate keeps some instruments reads theirs alone
+    // (E-120): a hot version their blocks, a partition through its index;
+    // the predicate still applies.
+    if let (QueryForm::Scan(sc), None) = (form, &f.identity) {
+        if let (Some(p), Ok(schema)) = (sc.predicate.as_deref(), store.schema(&relation)) {
+            f.identity = entity_ids(&schema, p);
+        }
+    }
     Ok((relation, f))
+}
+
+/// The instruments a predicate keeps when one of its conjuncts is an
+/// `=` or `in` of entities on the relation's entity column, sorted.
+fn entity_ids(schema: &RelationSchema, p: &Predicate) -> Option<Vec<u64>> {
+    let entity = schema.columns.iter().find(|c| c.role == abt_wire::generated::abt::wire::Role::Entity)?;
+    p.all.iter().flatten().find_map(|d| match d.atoms.as_slice() {
+        [a] if a.column == entity.name && matches!(a.op, Op::Eq | Op::In) => {
+            let values = a.values.as_ref()?;
+            if values.iter().any(|v| v.kind != ConstantKind::Entity) {
+                return None;
+            }
+            let mut ids: Vec<u64> = values.iter().map(|v| v.int as u64).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            Some(ids)
+        }
+        _ => None,
+    })
 }
 
 /// `Distinct` over a version read one bucket at a time in time order: each

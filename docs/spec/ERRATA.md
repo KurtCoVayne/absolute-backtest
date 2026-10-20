@@ -2785,8 +2785,19 @@ batch driver agree on every corpus program. Each bless since:
   every membership row). `Distinct` now reads a version bucket by bucket
   and keeps the values seen; the service's `stats` reports a hot version
   it has not opened from its manifest; `ABT_TRACE_REQUESTS=1` traces each
-  request with its time and the service's memory. [D] Open: the binding
-  scoped to the instruments its lists hold (and its checks with it).
+  request with its time and the service's memory. A universe whose every
+  rule reads `member(A, T, "L")` of its instrument (or keeps one the book
+  holds) is gated by those lists: its binding is scoped to the instruments
+  they ever held and those the program names by ticker, and the binding's
+  reads, its stream and the contract's checks read those alone (a scan
+  whose predicate keeps some instruments reads their blocks through the
+  store's identity filter); `pre.membership` reads the program's lists'
+  rows. `abt-tests/tests/list_scope.rs`: a list-gated universe binds its
+  three members of six and runs as the same universe through a derived
+  relation, bound to every instrument, does. [D] Open: a hard bound per
+  binding in the service; a suspect race in
+  `appends.rs::readers_at_a_sequence_keep_their_view_under_appends`,
+  failing in two of four full runs, passing alone.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

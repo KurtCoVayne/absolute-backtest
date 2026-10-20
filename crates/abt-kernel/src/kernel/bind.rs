@@ -30,7 +30,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
 
 use super::{time, Contract, Dataset, Kernel, RunError, RunWarning, Security, Sym, Symbols, Tuple, Value};
 use crate::check::Program;
-use crate::ir::{Cal, Kind, Ty};
+use crate::ir::{Cal, Kind, Lit, Literal, Rule, Term, Ty};
 
 fn wire(e: WireError) -> RunError {
     RunError::Config(format!("the data service: {}", e))
@@ -414,6 +414,16 @@ impl Bound {
         let entity = column_of(schema, Role::Entity).map(|c| c.name.clone());
         let time = column_of(schema, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
         let values: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role == Role::Value).collect();
+        // A scoped binding's rows are its instruments' (E-120).
+        let predicate = match (predicate, self.scope.as_ref().and_then(|ids| entity_in(schema, ids))) {
+            (Some(mut p), Some(s)) => {
+                let mut all = p.all.take().unwrap_or_default();
+                all.extend(s.all.unwrap_or_default());
+                p.all = Some(all);
+                Some(p)
+            }
+            (p, s) => p.or(s),
+        };
         let batches = client.query(
             &self.view,
             QueryForm::Scan(Box::new(Scan {
@@ -715,6 +725,43 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
         }
         out.into_iter().collect()
     });
+    // A universe its lists gate (E-120): the instruments those lists ever
+    // held, with those the program names by ticker, are every instrument it
+    // can hold; the binding reads and streams them alone. Read whole, a
+    // store of every US equity took the data service past 16 GB at one
+    // run's binding.
+    let named: Option<Vec<u64>> = match (named, universe_lists(prog), stored.get("member")) {
+        (Some(n), _, _) => Some(n),
+        (None, Some(lists), Some((member_rel, member_schema))) => {
+            let mut out: BTreeSet<u64> = list_members(client, &view, member_rel, member_schema, &lists)?;
+            let at = last_time.unwrap_or(0);
+            let mut tickers: BTreeSet<String> = BTreeSet::new();
+            for rule in &prog.rules {
+                super::for_each_lit(rule, &mut |l| {
+                    if let Lit::Entity(t) = l {
+                        tickers.insert(t.clone());
+                    }
+                });
+            }
+            for unit in prog.params.values() {
+                for p in unit.values() {
+                    if let Lit::Entity(t) | Lit::Str(t) = &p.value {
+                        if p.ty.is_entity() || matches!(p.value, Lit::Entity(_)) {
+                            tickers.insert(t.clone());
+                        }
+                    }
+                }
+            }
+            for n in &tickers {
+                let live = |s: &&Security| &s.ticker == n && s.from <= at && s.to.is_none_or(|to| at < to);
+                if let Some(&id) = securities.iter().find(live).map(|s| s.id).or_else(|| symbols.get(n)).and_then(|s| ids.get(s as usize)) {
+                    out.insert(id);
+                }
+            }
+            Some(out.into_iter().collect())
+        }
+        (None, _, _) => None,
+    };
     // A relation's rows: every instrument's, or the named ones' (one series
     // each, which a hot version reads from their blocks only).
     let rows_of = |stored_rel: &str| -> Result<Vec<RecordBatch>, RunError> {
@@ -726,6 +773,18 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
                     t0: i64::MIN,
                     t1: i64::MAX,
                     predicate: None,
+                    columns: None,
+                })),
+            ),
+            // Many instruments (a list's members): one scan, its entity
+            // predicate the store's identity filter (E-120).
+            Some(ids) if ids.len() > NAMED_SERIES => client.query(
+                &view,
+                QueryForm::Scan(Box::new(Scan {
+                    relation: stored_rel.to_string(),
+                    t0: i64::MIN,
+                    t1: i64::MAX,
+                    predicate: by_name.get(stored_rel).and_then(|s| entity_in(s, ids)).map(Box::new),
                     columns: None,
                 })),
             ),
@@ -760,7 +819,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
             continue;
         }
         let t = column_of(s, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
-        if named.is_some() {
+        if named.as_ref().is_some_and(|n| n.len() <= NAMED_SERIES) {
             for b in rows_of(stored_rel)? {
                 base_bars.extend(times(col(&b, &t)?).into_iter().flatten());
             }
@@ -992,14 +1051,119 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
 /// numerics; its answer is held by (instrument, label) for the evaluator. A
 /// literal the layer cannot answer is evaluated here; the result says which
 /// and why.
+/// Up to this many named instruments a relation is read one series each
+/// (E-99); past it, one scan with an entity predicate (E-120).
+const NAMED_SERIES: usize = 64;
+
+/// A predicate keeping the rows of `ids` in a relation keyed by an entity.
+pub(crate) fn entity_in(schema: &RelationSchema, ids: &[u64]) -> Option<abt_wire::generated::abt::wire::Predicate> {
+    use abt_wire::generated::abt::wire::{Atom, Disjunction, Op, Predicate};
+    let entity = column_of(schema, Role::Entity)?;
+    Some(Predicate {
+        all: Some(vec![Disjunction {
+            atoms: vec![Atom {
+                column: entity.name.clone(),
+                op: Op::In,
+                values: Some(
+                    ids.iter()
+                        .map(|&id| Constant {
+                            kind: ConstantKind::Entity,
+                            num: 0.0,
+                            int: id as i64,
+                            text: None,
+                        })
+                        .collect(),
+                ),
+            }],
+        }]),
+    })
+}
+
+/// The lists a universe draws its instruments from (E-120): when every
+/// rule of `universe` reads `member(A, T, "L")` of its instrument, or keeps
+/// one the book holds (`position`, `held`, `in_book`), those lists; none
+/// otherwise, the universe ranging over every instrument the data holds.
+fn universe_lists(prog: &Program) -> Option<Vec<String>> {
+    let rules: Vec<&Rule> = prog.rules.iter().filter(|r| r.head.name == "universe").collect();
+    if rules.is_empty() {
+        return None;
+    }
+    let mut lists = BTreeSet::new();
+    for r in rules {
+        let Some(Term::Var(a, _)) = r.head.terms.first() else { return None };
+        let mut gated = false;
+        for l in &r.body {
+            let Literal::Atom(at) = l else { continue };
+            if !matches!(at.terms.first(), Some(Term::Var(v, _)) if v == a) {
+                continue;
+            }
+            match at.name.as_str() {
+                "member" => {
+                    if let Some(Term::Lit(Lit::Label(s) | Lit::Str(s), _)) = at.terms.get(2) {
+                        lists.insert(s.clone());
+                        gated = true;
+                    }
+                }
+                "position" | "held" | "in_book" => gated = true,
+                _ => {}
+            }
+        }
+        if !gated {
+            return None;
+        }
+    }
+    (!lists.is_empty()).then(|| lists.into_iter().collect())
+}
+
+/// The instruments a membership relation ever lists under `lists`.
+fn list_members(client: &DataClient, view: &View, member_rel: &str, schema: &RelationSchema, lists: &[String]) -> Result<BTreeSet<u64>, RunError> {
+    use abt_wire::generated::abt::wire::{Atom, Disjunction, Op, Predicate};
+    let entity = column_of(schema, Role::Entity).map(|c| c.name.clone()).unwrap_or_default();
+    let label = schema.columns.iter().find(|c| c.ty == ColumnType::Label).map(|c| c.name.clone()).unwrap_or_default();
+    let predicate = Predicate {
+        all: Some(vec![Disjunction {
+            atoms: vec![Atom {
+                column: label,
+                op: Op::In,
+                values: Some(
+                    lists
+                        .iter()
+                        .map(|l| Constant {
+                            kind: ConstantKind::Label,
+                            num: 0.0,
+                            int: 0,
+                            text: Some(l.clone()),
+                        })
+                        .collect(),
+                ),
+            }],
+        }]),
+    };
+    let mut out = BTreeSet::new();
+    for b in client.query(
+        view,
+        QueryForm::Scan(Box::new(Scan {
+            relation: member_rel.to_string(),
+            t0: i64::MIN,
+            t1: i64::MAX,
+            predicate: Some(Box::new(predicate)),
+            columns: Some(vec![entity.clone()]),
+        })),
+    )? {
+        if let Some(c) = b.column_by_name(&entity).and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>()) {
+            out.extend(c.iter().flatten());
+        }
+    }
+    Ok(out)
+}
+
 /// The instruments a program names (ERRATA E-99): the rows of its
 /// universe's `instruments` table and the values of its `need instruments
 /// where root | symbol | ticker = "…"`, as the data layer's ids, each
 /// futures root with the contracts its continuous series holds. `None`
 /// when it names none: the run reads every instrument the binding holds.
 /// A named instrument the data does not hold names nothing.
-pub fn scope_entities(prog: &Program, bound: &Bound) -> Option<Vec<u64>> {
-    named_instruments(prog)?;
+pub fn scope_entities(_prog: &Program, bound: &Bound) -> Option<Vec<u64>> {
     bound.scope.clone()
 }
 

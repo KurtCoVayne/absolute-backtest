@@ -175,6 +175,33 @@ pub fn state_bound(prog: &Program, instruments: usize) -> u64 {
     total
 }
 
+/// A predicate keeping a bound relation's rows labelled with one of
+/// `labels` (its label column's), none when it names none.
+fn labels_in(bound: &Bound, relation: &str, labels: &[String]) -> Option<abt_wire::generated::abt::wire::Predicate> {
+    use abt_wire::generated::abt::wire::{Atom, ColumnType, Constant, ConstantKind, Disjunction, Op, Predicate};
+    let (_, schema) = bound.stored.get(relation)?;
+    let column = schema.columns.iter().find(|c| c.ty == ColumnType::Label)?;
+    (!labels.is_empty()).then(|| Predicate {
+        all: Some(vec![Disjunction {
+            atoms: vec![Atom {
+                column: column.name.clone(),
+                op: Op::In,
+                values: Some(
+                    labels
+                        .iter()
+                        .map(|l| Constant {
+                            kind: ConstantKind::Label,
+                            num: 0.0,
+                            int: 0,
+                            text: Some(l.clone()),
+                        })
+                        .collect(),
+                ),
+            }],
+        }]),
+    })
+}
+
 fn le_zero(column: &str) -> abt_wire::generated::abt::wire::Predicate {
     use abt_wire::generated::abt::wire::{Atom, Constant, ConstantKind, Disjunction, Op, Predicate};
     Predicate {
@@ -362,7 +389,10 @@ pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &D
         );
     }
     if !listed.is_empty() && bound.stored.contains_key("member") {
-        let members: Vec<(Sym, i64)> = bound.scan(client, "member", None)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect();
+        // The program's lists' rows alone (E-120): a store's membership of
+        // every list is two orders larger.
+        let lists = labels_in(bound, "member", &prog.demand.lists);
+        let members: Vec<(Sym, i64)> = bound.scan(client, "member", lists)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect();
         let on: BTreeSet<(Sym, i64)> = listed.iter().cloned().collect();
         let problems = membership_problems(&members, &on, &name);
         warned_or_checked(c, "pre.membership", &problems, &mut warnings, "survivorship");
