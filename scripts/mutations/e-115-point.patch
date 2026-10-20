@@ -1,0 +1,17 @@
+# proposition: E-115 (a run at a parameter point is compiled at it)
+# mutation: the compiler reads the defaults again
+# test: cargo test -p abt-tests --test param_point
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/compiler/mod.rs b/crates/abt-kernel/src/compiler/mod.rs
+index e2de4f8..c359b73 100644
+--- a/crates/abt-kernel/src/compiler/mod.rs
++++ b/crates/abt-kernel/src/compiler/mod.rs
+@@ -144,7 +144,7 @@ pub fn compile(prog: &Program, opts: &CompileOptions) -> Compiled {
+     // expression over one (`1 - w`) folded at the default, and the run at
+     // another point ran the default's rules (E-115).
+     let pointed;
+-    let prog = if opts.params.is_empty() {
++    let prog = if opts.params.is_empty() || true {
+         prog
+     } else {
+         pointed = prog.at_point(&opts.params);
