@@ -5,6 +5,7 @@
 //! instrument's final rows and revision entries, which S3 builds from.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::normalise::{Normalised, Row};
 use crate::hot::manifest::{Kind, Revision};
@@ -26,7 +27,8 @@ pub struct Counts {
 #[derive(Clone, Debug)]
 pub struct Planned {
     pub id: u64,
-    /// Its final rows in label order: one per label, the latest by receipt.
+    /// Its final rows in label order: one per label, the latest by receipt;
+    /// none for an instrument kept as the previous version holds it (E-122).
     pub rows: Vec<Row>,
     /// The rows superseded at a label, each with the receipt that
     /// superseded it.
@@ -38,7 +40,15 @@ pub struct Planned {
 /// A stored instrument's rows and revisions, as rows: one the version's
 /// runs hold, or one only its overlay holds (appended since publication as
 /// a new instrument, E-121).
-fn stored_rows(prev: &HotVersion, id: u64) -> (Vec<Row>, Vec<Row>) {
+static ROWS_READ: AtomicU64 = AtomicU64::new(0);
+
+/// The stored rows staging has read back so far in this process (E-122's
+/// test).
+pub fn rows_read() -> u64 {
+    ROWS_READ.load(Ordering::Relaxed)
+}
+
+pub(crate) fn stored_rows(prev: &HotVersion, id: u64) -> (Vec<Row>, Vec<Row>) {
     // The current row of each label (the superseded ones come from the
     // revision table, not from the read, or they would count twice).
     let f = crate::store::RowFilter {
@@ -47,6 +57,7 @@ fn stored_rows(prev: &HotVersion, id: u64) -> (Vec<Row>, Vec<Row>) {
         ..crate::store::RowFilter::default()
     };
     let rows = prev.read(&f, 0, prev.presence().labels.len() as u32).expect("a stored instrument reads");
+    ROWS_READ.fetch_add(rows.len() as u64, Ordering::Relaxed);
     let kinds: Vec<Kind> = prev.manifest.columns.iter().map(|c| c.kind).collect();
     let mut current = Vec::with_capacity(rows.len());
     for i in 0..rows.len() {
@@ -95,9 +106,12 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
     if let Some(p) = prev {
         for inst in p.presence().instruments.iter() {
             if !input.by_id.contains_key(&inst.id) {
-                let (rows, _) = stored_rows(p, inst.id);
                 let revisions = p.manifest.revisions.iter().filter(|x| x.id == inst.id).cloned().collect();
                 let rebuild = appended(p, inst.id);
+                // A kept instrument's rows are not read (E-122): its
+                // presence, runs and ladder come from the version, so an
+                // ingest's memory follows what it writes, not the store.
+                let rows = if rebuild { stored_rows(p, inst.id).0 } else { Vec::new() };
                 planned.insert(
                     inst.id,
                     Planned {

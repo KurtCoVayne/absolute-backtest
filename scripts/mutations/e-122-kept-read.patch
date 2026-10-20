@@ -1,0 +1,16 @@
+# proposition: E-122 (an ingest reads back the instruments it rebuilds alone)
+# mutation: S2 reads every kept instrument's rows back again
+# test: cargo test -p abt-data --test build_memory an_ingest_builds_what_it_writes_and_its_memory_follows_it
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/staging/classify.rs b/crates/abt-data/src/staging/classify.rs
+--- a/crates/abt-data/src/staging/classify.rs
++++ b/crates/abt-data/src/staging/classify.rs
+@@ -111,7 +111,7 @@
+                 // A kept instrument's rows are not read (E-122): its
+                 // presence, runs and ladder come from the version, so an
+                 // ingest's memory follows what it writes, not the store.
+-                let rows = if rebuild { stored_rows(p, inst.id).0 } else { Vec::new() };
++                let rows = stored_rows(p, inst.id).0;
+                 planned.insert(
+                     inst.id,
+                     Planned {

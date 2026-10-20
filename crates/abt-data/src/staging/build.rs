@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use abt_codec::rank::Bitmap;
 use abt_codec::summary::{self, BlockSummary, Column, Cumulative};
@@ -28,6 +29,20 @@ use crate::hot::HotVersion;
 
 /// Bytes a segment is rotated at.
 pub const SEGMENT_BYTES: usize = 64 << 20;
+
+static SEGMENT_LIMIT: AtomicUsize = AtomicUsize::new(SEGMENT_BYTES);
+
+/// The bytes a segment is rotated at in this process: `SEGMENT_BYTES`
+/// unless a test set fewer.
+pub fn segment_bytes() -> usize {
+    SEGMENT_LIMIT.load(Ordering::Relaxed)
+}
+
+/// Sets the bytes segments rotate at (a test's: a few blocks' worth).
+#[doc(hidden)]
+pub fn set_segment_bytes(n: usize) {
+    SEGMENT_LIMIT.store(n, Ordering::Relaxed);
+}
 
 /// The sizes of what a build wrote (`--measure`, ST-9).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -137,11 +152,27 @@ pub fn build(
     attributes: &BTreeMap<String, String>,
 ) -> Result<Built, DataError> {
     let ncols = kinds.len();
-    // The labels of the version: every row's time.
-    let mut labels: Vec<i64> = planned.iter().flat_map(|p| p.rows.iter().map(|r| r.t)).collect();
+    // The labels of the version: the previous version's (a kept
+    // instrument's are among them) and every rebuilt instrument's rows'.
+    let mut labels: Vec<i64> = prev.map(|p| p.presence().labels.clone()).unwrap_or_default();
+    labels.extend(planned.iter().filter(|p| p.rebuild).flat_map(|p| p.rows.iter().map(|r| r.t)));
     labels.sort_unstable();
     labels.dedup();
     let label_ix = |t: i64| labels.binary_search(&t).expect("a row's label") as u32;
+    // A previous label's index in the version's labels.
+    let label_map: Vec<u32> = prev.map(|p| p.presence().labels.iter().map(|&t| label_ix(t)).collect()).unwrap_or_default();
+    // Buckets: the partition calendar's, as label ranges; their receipts
+    // and sequence high-water from the previous version's, the rows'
+    // counted below.
+    let mut buckets = buckets_of(calendar, &labels);
+    let prev_buckets: BTreeMap<&str, &Bucket> = prev.map(|p| p.manifest.buckets.iter().map(|b| (b.bucket.as_str(), b)).collect()).unwrap_or_default();
+    for b in buckets.iter_mut() {
+        if let Some(old) = prev_buckets.get(b.bucket.as_str()) {
+            b.r_min = old.r_min;
+            b.r_max = old.r_max;
+            b.seq_max = old.seq_max;
+        }
+    }
     // Segment lists per column: the previous version's, then the new ones.
     let mut segment_lists: Vec<Vec<SegmentRef>> = match prev {
         Some(p) => p.manifest.levels[0].segments.clone(),
@@ -179,6 +210,36 @@ pub fn build(
         Ok(())
     };
     for (ordinal, p) in planned.iter().enumerate() {
+        if !p.rebuild {
+            // A kept instrument (E-122): its runs, sequence runs and
+            // exponents are the previous version's, its presence remapped
+            // to the version's labels; its rows are not read.
+            let pv = prev.expect("a kept instrument has a previous version");
+            let inst = &pv.presence().instruments[pv.presence().ordinal(p.id).expect("a kept instrument is stored") as usize];
+            let positions: Vec<u32> = inst.rows_with_labels(0, pv.presence().labels.len() as u32).into_iter().map(|(_, l)| label_map[l as usize]).collect();
+            let (first, last) = (positions[0], positions[positions.len() - 1]);
+            let mut bi = 0usize;
+            for &l in &positions {
+                while buckets[bi].hi <= l {
+                    bi += 1;
+                }
+                buckets[bi].rows += 1;
+            }
+            for (ce, &e) in column_exponent.iter_mut().zip(&inst.exponents) {
+                *ce = (*ce).max(e);
+            }
+            measure.rows += inst.rows;
+            instruments.push(Instrument {
+                id: p.id,
+                first,
+                last,
+                rows: inst.rows,
+                seq_runs: inst.seq_runs.clone(),
+                exponents: inst.exponents.clone(),
+                presence: Bitmap::of((last - first + 1) as usize, positions.iter().map(|&l| (l - first) as usize)),
+            });
+            continue;
+        }
         assert!(!p.rows.is_empty(), "an instrument with rows");
         let first = label_ix(p.rows[0].t);
         let last = label_ix(p.rows[p.rows.len() - 1].t);
@@ -201,14 +262,14 @@ pub fn build(
                 _ => seq_runs.push((k as u64, row.seq, 1)),
             }
         }
-        let exponents: Vec<u8> = if p.rebuild {
+        let exponents: Vec<u8> = {
             let enc = encode_instrument(p, kinds, &labels);
             for c in 0..ncols {
                 let blocks: Vec<Sealed> = enc.blocks[c].iter().zip(&enc.values[c]).map(|(enc, values)| Sealed { enc, values }).collect();
                 let run = writers[c].run(ordinal as u32, 0, enc.exponents[c], &blocks, &Cumulative::ZERO, 0);
                 measure.blocks += run.blocks as u64;
                 column_raw[c] |= enc.blocks[c].iter().any(|b| !b.exact());
-                if writers[c].len() >= SEGMENT_BYTES {
+                if writers[c].len() >= segment_bytes() {
                     finish(c, &mut writers[c], &mut new_segments, &mut segment_lists)?;
                 }
             }
@@ -216,10 +277,6 @@ pub fn build(
             // cumulatives equal a direct recomputation.
             verify_instrument(p, kinds, &enc, &mut verified)?;
             enc.exponents
-        } else {
-            let pv = prev.expect("a kept instrument has a previous version");
-            let o = pv.presence().ordinal(p.id).expect("a kept instrument is stored") as usize;
-            pv.presence().instruments[o].exponents.clone()
         };
         for c in 0..ncols {
             column_exponent[c] = column_exponent[c].max(exponents[c]);
@@ -250,52 +307,9 @@ pub fn build(
             rewrite_kept(root, &seg_dir, planned, pv, kinds, &mut segment_lists, &mut new_segments, &mut measure)?;
         }
     }
+    let seq_first = instruments.iter().flat_map(|i| i.seq_runs.iter().map(|r| r.1)).min().unwrap_or(seq_high);
     let presence = Presence::new(labels.clone(), instruments);
-    // Buckets: the partition calendar's, as label ranges.
-    let mut buckets: Vec<Bucket> = Vec::new();
-    let prev_buckets: BTreeMap<&str, &Bucket> = prev.map(|p| p.manifest.buckets.iter().map(|b| (b.bucket.as_str(), b)).collect()).unwrap_or_default();
-    {
-        let mut span: Option<(String, i64, i64, u32)> = None;
-        for (i, &t) in labels.iter().enumerate() {
-            if !span.as_ref().is_some_and(|(_, from, to, _)| *from <= t && t < *to) {
-                if let Some((name, _, _, lo)) = span.take() {
-                    buckets.push(Bucket {
-                        bucket: name,
-                        lo,
-                        hi: i as u32,
-                        t_min: labels[lo as usize],
-                        t_max: labels[i - 1],
-                        r_min: i64::MAX,
-                        r_max: i64::MIN,
-                        rows: 0,
-                        seq_max: 0,
-                    });
-                }
-                let (name, from, to) = crate::store::bucket_span(calendar, t);
-                span = Some((name, from, to, i as u32));
-            }
-        }
-        if let Some((name, _, _, lo)) = span {
-            buckets.push(Bucket {
-                bucket: name,
-                lo,
-                hi: labels.len() as u32,
-                t_min: labels[lo as usize],
-                t_max: labels[labels.len() - 1],
-                r_min: i64::MAX,
-                r_max: i64::MIN,
-                rows: 0,
-                seq_max: 0,
-            });
-        }
-    }
-    for b in buckets.iter_mut() {
-        if let Some(old) = prev_buckets.get(b.bucket.as_str()) {
-            b.r_min = old.r_min;
-            b.r_max = old.r_max;
-        }
-    }
-    for p in planned {
+    for p in planned.iter().filter(|p| p.rebuild) {
         let mut bi = 0usize;
         for row in &p.rows {
             let l = label_ix(row.t);
@@ -354,6 +368,7 @@ pub fn build(
             kinds,
             &labels,
             planned,
+            prev,
             &exponents_of,
             column_raw[0],
             &mut measure,
@@ -370,7 +385,7 @@ pub fn build(
         rows,
         from: labels.first().copied(),
         to: labels.last().copied(),
-        seq_first: planned.iter().flat_map(|p| p.rows.iter().map(|r| r.seq)).min().unwrap_or(seq_high),
+        seq_first,
         seq_high,
         replay_from: None,
         generation: 0,
@@ -417,6 +432,60 @@ pub fn build(
     })
 }
 
+/// Whether instrument `id`'s bars at level `li` of `v` are those of the
+/// same level of `prev`: the same labels, runs' exponents and blocks.
+fn same_bars(v: &HotVersion, li: usize, prev: &HotVersion, id: u64) -> bool {
+    let level = &v.levels[li];
+    let Some(pli) = prev.levels.iter().position(|l| l.level.is_some() && l.level == level.level) else {
+        return false;
+    };
+    let from = &prev.levels[pli];
+    let (Some(o), Some(po)) = (level.presence.ordinal(id), from.presence.ordinal(id)) else {
+        return false;
+    };
+    let (o, po) = (o as usize, po as usize);
+    let (a, b) = (&level.presence.instruments[o], &from.presence.instruments[po]);
+    let labels = |p: &Presence, inst: &Instrument| -> Vec<i64> { inst.rows_with_labels(0, p.labels.len() as u32).into_iter().map(|(_, l)| p.labels[l as usize]).collect() };
+    if a.rows != b.rows || a.exponents != b.exponents || labels(&level.presence, a) != labels(&from.presence, b) {
+        return false;
+    }
+    (0..level.columns.len()).all(|c| {
+        let n = v.column_at(li, c, o).blocks();
+        n == prev.column_at(pli, c, po).blocks() && (0..n).all(|k| v.block_hash_at(li, c, o, k) == prev.block_hash_at(pli, c, po, k))
+    })
+}
+
+/// The partition calendar's buckets over a version's labels, as label
+/// ranges, their counts zero.
+fn buckets_of(calendar: Option<&str>, labels: &[i64]) -> Vec<Bucket> {
+    let mut buckets: Vec<Bucket> = Vec::new();
+    let mut span: Option<(String, i64, i64, u32)> = None;
+    let bucket = |name: String, lo: u32, hi: u32| Bucket {
+        bucket: name,
+        lo,
+        hi,
+        t_min: labels[lo as usize],
+        t_max: labels[hi as usize - 1],
+        r_min: i64::MAX,
+        r_max: i64::MIN,
+        rows: 0,
+        seq_max: 0,
+    };
+    for (i, &t) in labels.iter().enumerate() {
+        if !span.as_ref().is_some_and(|(_, from, to, _)| *from <= t && t < *to) {
+            if let Some((name, _, _, lo)) = span.take() {
+                buckets.push(bucket(name, lo, i as u32));
+            }
+            let (name, from, to) = crate::store::bucket_span(calendar, t);
+            span = Some((name, from, to, i as u32));
+        }
+    }
+    if let Some((name, _, _, lo)) = span {
+        buckets.push(bucket(name, lo, labels.len() as u32));
+    }
+    buckets
+}
+
 /// The integer of a stored value at exponent `e` (0 for a value off the
 /// grid, which the ladder refuses above).
 fn value_int(kind: Kind, bits: u64, e: u8) -> i64 {
@@ -454,6 +523,7 @@ fn build_ladder(
     kinds: &[Kind],
     base_labels: &[i64],
     planned: &[Planned],
+    prev: Option<&HotVersion>,
     exponents: &[Vec<u8>],
     raw: bool,
     measure: &mut Measure,
@@ -465,54 +535,119 @@ fn build_ladder(
     }
     let value_kind = kinds[0];
     let source_kind = if value_kind == Kind::TickF32 { Source::F32 } else { Source::F64 };
-    let mut bars_of: BTreeMap<Level, Vec<Vec<Bar>>> = BTreeMap::new();
-    let mut labels_of: BTreeMap<Level, Vec<(i64, i64)>> = BTreeMap::new();
-    // Each built level's index of its bucket keys, built once with the
-    // level (E-109): a bar of the level above looks its source bucket's
-    // label up in it. Rebuilt per bar, it made a root's 15-minute level
-    // quadratic in its 5-minute labels.
-    let mut indexes: BTreeMap<Level, BTreeMap<i64, u32>> = BTreeMap::new();
-    let mut out = Vec::new();
-    for level in Level::of_base(calendar) {
-        let labels = level.labels(base_labels);
-        let index = ladder::index_of(&labels);
-        let label_of = |lv: Level, key: i64| -> i64 { labels_of[&lv][*indexes[&lv].get(&key).expect("a bucket of the source level") as usize].1 };
-        let mut per_inst: Vec<Vec<Bar>> = Vec::with_capacity(planned.len());
-        for (o, p) in planned.iter().enumerate() {
-            let e = exponents[o][0];
-            let source: Vec<LadderSource> = match level.source(calendar) {
-                None => p.rows.iter().map(|r| LadderSource::row(r.t, value_int(value_kind, r.vals[0], e), r.r, r.seq)).collect(),
-                Some(src) => bars_of[&src][o]
-                    .iter()
-                    .map(|b| {
-                        let label = label_of(src, b.key);
-                        LadderSource {
-                            label,
-                            value: b.value,
-                            count: b.count,
-                            r: b.receipt(label),
-                            seq: b.seq,
-                            last_label: b.last_label,
-                            last_r: b.last_r,
-                        }
-                    })
-                    .collect(),
+    let levels: Vec<Level> = Level::of_base(calendar);
+    // Every level's labels and its index of its bucket keys, built once
+    // with the level (E-109): a bar of the level above looks its source
+    // bucket's label up in it.
+    let labels_of: Vec<Vec<(i64, i64)>> = levels.iter().map(|l| l.labels(base_labels)).collect();
+    let indexes: Vec<BTreeMap<i64, u32>> = labels_of.iter().map(|l| ladder::index_of(l)).collect();
+    let source_of: Vec<Option<usize>> = levels
+        .iter()
+        .map(|l| l.source(calendar).map(|src| levels.iter().position(|x| *x == src).expect("a built source level")))
+        .collect();
+    // Each level's segments and presence, filled instrument by instrument
+    // (E-122): an instrument's bars at every level from its base rows, then
+    // dropped, so a build holds one instrument's bars and not the store's.
+    // A kept instrument whose buckets keep their labels has the bars it had
+    // and its rows are not read: with the ordinals where they were, its
+    // runs are the previous version's, in its segments, which the level's
+    // lists start from (as the base's do); with them shifted, they are
+    // copied block for block. A bucket's label is its latest base label
+    // over every instrument, so a level where an ingest moved one has the
+    // instrument's bars rebuilt, their runs superseding the ones before.
+    let shifted = prev.is_some_and(|pv| pv.presence().instruments.iter().enumerate().any(|(o, inst)| planned.get(o).is_none_or(|p| p.id != inst.id)));
+    let prev_level: Vec<Option<usize>> = levels
+        .iter()
+        .map(|&level| prev.and_then(|pv| pv.levels.iter().position(|l| l.level == Some(level))).filter(|_| !shifted))
+        .collect();
+    let ncols = 4usize;
+    let mut writers: Vec<Vec<Writer>> = levels.iter().map(|_| (0..ncols).map(|_| Writer::new()).collect()).collect();
+    let mut lists: Vec<Vec<Vec<SegmentRef>>> = prev_level
+        .iter()
+        .map(|pli| match (prev, pli) {
+            (Some(pv), Some(pli)) => pv.manifest.levels[*pli].segments.clone(),
+            _ => vec![Vec::new(); ncols],
+        })
+        .collect();
+    let mut instruments: Vec<Vec<Instrument>> = levels.iter().map(|_| Vec::with_capacity(planned.len())).collect();
+    let mut level_exponent = vec![0u8; levels.len()];
+    for (o, p) in planned.iter().enumerate() {
+        let e = exponents[o][0];
+        let kept: Vec<Kept> = match (prev, p.rebuild) {
+            (Some(pv), false) => kept_bars(pv, p.id, &levels, &labels_of, &indexes),
+            _ => vec![None; levels.len()],
+        };
+        let mut bars_of: Vec<Vec<Bar>> = Vec::with_capacity(levels.len());
+        if kept.iter().any(Option::is_none) {
+            let read;
+            let rows: &[Row] = match prev {
+                Some(pv) if !p.rebuild => {
+                    read = super::classify::stored_rows(pv, p.id).0;
+                    &read
+                }
+                _ => &p.rows,
             };
-            per_inst.push(ladder::build(level, rule, &source));
+            for (li, &level) in levels.iter().enumerate() {
+                let source: Vec<LadderSource> = match source_of[li] {
+                    None => rows.iter().map(|r| LadderSource::row(r.t, value_int(value_kind, r.vals[0], e), r.r, r.seq)).collect(),
+                    Some(si) => bars_of[si]
+                        .iter()
+                        .map(|b| {
+                            let label = labels_of[si][indexes[si][&b.key] as usize].1;
+                            LadderSource {
+                                label,
+                                value: b.value,
+                                count: b.count,
+                                r: b.receipt(label),
+                                seq: b.seq,
+                                last_label: b.last_label,
+                                last_r: b.last_r,
+                            }
+                        })
+                        .collect(),
+                };
+                bars_of.push(ladder::build(level, rule, &source));
+            }
         }
-        // The level's segments and presence.
-        let ncols = 4usize;
-        let mut writers: Vec<Writer> = (0..ncols).map(|_| Writer::new()).collect();
-        let mut lists: Vec<Vec<SegmentRef>> = vec![Vec::new(); ncols];
-        let mut instruments: Vec<Instrument> = Vec::with_capacity(planned.len());
-        let mut exponent = 0u8;
-        for (o, p) in planned.iter().enumerate() {
-            let bars = &per_inst[o];
+        for (li, &level) in levels.iter().enumerate() {
+            let ordinal = instruments[li].len() as u32;
+            if let (Some(pv), Some((pli, po, positions))) = (prev, &kept[li]) {
+                let (pli, po) = (*pli, *po);
+                let inst = &pv.levels[pli].presence.instruments[po];
+                level_exponent[li] = level_exponent[li].max(inst.exponents[0]);
+                if prev_level[li] != Some(pli) || po as u32 != ordinal {
+                    for (c, w) in writers[li].iter_mut().enumerate() {
+                        let view = pv.column_at(pli, c, po);
+                        let n = view.blocks();
+                        let encs: Vec<Encoded> = (0..n).map(|b| pv.encoded_at(pli, c, po, b)).collect();
+                        let values: Vec<Vec<i64>> = (0..n).map(|b| view.block(b)).collect();
+                        let blocks: Vec<Sealed> = encs.iter().zip(&values).map(|(enc, values)| Sealed { enc, values }).collect();
+                        let run = w.run(ordinal, 0, inst.exponents[c], &blocks, &Cumulative::ZERO, 0);
+                        measure.blocks += run.blocks as u64;
+                        if w.len() >= segment_bytes() {
+                            finish_into(root, seg_dir, c, w, new_segments, &mut lists[li])?;
+                        }
+                    }
+                }
+                measure.bars += inst.rows;
+                let (first, last) = (positions[0], positions[positions.len() - 1]);
+                instruments[li].push(Instrument {
+                    id: p.id,
+                    first,
+                    last,
+                    rows: inst.rows,
+                    seq_runs: inst.seq_runs.clone(),
+                    exponents: inst.exponents.clone(),
+                    presence: Bitmap::of((last - first + 1) as usize, positions.iter().map(|&l| (l - first) as usize)),
+                });
+                continue;
+            }
+            let bars = &bars_of[li];
             if bars.is_empty() {
                 continue;
             }
-            let e = exponents[o][0];
-            exponent = exponent.max(e);
+            let (index, labels) = (&indexes[li], &labels_of[li]);
+            level_exponent[li] = level_exponent[li].max(e);
             let first = index[&bars[0].key];
             let last = index[&bars[bars.len() - 1].key];
             let mut bits = Bitmap::new();
@@ -554,17 +689,17 @@ fn build_ladder(
                 }
             }
             let run_exponents = [e, 0, 0, 0];
-            for (c, w) in writers.iter_mut().enumerate() {
+            for (c, w) in writers[li].iter_mut().enumerate() {
                 let (encs, vals) = &columns[c];
                 let blocks: Vec<Sealed> = encs.iter().zip(vals).map(|(enc, values)| Sealed { enc, values }).collect();
-                let run = w.run(instruments.len() as u32, 0, run_exponents[c], &blocks, &Cumulative::ZERO, 0);
+                let run = w.run(ordinal, 0, run_exponents[c], &blocks, &Cumulative::ZERO, 0);
                 measure.blocks += run.blocks as u64;
-                if w.len() >= SEGMENT_BYTES {
-                    finish_into(root, seg_dir, c, w, new_segments, &mut lists)?;
+                if w.len() >= segment_bytes() {
+                    finish_into(root, seg_dir, c, w, new_segments, &mut lists[li])?;
                 }
             }
             measure.bars += bars.len() as u64;
-            instruments.push(Instrument {
+            instruments[li].push(Instrument {
                 id: p.id,
                 first,
                 last,
@@ -574,11 +709,14 @@ fn build_ladder(
                 presence: bits,
             });
         }
-        for (c, w) in writers.iter_mut().enumerate() {
-            finish_into(root, seg_dir, c, w, new_segments, &mut lists)?;
+    }
+    let mut out = Vec::new();
+    for (li, level) in levels.iter().enumerate() {
+        for (c, w) in writers[li].iter_mut().enumerate() {
+            finish_into(root, seg_dir, c, w, new_segments, &mut lists[li])?;
         }
         let name = level.name();
-        let presence = Presence::new(labels.iter().map(|l| l.1).collect(), instruments);
+        let presence = Presence::new(labels_of[li].iter().map(|l| l.1).collect(), std::mem::take(&mut instruments[li]));
         let bytes = presence.to_bytes();
         let file = format!("presence-{}.bin", name);
         fs::write(staging_dir.join(&file), &bytes)?;
@@ -594,18 +732,38 @@ fn build_ladder(
             calendar: name,
             presence: file,
             columns: vec![
-                entry("value", value_kind, exponent),
+                entry("value", value_kind, level_exponent[li]),
                 entry("count", Kind::Int, 0),
                 entry("seq", Kind::Int, 0),
                 entry("r", Kind::Residual, 0),
             ],
-            segments: lists,
+            segments: std::mem::take(&mut lists[li]),
         });
-        bars_of.insert(level, per_inst);
-        labels_of.insert(level, labels);
-        indexes.insert(level, index);
     }
     Ok(out)
+}
+
+/// A kept instrument's bars at each level where every bucket it has keeps
+/// its label: the previous version's level and ordinal and its bars'
+/// label indices in the level's new labels; none where one moved.
+fn kept_bars(prev: &HotVersion, id: u64, levels: &[Level], labels_of: &[Vec<(i64, i64)>], indexes: &[BTreeMap<i64, u32>]) -> Vec<Kept> {
+    let at_level = |li: usize, level: Level| -> Option<(usize, usize, Vec<u32>)> {
+        let pli = prev.levels.iter().position(|l| l.level == Some(level))?;
+        let presence = &prev.levels[pli].presence;
+        let po = presence.ordinal(id)? as usize;
+        let inst = &presence.instruments[po];
+        let mut positions = Vec::with_capacity(inst.rows as usize);
+        for (_, l) in inst.rows_with_labels(0, presence.labels.len() as u32) {
+            let label = presence.labels[l as usize];
+            let at = *indexes[li].get(&level.bucket_start(label))?;
+            if labels_of[li][at as usize].1 != label {
+                return None;
+            }
+            positions.push(at);
+        }
+        (!positions.is_empty()).then_some((pli, po, positions))
+    };
+    levels.iter().enumerate().map(|(li, &level)| at_level(li, level)).collect()
 }
 
 /// Copies every kept instrument's blocks into new runs at its new ordinal
@@ -624,10 +782,15 @@ fn rewrite_kept(
 ) -> Result<(), DataError> {
     // Start the lists over with the new runs only: rebuilt instruments
     // were written to the new segments already (at their new ordinals).
+    // (Before the kept runs are written: a segment they fill on the way
+    // joins the lists as it is finished, E-123.)
     let fresh: Vec<Vec<SegmentRef>> = segment_lists
         .iter()
         .map(|l| l.iter().filter(|s| new_segments.iter().any(|(h, _)| *h == s.hash)).cloned().collect())
         .collect();
+    for (list, f) in segment_lists.iter_mut().zip(fresh) {
+        *list = f;
+    }
     let mut writers: Vec<Writer> = (0..kinds.len()).map(|_| Writer::new()).collect();
     for (ordinal, p) in planned.iter().enumerate() {
         if p.rebuild {
@@ -642,13 +805,10 @@ fn rewrite_kept(
             let blocks: Vec<Sealed> = encs.iter().zip(&values).map(|(enc, values)| Sealed { enc, values }).collect();
             let run = w.run(ordinal as u32, 0, prev.presence().instruments[o].exponents[c], &blocks, &Cumulative::ZERO, 0);
             measure.blocks += run.blocks as u64;
-            if w.len() >= SEGMENT_BYTES {
+            if w.len() >= segment_bytes() {
                 finish_into(root, seg_dir, c, w, new_segments, segment_lists)?;
             }
         }
-    }
-    for (c, list) in segment_lists.iter_mut().enumerate() {
-        *list = fresh[c].clone();
     }
     for (c, w) in writers.iter_mut().enumerate() {
         finish_into(root, seg_dir, c, w, new_segments, segment_lists)?;
@@ -815,14 +975,23 @@ pub fn verify_ranges(v: &HotVersion, planned: &[Planned], sample: usize, verifie
     Ok(())
 }
 
+/// A ladder level S4 checks: its index in the version, its level, its
+/// labels and their index by bucket key.
+type Checked = (usize, Level, Vec<(i64, i64)>, BTreeMap<i64, u32>);
+
+/// Per level, a kept instrument's bars where its buckets keep their labels:
+/// the previous version's level and ordinal, its bars' new label indices.
+type Kept = Option<(usize, usize, Vec<u32>)>;
+
 /// S4 over the ladder (Proposition 5.2, ST-13's ladder row): every bar of
 /// every level equals the bar recomputed from the instrument's base rows
 /// under ST-5.3's rules (its value, base-row count, label, receipt and
 /// sequence), and a level's labels are the calendar's.
-pub fn verify_ladder(v: &HotVersion, planned: &[Planned], verified: &mut Verified) -> Result<(), DataError> {
+pub fn verify_ladder(v: &HotVersion, planned: &[Planned], prev: Option<&HotVersion>, verified: &mut Verified) -> Result<(), DataError> {
     let relation = &v.manifest.relation;
     let Some(rule) = Rule::of_relation(relation) else { return Ok(()) };
     let base_labels = &v.levels[0].presence.labels;
+    let mut checked: Vec<Checked> = Vec::new();
     for (li, lv) in v.levels.iter().enumerate().skip(1) {
         let level = lv.level.expect("a ladder level");
         let labels = level.labels(base_labels);
@@ -830,29 +999,53 @@ pub fn verify_ladder(v: &HotVersion, planned: &[Planned], verified: &mut Verifie
             return Err(DataError::Schema(format!("S4 verify, `{}` level `{}`: its labels are not the calendar's", relation, lv.calendar)));
         }
         let index = ladder::index_of(&labels);
-        for (o, p) in planned.iter().enumerate() {
-            let e = v.levels[0].presence.instruments[o].exponents[0];
-            let kind = v.manifest.columns[0].kind;
-            let source: Vec<LadderSource> = p.rows.iter().map(|r| LadderSource::row(r.t, value_int(kind, r.vals[0], e), r.r, r.seq)).collect();
-            let expect = ladder::build(level, rule, &source);
+        checked.push((li, level, labels, index));
+    }
+    if checked.is_empty() {
+        return Ok(());
+    }
+    // Instrument by instrument (E-122): a kept instrument's base rows read
+    // from the version, once for every level.
+    let kind = v.manifest.columns[0].kind;
+    for (o, p) in planned.iter().enumerate() {
+        // A kept instrument's copied bars: the previous version's blocks,
+        // byte for byte, at the labels they had (verified when written).
+        if let (Some(pv), false) = (prev, p.rebuild) {
+            if checked.iter().all(|(li, ..)| same_bars(v, *li, pv, p.id)) {
+                verified.ranges += checked.len() as u64;
+                continue;
+            }
+        }
+        let read;
+        let rows: &[Row] = if p.rebuild {
+            &p.rows
+        } else {
+            read = super::classify::stored_rows(v, p.id).0;
+            &read
+        };
+        let e = v.levels[0].presence.instruments[o].exponents[0];
+        let source: Vec<LadderSource> = rows.iter().map(|r| LadderSource::row(r.t, value_int(kind, r.vals[0], e), r.r, r.seq)).collect();
+        for (li, level, labels, index) in &checked {
+            let lv = &v.levels[*li];
+            let expect = ladder::build(*level, rule, &source);
             let f = crate::store::RowFilter {
                 identity: Some(vec![p.id]),
                 ..crate::store::RowFilter::default()
             };
-            let rows = v.read_at(li, &f, 0, u32::MAX)?;
-            if rows.len() != expect.len() {
+            let got_rows = v.read_at(*li, &f, 0, u32::MAX)?;
+            if got_rows.len() != expect.len() {
                 return Err(DataError::Schema(format!(
                     "S4 verify, `{}` level `{}`: instrument {} has {} bars, its rows give {}",
                     relation,
                     lv.calendar,
                     p.id,
-                    rows.len(),
+                    got_rows.len(),
                     expect.len()
                 )));
             }
             for (i, b) in expect.iter().enumerate() {
                 let label = labels[index[&b.key] as usize].1;
-                let got = (rows.t[i], rows.ints[0][i], rows.ints[1][i], rows.r[i], rows.seq[i], rows.floats[0][i].to_bits());
+                let got = (got_rows.t[i], got_rows.ints[0][i], got_rows.ints[1][i], got_rows.r[i], got_rows.seq[i], got_rows.floats[0][i].to_bits());
                 let want = (label, b.value, b.count, b.receipt(label), b.seq, value_view(kind, b.value, e).to_bits());
                 if got != want {
                     return Err(DataError::Schema(format!(

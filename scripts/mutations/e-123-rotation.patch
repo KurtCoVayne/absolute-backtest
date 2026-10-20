@@ -1,0 +1,27 @@
+# proposition: E-123 (a rewrite of the kept runs keeps the segments it fills)
+# mutation: the lists reset after the rewrite again
+# test: cargo test -p abt-data --test segment_rotation
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/staging/build.rs b/crates/abt-data/src/staging/build.rs
+--- a/crates/abt-data/src/staging/build.rs
++++ b/crates/abt-data/src/staging/build.rs
+@@ -781,9 +781,6 @@
+         .iter()
+         .map(|l| l.iter().filter(|s| new_segments.iter().any(|(h, _)| *h == s.hash)).cloned().collect())
+         .collect();
+-    for (list, f) in segment_lists.iter_mut().zip(fresh) {
+-        *list = f;
+-    }
+     let mut writers: Vec<Writer> = (0..kinds.len()).map(|_| Writer::new()).collect();
+     for (ordinal, p) in planned.iter().enumerate() {
+         if p.rebuild {
+@@ -803,6 +800,9 @@
+             }
+         }
+     }
++    for (list, f) in segment_lists.iter_mut().zip(fresh) {
++        *list = f;
++    }
+     for (c, w) in writers.iter_mut().enumerate() {
+         finish_into(root, seg_dir, c, w, new_segments, segment_lists)?;
+     }

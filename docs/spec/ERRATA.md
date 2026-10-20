@@ -2762,6 +2762,48 @@ batch driver agree on every corpus program. Each bless since:
   bought at a tenth, reduced by a share a bar while their prices drift
   past it; the same entered `moo` (under the growth from the book before
   the fills, the second halts at its first bar).
+- **E-123 (ST-7.1; a rewrite of the kept runs dropped the segments it
+  filled).** A new instrument whose id falls between stored ones shifts
+  the kept instruments' ordinals, and S3 rewrites their runs at the new
+  ones, block for block. The level's segment lists were reset to the
+  rebuilt instruments' segments after the rewrite, not before it: a
+  segment the rewrite filled to the rotation size (64 MiB) and finished on
+  the way was dropped from the lists, its instruments' blocks with it, and
+  the version did not open (S4 refused the ingest: an instrument with
+  fewer rows in its runs than in its presence). Any store of more than
+  64 MiB of a column's kept blocks met it at its first such ingest. The
+  lists are reset before the rewrite. `abt-data/tests/segment_rotation.rs`:
+  segments rotated at 4 KiB, 40 instruments of even ids, instrument 3
+  ingested; every instrument reads its rows (under the mutation the
+  ingest fails).
+- **E-122 (ST-7, S2 to S4; an ingest's memory followed the store).** An
+  ingest that is no append staged its version from every instrument's
+  rows: S2 read each stored instrument back to plan it, kept or not; S3
+  built the ladder level by level, every instrument's bars of every level
+  held at once; S4 checked every instrument's bars against those rows. A
+  Databento futures store's ingests grew 0.21 GB per million rows stored
+  (29.4 GB at 50 roots and 137 million rows), whatever they wrote. S2 now
+  reads back the instruments it rebuilds alone: a kept instrument's runs,
+  sequence runs and exponents are the version's, its presence remapped
+  onto the new labels, its buckets' counts taken from it. S3 builds the
+  ladder instrument by instrument. A bucket is labelled at its latest base
+  row of any instrument, so a kept instrument whose buckets keep their
+  labels has the bars it had: their runs are the version's, in its
+  segments, which each level's lists start from as the base's do (copied
+  block for block where the ordinals shifted), and its rows are not read;
+  at a level where the ingest moved one of its buckets' labels its bars
+  are rebuilt from its rows, their runs superseding the ones before. S4
+  checks a copied instrument's blocks and labels against the version's, a
+  rebuilt one's bars against its rows. `abt-data/tests/build_memory.rs`:
+  a new instrument and a revision ingested into stores of 6 and 96
+  instruments read back the revised instrument alone (4,806 and 3,892
+  rows; under the mutation every stored row) and leave every other instrument's
+  blocks at every level the version's, the memory added 2 and 5 MB;
+  `hot.rs::a_moved_bucket_label_rebuilds_the_kept_bars_under_it`: a new
+  instrument later in five weeks than the stored ones moves those weeks'
+  labels, the kept instruments' weekly bars there are rebuilt, and every
+  read is the Parquet store's (under its mutation, bars copied under moved
+  labels, S4 refuses the ingest).
 - **E-121 (ST-7, ST-8.1; a rebuild drops the instruments appended since
   publication).** An instrument a hot relation's published version does
   not hold is, when ingested, an append: its rows join the overlay (the
