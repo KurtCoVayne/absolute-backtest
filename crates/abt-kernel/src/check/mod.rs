@@ -518,7 +518,11 @@ impl Program {
         let mut p = self.clone();
         for (key, value) in point {
             let (unit, name) = key.split_once("::").unwrap_or((self.strategy.as_str(), key.as_str()));
-            let unit = if p.params.get(unit).is_some_and(|m| m.contains_key(name)) { unit.to_string() } else { self.strategy.clone() };
+            let unit = if p.params.get(unit).is_some_and(|m| m.contains_key(name)) {
+                unit.to_string()
+            } else {
+                self.strategy.clone()
+            };
             if let Some(param) = p.params.get_mut(&unit).and_then(|m| m.get_mut(name)) {
                 param.value = match value {
                     Lit::Str(s) if param.ty == Ty::Label => Lit::Label(s.clone()),

@@ -458,7 +458,8 @@ fn the_oldest_runs_outputs_and_cache_objects_are_pruned() {
         for out in ["decisions", "fills"] {
             s.put(&schema(format!("kernel.run{}.{}", k, out), "kernel"), &[close_rows(&[(1, t, t, k as f64)])], "kernel").unwrap();
         }
-        s.cache_put(&Hash::of(format!("request {}", k).as_bytes()), &schema("x".into(), "kernel"), &[close_rows(&[(1, t, t, k as f64)])]).unwrap();
+        s.cache_put(&Hash::of(format!("request {}", k).as_bytes()), &schema("x".into(), "kernel"), &[close_rows(&[(1, t, t, k as f64)])])
+            .unwrap();
         s.put(&schema(format!("query.plan{}", k), "query"), &[close_rows(&[(1, t, t, k as f64)])], "query").unwrap();
     }
     let names: Vec<String> = s.registry.schemas(None).into_iter().map(|r| r.name).collect();

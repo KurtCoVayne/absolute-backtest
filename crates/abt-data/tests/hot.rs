@@ -381,7 +381,13 @@ fn the_ladder_bars_equal_their_buckets_recomputed_from_base_rows() {
 fn a_finer_exponent_in_a_new_version_opens() {
     let day = |d: i64| (19_000 + d) * NANOS_PER_DAY;
     let rows: Vec<(u64, i64, i64, f64)> = (0..20)
-        .flat_map(|d| [(1u64, day(d), day(d), 10.125 + d as f64), (2u64, day(d), day(d), 20.5 + d as f64), (3u64, day(d), day(d), 30.25 + d as f64)])
+        .flat_map(|d| {
+            [
+                (1u64, day(d), day(d), 10.125 + d as f64),
+                (2u64, day(d), day(d), 20.5 + d as f64),
+                (3u64, day(d), day(d), 30.25 + d as f64),
+            ]
+        })
         .collect();
     // Instrument 1's next days at six decimals; instrument 2's day 3 revised
     // (received on day 22), so the ingest is no append; instrument 3 kept.

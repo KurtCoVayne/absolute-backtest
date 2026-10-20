@@ -278,7 +278,11 @@ impl HotVersion {
                 // segment the version keeps for its other instruments
                 // (E-111).
                 for (i, table) in blocks.iter().enumerate() {
-                    if let Some(run) = table.iter().map(|l| &segments[l.seg as usize].runs[l.run as usize]).find(|run| run.exponent != presence.instruments[i].exponents[c]) {
+                    if let Some(run) = table
+                        .iter()
+                        .map(|l| &segments[l.seg as usize].runs[l.run as usize])
+                        .find(|run| run.exponent != presence.instruments[i].exponents[c])
+                    {
                         return Err(DataError::Schema(format!(
                             "`{}`: instrument {}'s `{}` run is at exponent {}, its presence says {}",
                             manifest.relation, i, col.name, run.exponent, presence.instruments[i].exponents[c]

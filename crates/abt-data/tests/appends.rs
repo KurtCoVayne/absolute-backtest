@@ -693,7 +693,20 @@ fn a_rebuild_keeps_the_instruments_appended_since_publication() {
     let va = a.ingest(REL, &[close_rows(&revision)], "test", hot()).unwrap();
     let vb = b.ingest(REL, &[close_rows(&revision)], "test", BTreeMap::new()).unwrap();
     assert_ne!(va, v1, "a new version");
-    let rows_of = |id: u64| a.read(&va, &RowFilter { identity: Some(vec![id]), latest_only: true, ..RowFilter::default() }).unwrap().iter().map(|b| b.num_rows()).sum::<usize>();
+    let rows_of = |id: u64| {
+        a.read(
+            &va,
+            &RowFilter {
+                identity: Some(vec![id]),
+                latest_only: true,
+                ..RowFilter::default()
+            },
+        )
+        .unwrap()
+        .iter()
+        .map(|b| b.num_rows())
+        .sum::<usize>()
+    };
     assert_eq!((rows_of(1), rows_of(2)), (20, 20), "every instrument's rows");
     same_reads(&a, &va, &b, &vb, &mut Rng(4), &[1, 2], 19_000, 26);
 }

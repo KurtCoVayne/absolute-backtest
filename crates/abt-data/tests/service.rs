@@ -477,7 +477,13 @@ fn a_classless_schema_listing_leaves_derived_relations_out() {
         let mut st = svc.store_mut();
         let schema = st.schema("calendar_label").unwrap();
         st.cache_put(&abt_wire::Hash::of(b"an aggregate"), &schema, &[calendar_rows(&[T0])]).unwrap();
-        let name = st.registry.schemas(None).into_iter().map(|s| s.name).find(|n| n.starts_with("cache.")).expect("the cache object's relation");
+        let name = st
+            .registry
+            .schemas(None)
+            .into_iter()
+            .map(|s| s.name)
+            .find(|n| n.starts_with("cache."))
+            .expect("the cache object's relation");
         // Its rows are in its partitions only: no log segment.
         assert!(!st.root().join("log").join(&name).exists(), "a log for {}", name);
         name

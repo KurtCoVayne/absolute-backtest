@@ -4446,9 +4446,24 @@ mod ticker_tests {
     #[test]
     fn a_ticker_listed_after_the_bundle_date_is_its_first_carrier() {
         let table = vec![
-            Security { id: 1, ticker: "OLD".into(), from: 0, to: Some(100) },
-            Security { id: 2, ticker: "OLD".into(), from: 200, to: None },
-            Security { id: 3, ticker: "NEW".into(), from: 500, to: None },
+            Security {
+                id: 1,
+                ticker: "OLD".into(),
+                from: 0,
+                to: Some(100),
+            },
+            Security {
+                id: 2,
+                ticker: "OLD".into(),
+                from: 200,
+                to: None,
+            },
+            Security {
+                id: 3,
+                ticker: "NEW".into(),
+                from: 500,
+                to: None,
+            },
         ];
         assert_eq!(resolve_ticker(&table, "OLD", 50), Ok(1));
         assert_eq!(resolve_ticker(&table, "OLD", 250), Ok(2));

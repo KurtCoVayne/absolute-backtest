@@ -270,7 +270,9 @@ fn a_compare_steps_metrics_may_be_bracketed() {
     };
     for by in ["[return, max_drawdown, sharpe]", "return, max_drawdown, sharpe"] {
         let p = one(&study(by), "s").unwrap();
-        let Some(Step::Compare { by, .. }) = p.steps.iter().find(|s| s.kind() == "compare") else { panic!("{:?}", p.steps) };
+        let Some(Step::Compare { by, .. }) = p.steps.iter().find(|s| s.kind() == "compare") else {
+            panic!("{:?}", p.steps)
+        };
         assert_eq!(by, &vec!["return".to_string(), "max_drawdown".to_string(), "sharpe".to_string()]);
     }
 }

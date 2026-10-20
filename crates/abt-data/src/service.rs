@@ -38,7 +38,6 @@ use crate::stream::{self, Resolved, Stream, BATCH_EVENTS, SUBSCRIPTION_WINDOW};
 /// Frames in flight per direction of an in-process connection.
 const INPROC_BOUND: usize = 64;
 
-
 pub struct DataService {
     store: RwLock<Store>,
     /// A subscription's window of unacknowledged events (D-5.6).

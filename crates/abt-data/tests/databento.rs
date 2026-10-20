@@ -492,7 +492,11 @@ fn a_thin_nights_gaps_stay_inside_the_trade_date() {
 /// merged 2010-06 to 2012-11 into weekly sessions.
 #[test]
 fn the_daily_break_ends_a_session_in_every_era_of_cme_hours() {
-    let mut records = vec![def(1, "ESU0", b'F', "2010-09-17T13:30:00"), def(2, "ESU3", b'F', "2013-09-20T13:30:00"), def(3, "ESH6", b'F', "2016-03-18T13:30:00")];
+    let mut records = vec![
+        def(1, "ESU0", b'F', "2010-09-17T13:30:00"),
+        def(2, "ESU3", b'F', "2013-09-20T13:30:00"),
+        def(3, "ESH6", b'F', "2016-03-18T13:30:00"),
+    ];
     // (contract, trade dates, the evening's open and the minutes after it
     // that print, in UTC): New York is four hours behind in June and July,
     // five in March.

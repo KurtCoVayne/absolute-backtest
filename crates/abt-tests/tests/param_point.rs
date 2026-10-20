@@ -63,7 +63,15 @@ fn request(point: &[(&str, &str)]) -> KernelRequest {
         op: KernelOp::Run,
         sources: Some(sources),
         strategy: Some("param_point".into()),
-        point: Some(point.iter().map(|(n, v)| ParamValue { name: n.to_string(), value: v.to_string() }).collect()),
+        point: Some(
+            point
+                .iter()
+                .map(|(n, v)| ParamValue {
+                    name: n.to_string(),
+                    value: v.to_string(),
+                })
+                .collect(),
+        ),
         what: None,
         run_id: None,
         text: None,

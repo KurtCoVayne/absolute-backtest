@@ -36,7 +36,11 @@ fn program(name: &str, universe: &str, rules: &str) -> String {
 
 fn digest(r: &RunResult) -> Vec<String> {
     let mut out: Vec<String> = r.decisions.iter().map(|d| format!("{} {}", d.t, r.describe_decision(&d.decision))).collect();
-    out.extend(r.fills.iter().map(|f| format!("fill {} {} {:x} {:x}", f.t, r.symbols[f.equity as usize], f.quantity.to_bits(), f.price.to_bits())));
+    out.extend(
+        r.fills
+            .iter()
+            .map(|f| format!("fill {} {} {:x} {:x}", f.t, r.symbols[f.equity as usize], f.quantity.to_bits(), f.price.to_bits())),
+    );
     out.push(format!("cash {:x}", r.final_cash.to_bits()));
     out
 }
@@ -63,7 +67,13 @@ fn a_list_gated_universe_binds_its_lists_members_and_runs_the_same() {
     // The gated binding is its members'; the other every instrument's.
     let bg = bind_at(&pg, &client(), &point_of(&pg, &[]), None).unwrap();
     let bo = bind_at(&po, &client(), &point_of(&po, &[]), None).unwrap();
-    let scope: Vec<String> = bg.scope.clone().expect("a scoped binding").iter().map(|&id| bg.symbols.name(bg.ids.iter().position(|&x| x == id).unwrap() as u32).to_string()).collect();
+    let scope: Vec<String> = bg
+        .scope
+        .clone()
+        .expect("a scoped binding")
+        .iter()
+        .map(|&id| bg.symbols.name(bg.ids.iter().position(|&x| x == id).unwrap() as u32).to_string())
+        .collect();
     assert_eq!(scope, vec!["E1", "E2", "E3"]);
     assert_eq!(bo.scope, None);
     // And both runs decide, fill and end alike.
