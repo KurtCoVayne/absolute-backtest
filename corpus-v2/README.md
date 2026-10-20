@@ -28,7 +28,7 @@ libraries a unit reads directly.
 strategy NAME {
   data       { class CLASS   need ...   require reviewed | allow unreviewed   prefer latest | version V | base finest   [budget { ... }] }
   uses       LIB, LIB, ...
-  calendars  { NAME = base | days | weeks(n) | months(n) | years(n) | sessions | sessions of "ROOT"   ... }
+  calendars  { NAME = base | minutes(n) | hours(n) | days | weeks(n) | months(n) | years(n) | sessions | sessions of "ROOT"   ... }
   clock      { decide on CALENDAR [at session + OFFSET] }
   universe   { [instruments { NAME [from DATE]; ... }]   rules for universe(A, @T) }
   params     { NAME : TYPE = LITERAL [in LO..HI]   ... }

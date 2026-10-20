@@ -3790,6 +3790,7 @@ fn collect_vars(rule: &Rule, f: &mut dyn FnMut(&str)) {
 pub fn deadline_of(prog: &Program) -> i64 {
     match (&prog.decision_cal, prog.base.nanos()) {
         (Cal::Base, Some(n)) => n,
+        (Cal::Minutes(m), _) => *m as i64 * time::MIN,
         (Cal::Weeks(w), _) => *w as i64 * 7 * time::DAY,
         (Cal::Months(m), _) => *m as i64 * 30 * time::DAY,
         (Cal::Years(y), _) => *y as i64 * 365 * time::DAY,

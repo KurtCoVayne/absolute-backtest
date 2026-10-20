@@ -1178,8 +1178,22 @@ impl<'a> Checker<'a> {
                 if cal.is_sessions() && !self.demand.sessions && self.demand.needs > 0 {
                     self.unit_diag(Code::X, *sp, format!("calendar `{}` is `{}`, but the data block does not `need sessions`", name, cal));
                 }
-                if matches!(cal, Cal::Weeks(0) | Cal::Months(0) | Cal::Years(0)) {
+                if matches!(cal, Cal::Minutes(0) | Cal::Weeks(0) | Cal::Months(0) | Cal::Years(0)) {
                     self.unit_diag(Code::X, *sp, format!("calendar `{}` counts zero periods", name));
+                }
+                // A minute calendar groups whole base bars.
+                if let Cal::Minutes(n @ 1..) = cal {
+                    match self.base.nanos() {
+                        None => self.unit_diag(
+                            Code::X,
+                            *sp,
+                            format!("calendar `{}` is `{}`, finer than a day: it needs a sub-daily base, and the base is {}", name, cal, self.base),
+                        ),
+                        Some(bar) if (*n as i64 * crate::kernel::time::MIN) % bar != 0 => {
+                            self.unit_diag(Code::X, *sp, format!("calendar `{}` is `{}`, which is not a whole number of the base's {} bars", name, cal, self.base))
+                        }
+                        Some(_) => {}
+                    }
                 }
                 self.calendars.insert(name.clone(), cal.clone());
                 self.cal_names.entry(cal.clone()).or_insert_with(|| name.clone());

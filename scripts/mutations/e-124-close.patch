@@ -1,0 +1,17 @@
+# proposition: E-124 (a minute calendar's period holds the bars closing in it)
+# mutation: periods keyed on their start, the bar closing at a period's end put in the next
+# test: cargo test -p abt-tests --test hour_bars
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/time.rs b/crates/abt-kernel/src/kernel/time.rs
+index 8c8935f..222bebe 100644
+--- a/crates/abt-kernel/src/kernel/time.rs
++++ b/crates/abt-kernel/src/kernel/time.rs
+@@ -72,7 +72,7 @@ pub fn period_key(cal: &Cal, t: i64) -> i64 {
+         Cal::Base => t,
+         // The period whose end is the ceiling of `t`: bars are labelled at
+         // their close.
+-        Cal::Minutes(n) => floor_div(t.saturating_sub(1), (*n).max(1) as i64 * MIN) + 1,
++        Cal::Minutes(n) => floor_div(t, (*n).max(1) as i64 * MIN),
+         Cal::Days => day_key(t),
+         Cal::Weeks(n) => floor_div(week_key(t), (*n).max(1) as i64),
+         Cal::Months(n) => {

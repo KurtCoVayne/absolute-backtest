@@ -159,6 +159,7 @@ Calendars are declared, not fixed. The declarable constructors are:
 | Constructor | Classes | Label |
 | --- | --- | --- |
 | `base` | singletons | the bar |
+| `minutes(n)`, `hours(n)` (for a sub-daily base whose bar divides them) | the base bars whose closes fall in one UTC period of n minutes (`hours(n)`: 60n), `(k·n, (k+1)·n]` from the epoch: `hours(2)` holds the bars closing after 12:00 up to 14:00 (E-124) | the period's last bar |
 | `days` (for a sub-daily base) | the base bars of one civil date | the day's last bar |
 | `weeks(n)`, `months(n)`, `years(n)` | n consecutive civil weeks, months, years, anchored at the domain's first element or at a named anchor date | the period's last bar |
 | `sessions` (a class property, futures and intraday equities) | the base bars of one trading session of the instrument | the session's last bar |
