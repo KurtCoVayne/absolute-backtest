@@ -31,7 +31,7 @@ use super::presence::{Instrument, Presence};
 use super::segment::{Sealed, Writer};
 use super::version::HotVersion;
 use crate::error::DataError;
-use crate::staging::build::SEGMENT_BYTES;
+use crate::staging::build::segment_bytes;
 
 /// What a consolidation did.
 #[derive(Clone, Debug)]
@@ -267,7 +267,7 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
             }
             let blocks: Vec<Sealed> = encs.iter().zip(&values).map(|(enc, values)| Sealed { enc, values }).collect();
             w.run(ordinal as u32, 0, exponent, &blocks, &Cumulative::ZERO, 0);
-            if w.len() >= SEGMENT_BYTES {
+            if w.len() >= segment_bytes() {
                 finish(root, &seg_dir, c, &mut w, &mut lists, &mut written)?;
             }
         }

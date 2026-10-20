@@ -1,0 +1,16 @@
+# proposition: E-122 (a kept instrument's bars are copied only where its buckets keep their labels)
+# mutation: the bars copied under moved labels
+# test: cargo test -p abt-data --test hot a_moved_bucket_label_rebuilds_the_kept_bars_under_it
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/staging/build.rs b/crates/abt-data/src/staging/build.rs
+--- a/crates/abt-data/src/staging/build.rs
++++ b/crates/abt-data/src/staging/build.rs
+@@ -749,7 +749,7 @@
+         for (_, l) in inst.rows_with_labels(0, presence.labels.len() as u32) {
+             let label = presence.labels[l as usize];
+             let at = *indexes[li].get(&level.bucket_start(label))?;
+-            if labels_of[li][at as usize].1 != label {
++            if labels_of[li][at as usize].1 != label && false {
+                 return None;
+             }
+             positions.push(at);

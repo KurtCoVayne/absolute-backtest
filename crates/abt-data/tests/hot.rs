@@ -377,6 +377,51 @@ fn the_ladder_bars_equal_their_buckets_recomputed_from_base_rows() {
 /// The open checked that run against the presence before the new run
 /// superseded it and refused the version (`equity.open`, Norgate 2015 onto
 /// 1990–2014). The version opens and reads as its Parquet twin.
+/// E-122: a kept instrument's bars are copied from the version before
+/// only while its buckets keep their labels. A new instrument's rows later
+/// in a week than any stored row move the week's label: the kept
+/// instruments' weekly bars there are rebuilt from their rows, the others
+/// copied, and every read is the Parquet store's.
+#[test]
+fn a_moved_bucket_label_rebuilds_the_kept_bars_under_it() {
+    // A Monday, then one row a week per instrument.
+    let day = |d: i64| (19_002 + d) * NANOS_PER_DAY;
+    let rows: Vec<(u64, i64, i64, f64)> = (0..30)
+        .flat_map(|w| (1..=3u64).map(move |id| (id, day(7 * w), day(7 * w) + NANOS_PER_HOUR, 10.0 * id as f64 + w as f64 / 4.0)))
+        .collect();
+    // Instrument 4 on the Tuesdays of weeks 10 to 14, and instrument 3's
+    // first week revised (the ingest is no append).
+    let mut more: Vec<(u64, i64, i64, f64)> = (10..15).map(|w| (4u64, day(7 * w + 1), day(7 * w + 1) + NANOS_PER_HOUR, 40.0 + w as f64)).collect();
+    more.push((3, day(0), day(200), 31.5));
+    more.sort_by_key(|r| (r.1, r.0));
+    let mut a = Store::temporary("hot-moved-label-a").unwrap();
+    let mut b = Store::temporary("hot-moved-label-b").unwrap();
+    let v1 = a.ingest("equity.close", &[close_rows(&rows)], "test", hot()).unwrap();
+    b.ingest("equity.close", &[close_rows(&rows)], "test", BTreeMap::new()).unwrap();
+    // (The ingest's S4 checks every rebuilt or copied bar against its rows.)
+    let va = a.ingest("equity.close", &[close_rows(&more)], "test", hot()).unwrap();
+    let vb = b.ingest("equity.close", &[close_rows(&more)], "test", BTreeMap::new()).unwrap();
+    assert_ne!(v1, va, "a new version");
+    let (h1, h2) = (a.hot(&v1).unwrap(), a.hot(&va).unwrap());
+    let week = h2.levels.iter().position(|l| l.calendar == "1w").expect("a weekly level");
+    let o = h2.levels[week].presence.ordinal(1).unwrap() as usize;
+    let o1 = h1.levels[week].presence.ordinal(1).unwrap() as usize;
+    assert_ne!(
+        h2.block_hash_at(week, 3, o, 0),
+        h1.block_hash_at(week, 3, o1, 0),
+        "instrument 1's weekly receipts moved with the labels"
+    );
+    let f = RowFilter {
+        identity: Some(vec![1]),
+        ..RowFilter::default()
+    };
+    let bars = h2.read_at(week, &f, 0, u32::MAX).unwrap();
+    let labels: Vec<i64> = (0..bars.len()).map(|i| bars.t[i]).collect();
+    let want: Vec<i64> = (0..30).map(|w| day(7 * w + (10..15).contains(&w) as i64)).collect();
+    assert_eq!(labels, want, "instrument 1's weeks labelled at their latest row of any instrument");
+    same_reads(&a, &va, &b, &vb, &mut Rng(3), &[1, 2, 3, 4], 19_002, 7 * 30);
+}
+
 #[test]
 fn a_finer_exponent_in_a_new_version_opens() {
     let day = |d: i64| (19_000 + d) * NANOS_PER_DAY;

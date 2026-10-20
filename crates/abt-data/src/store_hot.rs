@@ -167,7 +167,7 @@ impl Store {
         {
             let v = HotVersion::open_manifest_at(&self.root, &built.staging_dir, built.manifest.clone(), true)?;
             build::verify_ranges(&v, &planned, 8, &mut verified)?;
-            build::verify_ladder(&v, &planned, &mut verified)?;
+            build::verify_ladder(&v, &planned, prev.as_deref(), &mut verified)?;
         }
         let t4 = t0.elapsed();
         build::publish(&self.root, &built)?;
