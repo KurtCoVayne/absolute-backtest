@@ -2663,9 +2663,14 @@ batch driver agree on every corpus program. Each bless since:
   refused the version ("instrument 0's `O` run is at exponent 3, its
   presence says 6"). The check now applies to the blocks each column
   keeps. It was not new: the staging that E-109 made fast reached the
-  open in 138 s where it had not in 504. `abt-data/tests/hot.rs`: two
-  instruments at three decimals, one appended at six, read as their
-  Parquet twin.
+  open in 138 s where it had not in 504. `abt-data/tests/hot.rs`: three
+  instruments at three decimals; an ingest that is no pure append (one
+  instrument's next days at six decimals, another's row revised) stages a
+  version that rebuilds the first at the finer exponent and keeps the
+  third in the previous segments; it opens and reads as its Parquet twin.
+  (A pure append joins the tails under the published version and stages
+  nothing; the first form of this test appended only and checked
+  nothing.)
 - **E-112 (Q-5.1; a claim on one side of an interval).** The house
   claim `survives_costs` (`bootstrap_sharpe on returns of base expect
   interval excludes 0`) held for a reliably negative Sharpe: an
