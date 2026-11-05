@@ -2038,8 +2038,10 @@ pub struct Kernel<'p> {
     /// across entities (no cross-sectional literal).
     pub(crate) parallel_ok: Vec<bool>,
     /// The open-loop derived relations in stratum order, warmed before a
-    /// decision when the run has workers.
+    /// decision when the run has workers, and those of them the last
+    /// decision demanded (what the next one warms).
     pub(crate) warm_rels: Vec<usize>,
+    pub(crate) warm_next: Option<Vec<usize>>,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -2898,6 +2900,7 @@ impl<'p> Kernel<'p> {
             workers: Vec::new(),
             parallel_ok: (0..prog.rules.len()).map(|ri| !crate::plan::planner::cross_sectional(prog, ri)).collect(),
             warm_rels: Vec::new(),
+            warm_next: None,
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),

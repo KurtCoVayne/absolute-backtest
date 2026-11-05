@@ -132,19 +132,20 @@ impl<'p> Kernel<'p> {
         self.workers = workers;
     }
 
-    /// Before a bar's decision: derive the open-loop relations at `t` in
-    /// stratum order, each through `call`, so that every entity-local rule
-    /// is cut across the workers while its inputs are already memoised, and
-    /// `decide` finds them. A halt met here is memoised and met again by the
-    /// decision that demands it (Kleene: an instance halts where it is
-    /// demanded), so none is raised here.
+    /// Before a bar's decision: derive the open-loop relations the last
+    /// decision demanded (every one, at the first) at `t` in stratum order,
+    /// each through `call`, so that every entity-local rule is cut across
+    /// the workers while its inputs are already memoised, and `decide` finds
+    /// them. A halt met here is memoised and met again by the decision that
+    /// demands it (Kleene: an instance halts where it is demanded), so none
+    /// is raised here.
     pub(crate) fn warm_strata(&mut self, t: i64) {
         if self.threads() <= 1 || self.worker.is_some() {
             return;
         }
         self.prepare_workers();
         self.seal_stores();
-        let rels = self.warm_rels.clone();
+        let rels = self.warm_next.clone().unwrap_or_else(|| self.warm_rels.clone());
         for rel in rels {
             let (key_pos, arity) = {
                 let info = &self.rels[rel];
@@ -158,6 +159,19 @@ impl<'p> Kernel<'p> {
             pattern[key_pos] = Some(Value::Time(t));
             let _ = self.call(rel, &pattern);
         }
+    }
+
+    /// After a decision: which of the open-loop relations it demanded at
+    /// `t` (their result is in the memo), in stratum order -- the next
+    /// decision warms those and no other, so a relation a program reads
+    /// only at some bars costs nothing at the others.
+    pub(crate) fn note_demanded(&mut self, t: i64) {
+        if self.threads() <= 1 || self.worker.is_some() {
+            return;
+        }
+        let key_of = |rel: usize| (rel, vec![Value::Time(t)]);
+        let demanded: Vec<usize> = self.warm_rels.iter().copied().filter(|&rel| self.memo.get(&key_of(rel)).is_some()).collect();
+        self.warm_next = Some(demanded);
     }
 
     /// `solve_kleene_block` over one starting binding, cut by entity across

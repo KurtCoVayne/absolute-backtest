@@ -404,9 +404,6 @@ impl<'p, 'e> Fold<'p, 'e> {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
-        // With workers, the open-loop relations are derived now, each
-        // entity-local rule cut across the threads (F-5.3, `parallel.rs`).
-        self.kernel.warm_strata(label);
         let mut by_equity = self.kernel.decide_at(label, &mut self.result)?;
         if let Some(source) = self.control.as_ref().and_then(|c| c.take_flatten()) {
             by_equity = self.flatten(label, by_equity, source);

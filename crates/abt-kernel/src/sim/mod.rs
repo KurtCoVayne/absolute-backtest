@@ -1485,7 +1485,12 @@ impl Kernel<'_> {
         if clock_syms.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
             return Ok(BTreeMap::new());
         }
+        // With workers, the open-loop relations this decision will demand
+        // are derived first, each entity-local rule cut across the threads
+        // (F-5.3, `parallel.rs`).
+        self.warm_strata(t);
         let tuples = self.call(decide, &[Some(Value::Time(t)), None])?;
+        self.note_demanded(t);
         let mut by_equity: BTreeMap<Sym, Vec<(Decision, usize)>> = BTreeMap::new();
         for (tu, rule) in tuples.iter() {
             let Value::Decision(d) = &tu[1] else {
