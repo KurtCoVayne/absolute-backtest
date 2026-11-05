@@ -770,6 +770,14 @@ fn pushdown_on() -> bool {
     true
 }
 
+fn one_thread() -> usize {
+    1
+}
+
+fn parallel_min_rows_default() -> usize {
+    64
+}
+
 /// Executor configuration: part of the kernel, not of the program (section 6).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecConfig {
@@ -859,17 +867,22 @@ pub struct ExecConfig {
     #[serde(skip, default = "pushdown_on")]
     pub set_eval: bool,
     /// Worker kernels for the entity-local rules (F-5.3): `1` is one thread,
-    /// `0` the machine's cores up to four. The result does not depend on it.
+    /// `0` the machine's cores up to four. The result does not depend on it,
+    /// so it is not part of the configuration's identity (D-6.1), nor are
+    /// `parallel_min_rows` and `trim_stores`.
+    #[serde(skip, default = "one_thread")]
     pub threads: usize,
     /// Rows a rule must bind after its first literal before it is cut across
     /// the workers (below it the fan-out costs more than the rows). The
     /// suites set it to 1 so that every entity-local rule takes the cut.
+    #[serde(skip, default = "parallel_min_rows_default")]
     pub parallel_min_rows: usize,
     /// Drop the stored rows no reader can reach any more at every barrier
     /// (the retention horizon of 06-performance 3.1): what the windows,
     /// lags, as-of reads and the executor look back over is kept, the rest
     /// goes. Off for a kernel that is read after its run (a ledger, the
     /// state tables, a query at an old bar).
+    #[serde(skip)]
     pub trim_stores: bool,
     /// The pre-trade limits of the execution block (K-3.5).
     #[serde(default)]
@@ -2109,6 +2122,9 @@ pub struct Kernel<'p> {
     /// decision demanded (what the next one warms).
     pub(crate) warm_rels: Vec<usize>,
     pub(crate) warm_next: Option<Vec<usize>>,
+    /// Per relation, whether anything in the run reads it (`read_relations`):
+    /// a streamed tuple of a relation nothing reads is not kept (E-127).
+    pub(crate) read_rels: Vec<bool>,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -2944,7 +2960,7 @@ impl<'p> Kernel<'p> {
         let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
         let n_rels = rels.len();
         let literal_counts: Vec<Vec<(u64, u64, u64)>> = prog.rules.iter().map(|r| vec![(0, 0, 0); r.body.len()]).collect();
-        Ok(Kernel {
+        let mut k = Kernel {
             prog,
             source: prog,
             plan_order: vec![None; prog.rules.len()],
@@ -2969,6 +2985,7 @@ impl<'p> Kernel<'p> {
             rule_has_window: prog.rules.iter().map(|r| r.body.iter().any(|l| matches!(l, crate::ir::Literal::Agg { .. }))).collect(),
             warm_rels: Vec::new(),
             warm_next: None,
+            read_rels: Vec::new(),
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),
@@ -3025,7 +3042,10 @@ impl<'p> Kernel<'p> {
             stats: KernelStats::default(),
             coverage: vec![(0, 0, 0); n_rels],
             run_warnings,
-        })
+        };
+        let read = k.read_relations();
+        k.read_rels = (0..n_rels).map(|r| read.contains(&r)).collect();
+        Ok(k)
     }
 
     /// What every relation derived so far (section 7, diagnostics): the

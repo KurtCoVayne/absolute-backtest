@@ -2963,7 +2963,14 @@ batch driver agree on every corpus program. Each bless since:
   dropping the fallback is the spec decision 3.3 needs.
   `tests/fold.rs::the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers`
   asserts the projected stream (`listed` read by the universe, `open` and
-  `ticker` not).
+  `ticker` not). [D] The kernel also drops an unread relation's tuple at
+  its door (`Fold::step_inner`, `Kernel::read_rels`): a live session
+  streams whole, so the kernel service and the in-process replay hold the
+  same rows either way (`abt/tests/deployment.rs`), and the front is
+  bounded whatever the data layer sends. `threads`, `parallel_min_rows`
+  and `trim_stores` are `#[serde(skip)]` on `ExecConfig`, as `pushdown`:
+  none changes the result, so none is part of the configuration's
+  identity (the binding table's `configuration` column, D-6.1).
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

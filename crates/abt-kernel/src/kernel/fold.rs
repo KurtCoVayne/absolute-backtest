@@ -348,6 +348,12 @@ impl<'p, 'e> Fold<'p, 'e> {
         match ev {
             Event::Tuple { seq, rel, key, r, tuple } => {
                 self.kernel.received_r = self.kernel.received_r.max(r);
+                // A tuple of a relation nothing in the run reads is not kept (the
+                // stream projection at the kernel's door, E-127: a live session
+                // streams whole).
+                if !self.kernel.read_rels.get(rel).copied().unwrap_or(true) {
+                    return Ok(());
+                }
                 // A checkpoint at the end of a decision bar, before the next
                 // tuple is stored: the replay resumes at this tuple.
                 if self.ran_decision {
