@@ -46,6 +46,10 @@ pub(crate) type MemoKey = (usize, Vec<Value>);
 pub(crate) struct Memo {
     by_time: BTreeMap<i64, FxHashMap<MemoKey, Derived>>,
     latest: FxHashMap<(usize, Vec<Value>), (i64, Derived)>,
+    /// Of the evicted buckets, the latest tuples of each entity of each
+    /// derived relation with one: what a read of an entity's previous row
+    /// behind the horizon finds once the stores are trimmed (E-126).
+    latest_rows: FxHashMap<(usize, Value), (i64, Derived)>,
     len: usize,
 }
 
@@ -80,6 +84,16 @@ impl Memo {
         *self = Memo::default();
     }
 
+    /// The oldest bucket held, if any.
+    pub(crate) fn oldest(&self) -> Option<i64> {
+        self.by_time.keys().next().copied()
+    }
+
+    /// An entity's latest tuples of `rel` among the evicted buckets.
+    pub(crate) fn latest_row(&self, rel: usize, entity: &Value) -> Option<&(i64, Derived)> {
+        self.latest_rows.get(&(rel, entity.clone()))
+    }
+
     /// Every result, bucket by bucket (a worker's overlay absorbed).
     pub(crate) fn into_entries(self) -> impl Iterator<Item = (MemoKey, Derived)> {
         self.by_time.into_values().flatten()
@@ -91,12 +105,30 @@ impl Memo {
 
     /// Drop every result keyed before `cutoff`, keeping the latest of each
     /// `keep` relation per inputs.
-    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>) {
+    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>, entity_pos: &[Option<usize>]) {
         let recent = self.by_time.split_off(&cutoff);
         let old = std::mem::replace(&mut self.by_time, recent);
         for (t, bucket) in old {
             self.len -= bucket.len();
             for (k, d) in bucket {
+                // Per entity, the latest tuples: a run whose stores are
+                // trimmed answers a read of the entity's previous row from
+                // here (`Kernel::call`).
+                if let Some(Some(e)) = entity_pos.get(k.0) {
+                    let mut by_entity: FxHashMap<Value, Vec<(Tuple, usize)>> = FxHashMap::default();
+                    for (tu, ri) in d.iter() {
+                        by_entity.entry(tu[*e].clone()).or_default().push((tu.clone(), *ri));
+                    }
+                    for (ent, rows) in by_entity {
+                        match self.latest_rows.get_mut(&(k.0, ent.clone())) {
+                            Some(slot) if slot.0 < t => *slot = (t, Arc::new(rows)),
+                            Some(_) => {}
+                            None => {
+                                self.latest_rows.insert((k.0, ent), (t, Arc::new(rows)));
+                            }
+                        }
+                    }
+                }
                 if !keep.contains(&k.0) {
                     continue;
                 }
@@ -778,6 +810,10 @@ fn parallel_min_rows_default() -> usize {
     64
 }
 
+fn memo_min_default() -> usize {
+    200_000
+}
+
 /// Executor configuration: part of the kernel, not of the program (section 6).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecConfig {
@@ -884,6 +920,10 @@ pub struct ExecConfig {
     /// state tables, a query at an old bar).
     #[serde(skip)]
     pub trim_stores: bool,
+    /// Memo entries below which no eviction pass runs (200,000; the suites
+    /// set 0 to evict at every barrier). Not part of the identity.
+    #[serde(skip, default = "memo_min_default")]
+    pub memo_min: usize,
     /// The pre-trade limits of the execution block (K-3.5).
     #[serde(default)]
     pub limits: Vec<crate::check::Limit>,
@@ -1054,6 +1094,7 @@ impl Default for ExecConfig {
             threads: 1,
             parallel_min_rows: 64,
             trim_stores: false,
+            memo_min: 200_000,
             limits: Vec::new(),
             late_reject: false,
             memory_budget: None,
@@ -2125,6 +2166,10 @@ pub struct Kernel<'p> {
     /// Per relation, whether anything in the run reads it (`read_relations`):
     /// a streamed tuple of a relation nothing reads is not kept (E-127).
     pub(crate) read_rels: Vec<bool>,
+    /// The temporally recursive derived relations (a rule reads its head at
+    /// a strictly earlier bar: a total-return index, a cumulative split):
+    /// extended at every barrier before the stores are trimmed (E-126).
+    pub(crate) recursive_rels: Vec<usize>,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -2960,6 +3005,7 @@ impl<'p> Kernel<'p> {
         let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
         let n_rels = rels.len();
         let literal_counts: Vec<Vec<(u64, u64, u64)>> = prog.rules.iter().map(|r| vec![(0, 0, 0); r.body.len()]).collect();
+        let memo_min = cfg.memo_min;
         let mut k = Kernel {
             prog,
             source: prog,
@@ -2986,6 +3032,7 @@ impl<'p> Kernel<'p> {
             warm_rels: Vec::new(),
             warm_next: None,
             read_rels: Vec::new(),
+            recursive_rels: Vec::new(),
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),
@@ -3037,14 +3084,24 @@ impl<'p> Kernel<'p> {
             memo_horizon,
             asof_read,
             rows_lookback,
-            asof_memo_next: 200_000,
-            memo_min: 200_000,
+            asof_memo_next: memo_min.max(1),
+            memo_min,
             stats: KernelStats::default(),
             coverage: vec![(0, 0, 0); n_rels],
             run_warnings,
         };
         let read = k.read_relations();
         k.read_rels = (0..n_rels).map(|r| read.contains(&r)).collect();
+        k.recursive_rels = (0..n_rels)
+            .filter(|&r| {
+                !k.rels[r].stored
+                    && k.rels[r].rules.iter().any(|&ri| {
+                        prog.infos
+                            .get(ri)
+                            .is_some_and(|info| info.refs.iter().any(|a| a.name == k.rels[r].name && a.key_prov == crate::check::TimeProv::Strict))
+                    })
+            })
+            .collect();
         Ok(k)
     }
 
@@ -3132,8 +3189,11 @@ impl<'p> Kernel<'p> {
     /// recomputed if asked for, so this bounds memory, never changes results.
     pub fn evict_memo(&mut self, t: i64, keep_from: i64) {
         let Some(h) = self.memo_horizon else { return };
-        // A small memo is not worth a pass.
-        if self.memo.len() < self.memo_min && self.asof_memo.len() < self.memo_min {
+        // A small memo is not worth a pass -- unless the stores are trimmed:
+        // then the memo is evicted at every barrier, since what it would
+        // keep is unreachable and it would be the run's unbounded holder
+        // otherwise (its entries are keys, a few per bar).
+        if !self.cfg.trim_stores && self.memo.len() < self.memo_min && self.asof_memo.len() < self.memo_min {
             return;
         }
         let mut cutoff = (t - h).min(keep_from);
@@ -3144,7 +3204,8 @@ impl<'p> Kernel<'p> {
                 return;
             }
         }
-        self.memo.evict_before(cutoff, &self.asof_read);
+        let entity_pos: Vec<Option<usize>> = self.rels.iter().map(|r| if r.stored { None } else { r.entity_positions.first().copied() }).collect();
+        self.memo.evict_before(cutoff, &self.asof_read, &entity_pos);
         self.memo_stuck.retain(|k, _| Memo::time_of(k) >= cutoff);
         // The as-of shortcuts are not bucketed: scanned only once they double.
         if self.asof_memo.len() >= self.asof_memo_next {
@@ -3165,6 +3226,23 @@ impl<'p> Kernel<'p> {
         let Some(h) = self.memo_horizon else { return };
         if executor_floor == i64::MIN {
             return;
+        }
+        // A temporally recursive relation reaches back to each entity's
+        // first row: its chain is extended at this bar for every entity
+        // present, while the rows it reads are still held, so that no
+        // later demand has to walk behind the horizon. A halt met here is
+        // memoised and raised where a decision demands it.
+        for rel in self.recursive_rels.clone() {
+            let (key_pos, arity) = {
+                let info = &self.rels[rel];
+                (info.key_pos, self.prog.relations.get(&info.name).map(|s| s.args.len()).unwrap_or(0))
+            };
+            if arity == 0 {
+                continue;
+            }
+            let mut pattern = vec![None; arity];
+            pattern[key_pos] = Some(Value::Time(t));
+            let _ = self.call(rel, &pattern);
         }
         let mut cutoff = (t - h).min(executor_floor);
         for (res, n) in &self.rows_lookback {

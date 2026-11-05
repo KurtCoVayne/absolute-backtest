@@ -2940,7 +2940,24 @@ batch driver agree on every corpus program. Each bless since:
   rows ever inserted (`Store::inserted`). `tests/retention.rs` holds the
   trimmed run equal to the whole run on every corpus program and both
   books, alone and on four workers. The ADV walk now runs only when
-  impact is on (sim/mod.rs; it ran and was discarded before).
+  impact is on (sim/mod.rs; it ran and was discarded before). [D] A
+  temporally recursive relation (a rule reads its head at a strictly
+  earlier bar, the checker's own test: the total-return index the
+  executor marks at, the cumulative split) reaches back to each entity's
+  first row, so a name first priced long after its first row would walk
+  behind the horizon (a served MW14 run on a thousand synthetic names
+  expired its fills with `moc: no close`, the whole run did not): before
+  the stores are trimmed the kernel derives every such relation at the
+  bar for the whole cross-section (`Kernel::recursive_rels`), so each
+  entity's chain is extended while its inputs are held; with the stores
+  trimmed the memo is evicted at every barrier (what it would keep is
+  unreachable, and its entries are keys, a few per bar, so the count
+  threshold would never fire), and the eviction keeps each entity's
+  latest tuples of each derived relation (`Memo::latest_rows`), which a
+  derivation behind the memo's oldest bucket is answered from rather
+  than from rows the horizon dropped. `tests/retention.rs` adds MW14 over
+  120 names and six years (most names first priced long after their
+  first row), whole against trimmed, alone and on four workers.
 
 - **E-127 (06-performance 3.3, the stream projection; E-77; the
   primitives nothing reads).** 3.3 says the stream carries only the

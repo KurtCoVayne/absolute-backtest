@@ -44,3 +44,33 @@ fn a_trimmed_run_equals_the_whole_run_on_every_corpus_program_and_both_books() {
     assert!(programs >= 24, "{} programs ran", programs);
     assert!(trimmed_somewhere, "no program had rows behind its horizon: the test exercised nothing");
 }
+
+/// MW14 over a market longer than its horizon (the golden market's 80 weekly
+/// bars are under the 71 the book looks back over, so the corpus gate never
+/// trims it): 120 names over six years, so that most names are first priced
+/// long after their first row (the total-return index is a recursion back
+/// to it, E-126); whole against trimmed, alone and on four workers.
+#[test]
+fn mw14_over_a_market_longer_than_its_horizon_is_trimmed_and_equal() {
+    let names: Vec<String> = (0..120).map(|i| format!("S{:03}", i)).collect();
+    let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+    let p = abt_tests::program(&abt_tests::corpus_source("company", "mw14"), "mw14");
+    let ds = abt_kernel::data::synthetic_for_program(&p, &syms, (2010, 1, 4), 1500, 11);
+    let (whole, k0) = run_kernel(&p, &ds, ExecConfig::from_program(&p)).unwrap();
+    let (d0, rows0) = (tv::digest(&whole), k0.store_rows());
+    assert!(whole.bars.len() > 200, "{} bars", whole.bars.len());
+    assert!(whole.fills.len() > 100, "{} fills", whole.fills.len());
+    for threads in [1, 4] {
+        let mut cfg = ExecConfig::from_program(&p);
+        cfg.trim_stores = true;
+        cfg.threads = threads;
+        let (r, k) = run_kernel(&p, &ds, cfg).unwrap();
+        let d1 = tv::digest(&r);
+        if d0 != d1 {
+            let (at, a, b) = tv::first_difference(&d0, &d1).unwrap_or((0, String::new(), String::new()));
+            panic!("mw14 ({} thread(s)): the trimmed run differs at line {}:\n  whole:   {}\n  trimmed: {}", threads, at, a, b);
+        }
+        let dropped = k.stats().trimmed_rows;
+        assert!(dropped > 0 && k.store_rows() < rows0, "nothing trimmed: {} dropped, {} of {} rows held", dropped, k.store_rows(), rows0);
+    }
+}

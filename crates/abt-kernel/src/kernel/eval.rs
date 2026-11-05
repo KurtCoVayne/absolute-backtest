@@ -501,6 +501,23 @@ impl<'p> Kernel<'p> {
         if let Some(e) = self.memo_errors.get(&memo_key) {
             return Err(e.clone());
         }
+        // Behind the memo's oldest bucket with the stores trimmed (E-126),
+        // a derivation would read rows the horizon dropped: an entity's
+        // read of its previous row is answered from the latest tuples the
+        // eviction kept for it (at that bar, or none), and nothing is
+        // derived.
+        if self.cfg.trim_stores && !info.stored {
+            if let (Some(oldest), Some(e)) = (self.memo.oldest(), entity) {
+                if key < oldest {
+                    if let Some(v) = pattern[e].as_ref() {
+                        return Ok(match self.memo.latest_row(rel, v) {
+                            Some((t, d)) if *t == key => narrow(d),
+                            _ => Arc::new(Vec::new()),
+                        });
+                    }
+                }
+            }
+        }
         // WF-4 rules out a relation depending on itself at the same time;
         // debug builds (the tests) still check that the checker did its job.
         if cfg!(debug_assertions) && !self.in_progress.insert(memo_key.clone()) {
