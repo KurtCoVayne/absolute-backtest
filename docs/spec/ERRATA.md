@@ -2946,13 +2946,18 @@ batch driver agree on every corpus program. Each bless since:
   primitives nothing reads).** 3.3 says the stream carries only the
   relations the program reads outside pushdown aggregates; E-77 recorded
   that it carried every primitive the binding names. [D] The first step:
-  `Kernel::read_relations` is every relation a rule's body names in any
-  literal form, the executor's own reads (the price and volume relations,
-  the actions, the clock, an option's quotes) and the bar companions
-  `open`/`high`/`low` only when a decision can fill at the open or on a
-  limit or stop (`orders moo|moo_moc`, or `moo`, `moo_moc`, `limit`, `stop`
-  named in a decide rule's head); `bind::stream_spec` streams a bound
-  primitive only when it is read. A book that fills at the close (MW14,
+  `Kernel::read_relations` keeps every relation but the pure data a run
+  can prove it never reads: the bar companions `open`/`high`/`low` when no
+  rule names them, no decision can fill at the open or on a limit or stop
+  (`orders moo|moo_moc`, or `moo`, `moo_moc`, `limit`, `stop` named in a
+  decide rule's head) and the class has no contracts (an index option
+  exercises at the AM print), and the identity relations `ticker` and
+  `classification` when no rule names them; everything else streams,
+  because the executor and the kernel read relations by name that no rule
+  does (the settlements, the margins, the quotes: `tests/futures.rs` and
+  `tests/options.rs` caught a projection that reasoned from the rules
+  alone). `bind::stream_spec` streams a bound primitive only when it is
+  kept. A book that fills at the close (MW14,
   `moc`) no longer receives its open, high, low, listing, tickers or
   classification. [D] Not done, and recorded for the next step: a
   primitive read only inside a pushed-down aggregate still streams (the

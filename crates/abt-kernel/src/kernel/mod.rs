@@ -3183,13 +3183,16 @@ impl<'p> Kernel<'p> {
         self.stats.trimmed_rows += dropped;
     }
 
-    /// The stored relations anything in this run reads: every relation a
-    /// rule's body names, in any literal form, and those the executor and
-    /// the kernel read on their own (the price, volume and bar companions,
-    /// the actions, the clock). A primitive outside this set never has to
-    /// reach the kernel (06-performance 3.3: the stream projection).
+    /// The stored relations this run keeps: every one but the pure data a
+    /// run can prove it never reads -- the bar companions `open`, `high` and
+    /// `low` when no rule names them and no decision fills at the open or on
+    /// a limit or stop, and the identity relations `ticker` and
+    /// `classification` when no rule names them. The executor and the
+    /// kernel read other relations by name (the settlements, the margins,
+    /// the quotes), so nothing else is projected (06-performance 3.3,
+    /// E-127: the first step of the stream projection).
     pub fn read_relations(&self) -> FxHashSet<usize> {
-        let mut read: FxHashSet<usize> = FxHashSet::default();
+        let mut named: FxHashSet<usize> = FxHashSet::default();
         for rule in &self.prog.rules {
             let mut stack: Vec<&Literal> = rule.body.iter().collect();
             while let Some(lit) = stack.pop() {
@@ -3207,36 +3210,23 @@ impl<'p> Kernel<'p> {
                     _ => None,
                 };
                 if let Some(&id) = atom.and_then(|a| self.rel_ids.get(&a.name)) {
-                    read.insert(id);
+                    named.insert(id);
                 }
             }
         }
-        for id in [
-            self.price_rel,
-            self.volume_rel,
-            self.clock_rel,
-            self.split_rel,
-            self.dividend_rel,
-            self.delisted_rel,
-            self.special_dividend_rel,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            read.insert(id);
-        }
-        // The bar companions serve fills at the open and limit and stop
-        // orders; a book whose orders are market or at the close never
-        // reads them.
-        if self.orders_read_companions() {
-            for (id, _) in [self.open_rel, self.high_rel, self.low_rel].into_iter().flatten() {
-                read.insert(id);
-            }
-        }
-        if let Some(q) = &self.quote_cols {
-            read.insert(q.relation());
-        }
-        read
+        // Contracts settle and exercise on prints the companions carry (an
+        // index option at the AM print): a class with contracts keeps them.
+        let companions = self.orders_read_companions() || self.has_options || !self.contracts.is_empty();
+        (0..self.rels.len())
+            .filter(|&id| {
+                let name = self.rels[id].name.as_str();
+                match name {
+                    "open" | "high" | "low" => companions || named.contains(&id),
+                    "ticker" | "classification" => named.contains(&id),
+                    _ => true,
+                }
+            })
+            .collect()
     }
 
     /// Whether a decision of this program can fill at the open or on a
