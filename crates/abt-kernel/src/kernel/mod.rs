@@ -3163,6 +3163,76 @@ impl<'p> Kernel<'p> {
         self.stats.trimmed_rows += dropped;
     }
 
+    /// The stored relations anything in this run reads: every relation a
+    /// rule's body names, in any literal form, and those the executor and
+    /// the kernel read on their own (the price, volume and bar companions,
+    /// the actions, the clock). A primitive outside this set never has to
+    /// reach the kernel (06-performance 3.3: the stream projection).
+    pub fn read_relations(&self) -> FxHashSet<usize> {
+        let mut read: FxHashSet<usize> = FxHashSet::default();
+        for rule in &self.prog.rules {
+            let mut stack: Vec<&Literal> = rule.body.iter().collect();
+            while let Some(lit) = stack.pop() {
+                let atom = match lit {
+                    Literal::Atom(a) | Literal::Neg(a) => Some(a),
+                    Literal::AsOf { atom, .. } | Literal::Top { atom, .. } => Some(atom),
+                    Literal::Agg { conj, .. } => {
+                        stack.extend(conj.iter());
+                        None
+                    }
+                    Literal::Case { branches, .. } => {
+                        stack.extend(branches.iter().flat_map(|b| b.guard.iter()));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(&id) = atom.and_then(|a| self.rel_ids.get(&a.name)) {
+                    read.insert(id);
+                }
+            }
+        }
+        for id in [
+            self.price_rel,
+            self.volume_rel,
+            self.clock_rel,
+            self.split_rel,
+            self.dividend_rel,
+            self.delisted_rel,
+            self.special_dividend_rel,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            read.insert(id);
+        }
+        // The bar companions serve fills at the open and limit and stop
+        // orders; a book whose orders are market or at the close never
+        // reads them.
+        if self.orders_read_companions() {
+            for (id, _) in [self.open_rel, self.high_rel, self.low_rel].into_iter().flatten() {
+                read.insert(id);
+            }
+        }
+        if let Some(q) = &self.quote_cols {
+            read.insert(q.relation());
+        }
+        read
+    }
+
+    /// Whether a decision of this program can fill at the open or on a
+    /// limit or stop: the default order kind, or an order named in a
+    /// decide rule's head.
+    fn orders_read_companions(&self) -> bool {
+        fn names(t: &Term) -> bool {
+            match t {
+                Term::Ctor(c, subs, _) => matches!(c.as_str(), "moo" | "moo_moc" | "limit" | "stop") || subs.iter().any(names),
+                Term::Lit(Lit::Label(s) | Lit::Str(s), _) => matches!(s.as_str(), "moo" | "moo_moc" | "limit" | "stop"),
+                _ => false,
+            }
+        }
+        matches!(self.prog.default_order.as_str(), "moo" | "moo_moc") || self.prog.rules.iter().filter(|r| r.head.name == "decide").any(|r| r.head.terms.iter().any(names))
+    }
+
     /// Stored rows held now, every relation together.
     pub fn store_rows(&self) -> usize {
         self.stores.iter().map(|s| s.len()).sum()
@@ -3181,6 +3251,11 @@ impl<'p> Kernel<'p> {
     /// The kernel's symbol names, by symbol id (identifier order).
     pub fn symbol_names(&self) -> &[String] {
         self.symbols.names()
+    }
+
+    /// A relation's name, by id.
+    pub fn relation_name(&self, rel: usize) -> &str {
+        &self.rels[rel].name
     }
 
     pub fn relation_id(&self, name: &str) -> Option<usize> {

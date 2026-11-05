@@ -263,14 +263,16 @@ fn the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers
     assert_eq!(keys, sorted);
     let barriers = events.iter().filter(|e| matches!(e, StreamEvent::Barrier { cal, .. } if *cal == p.decision_cal)).count();
     assert_eq!(barriers, 20);
-    // Every tuple of a primitive the program reads (the bars, the actions,
-    // the listing and the tickers of five names over twenty bars), once;
-    // the catalog the demand does not ask for (the index membership) is
-    // not in the stream.
+    // Every tuple of a primitive the run reads, once (the stream carries no
+    // other: the projection of 06-performance 3.3, E-127); the catalog the
+    // demand does not ask for (the index membership) is not in the stream,
+    // nor are the bound primitives nothing reads (the open, high and low
+    // of a book that fills at the close, the listing, the tickers).
+    let read: std::collections::BTreeSet<String> = k.read_relations().into_iter().map(|r| k.relation_name(r).to_string()).collect();
     let expected: usize = ds
         .facts
         .iter()
-        .filter(|(name, _)| matches!(p.relations.get(name.as_str()).map(|s| &s.kind), Some(Kind::Primitive { .. })))
+        .filter(|(name, _)| matches!(p.relations.get(name.as_str()).map(|s| &s.kind), Some(Kind::Primitive { .. })) && read.contains(name.as_str()))
         .map(|(_, tuples)| tuples.len())
         .sum();
     assert!(
@@ -278,5 +280,12 @@ fn the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers
         "the market has a membership the demand does not read"
     );
     assert_eq!(keys.len(), expected);
-    assert!(expected >= 7 * 5 * 16, "open, high, low, close, volume, listed and ticker: {}", expected);
+    assert!(read.contains("close"), "the price relation is read: {:?}", read);
+    assert!(read.contains("listed"), "the universe reads the listing: {:?}", read);
+    assert!(
+        !read.contains("open") && !read.contains("ticker"),
+        "a relation nothing reads is projected away (market orders fill at the close): {:?}",
+        read
+    );
+    assert!(expected >= 5 * 16 && expected < 7 * 5 * 16, "what the book reads, not the seven primitives: {}", expected);
 }

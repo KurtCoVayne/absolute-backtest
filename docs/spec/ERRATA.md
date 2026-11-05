@@ -2942,6 +2942,29 @@ batch driver agree on every corpus program. Each bless since:
   books, alone and on four workers. The ADV walk now runs only when
   impact is on (sim/mod.rs; it ran and was discarded before).
 
+- **E-127 (06-performance 3.3, the stream projection; E-77; the
+  primitives nothing reads).** 3.3 says the stream carries only the
+  relations the program reads outside pushdown aggregates; E-77 recorded
+  that it carried every primitive the binding names. [D] The first step:
+  `Kernel::read_relations` is every relation a rule's body names in any
+  literal form, the executor's own reads (the price and volume relations,
+  the actions, the clock, an option's quotes) and the bar companions
+  `open`/`high`/`low` only when a decision can fill at the open or on a
+  limit or stop (`orders moo|moo_moc`, or `moo`, `moo_moc`, `limit`, `stop`
+  named in a decide rule's head); `bind::stream_spec` streams a bound
+  primitive only when it is read. A book that fills at the close (MW14,
+  `moc`) no longer receives its open, high, low, listing, tickers or
+  classification. [D] Not done, and recorded for the next step: a
+  primitive read only inside a pushed-down aggregate still streams (the
+  E-47 fallback to local evaluation needs its rows), so MW14's `close` and
+  `volume` -- the weekly `dvol` mean of daily close×volume has no
+  data-layer form yet, and `traded@weekly` is a `count` the pass refuses
+  -- stream whole; delivering pushed answers as stream relations and
+  dropping the fallback is the spec decision 3.3 needs.
+  `tests/fold.rs::the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers`
+  asserts the projected stream (`listed` read by the universe, `open` and
+  `ticker` not).
+
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
