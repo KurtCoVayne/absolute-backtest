@@ -38,9 +38,10 @@ const MULTI: [&str; 2] = ["text", "param"];
 /// `report` block (language-v2, 4.3 and 4.5); what remains here is what
 /// describes the run itself (its data, its window, the bundle date), the
 /// compiler's choices that keep the result, and the commands' arguments.
-const OPTIONS: [&str; 35] = [
+const OPTIONS: [&str; 36] = [
     "strategy",
     "evaluator",
+    "threads",
     "mode",
     "session",
     "deployment",
@@ -555,6 +556,13 @@ fn exec_config(args: &Args, prog: &crate::check::Program) -> ExecConfig {
             eprintln!("--evaluator: `{}` is not `set` or `tuple`", other);
             exit(2)
         }
+    };
+    cfg.threads = match args.opts.get("threads").map(|s| s.as_str()) {
+        None => 1,
+        Some(s) => s.parse::<usize>().unwrap_or_else(|_| {
+            eprintln!("--threads: `{}` is not a count (0 is the machine's cores, up to four)", s);
+            exit(2)
+        }),
     };
     cfg.memory_budget = args.opts.get("memory-budget").map(|s| {
         s.parse::<u64>().unwrap_or_else(|_| {
@@ -1300,7 +1308,7 @@ pub fn main_with(raw: Vec<String>) {
                 let run_s = total - loaded_at;
                 let s = &result.stats;
                 eprintln!(
-                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={}",
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} rows_state_groups={}",
                     loaded_at - checked_at,
                     checked_at,
                     run_s,
@@ -1317,7 +1325,10 @@ pub fn main_with(raw: Vec<String>) {
                     s.window_rows_cached,
                     s.late_tuples,
                     s.memo_entries,
-                    s.pushed_answers
+                    s.pushed_answers,
+                    s.parallel_steps,
+                    s.parallel_rows,
+                    s.rows_state_groups
                 );
             }
             println!(

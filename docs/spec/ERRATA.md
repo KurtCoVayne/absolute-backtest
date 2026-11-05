@@ -2870,6 +2870,40 @@ batch driver agree on every corpus program. Each bless since:
   bars from 14:00 to 15:59 (under periods keyed on their start, the bar is
   one minute off). [D] UTC-aligned periods, not session-aligned: a
   session-relative N-hour clock is a later form.
+- **E-125 (06-performance 3.2, Proposition 3.1; M-8, F-5.3; entity-parallel
+  evaluation between barriers as built).** 3.2 describes the cut over
+  entity-local strata of a set-at-a-time evaluator over column blocks; the
+  tree's set evaluator still solves one environment at a time over a block
+  of bindings (`eval_set.rs`, E-75), so the cut lands one level down, on a
+  rule application: `Kernel::solve_block_maybe_parallel`
+  (`kernel/parallel.rs`) runs the first literal of the plan's order on the
+  main thread, cuts the bindings it produced by the entity they bind
+  (`entity % threads`, so a window group stays on one worker across bars),
+  solves the rest of the body on worker kernels, and merges their rows by
+  the index of the binding each descends from (`Block::origins`) and their
+  stuck instances by (literal, binding), which is the order the single
+  thread lists them in. A rule takes the cut when no literal of its body
+  reads the cross-section (`plan::planner::cross_sectional`), its head
+  binds an entity, and the first literal bound at least
+  `parallel_min_rows` of them (64; the suites set 1). [D] A worker is a
+  clone of the main kernel sharing its stores and memo through `Shared`
+  (an `Arc` the main kernel writes only while no worker holds a share: the
+  workers give theirs back before the step returns) and owning its
+  overlay memo, window groups and counters, absorbed after the step; the
+  stores are sealed (every dirty block sorted) before a step. Rejected: a
+  split of `Kernel` into shared and per-worker halves (every evaluator
+  method's receiver would change for the same sharing). [D] Before a
+  decision the fold derives the open-loop derived relations at the bar in
+  stratum order (`warm_strata`), so that each rule's inputs are memoised
+  when it is cut and no worker derives a whole relation on its own; a halt
+  met there is memoised and raised by the decision that demands it, as the
+  Kleene reading requires. The run does not depend on the thread count:
+  `tests/eval_set.rs` holds the tuple evaluator, the set evaluator and the
+  set evaluator on two and four workers equal on every corpus program and
+  both books, decisions and ledgers; `tests/determinism.rs` one thread
+  against four. `--threads N` (`ExecConfig::threads`, `1` by default, `0`
+  the cores up to four) is not part of the run's identity (A-D11).
+
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

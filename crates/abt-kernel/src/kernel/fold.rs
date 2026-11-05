@@ -236,7 +236,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             last_bar: self.last_bar.unwrap_or(i64::MIN),
             symbols: k.symbols.names().to_vec(),
             labels: k.labels.names().to_vec(),
-            stores: k.stores.clone(),
+            stores: (*k.stores).clone(),
             domains: {
                 let mut d: Vec<(Cal, Vec<i64>)> = k.domains.iter().map(|(r, s)| (r.clone(), s.iter().copied().collect())).collect();
                 d.sort_by_key(|(r, _)| r.clone());
@@ -291,7 +291,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         if cp.stores.len() != kernel.stores.len() {
             return Err(RunError::Config("the checkpoint's relations do not match the program's".into()));
         }
-        kernel.stores = cp.stores;
+        kernel.stores = super::Shared::new(cp.stores);
         // A checkpoint's blocks may predate the index: re-sort on first use.
         for (st, info) in kernel.stores.iter_mut().zip(kernel.rels.iter()) {
             st.index_by(info.entity_positions.first().copied());
@@ -404,6 +404,9 @@ impl<'p, 'e> Fold<'p, 'e> {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
+        // With workers, the open-loop relations are derived now, each
+        // entity-local rule cut across the threads (F-5.3, `parallel.rs`).
+        self.kernel.warm_strata(label);
         let mut by_equity = self.kernel.decide_at(label, &mut self.result)?;
         if let Some(source) = self.control.as_ref().and_then(|c| c.take_flatten()) {
             by_equity = self.flatten(label, by_equity, source);

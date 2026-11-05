@@ -15,7 +15,6 @@
 //! (ERRATA E-36).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use abt_wire::generated::abt::wire::{
@@ -1314,7 +1313,7 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
         }
         k.pushed.insert(
             (ri, li),
-            Rc::new(super::pushdown::Pushed {
+            Arc::new(super::pushdown::Pushed {
                 shape,
                 entity_slot,
                 base_slot,
