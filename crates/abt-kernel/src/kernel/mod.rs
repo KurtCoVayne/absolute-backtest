@@ -629,6 +629,9 @@ pub struct KernelStats {
     pub parallel_steps: usize,
     #[serde(default)]
     pub parallel_rows: usize,
+    /// Seconds the main thread spent inside cut steps (workers running).
+    #[serde(default)]
+    pub parallel_secs: f64,
     /// Live incremental window groups (`rows_state`), the main kernel's and
     /// the workers' together at the end of the run.
     #[serde(default)]
@@ -2037,6 +2040,9 @@ pub struct Kernel<'p> {
     /// Per rule, whether its rows after the first literal are independent
     /// across entities (no cross-sectional literal).
     pub(crate) parallel_ok: Vec<bool>,
+    /// Per rule, whether its body holds a window aggregate: such a rule is
+    /// cut at any row count, so its window groups live on one worker.
+    pub(crate) rule_has_window: Vec<bool>,
     /// The open-loop derived relations in stratum order, warmed before a
     /// decision when the run has workers, and those of them the last
     /// decision demanded (what the next one warms).
@@ -2899,6 +2905,7 @@ impl<'p> Kernel<'p> {
             worker: None,
             workers: Vec::new(),
             parallel_ok: (0..prog.rules.len()).map(|ri| !crate::plan::planner::cross_sectional(prog, ri)).collect(),
+            rule_has_window: prog.rules.iter().map(|r| r.body.iter().any(|l| matches!(l, crate::ir::Literal::Agg { .. }))).collect(),
             warm_rels: Vec::new(),
             warm_next: None,
             asof_memo: Default::default(),

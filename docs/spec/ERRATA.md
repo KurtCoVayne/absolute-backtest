@@ -2893,11 +2893,20 @@ batch driver agree on every corpus program. Each bless since:
   stores are sealed (every dirty block sorted) before a step. Rejected: a
   split of `Kernel` into shared and per-worker halves (every evaluator
   method's receiver would change for the same sharing). [D] Before a
-  decision the fold derives the open-loop derived relations at the bar in
-  stratum order (`warm_strata`), so that each rule's inputs are memoised
-  when it is cut and no worker derives a whole relation on its own; a halt
-  met there is memoised and raised by the decision that demands it, as the
-  Kleene reading requires. The run does not depend on the thread count:
+  decision (`decide_at`, after its clock check: a bar that decides nothing
+  warms nothing) the kernel derives, in stratum order, the open-loop
+  derived relations the previous decision demanded (`warm_strata`,
+  `note_demanded`; every one at the first), so that each rule's inputs are
+  memoised when it is cut and no worker derives a whole relation on its
+  own, and a relation a program reads at some bars only costs nothing at
+  the others; a halt met there is memoised and raised by the decision that
+  demands it, as the Kleene reading requires. Rejected: warming every
+  open-loop relation at every barrier (R8L, deciding at one minute of each
+  session, took 4.4x longer on four threads before the clock check). [D] A
+  rule with a window literal takes the cut at any row count, so that each
+  entity's window group lives on one worker for the whole run (cut at some
+  bars and solved on the main thread at others, a group would exist twice
+  and re-walk its window). The run does not depend on the thread count:
   `tests/eval_set.rs` holds the tuple evaluator, the set evaluator and the
   set evaluator on two and four workers equal on every corpus program and
   both books, decisions and ledgers; `tests/determinism.rs` one thread

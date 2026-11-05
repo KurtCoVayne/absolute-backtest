@@ -196,7 +196,7 @@ impl<'p> Kernel<'p> {
             return Ok((first, Vec::new()));
         }
         first.renumber();
-        if first.len() < self.cfg.parallel_min_rows.max(1) {
+        if first.len() < self.cfg.parallel_min_rows.max(1) && !self.rule_has_window.get(ri).copied().unwrap_or(false) {
             return self.solve_kleene_block(cr, lits, &order[1..], first, Some(ri));
         }
         self.prepare_workers();
@@ -217,6 +217,7 @@ impl<'p> Kernel<'p> {
         if self.stores.iter().any(|st| !st.dirty.is_empty()) {
             self.seal_stores();
         }
+        let started = std::time::Instant::now();
         let stores = self.stores.share();
         let memo = self.memo.share();
         let mut workers = std::mem::take(&mut self.workers);
@@ -249,6 +250,7 @@ impl<'p> Kernel<'p> {
         self.workers = workers;
         self.stats.parallel_steps += 1;
         self.stats.parallel_rows += first.len();
+        self.stats.parallel_secs += started.elapsed().as_secs_f64();
         self.absorb_workers();
         let mut blocks = Vec::with_capacity(n);
         let mut stucks: Vec<Stuck> = Vec::new();
@@ -348,5 +350,6 @@ impl super::KernelStats {
         self.window_noncanonical += o.window_noncanonical;
         self.window_backward += o.window_backward;
         self.pushed_answers += o.pushed_answers;
+        self.parallel_secs += o.parallel_secs;
     }
 }
