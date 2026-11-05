@@ -2913,6 +2913,35 @@ batch driver agree on every corpus program. Each bless since:
   against four. `--threads N` (`ExecConfig::threads`, `1` by default, `0`
   the cores up to four) is not part of the run's identity (A-D11).
 
+- **E-126 (06-performance 3.1, "Stored tables E[R] … over the retention
+  horizon"; A3 of `docs/assessment.md`; the kernel's copy of the stream
+  bounded).** The kernel kept every tuple the stream delivered
+  (`Fold::step_inner` → `insert_fact`) for the whole run, so the front grew
+  with the history streamed to it (MW14's run, E-93: 27 MB a second,
+  killed past 8.5 GB) while the data layer held the same bytes. [D]
+  `Kernel::trim_stores`, at every barrier after `evict_memo` when
+  `ExecConfig::trim_stores` (`abt run --history window`, the default):
+  every stored block keyed before the oldest bar any reader reaches from
+  the barrier is dropped -- the memo's horizon, each `rows` window's count
+  plus the slack a cold group walks back (`ROWS_SLACK + 3` bars of its
+  calendar), the executor's own reach (`Executor::retention_floor`: its
+  ADV and realised-volatility windows over its own bars, in whole days for
+  a sub-daily decision calendar), the decision bucket's bars, less a week.
+  A relation read `asof` keeps the latest row of each identity among the
+  dropped rows (`Store::kept`, read when the as-of walk reaches the
+  horizon). A program whose lookback is unbounded trims nothing; an
+  executor that cannot state its reach trims nothing. [D] The history
+  stays whole (`--history all`, forced for a ledger, the state tables and
+  a live run) for a kernel read after its run, since a query at an old bar
+  re-derives from the stores. Rejected: trimming by a fixed count of bars
+  (the executor's ADV on a sub-daily base walks back a count of *days* with
+  volume, which `tests/retention.rs` caught at `opening_gap`'s first fill
+  behind the cutoff). The coverage report's "tuples in the data" counts
+  rows ever inserted (`Store::inserted`). `tests/retention.rs` holds the
+  trimmed run equal to the whole run on every corpus program and both
+  books, alone and on four workers. The ADV walk now runs only when
+  impact is on (sim/mod.rs; it ran and was discarded before).
+
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

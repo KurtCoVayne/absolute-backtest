@@ -281,7 +281,7 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
 /// Anchored bars a rows window group keeps beyond its N, so that a call a
 /// few bars back (a recursion reaching its previous row) is served too;
 /// abt-agg's rows windows keep the same.
-const ROWS_SLACK: usize = abt_agg::window::ROWS_SLACK;
+pub(crate) const ROWS_SLACK: usize = abt_agg::window::ROWS_SLACK;
 
 /// A rows window group's running state: its last N anchored bars and the
 /// rows among them (time, the row's locally bound slots in slot order, which
@@ -1055,6 +1055,18 @@ impl<'p> Kernel<'p> {
                     break;
                 }
                 cur = k - 1;
+            }
+            // Behind the retention horizon: the latest row of each identity
+            // the trimmed blocks held (`Store::trim_before`).
+            if found.is_empty() && floor == i64::MIN {
+                let e = info.entity_positions.first().copied();
+                found.extend(
+                    self.stores[rel]
+                        .kept
+                        .iter()
+                        .filter(|tu| entity.as_ref().map(|v| e.map(|e| tu[e] == *v).unwrap_or(true)).unwrap_or(true) && matches(tu))
+                        .map(|tu| (tu.clone(), usize::MAX)),
+                );
             }
             Arc::new(found)
         } else {

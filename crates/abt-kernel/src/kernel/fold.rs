@@ -450,6 +450,11 @@ impl<'p, 'e> Fold<'p, 'e> {
             self.recent.pop_front();
         }
         self.kernel.evict_memo(label, self.recent.front().copied().unwrap_or(label));
+        if self.kernel.cfg.trim_stores {
+            if let Some(floor) = self.exec.retention_floor(&self.kernel) {
+                self.kernel.trim_stores(label, floor);
+            }
+        }
         self.decided_once = true;
         self.last_bar = Some(label);
         self.ran_decision = true;

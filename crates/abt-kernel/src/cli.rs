@@ -38,10 +38,11 @@ const MULTI: [&str; 2] = ["text", "param"];
 /// `report` block (language-v2, 4.3 and 4.5); what remains here is what
 /// describes the run itself (its data, its window, the bundle date), the
 /// compiler's choices that keep the result, and the commands' arguments.
-const OPTIONS: [&str; 36] = [
+const OPTIONS: [&str; 37] = [
     "strategy",
     "evaluator",
     "threads",
+    "history",
     "mode",
     "session",
     "deployment",
@@ -179,7 +180,8 @@ fn run_keeping(
                 let first = result.bars[0];
                 let last = *result.bars.last().unwrap();
                 let bars: Vec<i64> = k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect();
-                let Some(&t) = bars.get(bars.len() / 2) else {
+                let sample = if k.cfg.trim_stores { bars.len().saturating_sub(1) } else { bars.len() / 2 };
+                let Some(&t) = bars.get(sample) else {
                     notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, prog.cal_name(&cal)));
                     continue;
                 };
@@ -563,6 +565,14 @@ fn exec_config(args: &Args, prog: &crate::check::Program) -> ExecConfig {
             eprintln!("--threads: `{}` is not a count (0 is the machine's cores, up to four)", s);
             exit(2)
         }),
+    };
+    cfg.trim_stores = match args.opts.get("history").map(|s| s.as_str()) {
+        None | Some("window") => true,
+        Some("all") => false,
+        Some(other) => {
+            eprintln!("--history: `{}` is not `window` (the default: rows behind the lookback are dropped) or `all`", other);
+            exit(2)
+        }
     };
     cfg.memory_budget = args.opts.get("memory-budget").map(|s| {
         s.parse::<u64>().unwrap_or_else(|_| {
@@ -1259,6 +1269,12 @@ pub fn main_with(raw: Vec<String>) {
             // reads the mode's options.
             let live = ["mode", "session", "replay-of", "deadline", "deployment"].iter().any(|o| args.opts.contains_key(*o)) || args.flags.contains("paced");
             let keeps = !live && (!ledger.is_empty() || tables_out.is_some() || !args.opts.contains_key("checkpoint-every") && !args.opts.contains_key("resume"));
+            // A ledger or the state tables read every bar after the run: the
+            // history stays whole for them whatever --history says.
+            let cfg = ExecConfig {
+                trim_stores: cfg.trim_stores && ledger.is_empty() && tables_out.is_none() && !live,
+                ..cfg
+            };
             let mut notes: Vec<String> = Vec::new();
             // The kernel is kept after the run for the coverage report's
             // explanations, the ledger and the state tables; a run that
@@ -1308,7 +1324,7 @@ pub fn main_with(raw: Vec<String>) {
                 let run_s = total - loaded_at;
                 let s = &result.stats;
                 eprintln!(
-                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={}",
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={} trimmed_rows={}",
                     loaded_at - checked_at,
                     checked_at,
                     run_s,
@@ -1329,7 +1345,8 @@ pub fn main_with(raw: Vec<String>) {
                     s.parallel_steps,
                     s.parallel_rows,
                     s.parallel_secs,
-                    s.rows_state_groups
+                    s.rows_state_groups,
+                    s.trimmed_rows
                 );
             }
             println!(

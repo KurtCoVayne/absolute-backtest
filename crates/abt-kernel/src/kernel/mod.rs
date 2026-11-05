@@ -636,6 +636,9 @@ pub struct KernelStats {
     /// the workers' together at the end of the run.
     #[serde(default)]
     pub rows_state_groups: usize,
+    /// Stored rows dropped behind the retention horizon.
+    #[serde(default)]
+    pub trimmed_rows: usize,
     /// Running-sums windows built at the bar asked for because the buffer
     /// no longer held the checkpoint's window (a departure from the
     /// canonical walk; zero in a run whose groups are asked for in order).
@@ -862,6 +865,12 @@ pub struct ExecConfig {
     /// the workers (below it the fan-out costs more than the rows). The
     /// suites set it to 1 so that every entity-local rule takes the cut.
     pub parallel_min_rows: usize,
+    /// Drop the stored rows no reader can reach any more at every barrier
+    /// (the retention horizon of 06-performance 3.1): what the windows,
+    /// lags, as-of reads and the executor look back over is kept, the rest
+    /// goes. Off for a kernel that is read after its run (a ledger, the
+    /// state tables, a query at an old bar).
+    pub trim_stores: bool,
     /// The pre-trade limits of the execution block (K-3.5).
     #[serde(default)]
     pub limits: Vec<crate::check::Limit>,
@@ -1031,6 +1040,7 @@ impl Default for ExecConfig {
             set_eval: true,
             threads: 1,
             parallel_min_rows: 64,
+            trim_stores: false,
             limits: Vec::new(),
             late_reject: false,
             memory_budget: None,
@@ -1757,6 +1767,14 @@ pub struct Store {
     /// The key the latest insert went to.
     #[serde(skip)]
     open: Option<i64>,
+    /// Of the blocks trimmed away (`trim_before`), the latest row of each
+    /// identity: what an `asof` read reaching behind the horizon finds.
+    #[serde(default)]
+    pub kept: Vec<Tuple>,
+    /// Rows ever inserted, trimmed ones included (the coverage report's
+    /// "tuples in the data").
+    #[serde(default)]
+    pub inserted: u64,
 }
 
 /// The block of `key` for a tuple of `width` values. A new key's block is
@@ -1799,9 +1817,50 @@ impl Store {
     }
     pub fn insert(&mut self, key: i64, tuple: Tuple) {
         block_for(&mut self.by_time, &mut self.open, key, tuple.len()).push(tuple);
+        self.inserted += 1;
         if self.entity_pos.is_some() {
             self.dirty.insert(key);
         }
+    }
+
+    /// Rows ever inserted (the live ones when nothing was trimmed).
+    pub fn inserted(&self) -> usize {
+        (self.inserted as usize).max(self.len())
+    }
+
+    /// Drop every block keyed before `cutoff`. With `keep_latest`, the last
+    /// row of each identity among the dropped rows is kept in `kept` (the
+    /// as-of reads of a relation read behind the horizon), the later row of
+    /// one identity replacing the earlier. Returns the rows dropped.
+    pub fn trim_before(&mut self, cutoff: i64, identity: &[usize], keep_latest: bool) -> usize {
+        if self.by_time.first_key_value().map(|(k, _)| *k >= cutoff).unwrap_or(true) {
+            return 0;
+        }
+        let recent = self.by_time.split_off(&cutoff);
+        let old = std::mem::replace(&mut self.by_time, recent);
+        let mut dropped = 0;
+        if keep_latest {
+            let mut latest: FxHashMap<Vec<Value>, Tuple> = self.kept.drain(..).map(|tu| (identity.iter().map(|&i| tu[i].clone()).collect(), tu)).collect();
+            for (_, block) in old {
+                dropped += block.len();
+                for tu in block.iter() {
+                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), tu.to_vec());
+                }
+            }
+            let mut kept: Vec<Tuple> = latest.into_values().collect();
+            kept.sort();
+            self.kept = kept;
+        } else {
+            dropped = old.values().map(|b| b.len()).sum();
+        }
+        self.dirty = self.dirty.split_off(&cutoff);
+        if let Some((_, runs)) = &mut self.runs {
+            runs.retain(|k, _| *k >= cutoff);
+        }
+        if self.open.map(|k| k < cutoff).unwrap_or(false) {
+            self.open = None;
+        }
+        dropped
     }
 
     /// A tuple of the stream at `key`, received at instant `r`: a later
@@ -1811,12 +1870,14 @@ impl Store {
     /// already (two versions of one fact), so a bar received whole searches
     /// none.
     pub fn insert_received(&mut self, key: i64, tuple: Tuple, identity: &[usize], r: i64) {
+        self.inserted += 1;
         let Store {
             by_time,
             entity_pos,
             dirty,
             runs,
             open,
+            ..
         } = self;
         if runs.as_ref().is_none_or(|(at, _)| *at != r) {
             *runs = Some((r, FxHashMap::default()));
@@ -2977,7 +3038,7 @@ impl<'p> Kernel<'p> {
             .map(|((rel, info), &(calls, nonempty, tuples))| {
                 // A stored relation's tuples are what the data (or the
                 // executor) holds, whichever way the rules read them.
-                let tuples = if info.stored { self.stores[rel].len() } else { tuples };
+                let tuples = if info.stored { self.stores[rel].inserted() } else { tuples };
                 RelationCoverage {
                     name: info.name.clone(),
                     derived: !info.stored,
@@ -3074,6 +3135,39 @@ impl<'p> Kernel<'p> {
 
     /// Evict at every bar however small the memo (what tests use to prove
     /// that eviction never changes a result).
+    /// Drop the stored rows behind the retention horizon: before the oldest
+    /// bar any reader reaches from `t` -- the memo's horizon, every `rows`
+    /// window's count plus the slack a cold group walks back, the executor's
+    /// volume and volatility windows over its own bars (`executor_floor`),
+    /// the decision bucket's own bars -- less a week. A relation read `asof` keeps the latest row of each identity.
+    /// A program whose lookback is unbounded trims nothing.
+    pub fn trim_stores(&mut self, t: i64, executor_floor: i64) {
+        let Some(h) = self.memo_horizon else { return };
+        if executor_floor == i64::MIN {
+            return;
+        }
+        let mut cutoff = (t - h).min(executor_floor);
+        for (res, n) in &self.rows_lookback {
+            match self.domains.get(res).and_then(|d| d.range(..=t).rev().nth(n + eval::ROWS_SLACK + 3)) {
+                Some(&b) => cutoff = cutoff.min(b),
+                None => return,
+            }
+        }
+        cutoff = cutoff.min(self.decision_bucket(t).0).saturating_sub(7 * time::DAY);
+        let rels = &self.rels;
+        let asof_read = &self.asof_read;
+        let mut dropped = 0;
+        for (rel, st) in self.stores.iter_mut().enumerate() {
+            dropped += st.trim_before(cutoff, &rels[rel].identity, asof_read.contains(&rel));
+        }
+        self.stats.trimmed_rows += dropped;
+    }
+
+    /// Stored rows held now, every relation together.
+    pub fn store_rows(&self) -> usize {
+        self.stores.iter().map(|s| s.len()).sum()
+    }
+
     pub fn force_memo_eviction(&mut self) {
         self.memo_min = 0;
         self.asof_memo_next = 0;
