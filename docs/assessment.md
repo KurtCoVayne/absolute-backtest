@@ -260,6 +260,41 @@ Norgate lake to a tested bundle works:
 It took two changes to the bundle tests and a reviewed exception list, all
 recorded.
 
+**At M-8 (Nov 5): entity-parallel evaluation between barriers (F-5.3,
+ERRATA E-125).** `--threads N` cuts every entity-local rule's bindings across
+`N` worker kernels after its first literal (`kernel/parallel.rs`), bit for
+bit the one-thread run: `tests/eval_set.rs` holds the tuple evaluator, the
+set evaluator and the set evaluator on two and four workers equal on every
+corpus program and both books, decisions and the ledger of every derived
+relation at every bar. Measured on an AWS `m8g.xlarge` (Graviton4, 4 vCPU,
+16 GB, Rust 1.99.1, release), `mw14` on the synthetic daily market
+(`--synthetic --days 2520`, 504 weekly bars), the base being this tree
+before the change:
+
+| Names | base | 1 thread | 2 threads | 4 threads | inside the cut steps, 4 threads |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 300 | 22.9 s | 23.4 s | 23.1 s | 23.9 s (CPU 32.6 s) | 6.5 s of 23.9 |
+| 1,000 | 95.8 s | 96.3 s | 94.0 s | 93.8 s (CPU 122.9 s) | 16.3 s of 93.8 |
+
+The cut works and costs nothing at one thread (+0.6%), and it does not
+move the wall clock: the rule bodies it cuts are 17% of the run at 1,000
+names (`parallel_secs`), the workers spend their CPU (123 s for 94 s of
+wall) and Amdahl keeps the rest. `perf` on the 300-name run at one thread
+puts the time in the data path and the allocator, not the rule bodies: the
+synthetic market's ingest and staging (`ingest_keyed_with`,
+`staging::build`, `ladder::build`) 7%, `malloc`/`free` 15%, `memcmp` 4%,
+the exact decimal arithmetic (`abt_agg::exact::Wide::divrem`) 3%, the
+stream and the hot store (`Stream::next_batch`, `Cumulative::plus`,
+`HotVersion::read_at`) 5%, the evaluator's own instance work
+(`atom_pattern`, `step`, `term_value`, `push_env`, `rows_columns`,
+`Value::cmp`) under 10% in all. The next levers are therefore the stream
+and store path the books' runs found (open question 7 of
+`docs/iterations/01-foundation.md`) and the per-instance allocations, and
+the spawn per cut step (a persistent worker pool) once the cut is worth
+more than it costs. The corpus's five-name markets gain nothing (3.1 s
+total at one thread, 5.1 s at four before the per-worker row floor, since
+no rule reaches `parallel_min_rows`); `--threads` stays `1` by default.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).
