@@ -196,7 +196,15 @@ impl<'p> Kernel<'p> {
             return Ok((first, Vec::new()));
         }
         first.renumber();
-        if first.len() < self.cfg.parallel_min_rows.max(1) && !self.rule_has_window.get(ri).copied().unwrap_or(false) {
+        // A rule with a window takes the cut at any count that gives each
+        // worker a row, so that an entity's group stays on one worker; one
+        // without waits for `parallel_min_rows`.
+        let floor = if self.rule_has_window.get(ri).copied().unwrap_or(false) {
+            n
+        } else {
+            self.cfg.parallel_min_rows.max(1)
+        };
+        if first.len() < floor {
             return self.solve_kleene_block(cr, lits, &order[1..], first, Some(ri));
         }
         self.prepare_workers();
