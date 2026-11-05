@@ -287,5 +287,5 @@ fn the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers
         "a relation nothing reads is projected away (market orders fill at the close): {:?}",
         read
     );
-    assert!(expected >= 5 * 16 && expected < 7 * 5 * 16, "what the book reads, not the seven primitives: {}", expected);
+    assert!((5 * 16..7 * 5 * 16).contains(&expected), "what the book reads, not the seven primitives: {}", expected);
 }

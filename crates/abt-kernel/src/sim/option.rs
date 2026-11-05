@@ -28,11 +28,6 @@ pub struct QuoteCols {
 }
 
 impl QuoteCols {
-    /// The quote relation these columns read.
-    pub fn relation(&self) -> usize {
-        self.rel
-    }
-
     /// The program's `quote`, by its arguments' names; none outside the
     /// option class.
     pub fn of(prog: &crate::check::Program, rel_ids: &HashMap<String, usize>) -> Option<QuoteCols> {
