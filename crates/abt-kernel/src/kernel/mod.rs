@@ -3237,6 +3237,8 @@ impl<'p> Kernel<'p> {
             match t {
                 Term::Ctor(c, subs, _) => matches!(c.as_str(), "moo" | "moo_moc" | "limit" | "stop") || subs.iter().any(names),
                 Term::Lit(Lit::Label(s) | Lit::Str(s), _) => matches!(s.as_str(), "moo" | "moo_moc" | "limit" | "stop"),
+                // A bare order kind in a head is a parameter term (check/rule.rs).
+                Term::Param(p, _) => matches!(p.as_str(), "moo" | "moo_moc" | "limit" | "stop"),
                 _ => false,
             }
         }
