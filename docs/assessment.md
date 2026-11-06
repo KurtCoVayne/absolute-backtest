@@ -295,6 +295,37 @@ more than it costs. The corpus's five-name markets gain nothing (3.1 s
 total at one thread, 5.1 s at four before the per-worker row floor, since
 no rule reaches `parallel_min_rows`); `--threads` stays `1` by default.
 
+**At M-8 (Nov 6): the full MW14 finishes on this architecture.** The retention
+horizon (E-126) and the stream projection's first step (E-127) on the same
+`m8g.xlarge` (4 vCPU, 16 GB), the lake staged through the Norgate adapter in
+five-year chunks with the book's own `SPXTR@1d` and `VIX@1w` as series bundles
+(`docs/parity-mw14.md` now records the recipe): the data service holds the store
+at 3.8 GB; the front, `abt run --strategy mw14 --data SOCK --history window
+--start 1991-01-04 --end 2026-07-02`, runs the 1,904 weekly bars over 4,240
+names in **377 s** at **3.7 GB** resident, having dropped 59.2M stored rows
+behind the horizon (iteration 1's run of the same book was killed by the
+container at 443 s with the front past 8.5 GB and still growing). `--history
+all` on the same box thrashes and does not finish: the trim is what makes the
+run fit. The run is not at parity through this data path: against the canon,
+weekly correlation 0.9777, CAGR 18.5% against 20.9%, Sharpe 0.959 against
+1.020, maximum drawdown −25.9% against −26.2%, 25% of the weeks equal to 1e-4
+-- the kernel reproduces the canon exactly from the v1 bundle, so the gap is
+the adapter's weekly views of the daily lake against the bundle's, and it is
+the owner's open question 7 narrowed to the data path. The ledgers of the two
+observed relations are written at the barriers under trimming (E-126); on a
+served synthetic market of 1,000 names both histories give the same events,
+book, fills, decisions and ledgers.
+
+`perf` on this run (frame-pointer build, 299 Hz) is evaluator-bound: `Value::cmp`
+6.6%, `malloc`/`free` 14%, the result-narrowing closure of `call` 4.2%,
+`atom_pattern` 4.2%, `rows_columns` 4.2%, `Memo::get` 3.8%, `Value::clone`
+2.6%, the domain-range collection 2.0%, the block's `push_env` 1.9%; no data
+layer symbol reaches 1%. The 15× between this and the Python book's 25 s is
+therefore the tuple-at-a-time evaluator and its allocations, not the stream
+-- the column-block evaluator and the window states of 3.2 are the next
+step, and the aggregate pushdown of `dvol` and `traded@weekly` (E-127) is a
+memory lever before it is a time lever.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).
