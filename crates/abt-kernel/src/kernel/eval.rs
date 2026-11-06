@@ -110,6 +110,18 @@ impl IntoIterator for WindowCache {
 }
 
 /// The static shape of a rows window literal.
+/// A rows window's conjunction solved at one bar for every row of a block
+/// at once (06-performance 3.2, "window states advanced for the slots
+/// present"): per row, whether the anchor held and the solutions, or `None`
+/// where an instance stuck (the row-at-a-time path places the halt).
+#[derive(Clone, Debug)]
+pub(crate) struct Prefetch {
+    rule: usize,
+    literal: usize,
+    t: i64,
+    rows: Vec<Option<(bool, Vec<Env>)>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct RowsPlan {
     literal: usize,
@@ -923,10 +935,17 @@ impl<'p> Kernel<'p> {
                     continue;
                 }
             }
+            // A rows window over the block: its conjunction solved once for
+            // every row at the bar, each group then fed its own row.
+            let saved = self.prefetch.take();
+            if let Literal::Agg { args, conj, within, .. } = lit {
+                self.prefetch = self.prefetch_rows_window(cr, lit, conj, args, within.as_deref(), &live)?;
+            }
             for i in 0..live.len() {
                 let env = live.row(i);
                 let before = next.len();
                 next.set_origin(live.origin_of(i));
+                self.prefetch_row = i;
                 match self.step(cr, lit, env, &mut next) {
                     Ok(()) => {}
                     Err(error @ RunError::Arithmetic { .. }) => {
@@ -943,6 +962,7 @@ impl<'p> Kernel<'p> {
                     Err(e) => return Err(e),
                 }
             }
+            self.prefetch = saved;
             stuck = self.advance_stuck(cr, lit, stuck)?;
             self.count_literal(record, li, entering, next.len(), stuck.is_empty());
             live = next;
@@ -2366,6 +2386,86 @@ impl<'p> Kernel<'p> {
     /// anchored bars and their rows. `None` when the window cannot be served
     /// so (a bar with more than one row, a base time read by the rows, or a
     /// call earlier than the group's last): the general path answers then.
+    /// The rows window's conjunction solved at the bar for every row of the
+    /// block at once (`Prefetch`), when every row asks the same bar with the
+    /// window's time free and reads the window per instrument. Each row's
+    /// anchor and solutions are what its own solve yields, in the same order
+    /// (the block solver's, V-5); a row on which an instance stuck is left to
+    /// the row-at-a-time path.
+    fn prefetch_rows_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>, live: &Block) -> Result<Option<Prefetch>, RunError> {
+        const MIN_ROWS: usize = 32;
+        if live.len() < MIN_ROWS || !self.cfg.window_cache {
+            return Ok(None);
+        }
+        let has_rows = conj.iter().any(|l| {
+            matches!(
+                l,
+                Literal::Window {
+                    kind: WindowKind::Rows | WindowKind::PriorRows,
+                    ..
+                }
+            )
+        });
+        if !has_rows {
+            return Ok(None);
+        }
+        let plan = self.rows_plan(cr, lit, conj, args)?;
+        if !plan.shareable || plan.prior {
+            return Ok(None);
+        }
+        let first = live.row(0);
+        if first[plan.wslot].is_some() {
+            return Ok(None);
+        }
+        let aplan = self.agg_plan(cr, lit, conj, args, within);
+        if aplan.group.iter().any(|&s| first[s].is_none()) {
+            return Ok(None);
+        }
+        let t = self.time_of(cr, &plan.base, first)?;
+        for i in 1..live.len() {
+            let r = live.row(i);
+            if r[plan.wslot].is_some() || self.time_of(cr, &plan.base, r)? != t {
+                return Ok(None);
+            }
+        }
+        let n = live.len();
+        let mut start = Block::with_capacity(cr.nslots, n);
+        for i in 0..n {
+            let mut e = live.row(i).to_vec();
+            e[plan.wslot] = Some(Value::Time(t));
+            start.push_row(&e, i as u32);
+        }
+        let mut rows: Vec<Option<(bool, Vec<Env>)>> = vec![Some((plan.anchor.is_empty(), Vec::new())); n];
+        if !plan.anchor.is_empty() {
+            let order: Vec<usize> = (0..plan.anchor.len()).collect();
+            let (ab, astuck) = self.solve_kleene_block(cr, &plan.anchor, &order, start.clone(), None)?;
+            for j in 0..ab.len() {
+                if let Some((a, _)) = &mut rows[ab.origin_of(j) as usize] {
+                    *a = true;
+                }
+            }
+            for s in astuck {
+                rows[s.origin as usize] = None;
+            }
+        }
+        let order: Vec<usize> = (0..plan.order.len()).collect();
+        let (sb, sstuck) = self.solve_kleene_block(cr, &plan.order, &order, start, None)?;
+        for j in 0..sb.len() {
+            if let Some((_, v)) = &mut rows[sb.origin_of(j) as usize] {
+                v.push(sb.row(j).to_vec());
+            }
+        }
+        for s in sstuck {
+            rows[s.origin as usize] = None;
+        }
+        Ok(Some(Prefetch {
+            rule: cr.idx,
+            literal: plan.literal,
+            t,
+            rows,
+        }))
+    }
+
     fn rows_columns(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<Columns>, RunError> {
         let plan = self.rows_plan(cr, lit, conj, args)?;
         if !plan.shareable || plan.prior || env[plan.wslot].is_some() {
@@ -2433,11 +2533,24 @@ impl<'p> Kernel<'p> {
         } else {
             Vec::new()
         };
+        let pre: Option<(bool, Vec<Env>)> = if fresh.len() == 1 && fresh[0] == t {
+            self.prefetch
+                .as_ref()
+                .filter(|p| p.rule == cr.idx && p.literal == plan.literal && p.t == t)
+                .and_then(|p| p.rows.get(self.prefetch_row).cloned().flatten())
+        } else {
+            None
+        };
         for &t1 in fresh.iter() {
-            let mut e = env.to_vec();
-            e[plan.wslot] = Some(Value::Time(t1));
-            let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
-            let sols = self.solve(cr, &plan.order, vec![e])?;
+            let (anchored, sols) = match &pre {
+                Some((a, s)) => (*a, s.clone()),
+                None => {
+                    let mut e = env.to_vec();
+                    e[plan.wslot] = Some(Value::Time(t1));
+                    let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
+                    (anchored, self.solve(cr, &plan.order, vec![e])?)
+                }
+            };
             self.stats.window_bars_solved += 1;
             if sols.len() > 1 {
                 return Ok(None);

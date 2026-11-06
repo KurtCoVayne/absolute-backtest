@@ -2196,6 +2196,11 @@ pub struct Kernel<'p> {
     pub(crate) atom_slot_cache: FxHashMap<(usize, usize), Arc<Vec<Option<usize>>>>,
     /// A scratch vector for a window group's fresh bars.
     pub(crate) fresh_scratch: Vec<i64>,
+    /// The solutions of a rows window's conjunction at the bar for every row
+    /// of the block being solved (`eval::prefetch_rows_window`), and the row
+    /// the block solver is at.
+    pub(crate) prefetch: Option<eval::Prefetch>,
+    pub(crate) prefetch_row: usize,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -3065,6 +3070,8 @@ impl<'p> Kernel<'p> {
             recursive_rels: Vec::new(),
             atom_slot_cache: Default::default(),
             fresh_scratch: Vec::new(),
+            prefetch: None,
+            prefetch_row: 0,
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),
