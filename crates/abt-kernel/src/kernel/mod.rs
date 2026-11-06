@@ -3770,8 +3770,8 @@ impl<'p> Kernel<'p> {
             let mut pattern: Vec<Option<Value>> = vec![None; width];
             pattern[info.key_pos] = Some(Value::Time(t));
             pattern[entity_pos] = Some(Value::Equity(sym));
-            match self.call(id, &pattern) {
-                Ok(tuples) => tuples.first().and_then(|(tu, _)| tu[col].as_f64()),
+            match self.call_first(id, &pattern) {
+                Ok(tu) => tu.and_then(|tu| tu[col].as_f64()),
                 Err(_) => None,
             }
         } else if info.cal == self.prog.decision_cal {

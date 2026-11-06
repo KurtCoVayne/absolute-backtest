@@ -592,6 +592,31 @@ impl<'p> Kernel<'p> {
         Ok(narrow(&rc))
     }
 
+    /// The first tuple of a derived relation at its key for one entity: a
+    /// memoised block read by binary search, one tuple cloned, no result set
+    /// built (the executor's marks, one per held name per bar). The general
+    /// path when the result is not memoised or not sorted.
+    pub(crate) fn call_first(&mut self, rel: usize, pattern: &[Option<Value>]) -> Result<Option<Tuple>, RunError> {
+        let info = self.rels[rel].clone();
+        if !info.stored && info.inputs.is_empty() {
+            if let (Some(Value::Time(t)), Some(e)) = (pattern.get(info.key_pos).cloned().flatten(), info.entity_positions.first().copied()) {
+                if let Some(v) = pattern[e].as_ref() {
+                    let memo_key: super::MemoKey = (rel, vec![Value::Time(t)]);
+                    if self.memo_stuck.get(&memo_key).is_none() {
+                        if let Some(hit) = self.memo_get(&memo_key) {
+                            if hit.len() > SORTED_MIN {
+                                let lo = hit.partition_point(|(tu, _)| tu[e] < *v);
+                                let matches = |tu: &[Value]| pattern.iter().zip(tu.iter()).all(|(p, x)| p.as_ref().map(|p| p == x).unwrap_or(true));
+                                return Ok(hit[lo..].iter().take_while(|(tu, _)| tu[e] == *v).find(|(tu, _)| matches(tu)).map(|(tu, _)| tu.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(self.call(rel, pattern)?.first().map(|(tu, _)| tu.clone()))
+    }
+
     /// The tuples of `rel` matching `pattern` and the instances there left
     /// stuck on a partial operation, as partial tuples with their halts: an
     /// observed relation's (Definition V-8.3), whose stuck instance no
