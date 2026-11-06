@@ -172,6 +172,23 @@ fn run_keeping(
     };
     crate::kernel::run_keeping(prog, lowered, client, cfg, &opts, |result, k| {
         let mut notes = Vec::new();
+        if std::env::var_os("ABT_TIMING_RELS").is_some() {
+            for (name, secs, calls) in k.derive_times().iter().take(20) {
+                eprintln!("derive {:28} {:8.3} s {:8} calls", name, secs, calls);
+            }
+            let s = k.stats();
+            eprintln!(
+                "phases insert={:.3} fill={:.3} decide={:.3} exec={:.3} warm={:.3} trim={:.3} evict={:.3} derive_total={:.3}",
+                s.insert_secs,
+                s.fill_secs,
+                s.decide_secs,
+                s.exec_secs,
+                s.warm_secs,
+                s.trim_secs,
+                s.evict_secs,
+                k.derive_times().iter().map(|x| x.1).sum::<f64>()
+            );
+        }
         let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
         for c in &causes {
             for ri in prog.rules_for(&c.relation) {

@@ -672,6 +672,19 @@ pub struct KernelStats {
     /// Stored rows dropped behind the retention horizon.
     #[serde(default)]
     pub trimmed_rows: usize,
+    /// Seconds in the fold's phases: the stream's tuples inserted, the
+    /// barriers' fills, decisions and executor steps, and the wait for the
+    /// next batch.
+    #[serde(default)]
+    pub insert_secs: f64,
+    #[serde(default)]
+    pub fill_secs: f64,
+    #[serde(default)]
+    pub decide_secs: f64,
+    #[serde(default)]
+    pub exec_secs: f64,
+    #[serde(default)]
+    pub wait_secs: f64,
     /// Seconds in the recursive relations' warm-up, the trim of the stores
     /// and the memo's eviction.
     #[serde(default)]
@@ -2301,6 +2314,10 @@ pub struct Kernel<'p> {
     /// Per relation: calls computed (memo misses), calls that derived a
     /// tuple, tuples derived; the coverage report of a run.
     pub(crate) coverage: Vec<(usize, usize, usize)>,
+    /// Per relation, the seconds spent deriving it, its callees excluded
+    /// (`--timing`'s per-relation table).
+    pub(crate) derive_secs: Vec<f64>,
+    pub(crate) derive_stack: Vec<(usize, std::time::Instant, f64)>,
     /// What the build noticed about the program against this data (a label
     /// the data never carries); reported with the run's warnings.
     pub(crate) run_warnings: Vec<RunWarning>,
@@ -3103,6 +3120,8 @@ impl<'p> Kernel<'p> {
             memo_min,
             stats: KernelStats::default(),
             coverage: vec![(0, 0, 0); n_rels],
+            derive_secs: vec![0.0; n_rels],
+            derive_stack: Vec::new(),
             run_warnings,
         };
         let read = k.read_relations();
@@ -3343,6 +3362,20 @@ impl<'p> Kernel<'p> {
             }
         }
         matches!(self.prog.default_order.as_str(), "moo" | "moo_moc") || self.prog.rules.iter().filter(|r| r.head.name == "decide").any(|r| r.head.terms.iter().any(names))
+    }
+
+    /// The relations by the seconds spent deriving them (callees excluded).
+    pub fn derive_times(&self) -> Vec<(String, f64, usize)> {
+        let mut v: Vec<(String, f64, usize)> = self
+            .rels
+            .iter()
+            .zip(&self.derive_secs)
+            .zip(&self.coverage)
+            .filter(|((_, s), _)| **s > 0.0)
+            .map(|((r, s), c)| (r.name.clone(), *s, c.0))
+            .collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
     }
 
     /// Stored rows held now, every relation together.

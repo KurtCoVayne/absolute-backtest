@@ -526,7 +526,15 @@ impl<'p> Kernel<'p> {
                 info.name
             )));
         }
+        self.derive_stack.push((rel, std::time::Instant::now(), 0.0));
         let derived = self.derive_rules(&info, pattern);
+        if let Some((r, started, inner)) = self.derive_stack.pop() {
+            let total = started.elapsed().as_secs_f64();
+            self.derive_secs[r] += total - inner;
+            if let Some(parent) = self.derive_stack.last_mut() {
+                parent.2 += total;
+            }
+        }
         if cfg!(debug_assertions) {
             self.in_progress.remove(&memo_key);
         }

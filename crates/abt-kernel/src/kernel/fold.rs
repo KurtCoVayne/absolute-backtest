@@ -390,7 +390,9 @@ impl<'p, 'e> Fold<'p, 'e> {
                 let dcal = self.kernel.prog.decision_cal.clone();
                 let late = self.last_bar.is_some_and(|last| self.kernel.label_on(&dcal, key).is_some_and(|l| l <= last));
                 let entity = self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity());
+                let started = std::time::Instant::now();
                 self.kernel.insert_fact(rel, tuple, r)?;
+                self.kernel.stats.insert_secs += started.elapsed().as_secs_f64();
                 if late {
                     self.kernel.invalidate_from(key);
                     self.result.late.push(super::LateRecord {
@@ -421,11 +423,16 @@ impl<'p, 'e> Fold<'p, 'e> {
         if self.kernel.cfg.start.map(|s| label < s).unwrap_or(false) || self.kernel.cfg.end.map(|e| label > e).unwrap_or(false) {
             return Ok(());
         }
+        let started = std::time::Instant::now();
         if self.decided_once {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
+        self.kernel.stats.fill_secs += started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
         let mut by_equity = self.kernel.decide_at(label, &mut self.result)?;
+        self.kernel.stats.decide_secs += started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
         if let Some(source) = self.control.as_ref().and_then(|c| c.take_flatten()) {
             by_equity = self.flatten(label, by_equity, source);
         }
@@ -460,6 +467,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             }
         }
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
+        self.kernel.stats.exec_secs += started.elapsed().as_secs_f64();
         // The invariants after the executor's take (K-3.3, K-4.2).
         let working = self.exec.working();
         let at = self.kernel.now;
