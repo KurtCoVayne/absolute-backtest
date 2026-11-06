@@ -901,6 +901,20 @@ impl<'p> Kernel<'p> {
             let lit = &lits[li];
             let entering = live.len();
             let mut next = Block::with_capacity(live.stride(), entering);
+            // A positive atom over a block in entity order is joined by one
+            // merge pass (06-performance 3.2, "joins between blocks"): one
+            // demand for the whole relation, the rows and their matches in
+            // the order the row-at-a-time path yields them.
+            if let Literal::Atom(atom) = lit {
+                if self.merge_join_atom(cr, atom, &live, &mut next)? {
+                    self.count_literal(record, li, entering, next.len(), stuck.is_empty());
+                    live = next;
+                    if live.is_empty() && stuck.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+            }
             for i in 0..live.len() {
                 let env = live.row(i);
                 let before = next.len();
@@ -1026,6 +1040,105 @@ impl<'p> Kernel<'p> {
         let mut out = Vec::new();
         self.atom_matches_into(cr, atom, env, &mut out)?;
         Ok(out)
+    }
+
+    /// The merge join of a block with a relation (3.2): when the block's rows
+    /// bind the atom's entity in ascending order and its time to one bar, the
+    /// relation is demanded once, whole, and walked beside the block. The
+    /// matches of a row come in the relation's order, as `atom_matches_into`
+    /// yields them, so the two paths produce the same block. `false` when the
+    /// form is not this one, or a stuck instance would halt a row (the
+    /// row-at-a-time path halts the right rows): nothing was pushed then.
+    fn merge_join_atom(&mut self, cr: &CompiledRule, atom: &Atom, live: &Block, next: &mut Block) -> Result<bool, RunError> {
+        const MIN_ROWS: usize = 32;
+        if live.len() < MIN_ROWS || atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
+            return Ok(false);
+        }
+        let Some(&rel) = self.rel_ids.get(&atom.name) else { return Ok(false) };
+        let (stored, key_pos, entity_pos, inputs_empty) = {
+            let info = &self.rels[rel];
+            (info.stored, info.key_pos, info.entity_positions.first().copied(), info.inputs.is_empty())
+        };
+        let Some(entity_pos) = entity_pos else { return Ok(false) };
+        if !inputs_empty {
+            return Ok(false);
+        }
+        let Term::Var(ev, _) = &atom.terms[entity_pos] else { return Ok(false) };
+        let Term::Var(kv, _) = &atom.terms[key_pos] else { return Ok(false) };
+        let (eslot, kslot) = (cr.slots[ev], cr.slots[kv]);
+        // Every row binds the entity, ascending, and the time to one bar.
+        let first = live.row(0);
+        let Some(Value::Time(key)) = first[kslot] else { return Ok(false) };
+        let mut prev: Option<&Value> = None;
+        for i in 0..live.len() {
+            let row = live.row(i);
+            match (&row[eslot], &row[kslot]) {
+                (Some(e @ Value::Equity(_)), Some(Value::Time(k))) if *k == key => {
+                    if prev.is_some_and(|p| p > e) {
+                        return Ok(false);
+                    }
+                    prev = Some(e);
+                }
+                _ => return Ok(false),
+            }
+        }
+        // The pattern of the terms every row shares (the key and the
+        // constants); a variable bound differently per row is matched per row.
+        let mut shared: Vec<Option<Value>> = vec![None; atom.terms.len()];
+        for (i, term) in atom.terms.iter().enumerate() {
+            match term {
+                Term::Var(_, _) | Term::Wild(_) => {}
+                Term::Param(p, _) => shared[i] = Some(self.param_value(cr, p)?),
+                Term::Lit(l, _) => shared[i] = Some(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
+                Term::Ctor(..) => return Ok(false),
+            }
+        }
+        shared[key_pos] = Some(Value::Time(key));
+        let slots = self.atom_slots(cr, atom);
+        // The relation, whole at the bar.
+        let tuples: Vec<Tuple> = if stored {
+            self.store_lookup(rel, key, None).iter().map(|tu| tu.to_vec()).collect()
+        } else {
+            let mkey: super::MemoKey = (rel, vec![Value::Time(key)]);
+            // A halt the whole demand meets is the row-at-a-time path's to
+            // place on the rows it belongs to.
+            let derived = match self.call(rel, &shared) {
+                Ok(d) => d,
+                Err(RunError::Arithmetic { .. }) => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            if self.memo_stuck.contains_key(&mkey) {
+                return Ok(false);
+            }
+            derived.iter().map(|(tu, _)| tu.clone()).collect()
+        };
+        if !tuples.windows(2).all(|w| w[0][entity_pos] <= w[1][entity_pos]) {
+            return Ok(false);
+        }
+        let mut j = 0usize;
+        for i in 0..live.len() {
+            let env = live.row(i);
+            next.set_origin(live.origin_of(i));
+            let e = env[eslot].as_ref().expect("checked");
+            while j < tuples.len() && tuples[j][entity_pos] < *e {
+                j += 1;
+            }
+            let mut k = j;
+            while k < tuples.len() && tuples[k][entity_pos] == *e {
+                let tu = &tuples[k];
+                k += 1;
+                // The row's own bindings on the atom's other terms, and the constants.
+                let ok = atom.terms.iter().enumerate().all(|(p, term)| match term {
+                    Term::Var(v, _) => env[cr.slots[v]].as_ref().map(|b| b == &tu[p]).unwrap_or(true),
+                    Term::Wild(_) => true,
+                    _ => shared[p].as_ref().map(|s| s == &tu[p]).unwrap_or(true),
+                });
+                if ok {
+                    bind_row(env, &slots, tu, next);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// `atom_matches` into a sink, in the same order.
