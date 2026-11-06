@@ -2179,6 +2179,10 @@ pub struct Kernel<'p> {
     /// a strictly earlier bar: a total-return index, a cumulative split):
     /// extended at every barrier before the stores are trimmed (E-126).
     pub(crate) recursive_rels: Vec<usize>,
+    /// The slot map of each atom, by (rule, the atom's address) (`eval::atom_slots`).
+    pub(crate) atom_slot_cache: FxHashMap<(usize, usize), Arc<Vec<Option<usize>>>>,
+    /// A scratch vector for a window group's fresh bars.
+    pub(crate) fresh_scratch: Vec<i64>,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -3042,6 +3046,8 @@ impl<'p> Kernel<'p> {
             warm_next: None,
             read_rels: Vec::new(),
             recursive_rels: Vec::new(),
+            atom_slot_cache: Default::default(),
+            fresh_scratch: Vec::new(),
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),

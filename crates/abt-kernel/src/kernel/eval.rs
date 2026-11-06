@@ -543,7 +543,11 @@ impl<'p> Kernel<'p> {
             self.memo_stuck.insert(memo_key.clone(), Arc::new(stucks));
         }
         if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
-            results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+            // The block solver yields its rows in the first generator's order,
+            // the universe's entity order: a linear check spares the sort.
+            if !results.windows(2).all(|w| w[0].0[e] <= w[1].0[e]) {
+                results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+            }
         }
         let cov = &mut self.coverage[rel];
         cov.0 += 1;
@@ -992,6 +996,18 @@ impl<'p> Kernel<'p> {
 
     /// The pattern an atom presents to `call`, and whether each term needs
     /// post-matching (constructor patterns and fresh variables).
+    /// The slot each term of an atom binds, computed once per (rule, atom)
+    /// and kept on the kernel (a literal's address is stable for the run).
+    fn atom_slots(&mut self, cr: &CompiledRule, atom: &Atom) -> Arc<Vec<Option<usize>>> {
+        let key = (cr.idx, atom as *const Atom as usize);
+        if let Some(s) = self.atom_slot_cache.get(&key) {
+            return s.clone();
+        }
+        let slots: Arc<Vec<Option<usize>>> = Arc::new(atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect());
+        self.atom_slot_cache.insert(key, slots.clone());
+        slots
+    }
+
     fn atom_pattern(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>]) -> Result<Vec<Option<Value>>, RunError> {
         let mut pat = Vec::with_capacity(atom.terms.len());
         for term in &atom.terms {
@@ -1026,7 +1042,7 @@ impl<'p> Kernel<'p> {
             let Some(Value::Time(key)) = pat[key_pos] else {
                 return Err(RunError::Internal(format!("`{}` requested with an unbound temporal key", atom.name)));
             };
-            let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
+            let slots = self.atom_slots(cr, atom);
             let entity = entity_pos.and_then(|e| pat[e].clone());
             for tu in self.store_lookup(rel, key, entity.as_ref()) {
                 if !pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true)) {
@@ -1137,7 +1153,7 @@ impl<'p> Kernel<'p> {
     /// match, into a sink, in the tuples' order.
     fn bind_tuples_into<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>], tuples: &super::Derived, out: &mut S) -> Result<(), RunError> {
         if !atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
-            let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
+            let slots = self.atom_slots(cr, atom);
             for (tu, _) in tuples.iter() {
                 bind_row(env, &slots, tu, out);
             }
@@ -2289,11 +2305,14 @@ impl<'p> Kernel<'p> {
             bars.reverse();
             bars
         } else if t > st.upto {
-            self.domain(cr, env)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied().collect()
+            let mut v = std::mem::take(&mut self.fresh_scratch);
+            v.clear();
+            v.extend(self.domain(cr, env)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied());
+            v
         } else {
             Vec::new()
         };
-        for t1 in fresh {
+        for &t1 in fresh.iter() {
             let mut e = env.to_vec();
             e[plan.wslot] = Some(Value::Time(t1));
             let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
@@ -2320,6 +2339,9 @@ impl<'p> Kernel<'p> {
                 }
                 st.rows.push_back((t1, key, vals));
             }
+        }
+        if fresh.capacity() > self.fresh_scratch.capacity() {
+            self.fresh_scratch = fresh;
         }
         st.upto = st.upto.max(t);
         // Serve t from the buffer: its last N anchored bars at or before t
