@@ -260,6 +260,89 @@ Norgate lake to a tested bundle works:
 It took two changes to the bundle tests and a reviewed exception list, all
 recorded.
 
+**At M-8 (Nov 5): entity-parallel evaluation between barriers (F-5.3,
+ERRATA E-125).** `--threads N` cuts every entity-local rule's bindings across
+`N` worker kernels after its first literal (`kernel/parallel.rs`), bit for
+bit the one-thread run: `tests/eval_set.rs` holds the tuple evaluator, the
+set evaluator and the set evaluator on two and four workers equal on every
+corpus program and both books, decisions and the ledger of every derived
+relation at every bar. Measured on an AWS `m8g.xlarge` (Graviton4, 4 vCPU,
+16 GB, Rust 1.99.1, release), `mw14` on the synthetic daily market
+(`--synthetic --days 2520`, 504 weekly bars), the base being this tree
+before the change:
+
+| Names | base | 1 thread | 2 threads | 4 threads | inside the cut steps, 4 threads |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 300 | 22.9 s | 23.4 s | 23.1 s | 23.9 s (CPU 32.6 s) | 6.5 s of 23.9 |
+| 1,000 | 95.8 s | 96.3 s | 94.0 s | 93.8 s (CPU 122.9 s) | 16.3 s of 93.8 |
+
+The cut works and costs nothing at one thread (+0.6%), and it does not
+move the wall clock: the rule bodies it cuts are 17% of the run at 1,000
+names (`parallel_secs`), the workers spend their CPU (123 s for 94 s of
+wall) and Amdahl keeps the rest. `perf` on the 300-name run at one thread
+puts the time in the data path and the allocator, not the rule bodies: the
+synthetic market's ingest and staging (`ingest_keyed_with`,
+`staging::build`, `ladder::build`) 7%, `malloc`/`free` 15%, `memcmp` 4%,
+the exact decimal arithmetic (`abt_agg::exact::Wide::divrem`) 3%, the
+stream and the hot store (`Stream::next_batch`, `Cumulative::plus`,
+`HotVersion::read_at`) 5%, the evaluator's own instance work
+(`atom_pattern`, `step`, `term_value`, `push_env`, `rows_columns`,
+`Value::cmp`) under 10% in all. The next levers are therefore the stream
+and store path the books' runs found (open question 7 of
+`docs/iterations/01-foundation.md`) and the per-instance allocations, and
+the spawn per cut step (a persistent worker pool) once the cut is worth
+more than it costs. The corpus's five-name markets gain nothing (3.1 s
+total at one thread, 5.1 s at four before the per-worker row floor, since
+no rule reaches `parallel_min_rows`); `--threads` stays `1` by default.
+
+**At M-8 (Nov 6): the full MW14 finishes on this architecture.** The retention
+horizon (E-126) and the stream projection's first step (E-127) on the same
+`m8g.xlarge` (4 vCPU, 16 GB), the lake staged through the Norgate adapter in
+five-year chunks with the book's own `SPXTR@1d` and `VIX@1w` as series bundles
+(`docs/parity-mw14.md` now records the recipe): the data service holds the store
+at 3.8 GB; the front, `abt run --strategy mw14 --data SOCK --history window
+--start 1991-01-04 --end 2026-07-02`, runs the 1,904 weekly bars over 4,240
+names in **377 s** at **3.7 GB** resident (367 s with the three increments of 3.2 below, the result byte for byte the same), having dropped 59.2M stored rows
+behind the horizon (iteration 1's run of the same book was killed by the
+container at 443 s with the front past 8.5 GB and still growing). `--history
+all` on the same box thrashes and does not finish: the trim is what makes the
+run fit. The run is not at parity through this data path: against the canon,
+weekly correlation 0.9777, CAGR 18.5% against 20.9%, Sharpe 0.959 against
+1.020, maximum drawdown −25.9% against −26.2%, 25% of the weeks equal to 1e-4
+-- the kernel reproduces the canon exactly from the v1 bundle, so the gap is
+the adapter's weekly views of the daily lake against the bundle's, and it is
+the owner's open question 7 narrowed to the data path. The ledgers of the two
+observed relations are written at the barriers under trimming (E-126); on a
+served synthetic market of 1,000 names both histories give the same events,
+book, fills, decisions and ledgers.
+
+The run's own clock (`--timing` with `ABT_TIMING_RELS`, the seconds per
+derived relation and per phase of the fold): derivations 200 s of the 367 --
+`clenow` 38, `dvol` 30, `eligible` 17, `ma` 16 (the four per-instrument
+windows, 100 s), `dollar_volume@base` 14 (the daily relation `dvol` buckets,
+derived whole at 8,934 daily bars), `prev_row` 12, `dividend_at` 12,
+`traded@weekly` 11 -- the executor's fills and marks 54 s, the memo's
+eviction 17 s, the tuples' insertion 10 s, and some 75 s waiting on the
+stream of daily rows. Three increments of 3.2 are in (E-125): a positive
+atom over a block in entity order joined by one merge pass, a rows window's
+conjunction solved once for the whole block at the bar, the same for bucket
+and span windows; each held equal to the demand-driven evaluator by
+`tests/eval_set.rs`; together 27.8 to 23.1 CPU-seconds on a served store of
+1,000 synthetic names and 377 to 367 s on the book. What they do not reach
+is the per-row cost itself -- a `Value` per cell, an environment per
+instance, a hash lookup per derived atom -- which is the column-block
+evaluator's to remove.
+
+`perf` on this run (frame-pointer build, 299 Hz) is evaluator-bound: `Value::cmp`
+6.6%, `malloc`/`free` 14%, the result-narrowing closure of `call` 4.2%,
+`atom_pattern` 4.2%, `rows_columns` 4.2%, `Memo::get` 3.8%, `Value::clone`
+2.6%, the domain-range collection 2.0%, the block's `push_env` 1.9%; no data
+layer symbol reaches 1%. The 15× between this and the Python book's 25 s is
+therefore the tuple-at-a-time evaluator and its allocations, not the stream
+-- the column-block evaluator and the window states of 3.2 are the next
+step, and the aggregate pushdown of `dvol` and `traded@weekly` (E-127) is a
+memory lever before it is a time lever.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

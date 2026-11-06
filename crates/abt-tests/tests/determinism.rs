@@ -73,6 +73,15 @@ fn in_process_socket_and_concurrent_kernels_agree() {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
     assert_eq!(sequential, concurrent);
+    // The kernel's own workers (F-5.3): four worker kernels cutting every
+    // entity-local rule give the one-thread bits.
+    for (n, p) in &programs {
+        let mut cfg = ExecConfig::from_program(p);
+        cfg.threads = 4;
+        cfg.parallel_min_rows = 1;
+        let r = run_on(p, None, &client, cfg, &Replay::default()).unwrap();
+        assert_eq!(sequential[n], digest(&r), "{}: one thread against four worker kernels", n);
+    }
 }
 
 /// D-5.6 over the wire: a data service whose subscriptions may hold only

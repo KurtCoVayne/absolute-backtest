@@ -60,7 +60,7 @@ pub fn closed_loop(prog: &Program) -> BTreeSet<String> {
 /// Whether a rule holds a cross-sectional literal: a free entity argument
 /// inside a reduction, a resample or an aggregation's group (a barrier
 /// between per-entity partitions, section 5.5).
-fn cross_sectional(prog: &Program, rule: usize) -> bool {
+pub(crate) fn cross_sectional(prog: &Program, rule: usize) -> bool {
     let deps = literal_deps(prog, rule);
     let r = &prog.rules[rule];
     r.body.iter().enumerate().any(|(i, lit)| match lit {

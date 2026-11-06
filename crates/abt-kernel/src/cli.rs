@@ -38,9 +38,11 @@ const MULTI: [&str; 2] = ["text", "param"];
 /// `report` block (language-v2, 4.3 and 4.5); what remains here is what
 /// describes the run itself (its data, its window, the bundle date), the
 /// compiler's choices that keep the result, and the commands' arguments.
-const OPTIONS: [&str; 35] = [
+const OPTIONS: [&str; 37] = [
     "strategy",
     "evaluator",
+    "threads",
+    "history",
     "mode",
     "session",
     "deployment",
@@ -170,6 +172,23 @@ fn run_keeping(
     };
     crate::kernel::run_keeping(prog, lowered, client, cfg, &opts, |result, k| {
         let mut notes = Vec::new();
+        if std::env::var_os("ABT_TIMING_RELS").is_some() {
+            for (name, secs, calls) in k.derive_times().iter().take(20) {
+                eprintln!("derive {:28} {:8.3} s {:8} calls", name, secs, calls);
+            }
+            let s = k.stats();
+            eprintln!(
+                "phases insert={:.3} fill={:.3} decide={:.3} exec={:.3} warm={:.3} trim={:.3} evict={:.3} derive_total={:.3}",
+                s.insert_secs,
+                s.fill_secs,
+                s.decide_secs,
+                s.exec_secs,
+                s.warm_secs,
+                s.trim_secs,
+                s.evict_secs,
+                k.derive_times().iter().map(|x| x.1).sum::<f64>()
+            );
+        }
         let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
         for c in &causes {
             for ri in prog.rules_for(&c.relation) {
@@ -178,7 +197,8 @@ fn run_keeping(
                 let first = result.bars[0];
                 let last = *result.bars.last().unwrap();
                 let bars: Vec<i64> = k.bars_at(&cal).into_iter().filter(|&b| b >= first && b <= last).collect();
-                let Some(&t) = bars.get(bars.len() / 2) else {
+                let sample = if k.cfg.trim_stores { bars.len().saturating_sub(1) } else { bars.len() / 2 };
+                let Some(&t) = bars.get(sample) else {
                     notes.push(format!("rule {}: no bar of {} inside the run to explain it at", label, prog.cal_name(&cal)));
                     continue;
                 };
@@ -553,6 +573,21 @@ fn exec_config(args: &Args, prog: &crate::check::Program) -> ExecConfig {
         Some("tuple") => false,
         Some(other) => {
             eprintln!("--evaluator: `{}` is not `set` or `tuple`", other);
+            exit(2)
+        }
+    };
+    cfg.threads = match args.opts.get("threads").map(|s| s.as_str()) {
+        None => 1,
+        Some(s) => s.parse::<usize>().unwrap_or_else(|_| {
+            eprintln!("--threads: `{}` is not a count (0 is the machine's cores, up to four)", s);
+            exit(2)
+        }),
+    };
+    cfg.trim_stores = match args.opts.get("history").map(|s| s.as_str()) {
+        None | Some("window") => true,
+        Some("all") => false,
+        Some(other) => {
+            eprintln!("--history: `{}` is not `window` (the default: rows behind the lookback are dropped) or `all`", other);
             exit(2)
         }
     };
@@ -1251,6 +1286,12 @@ pub fn main_with(raw: Vec<String>) {
             // reads the mode's options.
             let live = ["mode", "session", "replay-of", "deadline", "deployment"].iter().any(|o| args.opts.contains_key(*o)) || args.flags.contains("paced");
             let keeps = !live && (!ledger.is_empty() || tables_out.is_some() || !args.opts.contains_key("checkpoint-every") && !args.opts.contains_key("resume"));
+            // A ledger or the state tables read every bar after the run: the
+            // history stays whole for them whatever --history says.
+            let cfg = ExecConfig {
+                trim_stores: cfg.trim_stores && ledger.is_empty() && tables_out.is_none() && !live,
+                ..cfg
+            };
             let mut notes: Vec<String> = Vec::new();
             // The kernel is kept after the run for the coverage report's
             // explanations, the ledger and the state tables; a run that
@@ -1300,7 +1341,7 @@ pub fn main_with(raw: Vec<String>) {
                 let run_s = total - loaded_at;
                 let s = &result.stats;
                 eprintln!(
-                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={}",
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={} trimmed_rows={} warm_secs={:.3} trim_secs={:.3} evict_secs={:.3}",
                     loaded_at - checked_at,
                     checked_at,
                     run_s,
@@ -1317,7 +1358,15 @@ pub fn main_with(raw: Vec<String>) {
                     s.window_rows_cached,
                     s.late_tuples,
                     s.memo_entries,
-                    s.pushed_answers
+                    s.pushed_answers,
+                    s.parallel_steps,
+                    s.parallel_rows,
+                    s.parallel_secs,
+                    s.rows_state_groups,
+                    s.trimmed_rows,
+                    s.warm_secs,
+                    s.trim_secs,
+                    s.evict_secs
                 );
             }
             println!(

@@ -48,6 +48,11 @@ pub(crate) struct Block {
     stride: usize,
     rows: usize,
     cells: Vec<Option<Value>>,
+    /// Per row, the index of the starting binding it descends from: what
+    /// orders the rows of a block cut across workers (`parallel.rs`).
+    origins: Vec<u32>,
+    /// The origin the next pushed row carries.
+    origin: u32,
 }
 
 impl Block {
@@ -56,13 +61,57 @@ impl Block {
             stride,
             rows: 0,
             cells: Vec::with_capacity(stride * rows),
+            origins: Vec::with_capacity(rows),
+            origin: 0,
         }
     }
 
-    /// A block of the environments given, in their order.
+    /// The origin the rows pushed next descend from.
+    pub fn set_origin(&mut self, origin: u32) {
+        self.origin = origin;
+    }
+
+    pub fn origin_of(&self, i: usize) -> u32 {
+        self.origins[i]
+    }
+
+    /// Each row its own origin: the block that starts a cut.
+    pub fn renumber(&mut self) {
+        for (i, o) in self.origins.iter_mut().enumerate() {
+            *o = i as u32;
+        }
+    }
+
+    /// A row copied in with the origin given.
+    pub fn push_row(&mut self, row: &[Option<Value>], origin: u32) {
+        self.origin = origin;
+        self.push_env(row);
+    }
+
+    /// The rows of several blocks in origin order (stable: rows of one
+    /// origin keep the order they were pushed in, and they all come from
+    /// one block).
+    pub fn merge_by_origin(stride: usize, blocks: Vec<Block>) -> Block {
+        let total: usize = blocks.iter().map(|b| b.rows).sum();
+        let mut idx: Vec<(u32, usize, usize)> = Vec::with_capacity(total);
+        for (bi, b) in blocks.iter().enumerate() {
+            for i in 0..b.rows {
+                idx.push((b.origins[i], bi, i));
+            }
+        }
+        idx.sort_by_key(|&(o, bi, i)| (o, bi, i));
+        let mut out = Block::with_capacity(stride, total);
+        for (o, bi, i) in idx {
+            out.push_row(blocks[bi].row(i), o);
+        }
+        out
+    }
+
+    /// A block of the environments given, in their order, each its own origin.
     pub fn of(stride: usize, envs: Vec<Env>) -> Block {
         let mut b = Block::with_capacity(stride, envs.len());
-        for e in envs {
+        for (i, e) in envs.into_iter().enumerate() {
+            b.origin = i as u32;
             b.push_owned(e);
         }
         b
@@ -90,6 +139,7 @@ impl Block {
         if rows < self.rows {
             self.rows = rows;
             self.cells.truncate(rows * self.stride);
+            self.origins.truncate(rows);
         }
     }
 }
@@ -98,17 +148,20 @@ impl Sink for Block {
     fn push_env(&mut self, env: &[Option<Value>]) {
         debug_assert_eq!(env.len(), self.stride);
         self.cells.extend_from_slice(env);
+        self.origins.push(self.origin);
         self.rows += 1;
     }
     fn push_with(&mut self, env: &[Option<Value>], slot: usize, v: Option<Value>) {
         let at = self.cells.len();
         self.cells.extend_from_slice(env);
         self.cells[at + slot] = v;
+        self.origins.push(self.origin);
         self.rows += 1;
     }
     fn push_owned(&mut self, env: Env) {
         debug_assert_eq!(env.len(), self.stride);
         self.cells.extend(env);
+        self.origins.push(self.origin);
         self.rows += 1;
     }
     fn last_row(&mut self) -> Option<&mut [Option<Value>]> {

@@ -5,7 +5,7 @@
 //! requested through `call`, which memoises by temporal key.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use abt_agg::{Function, ShiftedSums};
 
@@ -110,6 +110,29 @@ impl IntoIterator for WindowCache {
 }
 
 /// The static shape of a rows window literal.
+/// A rows window's conjunction solved at one bar for every row of a block
+/// at once (06-performance 3.2, "window states advanced for the slots
+/// present"): per row, whether the anchor held and the solutions, or `None`
+/// where an instance stuck (the row-at-a-time path places the halt).
+#[derive(Clone, Debug)]
+pub(crate) struct Prefetch {
+    rule: usize,
+    literal: usize,
+    t: i64,
+    rows: Vec<Option<(bool, Vec<Env>)>>,
+}
+
+/// A bucket or span window's conjunction solved at the bars every row of a
+/// block misses, for all rows at once (3.2): per row and bar, the
+/// solutions, or `None` for a row on which an instance stuck.
+#[derive(Clone, Debug)]
+pub(crate) struct PrefetchBucket {
+    rule: usize,
+    literal: usize,
+    bars: Vec<i64>,
+    rows: Vec<Option<Vec<Vec<Env>>>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct RowsPlan {
     literal: usize,
@@ -281,7 +304,7 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
 /// Anchored bars a rows window group keeps beyond its N, so that a call a
 /// few bars back (a recursion reaching its previous row) is served too;
 /// abt-agg's rows windows keep the same.
-const ROWS_SLACK: usize = abt_agg::window::ROWS_SLACK;
+pub(crate) const ROWS_SLACK: usize = abt_agg::window::ROWS_SLACK;
 
 /// A rows window group's running state: its last N anchored bars and the
 /// rows among them (time, the row's locally bound slots in slot order, which
@@ -365,6 +388,11 @@ pub(crate) struct Stuck {
     pub env: Env,
     pub undefined: Vec<usize>,
     pub error: RunError,
+    /// The starting binding the instance came from (`Block::origin_of`), and
+    /// the position in the plan's order of the literal it stuck at: together
+    /// the order the single thread lists stuck instances in.
+    pub origin: u32,
+    pub at: usize,
 }
 
 /// Whether two aggregation literals of one rule may share one window state
@@ -439,12 +467,12 @@ impl<'p> Kernel<'p> {
         let matches = |tu: &[Value]| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
         if info.stored {
             let entity = info.entity_positions.first().and_then(|&e| pattern[e].as_ref());
-            let tuples: Vec<(Tuple, usize)> = self.stores[rel].lookup(key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)).collect();
+            let tuples: Vec<(Tuple, usize)> = self.store_lookup(rel, key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)).collect();
             let cov = &mut self.coverage[rel];
             cov.0 += 1;
             cov.1 += usize::from(!tuples.is_empty());
             cov.2 += tuples.len();
-            return Ok(Rc::new(tuples));
+            return Ok(Arc::new(tuples));
         }
         let mut mkey: Vec<Value> = vec![Value::Time(key)];
         for &i in &info.inputs {
@@ -472,7 +500,7 @@ impl<'p> Kernel<'p> {
             if slice.len() == rc.len() && slice.iter().all(|(tu, _)| matches(tu)) {
                 rc.clone()
             } else {
-                Rc::new(slice.iter().filter(|(tu, _)| matches(tu)).cloned().collect())
+                Arc::new(slice.iter().filter(|(tu, _)| matches(tu)).cloned().collect())
             }
         };
         // A stuck instance the pattern meets halts the call (Kleene: a ⊥
@@ -483,7 +511,7 @@ impl<'p> Kernel<'p> {
                 _ => true,
             })
         };
-        if let Some(hit) = self.memo.get(&memo_key) {
+        if let Some(hit) = self.memo_get(&memo_key) {
             if let Some((_, e)) = self.memo_stuck.get(&memo_key).and_then(|st| st.iter().find(|(p, _)| compatible(p))) {
                 return Err(e.clone());
             }
@@ -496,6 +524,23 @@ impl<'p> Kernel<'p> {
         if let Some(e) = self.memo_errors.get(&memo_key) {
             return Err(e.clone());
         }
+        // Behind the memo's oldest bucket with the stores trimmed (E-126),
+        // a derivation would read rows the horizon dropped: an entity's
+        // read of its previous row is answered from the latest tuples the
+        // eviction kept for it (at that bar, or none), and nothing is
+        // derived.
+        if self.cfg.trim_stores && !info.stored {
+            if let (Some(oldest), Some(e)) = (self.memo.oldest(), entity) {
+                if key < oldest {
+                    if let Some(v) = pattern[e].as_ref() {
+                        return Ok(match self.memo.latest_row(rel, v) {
+                            Some((t, d)) if *t == key => narrow(d),
+                            _ => Arc::new(Vec::new()),
+                        });
+                    }
+                }
+            }
+        }
         // WF-4 rules out a relation depending on itself at the same time;
         // debug builds (the tests) still check that the checker did its job.
         if cfg!(debug_assertions) && !self.in_progress.insert(memo_key.clone()) {
@@ -504,7 +549,15 @@ impl<'p> Kernel<'p> {
                 info.name
             )));
         }
+        self.derive_stack.push((rel, std::time::Instant::now(), 0.0));
         let derived = self.derive_rules(&info, pattern);
+        if let Some((r, started, inner)) = self.derive_stack.pop() {
+            let total = started.elapsed().as_secs_f64();
+            self.derive_secs[r] += total - inner;
+            if let Some(parent) = self.derive_stack.last_mut() {
+                parent.2 += total;
+            }
+        }
         if cfg!(debug_assertions) {
             self.in_progress.remove(&memo_key);
         }
@@ -518,21 +571,50 @@ impl<'p> Kernel<'p> {
             }
         };
         if !stucks.is_empty() {
-            self.memo_stuck.insert(memo_key.clone(), Rc::new(stucks));
+            self.memo_stuck.insert(memo_key.clone(), Arc::new(stucks));
         }
         if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
-            results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+            // The block solver yields its rows in the first generator's order,
+            // the universe's entity order: a linear check spares the sort.
+            if !results.windows(2).all(|w| w[0].0[e] <= w[1].0[e]) {
+                results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+            }
         }
         let cov = &mut self.coverage[rel];
         cov.0 += 1;
         cov.1 += usize::from(!results.is_empty());
         cov.2 += results.len();
-        let rc = Rc::new(results);
-        self.memo.insert(memo_key.clone(), rc.clone());
+        let rc = Arc::new(results);
+        self.memo_insert(memo_key.clone(), rc.clone());
         if let Some((_, e)) = self.memo_stuck.get(&memo_key).and_then(|st| st.iter().find(|(p, _)| compatible(p))) {
             return Err(e.clone());
         }
         Ok(narrow(&rc))
+    }
+
+    /// The first tuple of a derived relation at its key for one entity: a
+    /// memoised block read by binary search, one tuple cloned, no result set
+    /// built (the executor's marks, one per held name per bar). The general
+    /// path when the result is not memoised or not sorted.
+    pub(crate) fn call_first(&mut self, rel: usize, pattern: &[Option<Value>]) -> Result<Option<Tuple>, RunError> {
+        let info = self.rels[rel].clone();
+        if !info.stored && info.inputs.is_empty() {
+            if let (Some(Value::Time(t)), Some(e)) = (pattern.get(info.key_pos).cloned().flatten(), info.entity_positions.first().copied()) {
+                if let Some(v) = pattern[e].as_ref() {
+                    let memo_key: super::MemoKey = (rel, vec![Value::Time(t)]);
+                    if self.memo_stuck.get(&memo_key).is_none() {
+                        if let Some(hit) = self.memo_get(&memo_key) {
+                            if hit.len() > SORTED_MIN {
+                                let lo = hit.partition_point(|(tu, _)| tu[e] < *v);
+                                let matches = |tu: &[Value]| pattern.iter().zip(tu.iter()).all(|(p, x)| p.as_ref().map(|p| p == x).unwrap_or(true));
+                                return Ok(hit[lo..].iter().take_while(|(tu, _)| tu[e] == *v).find(|(tu, _)| matches(tu)).map(|(tu, _)| tu.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(self.call(rel, pattern)?.first().map(|(tu, _)| tu.clone()))
     }
 
     /// The tuples of `rel` matching `pattern` and the instances there left
@@ -563,7 +645,7 @@ impl<'p> Kernel<'p> {
                 _ => true,
             })
         };
-        match (self.memo.get(&memo_key), self.memo_stuck.get(&memo_key)) {
+        match (self.memo_get(&memo_key), self.memo_stuck.get(&memo_key)) {
             (Some(live), Some(stuck)) => Ok((
                 live.iter().filter(|(tu, _)| matches(tu)).map(|(tu, _)| tu.clone()).collect(),
                 stuck.iter().filter(|(p, _)| compatible(p)).cloned().collect(),
@@ -578,7 +660,7 @@ impl<'p> Kernel<'p> {
     /// instances left stuck on a partial operation as partial head tuples
     /// with their errors (`call` halts a reader whose pattern meets one).
     #[allow(clippy::type_complexity)]
-    fn derive_rules(&mut self, info: &super::RelInfo, pattern: &[Option<Value>]) -> Result<(Vec<(Tuple, usize)>, Vec<(Vec<Option<Value>>, RunError)>), RunError> {
+    pub(crate) fn derive_rules(&mut self, info: &super::RelInfo, pattern: &[Option<Value>]) -> Result<(Vec<(Tuple, usize)>, Vec<(Vec<Option<Value>>, RunError)>), RunError> {
         let mut results: Vec<(Tuple, usize)> = Vec::new();
         let mut stucks: Vec<(Vec<Option<Value>>, RunError)> = Vec::new();
         // Duplicates are found by a scan while the set is small, by a hash
@@ -620,7 +702,7 @@ impl<'p> Kernel<'p> {
             // the tuple evaluator one environment at a time; both yield the
             // same rows in the same order (M-8, `tests/eval_set.rs`).
             let (sols, stuck) = if self.cfg.set_eval {
-                self.solve_kleene_block(&cr, &rule.body, &order, Block::of(cr.nslots, vec![env]), Some(ri))?
+                self.solve_block_maybe_parallel(&cr, ri, &rule.body, &order, env)?
             } else {
                 let (sols, stuck) = self.solve_kleene(&cr, &rule.body, &order, vec![env], Some(ri))?;
                 (Block::of(cr.nslots, sols), stuck)
@@ -670,13 +752,13 @@ impl<'p> Kernel<'p> {
 
     /// The order the plan evaluates a rule's body in (the written order
     /// without one).
-    pub(crate) fn plan_order(&self, ri: usize) -> Rc<Vec<usize>> {
+    pub(crate) fn plan_order(&self, ri: usize) -> Arc<Vec<usize>> {
         if self.written_order {
-            return Rc::new((0..self.prog.rules[ri].body.len()).collect());
+            return Arc::new((0..self.prog.rules[ri].body.len()).collect());
         }
         match self.plan_order.get(ri).and_then(|o| o.clone()) {
             Some(o) => o,
-            None => Rc::new((0..self.prog.rules[ri].body.len()).collect()),
+            None => Arc::new((0..self.prog.rules[ri].body.len()).collect()),
         }
     }
 
@@ -777,7 +859,7 @@ impl<'p> Kernel<'p> {
 
     /// Solve a conjunction in the order written: the live solutions, or the
     /// halt of an instance left stuck on a partial operation.
-    pub(crate) fn solve(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], envs: Vec<Env>) -> Result<Vec<Env>, RunError> {
+    pub(crate) fn solve(&mut self, cr: &Arc<CompiledRule>, lits: &[Literal], envs: Vec<Env>) -> Result<Vec<Env>, RunError> {
         let order: Vec<usize> = (0..lits.len()).collect();
         let (live, stuck) = self.solve_kleene(cr, lits, &order, envs, None)?;
         match stuck.into_iter().next() {
@@ -814,7 +896,7 @@ impl<'p> Kernel<'p> {
     /// bindings entering and leaving each literal (the observed cardinalities
     /// the plan reports) and the literal at which a call lost its last
     /// binding (the failure table).
-    pub(crate) fn solve_kleene(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], order: &[usize], envs: Vec<Env>, record: Option<usize>) -> Result<(Vec<Env>, Vec<Stuck>), RunError> {
+    pub(crate) fn solve_kleene(&mut self, cr: &Arc<CompiledRule>, lits: &[Literal], order: &[usize], envs: Vec<Env>, record: Option<usize>) -> Result<(Vec<Env>, Vec<Stuck>), RunError> {
         self.solve_kleene_from(cr, lits, order, envs, Vec::new(), record)
     }
 
@@ -822,7 +904,7 @@ impl<'p> Kernel<'p> {
     /// steps literal by literal).
     pub(crate) fn solve_kleene_from(
         &mut self,
-        cr: &Rc<CompiledRule>,
+        cr: &Arc<CompiledRule>,
         lits: &[Literal],
         order: &[usize],
         envs: Vec<Env>,
@@ -841,7 +923,13 @@ impl<'p> Kernel<'p> {
                     Ok(()) => next.extend(out),
                     Err(error @ RunError::Arithmetic { .. }) => {
                         let undefined: Vec<usize> = Self::literal_slots(cr, lit).into_iter().filter(|&s| env[s].is_none()).collect();
-                        stuck.push(Stuck { env: env.clone(), undefined, error });
+                        stuck.push(Stuck {
+                            env: env.clone(),
+                            undefined,
+                            error,
+                            origin: 0,
+                            at: 0,
+                        });
                     }
                     Err(e) => return Err(e),
                 }
@@ -862,26 +950,60 @@ impl<'p> Kernel<'p> {
     /// environments and each row's solutions in the order it yields them.
     /// An instance that meets a partial operation leaves no row (the rows it
     /// pushed are withdrawn) and is stuck, as there.
-    pub(crate) fn solve_kleene_block(&mut self, cr: &Rc<CompiledRule>, lits: &[Literal], order: &[usize], start: Block, record: Option<usize>) -> Result<(Block, Vec<Stuck>), RunError> {
+    pub(crate) fn solve_kleene_block(&mut self, cr: &Arc<CompiledRule>, lits: &[Literal], order: &[usize], start: Block, record: Option<usize>) -> Result<(Block, Vec<Stuck>), RunError> {
         let mut live = start;
         let mut stuck: Vec<Stuck> = Vec::new();
-        for &li in order {
+        for (pos, &li) in order.iter().enumerate() {
             let lit = &lits[li];
             let entering = live.len();
             let mut next = Block::with_capacity(live.stride(), entering);
+            // A positive atom over a block in entity order is joined by one
+            // merge pass (06-performance 3.2, "joins between blocks"): one
+            // demand for the whole relation, the rows and their matches in
+            // the order the row-at-a-time path yields them.
+            if let Literal::Atom(atom) = lit {
+                if self.merge_join_atom(cr, atom, &live, &mut next)? {
+                    self.count_literal(record, li, entering, next.len(), stuck.is_empty());
+                    live = next;
+                    if live.is_empty() && stuck.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            // A rows window over the block: its conjunction solved once for
+            // every row at the bar, each group then fed its own row.
+            let saved = self.prefetch.take();
+            let saved_bucket = self.prefetch_bucket.take();
+            if let Literal::Agg { args, conj, within, .. } = lit {
+                self.prefetch = self.prefetch_rows_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                if self.prefetch.is_none() {
+                    self.prefetch_bucket = self.prefetch_bucket_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                }
+            }
             for i in 0..live.len() {
                 let env = live.row(i);
                 let before = next.len();
+                next.set_origin(live.origin_of(i));
+                self.prefetch_row = i;
                 match self.step(cr, lit, env, &mut next) {
                     Ok(()) => {}
                     Err(error @ RunError::Arithmetic { .. }) => {
                         next.truncate(before);
                         let undefined: Vec<usize> = Self::literal_slots(cr, lit).into_iter().filter(|&s| env[s].is_none()).collect();
-                        stuck.push(Stuck { env: env.to_vec(), undefined, error });
+                        stuck.push(Stuck {
+                            env: env.to_vec(),
+                            undefined,
+                            error,
+                            origin: live.origin_of(i),
+                            at: pos,
+                        });
                     }
                     Err(e) => return Err(e),
                 }
             }
+            self.prefetch = saved;
+            self.prefetch_bucket = saved_bucket;
             stuck = self.advance_stuck(cr, lit, stuck)?;
             self.count_literal(record, li, entering, next.len(), stuck.is_empty());
             live = next;
@@ -895,7 +1017,7 @@ impl<'p> Kernel<'p> {
     /// The stuck instances past one more literal (Kleene conjunction): one
     /// that mentions an undefined slot is skipped, its value ⊥ too; any
     /// other runs, and is excluded when it is false.
-    fn advance_stuck(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, stuck: Vec<Stuck>) -> Result<Vec<Stuck>, RunError> {
+    fn advance_stuck(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, stuck: Vec<Stuck>) -> Result<Vec<Stuck>, RunError> {
         if stuck.is_empty() {
             return Ok(stuck);
         }
@@ -917,6 +1039,8 @@ impl<'p> Kernel<'p> {
                             env: e,
                             undefined: s.undefined.clone(),
                             error: s.error.clone(),
+                            origin: s.origin,
+                            at: s.at,
                         });
                     }
                 }
@@ -927,6 +1051,8 @@ impl<'p> Kernel<'p> {
                         env: s.env,
                         undefined,
                         error: s.error,
+                        origin: s.origin,
+                        at: s.at,
                     });
                 }
                 Err(e) => return Err(e),
@@ -937,7 +1063,7 @@ impl<'p> Kernel<'p> {
 
     /// A rule's per-literal counters: the bindings entering and leaving
     /// literal `li`, and whether the call lost its last binding there.
-    fn count_literal(&mut self, record: Option<usize>, li: usize, entering: usize, leaving: usize, no_stuck: bool) {
+    pub(crate) fn count_literal(&mut self, record: Option<usize>, li: usize, entering: usize, leaving: usize, no_stuck: bool) {
         if let Some(ri) = record {
             if let Some(counts) = self.literal_counts.get_mut(ri) {
                 if let Some(c) = counts.get_mut(li) {
@@ -953,6 +1079,18 @@ impl<'p> Kernel<'p> {
 
     /// The pattern an atom presents to `call`, and whether each term needs
     /// post-matching (constructor patterns and fresh variables).
+    /// The slot each term of an atom binds, computed once per (rule, atom)
+    /// and kept on the kernel (a literal's address is stable for the run).
+    fn atom_slots(&mut self, cr: &CompiledRule, atom: &Atom) -> Arc<Vec<Option<usize>>> {
+        let key = (cr.idx, atom as *const Atom as usize);
+        if let Some(s) = self.atom_slot_cache.get(&key) {
+            return s.clone();
+        }
+        let slots: Arc<Vec<Option<usize>>> = Arc::new(atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect());
+        self.atom_slot_cache.insert(key, slots.clone());
+        slots
+    }
+
     fn atom_pattern(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>]) -> Result<Vec<Option<Value>>, RunError> {
         let mut pat = Vec::with_capacity(atom.terms.len());
         for term in &atom.terms {
@@ -973,6 +1111,105 @@ impl<'p> Kernel<'p> {
         Ok(out)
     }
 
+    /// The merge join of a block with a relation (3.2): when the block's rows
+    /// bind the atom's entity in ascending order and its time to one bar, the
+    /// relation is demanded once, whole, and walked beside the block. The
+    /// matches of a row come in the relation's order, as `atom_matches_into`
+    /// yields them, so the two paths produce the same block. `false` when the
+    /// form is not this one, or a stuck instance would halt a row (the
+    /// row-at-a-time path halts the right rows): nothing was pushed then.
+    fn merge_join_atom(&mut self, cr: &CompiledRule, atom: &Atom, live: &Block, next: &mut Block) -> Result<bool, RunError> {
+        const MIN_ROWS: usize = 32;
+        if live.len() < MIN_ROWS || atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
+            return Ok(false);
+        }
+        let Some(&rel) = self.rel_ids.get(&atom.name) else { return Ok(false) };
+        let (stored, key_pos, entity_pos, inputs_empty) = {
+            let info = &self.rels[rel];
+            (info.stored, info.key_pos, info.entity_positions.first().copied(), info.inputs.is_empty())
+        };
+        let Some(entity_pos) = entity_pos else { return Ok(false) };
+        if !inputs_empty {
+            return Ok(false);
+        }
+        let Term::Var(ev, _) = &atom.terms[entity_pos] else { return Ok(false) };
+        let Term::Var(kv, _) = &atom.terms[key_pos] else { return Ok(false) };
+        let (eslot, kslot) = (cr.slots[ev], cr.slots[kv]);
+        // Every row binds the entity, ascending, and the time to one bar.
+        let first = live.row(0);
+        let Some(Value::Time(key)) = first[kslot] else { return Ok(false) };
+        let mut prev: Option<&Value> = None;
+        for i in 0..live.len() {
+            let row = live.row(i);
+            match (&row[eslot], &row[kslot]) {
+                (Some(e @ Value::Equity(_)), Some(Value::Time(k))) if *k == key => {
+                    if prev.is_some_and(|p| p > e) {
+                        return Ok(false);
+                    }
+                    prev = Some(e);
+                }
+                _ => return Ok(false),
+            }
+        }
+        // The pattern of the terms every row shares (the key and the
+        // constants); a variable bound differently per row is matched per row.
+        let mut shared: Vec<Option<Value>> = vec![None; atom.terms.len()];
+        for (i, term) in atom.terms.iter().enumerate() {
+            match term {
+                Term::Var(_, _) | Term::Wild(_) => {}
+                Term::Param(p, _) => shared[i] = Some(self.param_value(cr, p)?),
+                Term::Lit(l, _) => shared[i] = Some(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
+                Term::Ctor(..) => return Ok(false),
+            }
+        }
+        shared[key_pos] = Some(Value::Time(key));
+        let slots = self.atom_slots(cr, atom);
+        // The relation, whole at the bar.
+        let tuples: Vec<Tuple> = if stored {
+            self.store_lookup(rel, key, None).iter().map(|tu| tu.to_vec()).collect()
+        } else {
+            let mkey: super::MemoKey = (rel, vec![Value::Time(key)]);
+            // A halt the whole demand meets is the row-at-a-time path's to
+            // place on the rows it belongs to.
+            let derived = match self.call(rel, &shared) {
+                Ok(d) => d,
+                Err(RunError::Arithmetic { .. }) => return Ok(false),
+                Err(e) => return Err(e),
+            };
+            if self.memo_stuck.contains_key(&mkey) {
+                return Ok(false);
+            }
+            derived.iter().map(|(tu, _)| tu.clone()).collect()
+        };
+        if !tuples.windows(2).all(|w| w[0][entity_pos] <= w[1][entity_pos]) {
+            return Ok(false);
+        }
+        let mut j = 0usize;
+        for i in 0..live.len() {
+            let env = live.row(i);
+            next.set_origin(live.origin_of(i));
+            let e = env[eslot].as_ref().expect("checked");
+            while j < tuples.len() && tuples[j][entity_pos] < *e {
+                j += 1;
+            }
+            let mut k = j;
+            while k < tuples.len() && tuples[k][entity_pos] == *e {
+                let tu = &tuples[k];
+                k += 1;
+                // The row's own bindings on the atom's other terms, and the constants.
+                let ok = atom.terms.iter().enumerate().all(|(p, term)| match term {
+                    Term::Var(v, _) => env[cr.slots[v]].as_ref().map(|b| b == &tu[p]).unwrap_or(true),
+                    Term::Wild(_) => true,
+                    _ => shared[p].as_ref().map(|s| s == &tu[p]).unwrap_or(true),
+                });
+                if ok {
+                    bind_row(env, &slots, tu, next);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// `atom_matches` into a sink, in the same order.
     fn atom_matches_into<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
@@ -987,9 +1224,9 @@ impl<'p> Kernel<'p> {
             let Some(Value::Time(key)) = pat[key_pos] else {
                 return Err(RunError::Internal(format!("`{}` requested with an unbound temporal key", atom.name)));
             };
-            let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
+            let slots = self.atom_slots(cr, atom);
             let entity = entity_pos.and_then(|e| pat[e].clone());
-            for tu in self.stores[rel].lookup(key, entity.as_ref()) {
+            for tu in self.store_lookup(rel, key, entity.as_ref()) {
                 if !pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true)) {
                     continue;
                 }
@@ -1028,13 +1265,25 @@ impl<'p> Kernel<'p> {
             let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
             let mut cur = t;
             while let Some(k) = self.stores[rel].by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
-                found.extend(self.stores[rel].lookup(k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)));
+                found.extend(self.store_lookup(rel, k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)));
                 if !found.is_empty() || k == i64::MIN {
                     break;
                 }
                 cur = k - 1;
             }
-            Rc::new(found)
+            // Behind the retention horizon: the latest row of each identity
+            // the trimmed blocks held (`Store::trim_before`).
+            if found.is_empty() && floor == i64::MIN {
+                let e = info.entity_positions.first().copied();
+                found.extend(
+                    self.stores[rel]
+                        .kept
+                        .iter()
+                        .filter(|tu| entity.as_ref().map(|v| e.map(|e| tu[e] == *v).unwrap_or(true)).unwrap_or(true) && matches(tu))
+                        .map(|tu| (tu.clone(), usize::MAX)),
+                );
+            }
+            Arc::new(found)
         } else {
             let mut mkey: Vec<Value> = Vec::with_capacity(info.inputs.len());
             for &i in &info.inputs {
@@ -1076,7 +1325,7 @@ impl<'p> Kernel<'p> {
                     pat[info.key_pos] = Some(Value::Time(k));
                     self.call(rel, &pat)?
                 }
-                None => Rc::new(Vec::new()),
+                None => Arc::new(Vec::new()),
             }
         };
         self.bind_tuples_into(cr, atom, env, &tuples, out)
@@ -1086,7 +1335,7 @@ impl<'p> Kernel<'p> {
     /// match, into a sink, in the tuples' order.
     fn bind_tuples_into<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>], tuples: &super::Derived, out: &mut S) -> Result<(), RunError> {
         if !atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
-            let slots: Vec<Option<usize>> = atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect();
+            let slots = self.atom_slots(cr, atom);
             for (tu, _) in tuples.iter() {
                 bind_row(env, &slots, tu, out);
             }
@@ -1311,7 +1560,7 @@ impl<'p> Kernel<'p> {
     /// The value of a case form on one binding: the first branch whose
     /// guard holds binds the variable to its value (Definition 5.9); with
     /// no branch and no `else` the instance is excluded.
-    fn case_value(&mut self, cr: &Rc<CompiledRule>, branches: &[Branch], otherwise: Option<&Expr>, env: &[Option<Value>]) -> Result<Option<Value>, RunError> {
+    fn case_value(&mut self, cr: &Arc<CompiledRule>, branches: &[Branch], otherwise: Option<&Expr>, env: &[Option<Value>]) -> Result<Option<Value>, RunError> {
         for b in branches {
             let order: Vec<usize> = (0..b.guard.len()).collect();
             let (sols, stuck) = self.solve_kleene(cr, &b.guard, &order, vec![env.to_vec()], None)?;
@@ -1331,7 +1580,7 @@ impl<'p> Kernel<'p> {
     /// The rule's time domain as a sorted vector (cached per calendar, and
     /// per instrument on the sessions calendar): the bars the running sums
     /// walk, with their indices.
-    fn domain_bars(&mut self, cr: &CompiledRule, env: &[Option<Value>]) -> Result<Rc<Vec<i64>>, RunError> {
+    fn domain_bars(&mut self, cr: &CompiledRule, env: &[Option<Value>]) -> Result<Arc<Vec<i64>>, RunError> {
         let cal = self.prog.infos[cr.idx].cal.clone();
         let entity = if cal.per_entity() {
             cr.entity_slot.and_then(|s| env.get(s)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity())
@@ -1342,12 +1591,12 @@ impl<'p> Kernel<'p> {
         if let Some(v) = self.domain_vecs.get(&key) {
             return Ok(v.clone());
         }
-        let v: Rc<Vec<i64>> = Rc::new(self.domain(cr, env)?.iter().copied().collect());
+        let v: Arc<Vec<i64>> = Arc::new(self.domain(cr, env)?.iter().copied().collect());
         self.domain_vecs.insert(key, v.clone());
         Ok(v)
     }
 
-    pub(crate) fn step<S: Sink>(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
+    pub(crate) fn step<S: Sink>(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         match lit {
             Literal::Atom(a) => self.atom_matches_into(cr, a, env, out)?,
             Literal::AsOf { atom, at, within_bucket, .. } => self.asof_matches(cr, atom, at, within_bucket.as_ref(), env, out)?,
@@ -1773,7 +2022,7 @@ impl<'p> Kernel<'p> {
     /// The aggregation literal's plan, computed on its first call: by its
     /// position in the rule's body (one nested in a case is planned at
     /// each call).
-    fn agg_plan(&mut self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Rc<AggPlan> {
+    fn agg_plan(&mut self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Arc<AggPlan> {
         let pos = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit));
         if let Some(p) = pos.and_then(|p| self.agg_plans.get(&(cr.idx, p))) {
             return p.clone();
@@ -1811,7 +2060,7 @@ impl<'p> Kernel<'p> {
         let mut group: Vec<usize> = group_vars.iter().filter_map(|v| cr.slots.get(v).copied()).collect();
         group.sort_unstable();
         group.dedup();
-        let plan = Rc::new(AggPlan {
+        let plan = Arc::new(AggPlan {
             group,
             window: self.window_plan(cr, lit, conj, args),
         });
@@ -1945,7 +2194,83 @@ impl<'p> Kernel<'p> {
     /// variable bound to it and the rest of the conjunction in evaluation
     /// order, and kept until it leaves the window. `None` when this call
     /// cannot be served so (solved whole instead).
-    fn window_columns(&mut self, cr: &Rc<CompiledRule>, plan: &WindowPlan, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<WindowColumns>, RunError> {
+    /// A bucket or span window's conjunction solved for every row of the
+    /// block at once (`PrefetchBucket`): the bars the first row's group
+    /// misses, each solved over the whole block, each row then holding its
+    /// own solutions in its own solve's order.
+    fn prefetch_bucket_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>, live: &Block) -> Result<Option<PrefetchBucket>, RunError> {
+        const MIN_ROWS: usize = 32;
+        if live.len() < MIN_ROWS || !self.cfg.window_cache {
+            return Ok(None);
+        }
+        let aplan = self.agg_plan(cr, lit, conj, args, within);
+        let Some(wp) = aplan.window.as_ref() else { return Ok(None) };
+        if !wp.late.is_empty() {
+            return Ok(None);
+        }
+        let Literal::Window { kind, base, dur, lo: lo_off, .. } = &conj[wp.window] else { return Ok(None) };
+        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) || self.per_entity_window(kind) {
+            return Ok(None);
+        }
+        let first = live.row(0);
+        if first[wp.wslot].is_some() || aplan.group.iter().any(|&s| first[s].is_none()) {
+            return Ok(None);
+        }
+        let t = self.time_of(cr, base, first)?;
+        for i in 1..live.len() {
+            let r = live.row(i);
+            if r[wp.wslot].is_some() || self.time_of(cr, base, r)? != t {
+                return Ok(None);
+            }
+        }
+        let times: Vec<i64> = self.window_times(cr, kind, base, dur, lo_off.as_ref(), first)?;
+        let lo = times.first().copied().unwrap_or(t);
+        // The bars the first row's group misses: what every group of this
+        // block is about to ask for.
+        let key = WindowKey {
+            rule: cr.idx,
+            literal: wp.literal,
+            outer: wp.outer.iter().map(|&s| first[s].clone()).collect(),
+        };
+        let bars: Vec<i64> = match self.windows.get(&key) {
+            Some(cache) => {
+                let have: Vec<i64> = cache.range(lo, t).map(|(k, _)| *k).collect();
+                times.iter().copied().filter(|t1| have.binary_search(t1).is_err()).collect()
+            }
+            None => times.clone(),
+        };
+        if bars.is_empty() {
+            return Ok(None);
+        }
+        let n = live.len();
+        let mut rows: Vec<Option<Vec<Vec<Env>>>> = vec![Some(vec![Vec::new(); bars.len()]); n];
+        let order: Vec<usize> = (0..wp.order.len()).collect();
+        for (k, &t1) in bars.iter().enumerate() {
+            let mut start = Block::with_capacity(cr.nslots, n);
+            for i in 0..n {
+                let mut e = live.row(i).to_vec();
+                e[wp.wslot] = Some(Value::Time(t1));
+                start.push_row(&e, i as u32);
+            }
+            let (sb, sstuck) = self.solve_kleene_block(cr, &wp.order, &order, start, None)?;
+            for j in 0..sb.len() {
+                if let Some(r) = &mut rows[sb.origin_of(j) as usize] {
+                    r[k].push(sb.row(j).to_vec());
+                }
+            }
+            for s in sstuck {
+                rows[s.origin as usize] = None;
+            }
+        }
+        Ok(Some(PrefetchBucket {
+            rule: cr.idx,
+            literal: wp.literal,
+            bars,
+            rows,
+        }))
+    }
+
+    fn window_columns(&mut self, cr: &Arc<CompiledRule>, plan: &WindowPlan, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<WindowColumns>, RunError> {
         let Literal::Window { kind, base, dur, lo: lo_off, .. } = &conj[plan.window] else {
             return Ok(None);
         };
@@ -1988,16 +2313,27 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        let pre: Option<(Vec<i64>, Vec<Vec<Env>>)> = self
+            .prefetch_bucket
+            .as_ref()
+            .filter(|p| p.rule == cr.idx && p.literal == plan.literal)
+            .and_then(|p| p.rows.get(self.prefetch_row).cloned().flatten().map(|r| (p.bars.clone(), r)));
         for t1 in missing {
-            let mut e = env.to_vec();
-            e[wslot] = Some(Value::Time(t1));
             // A row stuck or failing here may be one a deferred test
             // excludes (Kleene conjunction, V-5): the whole solve decides.
-            let sols = match self.solve(cr, order, vec![e]) {
-                Ok(s) => s,
-                Err(err) => {
-                    self.windows.insert(key, cache);
-                    return if late.is_empty() { Err(err) } else { Ok(None) };
+            let fetched = pre.as_ref().and_then(|(bars, rows)| bars.iter().position(|&b| b == t1).map(|k| rows[k].clone()));
+            let sols = match fetched {
+                Some(s) => s,
+                None => {
+                    let mut e = env.to_vec();
+                    e[wslot] = Some(Value::Time(t1));
+                    match self.solve(cr, order, vec![e]) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.windows.insert(key, cache);
+                            return if late.is_empty() { Err(err) } else { Ok(None) };
+                        }
+                    }
                 }
             };
             self.stats.window_bars_solved += 1;
@@ -2108,7 +2444,7 @@ impl<'p> Kernel<'p> {
     /// once and kept while it can be among the group's last N; a walk stops
     /// at the group's first bar once it is known.
     /// The static shape of a rows window (rule, literal): computed once.
-    fn rows_plan(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Result<Rc<RowsPlan>, RunError> {
+    fn rows_plan(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Result<Arc<RowsPlan>, RunError> {
         let literal = self.literal_index(cr, lit);
         if let Some(p) = self.rows_plans.get(&(cr.idx, literal)) {
             return Ok(p.clone());
@@ -2147,7 +2483,7 @@ impl<'p> Kernel<'p> {
         let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
         outer.sort_unstable();
         outer.dedup();
-        let plan = Rc::new(RowsPlan {
+        let plan = Arc::new(RowsPlan {
             literal,
             wslot,
             base: Term::Var(bvar.clone(), crate::ir::Span::default()),
@@ -2178,7 +2514,87 @@ impl<'p> Kernel<'p> {
     /// anchored bars and their rows. `None` when the window cannot be served
     /// so (a bar with more than one row, a base time read by the rows, or a
     /// call earlier than the group's last): the general path answers then.
-    fn rows_columns(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<Columns>, RunError> {
+    /// The rows window's conjunction solved at the bar for every row of the
+    /// block at once (`Prefetch`), when every row asks the same bar with the
+    /// window's time free and reads the window per instrument. Each row's
+    /// anchor and solutions are what its own solve yields, in the same order
+    /// (the block solver's, V-5); a row on which an instance stuck is left to
+    /// the row-at-a-time path.
+    fn prefetch_rows_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>, live: &Block) -> Result<Option<Prefetch>, RunError> {
+        const MIN_ROWS: usize = 32;
+        if live.len() < MIN_ROWS || !self.cfg.window_cache {
+            return Ok(None);
+        }
+        let has_rows = conj.iter().any(|l| {
+            matches!(
+                l,
+                Literal::Window {
+                    kind: WindowKind::Rows | WindowKind::PriorRows,
+                    ..
+                }
+            )
+        });
+        if !has_rows {
+            return Ok(None);
+        }
+        let plan = self.rows_plan(cr, lit, conj, args)?;
+        if !plan.shareable || plan.prior {
+            return Ok(None);
+        }
+        let first = live.row(0);
+        if first[plan.wslot].is_some() {
+            return Ok(None);
+        }
+        let aplan = self.agg_plan(cr, lit, conj, args, within);
+        if aplan.group.iter().any(|&s| first[s].is_none()) {
+            return Ok(None);
+        }
+        let t = self.time_of(cr, &plan.base, first)?;
+        for i in 1..live.len() {
+            let r = live.row(i);
+            if r[plan.wslot].is_some() || self.time_of(cr, &plan.base, r)? != t {
+                return Ok(None);
+            }
+        }
+        let n = live.len();
+        let mut start = Block::with_capacity(cr.nslots, n);
+        for i in 0..n {
+            let mut e = live.row(i).to_vec();
+            e[plan.wslot] = Some(Value::Time(t));
+            start.push_row(&e, i as u32);
+        }
+        let mut rows: Vec<Option<(bool, Vec<Env>)>> = vec![Some((plan.anchor.is_empty(), Vec::new())); n];
+        if !plan.anchor.is_empty() {
+            let order: Vec<usize> = (0..plan.anchor.len()).collect();
+            let (ab, astuck) = self.solve_kleene_block(cr, &plan.anchor, &order, start.clone(), None)?;
+            for j in 0..ab.len() {
+                if let Some((a, _)) = &mut rows[ab.origin_of(j) as usize] {
+                    *a = true;
+                }
+            }
+            for s in astuck {
+                rows[s.origin as usize] = None;
+            }
+        }
+        let order: Vec<usize> = (0..plan.order.len()).collect();
+        let (sb, sstuck) = self.solve_kleene_block(cr, &plan.order, &order, start, None)?;
+        for j in 0..sb.len() {
+            if let Some((_, v)) = &mut rows[sb.origin_of(j) as usize] {
+                v.push(sb.row(j).to_vec());
+            }
+        }
+        for s in sstuck {
+            rows[s.origin as usize] = None;
+        }
+        Ok(Some(Prefetch {
+            rule: cr.idx,
+            literal: plan.literal,
+            t,
+            rows,
+        }))
+    }
+
+    fn rows_columns(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<Columns>, RunError> {
         let plan = self.rows_plan(cr, lit, conj, args)?;
         if !plan.shareable || plan.prior || env[plan.wslot].is_some() {
             return Ok(None);
@@ -2238,15 +2654,31 @@ impl<'p> Kernel<'p> {
             bars.reverse();
             bars
         } else if t > st.upto {
-            self.domain(cr, env)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied().collect()
+            let mut v = std::mem::take(&mut self.fresh_scratch);
+            v.clear();
+            v.extend(self.domain(cr, env)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied());
+            v
         } else {
             Vec::new()
         };
-        for t1 in fresh {
-            let mut e = env.to_vec();
-            e[plan.wslot] = Some(Value::Time(t1));
-            let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
-            let sols = self.solve(cr, &plan.order, vec![e])?;
+        let pre: Option<(bool, Vec<Env>)> = if fresh.len() == 1 && fresh[0] == t {
+            self.prefetch
+                .as_ref()
+                .filter(|p| p.rule == cr.idx && p.literal == plan.literal && p.t == t)
+                .and_then(|p| p.rows.get(self.prefetch_row).cloned().flatten())
+        } else {
+            None
+        };
+        for &t1 in fresh.iter() {
+            let (anchored, sols) = match &pre {
+                Some((a, s)) => (*a, s.clone()),
+                None => {
+                    let mut e = env.to_vec();
+                    e[plan.wslot] = Some(Value::Time(t1));
+                    let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
+                    (anchored, self.solve(cr, &plan.order, vec![e])?)
+                }
+            };
             self.stats.window_bars_solved += 1;
             if sols.len() > 1 {
                 return Ok(None);
@@ -2269,6 +2701,9 @@ impl<'p> Kernel<'p> {
                 }
                 st.rows.push_back((t1, key, vals));
             }
+        }
+        if fresh.capacity() > self.fresh_scratch.capacity() {
+            self.fresh_scratch = fresh;
         }
         st.upto = st.upto.max(t);
         // Serve t from the buffer: its last N anchored bars at or before t
@@ -2365,7 +2800,7 @@ impl<'p> Kernel<'p> {
     /// Whether a rows window's time variable is the lowest slot among the
     /// variables its conjunction binds (then rows in time order are rows in
     /// environment order). Judged once per rule and literal.
-    fn time_ordered(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], env: &[Option<Value>]) -> bool {
+    fn time_ordered(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], env: &[Option<Value>]) -> bool {
         let literal = self.literal_index(cr, lit);
         if let Some(&known) = self.time_ordered_memo.get(&(cr.idx, literal)) {
             return known;
@@ -2387,7 +2822,7 @@ impl<'p> Kernel<'p> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn rows_window(&mut self, cr: &Rc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>], want_env: bool) -> Result<(WindowRows, bool), RunError> {
+    fn rows_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>], want_env: bool) -> Result<(WindowRows, bool), RunError> {
         let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
         let Some(Literal::Window {
             var: Term::Var(wvar, _),

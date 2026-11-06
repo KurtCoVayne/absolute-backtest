@@ -11,7 +11,6 @@ pub mod value;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use hash::{FxHashMap, FxHashSet};
@@ -26,6 +25,7 @@ pub mod events;
 pub mod fold;
 pub mod hash;
 pub mod outputs;
+pub mod parallel;
 pub mod pushdown;
 pub mod service;
 pub use crate::sim::{Executor, SimExecutor};
@@ -42,10 +42,14 @@ pub(crate) type MemoKey = (usize, Vec<Value>);
 /// dropping the past costs only what is dropped; the latest old result of
 /// each relation read through `asof`, per inputs, is kept apart (a later bar
 /// may read it however old).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Memo {
     by_time: BTreeMap<i64, FxHashMap<MemoKey, Derived>>,
     latest: FxHashMap<(usize, Vec<Value>), (i64, Derived)>,
+    /// Of the evicted buckets, the latest tuples of each entity of each
+    /// derived relation with one: what a read of an entity's previous row
+    /// behind the horizon finds once the stores are trimmed (E-126).
+    latest_rows: FxHashMap<(usize, Value), (i64, Derived)>,
     len: usize,
 }
 
@@ -80,18 +84,52 @@ impl Memo {
         *self = Memo::default();
     }
 
+    /// The oldest bucket held, if any.
+    pub(crate) fn oldest(&self) -> Option<i64> {
+        self.by_time.keys().next().copied()
+    }
+
+    /// An entity's latest tuples of `rel` among the evicted buckets.
+    pub(crate) fn latest_row(&self, rel: usize, entity: &Value) -> Option<&(i64, Derived)> {
+        self.latest_rows.get(&(rel, entity.clone()))
+    }
+
+    /// Every result, bucket by bucket (a worker's overlay absorbed).
+    pub(crate) fn into_entries(self) -> impl Iterator<Item = (MemoKey, Derived)> {
+        self.by_time.into_values().flatten()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.len + self.latest.len()
     }
 
     /// Drop every result keyed before `cutoff`, keeping the latest of each
     /// `keep` relation per inputs.
-    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>) {
+    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>, entity_pos: &[Option<usize>], chained: &FxHashSet<usize>) {
         let recent = self.by_time.split_off(&cutoff);
         let old = std::mem::replace(&mut self.by_time, recent);
         for (t, bucket) in old {
             self.len -= bucket.len();
             for (k, d) in bucket {
+                // Per entity, the latest tuples of a temporally recursive
+                // relation: a run whose stores are trimmed answers a read of
+                // the entity's previous row from here (`Kernel::call`); no
+                // other relation is read behind the horizon.
+                if let (Some(Some(e)), true) = (entity_pos.get(k.0), chained.contains(&k.0)) {
+                    let mut by_entity: FxHashMap<Value, Vec<(Tuple, usize)>> = FxHashMap::default();
+                    for (tu, ri) in d.iter() {
+                        by_entity.entry(tu[*e].clone()).or_default().push((tu.clone(), *ri));
+                    }
+                    for (ent, rows) in by_entity {
+                        match self.latest_rows.get_mut(&(k.0, ent.clone())) {
+                            Some(slot) if slot.0 < t => *slot = (t, Arc::new(rows)),
+                            Some(_) => {}
+                            None => {
+                                self.latest_rows.insert((k.0, ent), (t, Arc::new(rows)));
+                            }
+                        }
+                    }
+                }
                 if !keep.contains(&k.0) {
                     continue;
                 }
@@ -107,9 +145,51 @@ impl Memo {
         }
     }
 }
-pub(crate) type Derived = Rc<Vec<(Tuple, usize)>>;
+pub(crate) type Derived = Arc<Vec<(Tuple, usize)>>;
 /// The instances a call left stuck: partial head tuples with their errors.
 pub(crate) type StuckSet = Vec<(Vec<Option<Value>>, RunError)>;
+
+/// Heavy state a run shares with its worker kernels for the length of one
+/// parallel step (F-5.3, `parallel.rs`): an `Arc` whose exclusive owner between
+/// steps is the main kernel. A read derefs to the value; a write takes the
+/// `Arc` back, which succeeds exactly when no worker holds a share -- the
+/// workers give theirs back before the main thread continues.
+pub(crate) struct Shared<T>(Arc<T>);
+
+impl<T> Shared<T> {
+    pub(crate) fn new(v: T) -> Shared<T> {
+        Shared(Arc::new(v))
+    }
+    pub(crate) fn share(&self) -> Shared<T> {
+        Shared(self.0.clone())
+    }
+}
+
+impl<T> std::ops::Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::get_mut(&mut self.0).expect("the kernel's shared state is written while a worker holds it (F-5.3)")
+    }
+}
+
+impl<T: Default> Default for Shared<T> {
+    fn default() -> Self {
+        Shared::new(T::default())
+    }
+}
+
+/// A clone is a share: the worker kernels are clones of the main one.
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        self.share()
+    }
+}
 
 /// One row of the bundle's security table (data-bundle doc, section 3,
 /// "Identity"): the security `id` carried `ticker` from `from` (inclusive)
@@ -577,6 +657,42 @@ pub struct KernelStats {
     /// literal (Kleene conjunction: never a halt).
     #[serde(default)]
     pub excluded_after_undefined: usize,
+    /// Rule applications cut across the worker kernels, and the rows they cut.
+    #[serde(default)]
+    pub parallel_steps: usize,
+    #[serde(default)]
+    pub parallel_rows: usize,
+    /// Seconds the main thread spent inside cut steps (workers running).
+    #[serde(default)]
+    pub parallel_secs: f64,
+    /// Live incremental window groups (`rows_state`), the main kernel's and
+    /// the workers' together at the end of the run.
+    #[serde(default)]
+    pub rows_state_groups: usize,
+    /// Stored rows dropped behind the retention horizon.
+    #[serde(default)]
+    pub trimmed_rows: usize,
+    /// Seconds in the fold's phases: the stream's tuples inserted, the
+    /// barriers' fills, decisions and executor steps, and the wait for the
+    /// next batch.
+    #[serde(default)]
+    pub insert_secs: f64,
+    #[serde(default)]
+    pub fill_secs: f64,
+    #[serde(default)]
+    pub decide_secs: f64,
+    #[serde(default)]
+    pub exec_secs: f64,
+    #[serde(default)]
+    pub wait_secs: f64,
+    /// Seconds in the recursive relations' warm-up, the trim of the stores
+    /// and the memo's eviction.
+    #[serde(default)]
+    pub warm_secs: f64,
+    #[serde(default)]
+    pub trim_secs: f64,
+    #[serde(default)]
+    pub evict_secs: f64,
     /// Running-sums windows built at the bar asked for because the buffer
     /// no longer held the checkpoint's window (a departure from the
     /// canonical walk; zero in a run whose groups are asked for in order).
@@ -708,6 +824,18 @@ fn pushdown_on() -> bool {
     true
 }
 
+fn one_thread() -> usize {
+    1
+}
+
+fn parallel_min_rows_default() -> usize {
+    64
+}
+
+fn memo_min_default() -> usize {
+    200_000
+}
+
 /// Executor configuration: part of the kernel, not of the program (section 6).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExecConfig {
@@ -796,6 +924,28 @@ pub struct ExecConfig {
     /// configuration's identity: both give the same bits.
     #[serde(skip, default = "pushdown_on")]
     pub set_eval: bool,
+    /// Worker kernels for the entity-local rules (F-5.3): `1` is one thread,
+    /// `0` the machine's cores up to four. The result does not depend on it,
+    /// so it is not part of the configuration's identity (D-6.1), nor are
+    /// `parallel_min_rows` and `trim_stores`.
+    #[serde(skip, default = "one_thread")]
+    pub threads: usize,
+    /// Rows a rule must bind after its first literal before it is cut across
+    /// the workers (below it the fan-out costs more than the rows). The
+    /// suites set it to 1 so that every entity-local rule takes the cut.
+    #[serde(skip, default = "parallel_min_rows_default")]
+    pub parallel_min_rows: usize,
+    /// Drop the stored rows no reader can reach any more at every barrier
+    /// (the retention horizon of 06-performance 3.1): what the windows,
+    /// lags, as-of reads and the executor look back over is kept, the rest
+    /// goes. Off for a kernel that is read after its run (a ledger, the
+    /// state tables, a query at an old bar).
+    #[serde(skip)]
+    pub trim_stores: bool,
+    /// Memo entries below which no eviction pass runs (200,000; the suites
+    /// set 0 to evict at every barrier). Not part of the identity.
+    #[serde(skip, default = "memo_min_default")]
+    pub memo_min: usize,
     /// The pre-trade limits of the execution block (K-3.5).
     #[serde(default)]
     pub limits: Vec<crate::check::Limit>,
@@ -963,6 +1113,10 @@ impl Default for ExecConfig {
             window_cache: true,
             pushdown: true,
             set_eval: true,
+            threads: 1,
+            parallel_min_rows: 64,
+            trim_stores: false,
+            memo_min: 200_000,
             limits: Vec::new(),
             late_reject: false,
             memory_budget: None,
@@ -1689,6 +1843,14 @@ pub struct Store {
     /// The key the latest insert went to.
     #[serde(skip)]
     open: Option<i64>,
+    /// Of the blocks trimmed away (`trim_before`), the latest row of each
+    /// identity: what an `asof` read reaching behind the horizon finds.
+    #[serde(default)]
+    pub kept: Vec<Tuple>,
+    /// Rows ever inserted, trimmed ones included (the coverage report's
+    /// "tuples in the data").
+    #[serde(default)]
+    pub inserted: u64,
 }
 
 /// The block of `key` for a tuple of `width` values. A new key's block is
@@ -1731,9 +1893,50 @@ impl Store {
     }
     pub fn insert(&mut self, key: i64, tuple: Tuple) {
         block_for(&mut self.by_time, &mut self.open, key, tuple.len()).push(tuple);
+        self.inserted += 1;
         if self.entity_pos.is_some() {
             self.dirty.insert(key);
         }
+    }
+
+    /// Rows ever inserted (the live ones when nothing was trimmed).
+    pub fn inserted(&self) -> usize {
+        (self.inserted as usize).max(self.len())
+    }
+
+    /// Drop every block keyed before `cutoff`. With `keep_latest`, the last
+    /// row of each identity among the dropped rows is kept in `kept` (the
+    /// as-of reads of a relation read behind the horizon), the later row of
+    /// one identity replacing the earlier. Returns the rows dropped.
+    pub fn trim_before(&mut self, cutoff: i64, identity: &[usize], keep_latest: bool) -> usize {
+        if self.by_time.first_key_value().map(|(k, _)| *k >= cutoff).unwrap_or(true) {
+            return 0;
+        }
+        let recent = self.by_time.split_off(&cutoff);
+        let old = std::mem::replace(&mut self.by_time, recent);
+        let mut dropped = 0;
+        if keep_latest {
+            let mut latest: FxHashMap<Vec<Value>, Tuple> = self.kept.drain(..).map(|tu| (identity.iter().map(|&i| tu[i].clone()).collect(), tu)).collect();
+            for (_, block) in old {
+                dropped += block.len();
+                for tu in block.iter() {
+                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), tu.to_vec());
+                }
+            }
+            let mut kept: Vec<Tuple> = latest.into_values().collect();
+            kept.sort();
+            self.kept = kept;
+        } else {
+            dropped = old.values().map(|b| b.len()).sum();
+        }
+        self.dirty = self.dirty.split_off(&cutoff);
+        if let Some((_, runs)) = &mut self.runs {
+            runs.retain(|k, _| *k >= cutoff);
+        }
+        if self.open.map(|k| k < cutoff).unwrap_or(false) {
+            self.open = None;
+        }
+        dropped
     }
 
     /// A tuple of the stream at `key`, received at instant `r`: a later
@@ -1743,12 +1946,14 @@ impl Store {
     /// already (two versions of one fact), so a bar received whole searches
     /// none.
     pub fn insert_received(&mut self, key: i64, tuple: Tuple, identity: &[usize], r: i64) {
+        self.inserted += 1;
         let Store {
             by_time,
             entity_pos,
             dirty,
             runs,
             open,
+            ..
         } = self;
         if runs.as_ref().is_none_or(|(at, _)| *at != r) {
             *runs = Some((r, FxHashMap::default()));
@@ -1811,6 +2016,40 @@ impl Store {
                 runs.remove(&key);
             }
         }
+        match entity {
+            Some(v) => {
+                let lo = block.partition_point(|t| t[e] < *v);
+                let hi = block.partition_point(|t| t[e] <= *v);
+                block.slice(lo, hi)
+            }
+            None => block.all(),
+        }
+    }
+
+    /// Sort every dirty block now, so that `lookup_sealed` can read without
+    /// writing (the worker kernels of `parallel.rs`).
+    pub fn seal(&mut self) {
+        let Some(e) = self.entity_pos else {
+            self.dirty.clear();
+            return;
+        };
+        for key in std::mem::take(&mut self.dirty) {
+            if let Some(block) = self.by_time.get_mut(&key) {
+                block.sort_by_column(e);
+                if let Some((_, runs)) = &mut self.runs {
+                    runs.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// `lookup` over a sealed store: the block is sorted already.
+    pub fn lookup_sealed(&self, key: i64, entity: Option<&Value>) -> RowSlice<'_> {
+        debug_assert!(!self.dirty.contains(&key), "a worker read a dirty block (seal the stores before the step)");
+        let Some(e) = self.entity_pos else {
+            return self.by_time.get(&key).map(|v| v.all()).unwrap_or_default();
+        };
+        let Some(block) = self.by_time.get(&key) else { return RowSlice::default() };
         match entity {
             Some(v) => {
                 let lo = block.partition_point(|t| t[e] < *v);
@@ -1896,6 +2135,7 @@ impl std::fmt::Display for Explanation {
     }
 }
 
+#[derive(Clone)]
 pub struct Kernel<'p> {
     /// The program the kernel evaluates: the checked one, or the lowered copy
     /// with its constants folded (compiler design, R6).
@@ -1905,7 +2145,7 @@ pub struct Kernel<'p> {
     /// The plan (compiler design, "Lower"): per rule the evaluation order of
     /// its body, the rules that contribute no work, the aggregation literals
     /// sharing one window state, and the plan's name.
-    pub(crate) plan_order: Vec<Option<Rc<Vec<usize>>>>,
+    pub(crate) plan_order: Vec<Option<Arc<Vec<usize>>>>,
     /// Evaluate every rule in its written order rather than the plan's
     /// (`why not ... in written order`, V-8.3).
     pub(crate) written_order: bool,
@@ -1922,12 +2162,46 @@ pub struct Kernel<'p> {
     /// which the literal emptied the survivors.
     pub(crate) literal_counts: Vec<Vec<(u64, u64, u64)>>,
     pub symbols: Symbols,
-    pub(crate) stores: Vec<Store>,
+    pub(crate) stores: Shared<Vec<Store>>,
     /// Shared so that a call holds its relation's facts without copying them.
-    pub(crate) rels: Vec<Rc<RelInfo>>,
+    pub(crate) rels: Vec<Arc<RelInfo>>,
     pub(crate) rel_ids: HashMap<String, usize>,
-    pub(crate) compiled: Vec<Rc<CompiledRule>>,
-    pub(crate) memo: Memo,
+    pub(crate) compiled: Vec<Arc<CompiledRule>>,
+    pub(crate) memo: Shared<Memo>,
+    /// A worker's own derivations during a step (`parallel.rs`).
+    pub(crate) overlay: Memo,
+    /// This kernel's worker index, `None` for the main kernel.
+    pub(crate) worker: Option<usize>,
+    /// The worker kernels of the main kernel, made on the first step.
+    pub(crate) workers: Vec<Kernel<'p>>,
+    /// Per rule, whether its rows after the first literal are independent
+    /// across entities (no cross-sectional literal).
+    pub(crate) parallel_ok: Vec<bool>,
+    /// Per rule, whether its body holds a window aggregate: such a rule is
+    /// cut at any row count, so its window groups live on one worker.
+    pub(crate) rule_has_window: Vec<bool>,
+    /// The open-loop derived relations in stratum order, warmed before a
+    /// decision when the run has workers, and those of them the last
+    /// decision demanded (what the next one warms).
+    pub(crate) warm_rels: Vec<usize>,
+    pub(crate) warm_next: Option<Vec<usize>>,
+    /// Per relation, whether anything in the run reads it (`read_relations`):
+    /// a streamed tuple of a relation nothing reads is not kept (E-127).
+    pub(crate) read_rels: Vec<bool>,
+    /// The temporally recursive derived relations (a rule reads its head at
+    /// a strictly earlier bar: a total-return index, a cumulative split):
+    /// extended at every barrier before the stores are trimmed (E-126).
+    pub(crate) recursive_rels: Vec<usize>,
+    /// The slot map of each atom, by (rule, the atom's address) (`eval::atom_slots`).
+    pub(crate) atom_slot_cache: FxHashMap<(usize, usize), Arc<Vec<Option<usize>>>>,
+    /// A scratch vector for a window group's fresh bars.
+    pub(crate) fresh_scratch: Vec<i64>,
+    /// The solutions of a rows window's conjunction at the bar for every row
+    /// of the block being solved (`eval::prefetch_rows_window`), and the row
+    /// the block solver is at.
+    pub(crate) prefetch: Option<eval::Prefetch>,
+    pub(crate) prefetch_bucket: Option<eval::PrefetchBucket>,
+    pub(crate) prefetch_row: usize,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
     pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
@@ -1939,21 +2213,21 @@ pub struct Kernel<'p> {
     /// there): by memo key, the partial head tuple of each with its error.
     /// A later call whose pattern meets one halts; one that does not reads
     /// the live tuples.
-    pub(crate) memo_stuck: FxHashMap<MemoKey, Rc<StuckSet>>,
+    pub(crate) memo_stuck: FxHashMap<MemoKey, Arc<StuckSet>>,
     pub(crate) domains: HashMap<Cal, BTreeSet<i64>>,
     /// Every calendar's labels over the whole dataset (the bars' keys, the
     /// periods' last bars, the sessions): what a fold opens buckets from.
     pub(crate) schedule: HashMap<Cal, BTreeSet<i64>>,
     /// Each instrument's sessions as (open, label) pairs by label (3.5), for
     /// the `sessions` calendars, `session_of` and the session constraints.
-    pub(crate) sessions: FxHashMap<Sym, Rc<Vec<(i64, i64)>>>,
+    pub(crate) sessions: FxHashMap<Sym, Arc<Vec<(i64, i64)>>>,
     /// Each instrument's session labels: its domain on the `sessions` calendar.
     pub(crate) session_domains: FxHashMap<Sym, BTreeSet<i64>>,
     /// The `clock(A, @T)` relation of a session-offset clock.
     pub(crate) clock_rel: Option<usize>,
     pub(crate) cfg: ExecConfig,
     /// The pushed-down aggregate literals' answers, by (rule, literal).
-    pub(crate) pushed: FxHashMap<(usize, usize), Rc<pushdown::Pushed>>,
+    pub(crate) pushed: FxHashMap<(usize, usize), Arc<pushdown::Pushed>>,
     /// The instant of the last barrier the fold passed: every tuple received
     /// by it is held, so a pushed answer that waits on no later receipt is
     /// what the kernel computes (ERRATA E-47). Before the first barrier (a
@@ -1991,13 +2265,13 @@ pub struct Kernel<'p> {
     /// Per (rule, literal): whether its rows window yields rows in
     /// environment order (see `eval::time_ordered`).
     pub(crate) time_ordered_memo: FxHashMap<(usize, usize), bool>,
-    pub(crate) rows_plans: FxHashMap<(usize, usize), Rc<eval::RowsPlan>>,
+    pub(crate) rows_plans: FxHashMap<(usize, usize), Arc<eval::RowsPlan>>,
     /// Per (rule, literal): what an aggregation's calls share.
-    pub(crate) agg_plans: FxHashMap<(usize, usize), Rc<eval::AggPlan>>,
+    pub(crate) agg_plans: FxHashMap<(usize, usize), Arc<eval::AggPlan>>,
     pub(crate) rows_state: FxHashMap<eval::WindowKey, eval::RowsState>,
     /// Each calendar's time domain as a sorted vector, for the running
     /// sums' bar walk.
-    pub(crate) domain_vecs: FxHashMap<(Cal, Option<Sym>), Rc<Vec<i64>>>,
+    pub(crate) domain_vecs: FxHashMap<(Cal, Option<Sym>), Arc<Vec<i64>>>,
     /// Memo retention (data-bundle doc, section 2, "State"): derived tuples
     /// older than `memo_horizon` seconds before the current bar (and than the
     /// last few bars) are dropped, except the latest of each relation read
@@ -2046,6 +2320,10 @@ pub struct Kernel<'p> {
     /// Per relation: calls computed (memo misses), calls that derived a
     /// tuple, tuples derived; the coverage report of a run.
     pub(crate) coverage: Vec<(usize, usize, usize)>,
+    /// Per relation, the seconds spent deriving it, its callees excluded
+    /// (`--timing`'s per-relation table).
+    pub(crate) derive_secs: Vec<f64>,
+    pub(crate) derive_stack: Vec<(usize, std::time::Instant, f64)>,
     /// What the build noticed about the program against this data (a label
     /// the data never carries); reported with the run's warnings.
     pub(crate) run_warnings: Vec<RunWarning>,
@@ -2112,7 +2390,7 @@ impl<'p> Kernel<'p> {
             .map(|ri| {
                 let order = lowered.order.get(ri)?;
                 let written: Vec<usize> = (0..self.prog.rules[ri].body.len()).collect();
-                (*order != written).then(|| Rc::new(order.clone()))
+                (*order != written).then(|| Arc::new(order.clone()))
             })
             .collect();
         self.skip_rule = (0..self.prog.rules.len()).map(|ri| lowered.skip.get(ri).copied().unwrap_or(false)).collect();
@@ -2339,7 +2617,7 @@ impl<'p> Kernel<'p> {
             let key_pos = sig.key_pos().ok_or_else(|| RunError::Internal(format!("relation `{}` has no temporal key", name)))?;
             let stored = matches!(sig.kind, Kind::Primitive { .. } | Kind::Executor | Kind::KernelState);
             rel_ids.insert(name.clone(), rels.len());
-            rels.push(Rc::new(RelInfo {
+            rels.push(Arc::new(RelInfo {
                 name: name.clone(),
                 key_pos,
                 inputs: vec![],
@@ -2384,7 +2662,7 @@ impl<'p> Kernel<'p> {
         // The sessions by instrument, and the calendars' domains (3.1, 3.5):
         // a civil calendar's labels are the last base bar of each period;
         // the sessions calendar's labels are the session labels.
-        let mut sessions: FxHashMap<Sym, Rc<Vec<(i64, i64)>>> = FxHashMap::default();
+        let mut sessions: FxHashMap<Sym, Arc<Vec<(i64, i64)>>> = FxHashMap::default();
         {
             let mut by_sym: BTreeMap<Sym, Vec<(i64, i64)>> = BTreeMap::new();
             for (sym, open, label) in session_rows {
@@ -2393,7 +2671,7 @@ impl<'p> Kernel<'p> {
             for (sym, mut v) in by_sym {
                 v.sort_by_key(|(_, l)| *l);
                 v.dedup_by_key(|(_, l)| *l);
-                sessions.insert(sym, Rc::new(v));
+                sessions.insert(sym, Arc::new(v));
             }
         }
         let mut domains: HashMap<Cal, BTreeSet<i64>> = HashMap::new();
@@ -2445,7 +2723,7 @@ impl<'p> Kernel<'p> {
                     _ => None,
                 })
             });
-            compiled.push(Rc::new(CompiledRule {
+            compiled.push(Arc::new(CompiledRule {
                 idx: i,
                 slots,
                 nslots,
@@ -2763,7 +3041,8 @@ impl<'p> Kernel<'p> {
         let memo_horizon = horizon.map(|h| h + 7 * time::DAY);
         let n_rels = rels.len();
         let literal_counts: Vec<Vec<(u64, u64, u64)>> = prog.rules.iter().map(|r| vec![(0, 0, 0); r.body.len()]).collect();
-        Ok(Kernel {
+        let memo_min = cfg.memo_min;
+        let mut k = Kernel {
             prog,
             source: prog,
             plan_order: vec![None; prog.rules.len()],
@@ -2775,12 +3054,26 @@ impl<'p> Kernel<'p> {
             plan_label: "written".into(),
             literal_counts,
             symbols,
-            stores,
+            stores: Shared::new(stores),
             rels,
             clock_rel: rel_ids.get("clock").copied().filter(|_| prog.clock.offset.is_some()),
             rel_ids,
             compiled,
             memo: Default::default(),
+            overlay: Default::default(),
+            worker: None,
+            workers: Vec::new(),
+            parallel_ok: (0..prog.rules.len()).map(|ri| !crate::plan::planner::cross_sectional(prog, ri)).collect(),
+            rule_has_window: prog.rules.iter().map(|r| r.body.iter().any(|l| matches!(l, crate::ir::Literal::Agg { .. }))).collect(),
+            warm_rels: Vec::new(),
+            warm_next: None,
+            read_rels: Vec::new(),
+            recursive_rels: Vec::new(),
+            atom_slot_cache: Default::default(),
+            fresh_scratch: Vec::new(),
+            prefetch: None,
+            prefetch_bucket: None,
+            prefetch_row: 0,
             asof_memo: Default::default(),
             in_progress: Default::default(),
             memo_errors: Default::default(),
@@ -2832,12 +3125,27 @@ impl<'p> Kernel<'p> {
             memo_horizon,
             asof_read,
             rows_lookback,
-            asof_memo_next: 200_000,
-            memo_min: 200_000,
+            asof_memo_next: memo_min.max(1),
+            memo_min,
             stats: KernelStats::default(),
             coverage: vec![(0, 0, 0); n_rels],
+            derive_secs: vec![0.0; n_rels],
+            derive_stack: Vec::new(),
             run_warnings,
-        })
+        };
+        let read = k.read_relations();
+        k.read_rels = (0..n_rels).map(|r| read.contains(&r)).collect();
+        k.recursive_rels = (0..n_rels)
+            .filter(|&r| {
+                !k.rels[r].stored
+                    && k.rels[r].rules.iter().any(|&ri| {
+                        prog.infos
+                            .get(ri)
+                            .is_some_and(|info| info.refs.iter().any(|a| a.name == k.rels[r].name && a.key_prov == crate::check::TimeProv::Strict))
+                    })
+            })
+            .collect();
+        Ok(k)
     }
 
     /// What every relation derived so far (section 7, diagnostics): the
@@ -2850,7 +3158,7 @@ impl<'p> Kernel<'p> {
             .map(|((rel, info), &(calls, nonempty, tuples))| {
                 // A stored relation's tuples are what the data (or the
                 // executor) holds, whichever way the rules read them.
-                let tuples = if info.stored { self.stores[rel].len() } else { tuples };
+                let tuples = if info.stored { self.stores[rel].inserted() } else { tuples };
                 RelationCoverage {
                     name: info.name.clone(),
                     derived: !info.stored,
@@ -2868,6 +3176,7 @@ impl<'p> Kernel<'p> {
             window_groups: self.windows.len(),
             window_rows_cached: self.windows.values().map(|m| m.len()).sum(),
             memo_entries: self.memo.len(),
+            rows_state_groups: self.rows_state.len() + self.workers.iter().map(|w| w.rows_state.len()).sum::<usize>(),
             ..self.stats.clone()
         }
     }
@@ -2923,8 +3232,12 @@ impl<'p> Kernel<'p> {
     /// recomputed if asked for, so this bounds memory, never changes results.
     pub fn evict_memo(&mut self, t: i64, keep_from: i64) {
         let Some(h) = self.memo_horizon else { return };
-        // A small memo is not worth a pass.
-        if self.memo.len() < self.memo_min && self.asof_memo.len() < self.memo_min {
+        let started = std::time::Instant::now();
+        // A small memo is not worth a pass -- unless the stores are trimmed:
+        // then the memo is evicted at every barrier, since what it would
+        // keep is unreachable and it would be the run's unbounded holder
+        // otherwise (its entries are keys, a few per bar).
+        if !self.cfg.trim_stores && self.memo.len() < self.memo_min && self.asof_memo.len() < self.memo_min {
             return;
         }
         let mut cutoff = (t - h).min(keep_from);
@@ -2935,17 +3248,150 @@ impl<'p> Kernel<'p> {
                 return;
             }
         }
-        self.memo.evict_before(cutoff, &self.asof_read);
+        let entity_pos: Vec<Option<usize>> = self.rels.iter().map(|r| if r.stored { None } else { r.entity_positions.first().copied() }).collect();
+        let chained: FxHashSet<usize> = self.recursive_rels.iter().copied().collect();
+        self.memo.evict_before(cutoff, &self.asof_read, &entity_pos, &chained);
         self.memo_stuck.retain(|k, _| Memo::time_of(k) >= cutoff);
         // The as-of shortcuts are not bucketed: scanned only once they double.
         if self.asof_memo.len() >= self.asof_memo_next {
             self.asof_memo.retain(|(_, _, k), _| *k >= cutoff);
             self.asof_memo_next = (2 * self.asof_memo.len()).max(self.memo_min);
         }
+        self.stats.evict_secs += started.elapsed().as_secs_f64();
     }
 
     /// Evict at every bar however small the memo (what tests use to prove
     /// that eviction never changes a result).
+    /// Drop the stored rows behind the retention horizon: before the oldest
+    /// bar any reader reaches from `t` -- the memo's horizon, every `rows`
+    /// window's count plus the slack a cold group walks back, the executor's
+    /// volume and volatility windows over its own bars (`executor_floor`),
+    /// the decision bucket's own bars -- less a week. A relation read `asof` keeps the latest row of each identity.
+    /// A program whose lookback is unbounded trims nothing.
+    pub fn trim_stores(&mut self, t: i64, executor_floor: i64) {
+        let Some(h) = self.memo_horizon else { return };
+        if executor_floor == i64::MIN {
+            return;
+        }
+        let started = std::time::Instant::now();
+        // A temporally recursive relation reaches back to each entity's
+        // first row: its chain is extended at this bar for every entity
+        // present, while the rows it reads are still held, so that no
+        // later demand has to walk behind the horizon. A halt met here is
+        // memoised and raised where a decision demands it.
+        for rel in self.recursive_rels.clone() {
+            let (key_pos, arity) = {
+                let info = &self.rels[rel];
+                (info.key_pos, self.prog.relations.get(&info.name).map(|s| s.args.len()).unwrap_or(0))
+            };
+            if arity == 0 {
+                continue;
+            }
+            let mut pattern = vec![None; arity];
+            pattern[key_pos] = Some(Value::Time(t));
+            let _ = self.call(rel, &pattern);
+        }
+        self.stats.warm_secs += started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
+        let mut cutoff = (t - h).min(executor_floor);
+        for (res, n) in &self.rows_lookback {
+            match self.domains.get(res).and_then(|d| d.range(..=t).rev().nth(n + eval::ROWS_SLACK + 3)) {
+                Some(&b) => cutoff = cutoff.min(b),
+                None => return,
+            }
+        }
+        cutoff = cutoff.min(self.decision_bucket(t).0).saturating_sub(7 * time::DAY);
+        let rels = &self.rels;
+        let asof_read = &self.asof_read;
+        let mut dropped = 0;
+        for (rel, st) in self.stores.iter_mut().enumerate() {
+            dropped += st.trim_before(cutoff, &rels[rel].identity, asof_read.contains(&rel));
+        }
+        self.stats.trimmed_rows += dropped;
+        self.stats.trim_secs += started.elapsed().as_secs_f64();
+    }
+
+    /// The stored relations this run keeps: every one but the pure data a
+    /// run can prove it never reads -- the bar companions `open`, `high` and
+    /// `low` when no rule names them and no decision fills at the open or on
+    /// a limit or stop, and the identity relations `ticker` and
+    /// `classification` when no rule names them. The executor and the
+    /// kernel read other relations by name (the settlements, the margins,
+    /// the quotes), so nothing else is projected (06-performance 3.3,
+    /// E-127: the first step of the stream projection).
+    pub fn read_relations(&self) -> FxHashSet<usize> {
+        let mut named: FxHashSet<usize> = FxHashSet::default();
+        for rule in &self.prog.rules {
+            let mut stack: Vec<&Literal> = rule.body.iter().collect();
+            while let Some(lit) = stack.pop() {
+                let atom = match lit {
+                    Literal::Atom(a) | Literal::Neg(a) => Some(a),
+                    Literal::AsOf { atom, .. } | Literal::Top { atom, .. } => Some(atom),
+                    Literal::Agg { conj, .. } => {
+                        stack.extend(conj.iter());
+                        None
+                    }
+                    Literal::Case { branches, .. } => {
+                        stack.extend(branches.iter().flat_map(|b| b.guard.iter()));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(&id) = atom.and_then(|a| self.rel_ids.get(&a.name)) {
+                    named.insert(id);
+                }
+            }
+        }
+        // Contracts settle and exercise on prints the companions carry (an
+        // index option at the AM print): a class with contracts keeps them.
+        let companions = self.orders_read_companions() || self.has_options || !self.contracts.is_empty();
+        (0..self.rels.len())
+            .filter(|&id| {
+                let name = self.rels[id].name.as_str();
+                match name {
+                    "open" | "high" | "low" => companions || named.contains(&id),
+                    "ticker" | "classification" => named.contains(&id),
+                    _ => true,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether a decision of this program can fill at the open or on a
+    /// limit or stop: the default order kind, or an order named in a
+    /// decide rule's head.
+    fn orders_read_companions(&self) -> bool {
+        fn names(t: &Term) -> bool {
+            match t {
+                Term::Ctor(c, subs, _) => matches!(c.as_str(), "moo" | "moo_moc" | "limit" | "stop") || subs.iter().any(names),
+                Term::Lit(Lit::Label(s) | Lit::Str(s), _) => matches!(s.as_str(), "moo" | "moo_moc" | "limit" | "stop"),
+                // A bare order kind in a head is a parameter term (check/rule.rs).
+                Term::Param(p, _) => matches!(p.as_str(), "moo" | "moo_moc" | "limit" | "stop"),
+                _ => false,
+            }
+        }
+        matches!(self.prog.default_order.as_str(), "moo" | "moo_moc") || self.prog.rules.iter().filter(|r| r.head.name == "decide").any(|r| r.head.terms.iter().any(names))
+    }
+
+    /// The relations by the seconds spent deriving them (callees excluded).
+    pub fn derive_times(&self) -> Vec<(String, f64, usize)> {
+        let mut v: Vec<(String, f64, usize)> = self
+            .rels
+            .iter()
+            .zip(&self.derive_secs)
+            .zip(&self.coverage)
+            .filter(|((_, s), _)| **s > 0.0)
+            .map(|((r, s), c)| (r.name.clone(), *s, c.0))
+            .collect();
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    /// Stored rows held now, every relation together.
+    pub fn store_rows(&self) -> usize {
+        self.stores.iter().map(|s| s.len()).sum()
+    }
+
     pub fn force_memo_eviction(&mut self) {
         self.memo_min = 0;
         self.asof_memo_next = 0;
@@ -2959,6 +3405,11 @@ impl<'p> Kernel<'p> {
     /// The kernel's symbol names, by symbol id (identifier order).
     pub fn symbol_names(&self) -> &[String] {
         self.symbols.names()
+    }
+
+    /// A relation's name, by id.
+    pub fn relation_name(&self, rel: usize) -> &str {
+        &self.rels[rel].name
     }
 
     pub fn relation_id(&self, name: &str) -> Option<usize> {
@@ -3319,8 +3770,8 @@ impl<'p> Kernel<'p> {
             let mut pattern: Vec<Option<Value>> = vec![None; width];
             pattern[info.key_pos] = Some(Value::Time(t));
             pattern[entity_pos] = Some(Value::Equity(sym));
-            match self.call(id, &pattern) {
-                Ok(tuples) => tuples.first().and_then(|(tu, _)| tu[col].as_f64()),
+            match self.call_first(id, &pattern) {
+                Ok(tu) => tu.and_then(|tu| tu[col].as_f64()),
                 Err(_) => None,
             }
         } else if info.cal == self.prog.decision_cal {
@@ -3414,7 +3865,7 @@ impl<'p> Kernel<'p> {
     /// key and inputs bound, and the variables pre-bound (with their shown
     /// values). Only bars of the rule's time domain are evaluated.
     #[allow(clippy::type_complexity)]
-    fn entry(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<(Rc<CompiledRule>, Env, Vec<(String, String)>), RunError> {
+    fn entry(&mut self, rule_idx: usize, t: i64, inputs: &[Value], bindings: &[(String, Value)]) -> Result<(Arc<CompiledRule>, Env, Vec<(String, String)>), RunError> {
         let rule = &self.prog.rules[rule_idx];
         let cr = self.compiled[rule_idx].clone();
         let rel = self.rel(&rule.head.name)?;
@@ -4088,6 +4539,11 @@ pub fn replay_observed<'p>(
     if let Some(end) = end_label.or(opts.horizon) {
         cfg.as_of = Some(cfg.as_of.or(bound.bundle_date()).map_or(end, |a| a.min(end)));
     }
+    // An observed relation off the decision calendar is read after the run,
+    // bar by bar: the history stays whole for it.
+    if cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() && !outputs::observes_at_barriers(prog) {
+        cfg.trim_stores = false;
+    }
     let mut kernel = match lowered {
         Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
         None => Kernel::bound(prog, &bound, cfg.clone())?,
@@ -4106,6 +4562,11 @@ pub fn replay_observed<'p>(
         None => Fold::new(kernel, exec),
     }
     .with_contract(contract);
+    // A run that writes outputs observes its relations at the barriers when
+    // its stores are trimmed (`outputs::observe_bar`, E-126).
+    if fold.kernel.cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() {
+        fold.observe_as_it_goes();
+    }
     if let Some(e) = opts.checkpoint_every {
         fold = fold.with_checkpoints(e);
     }
@@ -4192,6 +4653,7 @@ pub fn replay_observed<'p>(
         }
         return Err(e);
     }
+    let ledger_acc = fold.take_ledger_acc();
     let (mut result, mut kernel) = fold.finish()?;
     result.run_id = run.clone();
     result.binding_id = bound.binding.id.clone().unwrap_or_default();
@@ -4210,7 +4672,10 @@ pub fn replay_observed<'p>(
         return Ok((result, kernel));
     }
     let ids = kernel.data_ids.clone();
-    let (ledgers, notes) = outputs::ledgers(&run, prog, &mut kernel, &ids, &result)?;
+    let (ledgers, notes) = match ledger_acc {
+        Some(acc) => outputs::ledgers_from(&run, prog, &kernel, &ids, acc)?,
+        None => outputs::ledgers(&run, prog, &mut kernel, &ids, &result)?,
+    };
     result.warnings.extend(notes.into_iter().map(|message| RunWarning { bias: "observation".into(), message }));
     if !prog.observes.is_empty() {
         result.contract.set("post.ledgers", crate::contract::Status::Checked { times: ledgers.len() as u64 });

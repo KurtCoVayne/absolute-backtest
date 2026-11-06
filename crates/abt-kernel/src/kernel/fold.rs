@@ -104,6 +104,9 @@ pub struct Fold<'p, 'e> {
     live: Option<Lag>,
     /// The kill switch (K-6.5), read at every decision barrier.
     control: Option<crate::live::LiveControl>,
+    /// The observed relations' ledger rows, collected at each barrier when
+    /// the stores are trimmed (`outputs::observe_bar`, E-126).
+    ledger_acc: Option<super::outputs::LedgerAcc>,
 }
 
 /// What a live run measures (K-6.3): each decision bar's lag, the time
@@ -155,6 +158,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             invariants,
             live: None,
             control: None,
+            ledger_acc: None,
         }
     }
 
@@ -236,7 +240,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             last_bar: self.last_bar.unwrap_or(i64::MIN),
             symbols: k.symbols.names().to_vec(),
             labels: k.labels.names().to_vec(),
-            stores: k.stores.clone(),
+            stores: (*k.stores).clone(),
             domains: {
                 let mut d: Vec<(Cal, Vec<i64>)> = k.domains.iter().map(|(r, s)| (r.clone(), s.iter().copied().collect())).collect();
                 d.sort_by_key(|(r, _)| r.clone());
@@ -260,6 +264,16 @@ impl<'p, 'e> Fold<'p, 'e> {
     /// A fold continuing from `cp`: `kernel` is a bound kernel of the same
     /// run (checked by the run's identity and the symbols), `exec` the same
     /// kind of executor. The stream resumes at the seq `cp.cursor`.
+    /// Collect the observed relations' ledgers at the barriers (a run
+    /// whose stores are trimmed observes as it goes).
+    pub fn observe_as_it_goes(&mut self) {
+        self.ledger_acc = Some(super::outputs::LedgerAcc::new(self.kernel.prog));
+    }
+
+    pub fn take_ledger_acc(&mut self) -> Option<super::outputs::LedgerAcc> {
+        self.ledger_acc.take()
+    }
+
     pub fn restore(mut kernel: Kernel<'p>, exec: &'e mut dyn Executor, cp: Checkpoint) -> Result<Fold<'p, 'e>, RunError> {
         let (here, there) = (&kernel.identity, &cp.identity);
         if there.program_hash != here.program_hash {
@@ -291,7 +305,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         if cp.stores.len() != kernel.stores.len() {
             return Err(RunError::Config("the checkpoint's relations do not match the program's".into()));
         }
-        kernel.stores = cp.stores;
+        kernel.stores = super::Shared::new(cp.stores);
         // A checkpoint's blocks may predate the index: re-sort on first use.
         for (st, info) in kernel.stores.iter_mut().zip(kernel.rels.iter()) {
             st.index_by(info.entity_positions.first().copied());
@@ -328,6 +342,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             recent: Default::default(),
             live: None,
             control: None,
+            ledger_acc: None,
         })
     }
 
@@ -348,6 +363,12 @@ impl<'p, 'e> Fold<'p, 'e> {
         match ev {
             Event::Tuple { seq, rel, key, r, tuple } => {
                 self.kernel.received_r = self.kernel.received_r.max(r);
+                // A tuple of a relation nothing in the run reads is not kept (the
+                // stream projection at the kernel's door, E-127: a live session
+                // streams whole).
+                if !self.kernel.read_rels.get(rel).copied().unwrap_or(true) {
+                    return Ok(());
+                }
                 // A checkpoint at the end of a decision bar, before the next
                 // tuple is stored: the replay resumes at this tuple.
                 if self.ran_decision {
@@ -369,7 +390,9 @@ impl<'p, 'e> Fold<'p, 'e> {
                 let dcal = self.kernel.prog.decision_cal.clone();
                 let late = self.last_bar.is_some_and(|last| self.kernel.label_on(&dcal, key).is_some_and(|l| l <= last));
                 let entity = self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity());
+                let started = std::time::Instant::now();
                 self.kernel.insert_fact(rel, tuple, r)?;
+                self.kernel.stats.insert_secs += started.elapsed().as_secs_f64();
                 if late {
                     self.kernel.invalidate_from(key);
                     self.result.late.push(super::LateRecord {
@@ -400,11 +423,16 @@ impl<'p, 'e> Fold<'p, 'e> {
         if self.kernel.cfg.start.map(|s| label < s).unwrap_or(false) || self.kernel.cfg.end.map(|e| label > e).unwrap_or(false) {
             return Ok(());
         }
+        let started = std::time::Instant::now();
         if self.decided_once {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
         self.exec.open_bar(&mut self.kernel, label, &mut self.result)?;
+        self.kernel.stats.fill_secs += started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
         let mut by_equity = self.kernel.decide_at(label, &mut self.result)?;
+        self.kernel.stats.decide_secs += started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
         if let Some(source) = self.control.as_ref().and_then(|c| c.take_flatten()) {
             by_equity = self.flatten(label, by_equity, source);
         }
@@ -439,17 +467,28 @@ impl<'p, 'e> Fold<'p, 'e> {
             }
         }
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
+        self.kernel.stats.exec_secs += started.elapsed().as_secs_f64();
         // The invariants after the executor's take (K-3.3, K-4.2).
         let working = self.exec.working();
         let at = self.kernel.now;
         self.invariants.check(&mut self.kernel, self.exec.book(), &working, self.exec.expected(), &mut self.result, label, at)?;
         // Bucketed by time, eviction costs only what it drops: every bar,
         // keeping the last few decision bars' entries.
+        // The observed relations at this bar, before the stores are trimmed.
+        if let Some(acc) = &mut self.ledger_acc {
+            let prog = self.kernel.prog;
+            super::outputs::observe_bar(prog, &mut self.kernel, label, acc)?;
+        }
         self.recent.push_back(label);
         if self.recent.len() > 4 {
             self.recent.pop_front();
         }
         self.kernel.evict_memo(label, self.recent.front().copied().unwrap_or(label));
+        if self.kernel.cfg.trim_stores {
+            if let Some(floor) = self.exec.retention_floor(&self.kernel) {
+                self.kernel.trim_stores(label, floor);
+            }
+        }
         self.decided_once = true;
         self.last_bar = Some(label);
         self.ran_decision = true;

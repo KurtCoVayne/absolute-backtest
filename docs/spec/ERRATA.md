@@ -2870,6 +2870,142 @@ batch driver agree on every corpus program. Each bless since:
   bars from 14:00 to 15:59 (under periods keyed on their start, the bar is
   one minute off). [D] UTC-aligned periods, not session-aligned: a
   session-relative N-hour clock is a later form.
+- **E-125 (06-performance 3.2, Proposition 3.1; M-8, F-5.3; entity-parallel
+  evaluation between barriers as built).** 3.2 describes the cut over
+  entity-local strata of a set-at-a-time evaluator over column blocks; the
+  tree's set evaluator still solves one environment at a time over a block
+  of bindings (`eval_set.rs`, E-75), so the cut lands one level down, on a
+  rule application: `Kernel::solve_block_maybe_parallel`
+  (`kernel/parallel.rs`) runs the first literal of the plan's order on the
+  main thread, cuts the bindings it produced by the entity they bind
+  (`entity % threads`, so a window group stays on one worker across bars),
+  solves the rest of the body on worker kernels, and merges their rows by
+  the index of the binding each descends from (`Block::origins`) and their
+  stuck instances by (literal, binding), which is the order the single
+  thread lists them in. A rule takes the cut when no literal of its body
+  reads the cross-section (`plan::planner::cross_sectional`), its head
+  binds an entity, and the first literal bound at least
+  `parallel_min_rows` of them (64; the suites set 1). [D] A worker is a
+  clone of the main kernel sharing its stores and memo through `Shared`
+  (an `Arc` the main kernel writes only while no worker holds a share: the
+  workers give theirs back before the step returns) and owning its
+  overlay memo, window groups and counters, absorbed after the step; the
+  stores are sealed (every dirty block sorted) before a step. Rejected: a
+  split of `Kernel` into shared and per-worker halves (every evaluator
+  method's receiver would change for the same sharing). [D] Before a
+  decision (`decide_at`, after its clock check: a bar that decides nothing
+  warms nothing) the kernel derives, in stratum order, the open-loop
+  derived relations the previous decision demanded (`warm_strata`,
+  `note_demanded`; every one at the first), so that each rule's inputs are
+  memoised when it is cut and no worker derives a whole relation on its
+  own, and a relation a program reads at some bars only costs nothing at
+  the others; a halt met there is memoised and raised by the decision that
+  demands it, as the Kleene reading requires. Rejected: warming every
+  open-loop relation at every barrier (R8L, deciding at one minute of each
+  session, took 4.4x longer on four threads before the clock check). [D] A
+  rule with a window literal takes the cut at any row count, so that each
+  entity's window group lives on one worker for the whole run (cut at some
+  bars and solved on the main thread at others, a group would exist twice
+  and re-walk its window). The run does not depend on the thread count:
+  `tests/eval_set.rs` holds the tuple evaluator, the set evaluator and the
+  set evaluator on two and four workers equal on every corpus program and
+  both books, decisions and ledgers; `tests/determinism.rs` one thread
+  against four. `--threads N` (`ExecConfig::threads`, `1` by default, `0`
+  the cores up to four) is not part of the run's identity (A-D11).
+
+- **E-126 (06-performance 3.1, "Stored tables E[R] … over the retention
+  horizon"; A3 of `docs/assessment.md`; the kernel's copy of the stream
+  bounded).** The kernel kept every tuple the stream delivered
+  (`Fold::step_inner` → `insert_fact`) for the whole run, so the front grew
+  with the history streamed to it (MW14's run, E-93: 27 MB a second,
+  killed past 8.5 GB) while the data layer held the same bytes. [D]
+  `Kernel::trim_stores`, at every barrier after `evict_memo` when
+  `ExecConfig::trim_stores` (`abt run --history window`, the default):
+  every stored block keyed before the oldest bar any reader reaches from
+  the barrier is dropped -- the memo's horizon, each `rows` window's count
+  plus the slack a cold group walks back (`ROWS_SLACK + 3` bars of its
+  calendar), the executor's own reach (`Executor::retention_floor`: its
+  ADV and realised-volatility windows over its own bars, in whole days for
+  a sub-daily decision calendar), the decision bucket's bars, less a week.
+  A relation read `asof` keeps the latest row of each identity among the
+  dropped rows (`Store::kept`, read when the as-of walk reaches the
+  horizon). A program whose lookback is unbounded trims nothing; an
+  executor that cannot state its reach trims nothing. [D] The history
+  stays whole (`--history all`, forced for a ledger, the state tables and
+  a live run) for a kernel read after its run, since a query at an old bar
+  re-derives from the stores. Rejected: trimming by a fixed count of bars
+  (the executor's ADV on a sub-daily base walks back a count of *days* with
+  volume, which `tests/retention.rs` caught at `opening_gap`'s first fill
+  behind the cutoff). The coverage report's "tuples in the data" counts
+  rows ever inserted (`Store::inserted`). `tests/retention.rs` holds the
+  trimmed run equal to the whole run on every corpus program and both
+  books, alone and on four workers. The ADV walk now runs only when
+  impact is on (sim/mod.rs; it ran and was discarded before). [D] A
+  temporally recursive relation (a rule reads its head at a strictly
+  earlier bar, the checker's own test: the total-return index the
+  executor marks at, the cumulative split) reaches back to each entity's
+  first row, so a name first priced long after its first row would walk
+  behind the horizon (a served MW14 run on a thousand synthetic names
+  expired its fills with `moc: no close`, the whole run did not): before
+  the stores are trimmed the kernel derives every such relation at the
+  bar for the whole cross-section (`Kernel::recursive_rels`), so each
+  entity's chain is extended while its inputs are held; with the stores
+  trimmed the memo is evicted at every barrier (what it would keep is
+  unreachable, and its entries are keys, a few per bar, so the count
+  threshold would never fire), and the eviction keeps each entity's
+  latest tuples of each derived relation (`Memo::latest_rows`), which a
+  derivation behind the memo's oldest bucket is answered from rather
+  than from rows the horizon dropped. `tests/retention.rs` adds MW14 over
+  120 names and six years (most names first priced long after their
+  first row), whole against trimmed, alone and on four workers.
+  [D] The observed relations' ledgers (`observe scale`, `observe
+  latched`) were written after the run by re-deriving every bar
+  (`outputs::ledgers`, `observe_at` per bar): under trimming that read
+  1,900 bars of MW14 from trimmed stores -- the rows wrong, and every rows
+  window walked from scratch at every bar (the run took twice as long,
+  20M extra reads of `universe`). A run that writes outputs now observes
+  at each barrier, before the trim (`Fold::observe_as_it_goes`,
+  `outputs::observe_bar`, `ledgers_from`): the same rows in the same
+  order, read while the bar's inputs are held. An observed relation off
+  the decision calendar is still read after the run, and such a program
+  keeps its history whole. The served comparison on the real MW14 holds
+  `ledger.scale` and `ledger.latched` equal between the two histories.
+
+- **E-127 (06-performance 3.3, the stream projection; E-77; the
+  primitives nothing reads).** 3.3 says the stream carries only the
+  relations the program reads outside pushdown aggregates; E-77 recorded
+  that it carried every primitive the binding names. [D] The first step:
+  `Kernel::read_relations` keeps every relation but the pure data a run
+  can prove it never reads: the bar companions `open`/`high`/`low` when no
+  rule names them, no decision can fill at the open or on a limit or stop
+  (`orders moo|moo_moc`, or `moo`, `moo_moc`, `limit`, `stop` named in a
+  decide rule's head) and the class has no contracts (an index option
+  exercises at the AM print), and the identity relations `ticker` and
+  `classification` when no rule names them; everything else streams,
+  because the executor and the kernel read relations by name that no rule
+  does (the settlements, the margins, the quotes: `tests/futures.rs` and
+  `tests/options.rs` caught a projection that reasoned from the rules
+  alone). `bind::stream_spec` streams a bound primitive only when it is
+  kept. A book that fills at the close (MW14,
+  `moc`) no longer receives its open, high, low, listing, tickers or
+  classification. [D] Not done, and recorded for the next step: a
+  primitive read only inside a pushed-down aggregate still streams (the
+  E-47 fallback to local evaluation needs its rows), so MW14's `close` and
+  `volume` -- the weekly `dvol` mean of daily close×volume has no
+  data-layer form yet, and `traded@weekly` is a `count` the pass refuses
+  -- stream whole; delivering pushed answers as stream relations and
+  dropping the fallback is the spec decision 3.3 needs.
+  `tests/fold.rs::the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers`
+  asserts the projected stream (`listed` read by the universe, `open` and
+  `ticker` not). [D] The kernel also drops an unread relation's tuple at
+  its door (`Fold::step_inner`, `Kernel::read_rels`): a live session
+  streams whole, so the kernel service and the in-process replay hold the
+  same rows either way (`abt/tests/deployment.rs`), and the front is
+  bounded whatever the data layer sends. `threads`, `parallel_min_rows`
+  and `trim_stores` are `#[serde(skip)]` on `ExecConfig`, as `pushdown`:
+  none changes the result, so none is part of the configuration's
+  identity (the binding table's `configuration` column, D-6.1).
+
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
