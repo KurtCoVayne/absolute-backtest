@@ -302,7 +302,7 @@ five-year chunks with the book's own `SPXTR@1d` and `VIX@1w` as series bundles
 (`docs/parity-mw14.md` now records the recipe): the data service holds the store
 at 3.8 GB; the front, `abt run --strategy mw14 --data SOCK --history window
 --start 1991-01-04 --end 2026-07-02`, runs the 1,904 weekly bars over 4,240
-names in **377 s** at **3.7 GB** resident, having dropped 59.2M stored rows
+names in **377 s** at **3.7 GB** resident (367 s with the three increments of 3.2 below, the result byte for byte the same), having dropped 59.2M stored rows
 behind the horizon (iteration 1's run of the same book was killed by the
 container at 443 s with the front past 8.5 GB and still growing). `--history
 all` on the same box thrashes and does not finish: the trim is what makes the
@@ -315,6 +315,23 @@ the owner's open question 7 narrowed to the data path. The ledgers of the two
 observed relations are written at the barriers under trimming (E-126); on a
 served synthetic market of 1,000 names both histories give the same events,
 book, fills, decisions and ledgers.
+
+The run's own clock (`--timing` with `ABT_TIMING_RELS`, the seconds per
+derived relation and per phase of the fold): derivations 200 s of the 367 --
+`clenow` 38, `dvol` 30, `eligible` 17, `ma` 16 (the four per-instrument
+windows, 100 s), `dollar_volume@base` 14 (the daily relation `dvol` buckets,
+derived whole at 8,934 daily bars), `prev_row` 12, `dividend_at` 12,
+`traded@weekly` 11 -- the executor's fills and marks 54 s, the memo's
+eviction 17 s, the tuples' insertion 10 s, and some 75 s waiting on the
+stream of daily rows. Three increments of 3.2 are in (E-125): a positive
+atom over a block in entity order joined by one merge pass, a rows window's
+conjunction solved once for the whole block at the bar, the same for bucket
+and span windows; each held equal to the demand-driven evaluator by
+`tests/eval_set.rs`; together 27.8 to 23.1 CPU-seconds on a served store of
+1,000 synthetic names and 377 to 367 s on the book. What they do not reach
+is the per-row cost itself -- a `Value` per cell, an environment per
+instance, a hash lookup per derived atom -- which is the column-block
+evaluator's to remove.
 
 `perf` on this run (frame-pointer build, 299 Hz) is evaluator-bound: `Value::cmp`
 6.6%, `malloc`/`free` 14%, the result-narrowing closure of `call` 4.2%,
