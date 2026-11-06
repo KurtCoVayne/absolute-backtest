@@ -2200,6 +2200,7 @@ pub struct Kernel<'p> {
     /// of the block being solved (`eval::prefetch_rows_window`), and the row
     /// the block solver is at.
     pub(crate) prefetch: Option<eval::Prefetch>,
+    pub(crate) prefetch_bucket: Option<eval::PrefetchBucket>,
     pub(crate) prefetch_row: usize,
     /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
     /// the latest bar at or before it with a tuple, a cache like `memo`.
@@ -3071,6 +3072,7 @@ impl<'p> Kernel<'p> {
             atom_slot_cache: Default::default(),
             fresh_scratch: Vec::new(),
             prefetch: None,
+            prefetch_bucket: None,
             prefetch_row: 0,
             asof_memo: Default::default(),
             in_progress: Default::default(),

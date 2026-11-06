@@ -122,6 +122,17 @@ pub(crate) struct Prefetch {
     rows: Vec<Option<(bool, Vec<Env>)>>,
 }
 
+/// A bucket or span window's conjunction solved at the bars every row of a
+/// block misses, for all rows at once (3.2): per row and bar, the
+/// solutions, or `None` for a row on which an instance stuck.
+#[derive(Clone, Debug)]
+pub(crate) struct PrefetchBucket {
+    rule: usize,
+    literal: usize,
+    bars: Vec<i64>,
+    rows: Vec<Option<Vec<Vec<Env>>>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct RowsPlan {
     literal: usize,
@@ -938,8 +949,12 @@ impl<'p> Kernel<'p> {
             // A rows window over the block: its conjunction solved once for
             // every row at the bar, each group then fed its own row.
             let saved = self.prefetch.take();
+            let saved_bucket = self.prefetch_bucket.take();
             if let Literal::Agg { args, conj, within, .. } = lit {
                 self.prefetch = self.prefetch_rows_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                if self.prefetch.is_none() {
+                    self.prefetch_bucket = self.prefetch_bucket_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                }
             }
             for i in 0..live.len() {
                 let env = live.row(i);
@@ -963,6 +978,7 @@ impl<'p> Kernel<'p> {
                 }
             }
             self.prefetch = saved;
+            self.prefetch_bucket = saved_bucket;
             stuck = self.advance_stuck(cr, lit, stuck)?;
             self.count_literal(record, li, entering, next.len(), stuck.is_empty());
             live = next;
@@ -2153,6 +2169,82 @@ impl<'p> Kernel<'p> {
     /// variable bound to it and the rest of the conjunction in evaluation
     /// order, and kept until it leaves the window. `None` when this call
     /// cannot be served so (solved whole instead).
+    /// A bucket or span window's conjunction solved for every row of the
+    /// block at once (`PrefetchBucket`): the bars the first row's group
+    /// misses, each solved over the whole block, each row then holding its
+    /// own solutions in its own solve's order.
+    fn prefetch_bucket_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>, live: &Block) -> Result<Option<PrefetchBucket>, RunError> {
+        const MIN_ROWS: usize = 32;
+        if live.len() < MIN_ROWS || !self.cfg.window_cache {
+            return Ok(None);
+        }
+        let aplan = self.agg_plan(cr, lit, conj, args, within);
+        let Some(wp) = aplan.window.as_ref() else { return Ok(None) };
+        if !wp.late.is_empty() {
+            return Ok(None);
+        }
+        let Literal::Window { kind, base, dur, lo: lo_off, .. } = &conj[wp.window] else { return Ok(None) };
+        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) || self.per_entity_window(kind) {
+            return Ok(None);
+        }
+        let first = live.row(0);
+        if first[wp.wslot].is_some() || aplan.group.iter().any(|&s| first[s].is_none()) {
+            return Ok(None);
+        }
+        let t = self.time_of(cr, base, first)?;
+        for i in 1..live.len() {
+            let r = live.row(i);
+            if r[wp.wslot].is_some() || self.time_of(cr, base, r)? != t {
+                return Ok(None);
+            }
+        }
+        let times: Vec<i64> = self.window_times(cr, kind, base, dur, lo_off.as_ref(), first)?;
+        let lo = times.first().copied().unwrap_or(t);
+        // The bars the first row's group misses: what every group of this
+        // block is about to ask for.
+        let key = WindowKey {
+            rule: cr.idx,
+            literal: wp.literal,
+            outer: wp.outer.iter().map(|&s| first[s].clone()).collect(),
+        };
+        let bars: Vec<i64> = match self.windows.get(&key) {
+            Some(cache) => {
+                let have: Vec<i64> = cache.range(lo, t).map(|(k, _)| *k).collect();
+                times.iter().copied().filter(|t1| have.binary_search(t1).is_err()).collect()
+            }
+            None => times.clone(),
+        };
+        if bars.is_empty() {
+            return Ok(None);
+        }
+        let n = live.len();
+        let mut rows: Vec<Option<Vec<Vec<Env>>>> = vec![Some(vec![Vec::new(); bars.len()]); n];
+        let order: Vec<usize> = (0..wp.order.len()).collect();
+        for (k, &t1) in bars.iter().enumerate() {
+            let mut start = Block::with_capacity(cr.nslots, n);
+            for i in 0..n {
+                let mut e = live.row(i).to_vec();
+                e[wp.wslot] = Some(Value::Time(t1));
+                start.push_row(&e, i as u32);
+            }
+            let (sb, sstuck) = self.solve_kleene_block(cr, &wp.order, &order, start, None)?;
+            for j in 0..sb.len() {
+                if let Some(r) = &mut rows[sb.origin_of(j) as usize] {
+                    r[k].push(sb.row(j).to_vec());
+                }
+            }
+            for s in sstuck {
+                rows[s.origin as usize] = None;
+            }
+        }
+        Ok(Some(PrefetchBucket {
+            rule: cr.idx,
+            literal: wp.literal,
+            bars,
+            rows,
+        }))
+    }
+
     fn window_columns(&mut self, cr: &Arc<CompiledRule>, plan: &WindowPlan, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<WindowColumns>, RunError> {
         let Literal::Window { kind, base, dur, lo: lo_off, .. } = &conj[plan.window] else {
             return Ok(None);
@@ -2196,16 +2288,27 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        let pre: Option<(Vec<i64>, Vec<Vec<Env>>)> = self
+            .prefetch_bucket
+            .as_ref()
+            .filter(|p| p.rule == cr.idx && p.literal == plan.literal)
+            .and_then(|p| p.rows.get(self.prefetch_row).cloned().flatten().map(|r| (p.bars.clone(), r)));
         for t1 in missing {
-            let mut e = env.to_vec();
-            e[wslot] = Some(Value::Time(t1));
             // A row stuck or failing here may be one a deferred test
             // excludes (Kleene conjunction, V-5): the whole solve decides.
-            let sols = match self.solve(cr, order, vec![e]) {
-                Ok(s) => s,
-                Err(err) => {
-                    self.windows.insert(key, cache);
-                    return if late.is_empty() { Err(err) } else { Ok(None) };
+            let fetched = pre.as_ref().and_then(|(bars, rows)| bars.iter().position(|&b| b == t1).map(|k| rows[k].clone()));
+            let sols = match fetched {
+                Some(s) => s,
+                None => {
+                    let mut e = env.to_vec();
+                    e[wslot] = Some(Value::Time(t1));
+                    match self.solve(cr, order, vec![e]) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            self.windows.insert(key, cache);
+                            return if late.is_empty() { Err(err) } else { Ok(None) };
+                        }
+                    }
                 }
             };
             self.stats.window_bars_solved += 1;
