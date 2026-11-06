@@ -1324,7 +1324,7 @@ pub fn main_with(raw: Vec<String>) {
                 let run_s = total - loaded_at;
                 let s = &result.stats;
                 eprintln!(
-                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={} trimmed_rows={}",
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={} trimmed_rows={} warm_secs={:.3} trim_secs={:.3} evict_secs={:.3}",
                     loaded_at - checked_at,
                     checked_at,
                     run_s,
@@ -1346,7 +1346,10 @@ pub fn main_with(raw: Vec<String>) {
                     s.parallel_rows,
                     s.parallel_secs,
                     s.rows_state_groups,
-                    s.trimmed_rows
+                    s.trimmed_rows,
+                    s.warm_secs,
+                    s.trim_secs,
+                    s.evict_secs
                 );
             }
             println!(

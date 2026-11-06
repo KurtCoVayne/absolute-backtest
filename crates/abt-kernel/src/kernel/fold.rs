@@ -104,6 +104,9 @@ pub struct Fold<'p, 'e> {
     live: Option<Lag>,
     /// The kill switch (K-6.5), read at every decision barrier.
     control: Option<crate::live::LiveControl>,
+    /// The observed relations' ledger rows, collected at each barrier when
+    /// the stores are trimmed (`outputs::observe_bar`, E-126).
+    ledger_acc: Option<super::outputs::LedgerAcc>,
 }
 
 /// What a live run measures (K-6.3): each decision bar's lag, the time
@@ -155,6 +158,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             invariants,
             live: None,
             control: None,
+            ledger_acc: None,
         }
     }
 
@@ -260,6 +264,16 @@ impl<'p, 'e> Fold<'p, 'e> {
     /// A fold continuing from `cp`: `kernel` is a bound kernel of the same
     /// run (checked by the run's identity and the symbols), `exec` the same
     /// kind of executor. The stream resumes at the seq `cp.cursor`.
+    /// Collect the observed relations' ledgers at the barriers (a run
+    /// whose stores are trimmed observes as it goes).
+    pub fn observe_as_it_goes(&mut self) {
+        self.ledger_acc = Some(super::outputs::LedgerAcc::new(self.kernel.prog));
+    }
+
+    pub fn take_ledger_acc(&mut self) -> Option<super::outputs::LedgerAcc> {
+        self.ledger_acc.take()
+    }
+
     pub fn restore(mut kernel: Kernel<'p>, exec: &'e mut dyn Executor, cp: Checkpoint) -> Result<Fold<'p, 'e>, RunError> {
         let (here, there) = (&kernel.identity, &cp.identity);
         if there.program_hash != here.program_hash {
@@ -328,6 +342,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             recent: Default::default(),
             live: None,
             control: None,
+            ledger_acc: None,
         })
     }
 
@@ -451,6 +466,11 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.invariants.check(&mut self.kernel, self.exec.book(), &working, self.exec.expected(), &mut self.result, label, at)?;
         // Bucketed by time, eviction costs only what it drops: every bar,
         // keeping the last few decision bars' entries.
+        // The observed relations at this bar, before the stores are trimmed.
+        if let Some(acc) = &mut self.ledger_acc {
+            let prog = self.kernel.prog;
+            super::outputs::observe_bar(prog, &mut self.kernel, label, acc)?;
+        }
         self.recent.push_back(label);
         if self.recent.len() > 4 {
             self.recent.pop_front();

@@ -2958,6 +2958,18 @@ batch driver agree on every corpus program. Each bless since:
   than from rows the horizon dropped. `tests/retention.rs` adds MW14 over
   120 names and six years (most names first priced long after their
   first row), whole against trimmed, alone and on four workers.
+  [D] The observed relations' ledgers (`observe scale`, `observe
+  latched`) were written after the run by re-deriving every bar
+  (`outputs::ledgers`, `observe_at` per bar): under trimming that read
+  1,900 bars of MW14 from trimmed stores -- the rows wrong, and every rows
+  window walked from scratch at every bar (the run took twice as long,
+  20M extra reads of `universe`). A run that writes outputs now observes
+  at each barrier, before the trim (`Fold::observe_as_it_goes`,
+  `outputs::observe_bar`, `ledgers_from`): the same rows in the same
+  order, read while the bar's inputs are held. An observed relation off
+  the decision calendar is still read after the run, and such a program
+  keeps its history whole. The served comparison on the real MW14 holds
+  `ledger.scale` and `ledger.latched` equal between the two histories.
 
 - **E-127 (06-performance 3.3, the stream projection; E-77; the
   primitives nothing reads).** 3.3 says the stream carries only the

@@ -105,16 +105,17 @@ impl Memo {
 
     /// Drop every result keyed before `cutoff`, keeping the latest of each
     /// `keep` relation per inputs.
-    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>, entity_pos: &[Option<usize>]) {
+    fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>, entity_pos: &[Option<usize>], chained: &FxHashSet<usize>) {
         let recent = self.by_time.split_off(&cutoff);
         let old = std::mem::replace(&mut self.by_time, recent);
         for (t, bucket) in old {
             self.len -= bucket.len();
             for (k, d) in bucket {
-                // Per entity, the latest tuples: a run whose stores are
-                // trimmed answers a read of the entity's previous row from
-                // here (`Kernel::call`).
-                if let Some(Some(e)) = entity_pos.get(k.0) {
+                // Per entity, the latest tuples of a temporally recursive
+                // relation: a run whose stores are trimmed answers a read of
+                // the entity's previous row from here (`Kernel::call`); no
+                // other relation is read behind the horizon.
+                if let (Some(Some(e)), true) = (entity_pos.get(k.0), chained.contains(&k.0)) {
                     let mut by_entity: FxHashMap<Value, Vec<(Tuple, usize)>> = FxHashMap::default();
                     for (tu, ri) in d.iter() {
                         by_entity.entry(tu[*e].clone()).or_default().push((tu.clone(), *ri));
@@ -671,6 +672,14 @@ pub struct KernelStats {
     /// Stored rows dropped behind the retention horizon.
     #[serde(default)]
     pub trimmed_rows: usize,
+    /// Seconds in the recursive relations' warm-up, the trim of the stores
+    /// and the memo's eviction.
+    #[serde(default)]
+    pub warm_secs: f64,
+    #[serde(default)]
+    pub trim_secs: f64,
+    #[serde(default)]
+    pub evict_secs: f64,
     /// Running-sums windows built at the bar asked for because the buffer
     /// no longer held the checkpoint's window (a departure from the
     /// canonical walk; zero in a run whose groups are asked for in order).
@@ -3189,6 +3198,7 @@ impl<'p> Kernel<'p> {
     /// recomputed if asked for, so this bounds memory, never changes results.
     pub fn evict_memo(&mut self, t: i64, keep_from: i64) {
         let Some(h) = self.memo_horizon else { return };
+        let started = std::time::Instant::now();
         // A small memo is not worth a pass -- unless the stores are trimmed:
         // then the memo is evicted at every barrier, since what it would
         // keep is unreachable and it would be the run's unbounded holder
@@ -3205,13 +3215,15 @@ impl<'p> Kernel<'p> {
             }
         }
         let entity_pos: Vec<Option<usize>> = self.rels.iter().map(|r| if r.stored { None } else { r.entity_positions.first().copied() }).collect();
-        self.memo.evict_before(cutoff, &self.asof_read, &entity_pos);
+        let chained: FxHashSet<usize> = self.recursive_rels.iter().copied().collect();
+        self.memo.evict_before(cutoff, &self.asof_read, &entity_pos, &chained);
         self.memo_stuck.retain(|k, _| Memo::time_of(k) >= cutoff);
         // The as-of shortcuts are not bucketed: scanned only once they double.
         if self.asof_memo.len() >= self.asof_memo_next {
             self.asof_memo.retain(|(_, _, k), _| *k >= cutoff);
             self.asof_memo_next = (2 * self.asof_memo.len()).max(self.memo_min);
         }
+        self.stats.evict_secs += started.elapsed().as_secs_f64();
     }
 
     /// Evict at every bar however small the memo (what tests use to prove
@@ -3227,6 +3239,7 @@ impl<'p> Kernel<'p> {
         if executor_floor == i64::MIN {
             return;
         }
+        let started = std::time::Instant::now();
         // A temporally recursive relation reaches back to each entity's
         // first row: its chain is extended at this bar for every entity
         // present, while the rows it reads are still held, so that no
@@ -3244,6 +3257,8 @@ impl<'p> Kernel<'p> {
             pattern[key_pos] = Some(Value::Time(t));
             let _ = self.call(rel, &pattern);
         }
+        self.stats.warm_secs += started.elapsed().as_secs_f64();
+        let started = std::time::Instant::now();
         let mut cutoff = (t - h).min(executor_floor);
         for (res, n) in &self.rows_lookback {
             match self.domains.get(res).and_then(|d| d.range(..=t).rev().nth(n + eval::ROWS_SLACK + 3)) {
@@ -3259,6 +3274,7 @@ impl<'p> Kernel<'p> {
             dropped += st.trim_before(cutoff, &rels[rel].identity, asof_read.contains(&rel));
         }
         self.stats.trimmed_rows += dropped;
+        self.stats.trim_secs += started.elapsed().as_secs_f64();
     }
 
     /// The stored relations this run keeps: every one but the pure data a
@@ -4475,6 +4491,11 @@ pub fn replay_observed<'p>(
     if let Some(end) = end_label.or(opts.horizon) {
         cfg.as_of = Some(cfg.as_of.or(bound.bundle_date()).map_or(end, |a| a.min(end)));
     }
+    // An observed relation off the decision calendar is read after the run,
+    // bar by bar: the history stays whole for it.
+    if cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() && !outputs::observes_at_barriers(prog) {
+        cfg.trim_stores = false;
+    }
     let mut kernel = match lowered {
         Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
         None => Kernel::bound(prog, &bound, cfg.clone())?,
@@ -4493,6 +4514,11 @@ pub fn replay_observed<'p>(
         None => Fold::new(kernel, exec),
     }
     .with_contract(contract);
+    // A run that writes outputs observes its relations at the barriers when
+    // its stores are trimmed (`outputs::observe_bar`, E-126).
+    if fold.kernel.cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() {
+        fold.observe_as_it_goes();
+    }
     if let Some(e) = opts.checkpoint_every {
         fold = fold.with_checkpoints(e);
     }
@@ -4579,6 +4605,7 @@ pub fn replay_observed<'p>(
         }
         return Err(e);
     }
+    let ledger_acc = fold.take_ledger_acc();
     let (mut result, mut kernel) = fold.finish()?;
     result.run_id = run.clone();
     result.binding_id = bound.binding.id.clone().unwrap_or_default();
@@ -4597,7 +4624,10 @@ pub fn replay_observed<'p>(
         return Ok((result, kernel));
     }
     let ids = kernel.data_ids.clone();
-    let (ledgers, notes) = outputs::ledgers(&run, prog, &mut kernel, &ids, &result)?;
+    let (ledgers, notes) = match ledger_acc {
+        Some(acc) => outputs::ledgers_from(&run, prog, &kernel, &ids, acc)?,
+        None => outputs::ledgers(&run, prog, &mut kernel, &ids, &result)?,
+    };
     result.warnings.extend(notes.into_iter().map(|message| RunWarning { bias: "observation".into(), message }));
     if !prog.observes.is_empty() {
         result.contract.set("post.ledgers", crate::contract::Status::Checked { times: ledgers.len() as u64 });
