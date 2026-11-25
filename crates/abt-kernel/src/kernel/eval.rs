@@ -231,8 +231,8 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
         let shift = (first.and_then(|f| f.first().copied()).unwrap_or(0.0), first.and_then(|f| f.get(1).copied()).unwrap_or(0.0));
         let shift = (if shift.0.is_finite() { shift.0 } else { 0.0 }, if shift.1.is_finite() { shift.1 } else { 0.0 });
         let mut r = RunningSums::new(st.base_id + lo as u64, shift);
-        for i in lo..hi {
-            r.apply(&st.rows[i].2, 1.0);
+        for row in st.rows.iter().take(hi).skip(lo) {
+            r.apply(&row.2, 1.0);
         }
         r.hi = st.base_id + hi as u64;
         r.at = b;
@@ -2753,8 +2753,8 @@ impl<'p> Kernel<'p> {
                     }
                 };
                 if time_first {
-                    for i in lo..hi_r {
-                        push(&st.rows[i].2);
+                    for row in st.rows.iter().take(hi_r).skip(lo) {
+                        push(&row.2);
                     }
                 } else {
                     for &id in st.sorted.iter().filter(|&&id| lo_id <= id && id < hi_id) {

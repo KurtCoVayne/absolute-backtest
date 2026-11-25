@@ -464,10 +464,10 @@ fn consolidation_keeps_every_answer_and_the_version_id() {
     assert_eq!(found, old_hashes.len());
     assert!(carried >= 1, "the appended-only instrument's blocks carry their hashes");
     // Every block but an instrument's last is full (ST-4.1).
-    for o in 0..p.instruments.len() {
+    for (o, inst) in p.instruments.iter().enumerate() {
         let n = h.column(0, o).blocks_len();
         for b in 0..n.saturating_sub(1) {
-            assert_eq!(h.block(0, o, b).ints.len(), abt_codec::BLOCK, "instrument {} block {}", p.instruments[o].id, b);
+            assert_eq!(h.block(0, o, b).ints.len(), abt_codec::BLOCK, "instrument {} block {}", inst.id, b);
         }
     }
     // The sealed rows are published rows now: the presence holds every

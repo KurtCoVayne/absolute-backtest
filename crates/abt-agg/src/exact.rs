@@ -137,8 +137,8 @@ impl Wide {
             out.limbs[i] = v;
         }
         if words < LIMBS {
-            for i in (LIMBS - words)..LIMBS {
-                assert!(self.limbs[i] == 0 || i + words >= LIMBS, "a wide shift overflowed 320 bits");
+            for (i, limb) in self.limbs.iter().enumerate().skip(LIMBS - words) {
+                assert!(*limb == 0 || i + words >= LIMBS, "a wide shift overflowed 320 bits");
             }
         }
         out
@@ -147,7 +147,7 @@ impl Wide {
     pub fn shr(&self, bits: u32) -> Wide {
         let (words, rem) = ((bits / 64) as usize, bits % 64);
         let mut out = Wide::ZERO;
-        for i in 0..LIMBS {
+        for (i, o) in out.limbs.iter_mut().enumerate() {
             let src = i + words;
             if src >= LIMBS {
                 break;
@@ -156,7 +156,7 @@ impl Wide {
             if rem > 0 && src + 1 < LIMBS {
                 v |= self.limbs[src + 1] << (64 - rem);
             }
-            out.limbs[i] = v;
+            *o = v;
         }
         out
     }

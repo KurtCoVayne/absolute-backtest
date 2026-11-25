@@ -13,7 +13,7 @@ The log is `~/.claude/projects/-Users-alejandro-stageanalyst/19cd91e4-5b72-44ac-
 | `scripts/parity/mw14_compare.py … --json FILE` | The comparison, also as JSON with exact counts |
 | `scripts/build-profiling.sh` | The frame-pointer build, into `target/profiling` (`[profile.profiling]`) |
 
-The machine has had the `m8-bench` role since Nov 25 and is driven through SSM Run Command. Its toolchain was installed with rustup's minimal profile: `rustfmt` and `clippy` were added that day (`rustup component add rustfmt clippy`); the bootstrap below, which is the user data the machine was launched with, has that line added. "The machine" below is the state of Nov 24: way A was taken on Nov 25.
+The machine has had the `m8-bench` role since Nov 25 and is driven through SSM Run Command. Its toolchain was installed with rustup's minimal profile: `rustfmt` and `clippy` were added that day (`rustup component add rustfmt clippy`); the bootstrap below, which is the user data the machine was launched with, has that line added. "The machine" below is the state of Nov 24: way A was taken on Nov 25. CI's toolchain is newer (1.100.0 against the machine's 1.99.1): it is installed beside the default for its clippy alone (`cargo +1.100.0 clippy`), and the benchmark's compiler does not change. The machine's `python3` has no pandas: the scripts take `PY=python3.12`, and `scripts/bench-mw14.sh` checks the imports before it stages.
 
 ## The machine
 

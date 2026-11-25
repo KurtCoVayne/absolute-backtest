@@ -13,6 +13,7 @@ The documents in this directory describe Nov 24 and are left as they were. This 
 | Nov 25 | **Package 0's fixes.** The lint. The test regression, reproduced on Linux (3 runs of 3 at `eb3345c`) and fixed by removing the slot-map cache (E-130). The as-of memo keyed by the whole bound pattern (E-132). The log replay brought over from the amendments tree (E-128, E-129). The batch paths of Nov 6 written up (E-131). The first whole suite since `9a255d9` found one more failure, in `outputs`: wall-clock seconds in a run's stored report (E-133), fixed | `docs/spec/ERRATA.md`, E-128 to E-133 |
 | Nov 25 | **The whole suite on the machine at that tree:** 859 passed, 0 failed, in process and over sockets; `fmt` and `clippy` clean | |
 | Nov 25 | **Package 1's tooling:** `scripts/bench-mw14.sh` (stages the store, N cold runs, one JSON line each), `scripts/parity/mw14_series_bundles.py`, `mw14_compare.py --json`, `[profile.profiling]` with `scripts/build-profiling.sh`. The run's clock gains the rows per relation, the wait for the stream and the decode (`rows`, `phases wait= decode=` under `ABT_TIMING_RELS=1`), and `tuples=` is now the count of a served run | `benchmark.md`; `docs/assessment.md` for the results |
+| Nov 25 | **CI's toolchain is not the machine's.** CI installs the newest stable (`dtolnay/rust-toolchain@stable`): 1.100.0 since mid November. The machine builds and benchmarks with the 1.99.1 it was launched with. Clippy 1.100 rejects six loops that 1.99 accepts (`needless_range_loop`), so the first push of the batch failed in CI though the machine's gate was green; the loops are rewritten. The machine's gate now runs CI's clippy too (`rustup toolchain install 1.100.0`, a target directory of its own); its tests and the benchmark stay on 1.99.1. Nothing pins the toolchain, so CI can turn red when a new stable ships | `.github/workflows/ci.yml` |
 
 The next free erratum number is E-138. `status.md` section 6 cites TRACE rows by their line on Nov 24; six rows (E-128 to E-133) were inserted at lines 161 to 166 on Nov 25, so a line from 161 on is now six further down. `roadmap.md` names the rows instead.
 
@@ -22,6 +23,7 @@ The next free erratum number is E-138. `status.md` section 6 cites TRACE rows by
 - E-135: a resumed run, or a run with a late tuple, under trimming reads nothing at earlier bars. With package 7's change (a).
 - E-133's open part: the stats row of a run's report follows the thread count and the history kept, which are not in the run id.
 - E-136, E-137: two defects of the hot store's replay after a restart.
+- `abt_agg::exact::Wide::shl` asserts nothing: its overflow check runs over the limbs `LIMBS - words..LIMBS` and passes whenever `i + words >= LIMBS`, which holds for every one of them. A wide shift that overflows is not caught.
 - Three mutation patches no longer apply to the tree and so falsify nothing: `e-109-ladder-index`, `e-119-drift`, `st-5.2-ladder-receipt` (`st-8.1-snapshot` was a fourth and is regenerated).
 
 ## The state in one screen

@@ -95,8 +95,8 @@ impl Block {
         let total: usize = blocks.iter().map(|b| b.rows).sum();
         let mut idx: Vec<(u32, usize, usize)> = Vec::with_capacity(total);
         for (bi, b) in blocks.iter().enumerate() {
-            for i in 0..b.rows {
-                idx.push((b.origins[i], bi, i));
+            for (i, o) in b.origins.iter().enumerate().take(b.rows) {
+                idx.push((*o, bi, i));
             }
         }
         idx.sort_by_key(|&(o, bi, i)| (o, bi, i));

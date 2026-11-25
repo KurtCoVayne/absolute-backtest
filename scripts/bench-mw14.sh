@@ -16,8 +16,8 @@
 #
 # 1. Stages the store once. The store is keyed by a hash of what it is made
 #    from: every file of the lake, the two series files, the staging recipe,
-#    and the code that writes a store (crates/abt-data, crates/abt-codec and
-#    the series script, with their uncommitted changes). A second call with
+#    and the code that writes a store (the sources of crates/abt-data and
+#    crates/abt-codec and the series script, with their uncommitted changes). A second call with
 #    the same inputs reuses it: $BENCH/store-<hash>. RESTAGE=1 stages again;
 #    KEY_ONLY=1 prints the store's path and stops.
 #    STORE=DIR names a store already staged and skips this step; LAKE, SPXTR
@@ -45,7 +45,10 @@
 # logs), ABT=target/release/abt, PY=python3, THREADS (--threads, default the
 # engine's), START=1991-01-04 and END=2026-07-02 (the canon's first decision
 # week and the bar after its last), EXTRA (more arguments to `abt run`),
-# KEEP=1 (keep each repetition's copy of the store).
+# KEEP=1 (keep each repetition's copy of the store), WRAP (a command the run
+# is started under, for a profile: ABT=target/profiling/abt WRAP='perf record
+# -e cpu-clock -F 299 -g --call-graph fp -o perf.data --'; such a repetition's
+# seconds are the profiler's too).
 #
 # It runs on Linux (GNU time, /proc); the full replay is not for a laptop.
 set -euo pipefail
@@ -66,6 +69,7 @@ START=${START:-1991-01-04}
 END=${END:-2026-07-02}
 THREADS=${THREADS:-}
 EXTRA=${EXTRA:-}
+WRAP=${WRAP:-}
 KEEP=${KEEP:-0}
 OUT=${OUT:-$BENCH/run-$(date -u +%Y%m%dT%H%M%S)}
 CORPUS="corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl"
@@ -78,6 +82,7 @@ say() { echo "[$(date -u +%H:%M:%S)] $*" >&2; }
 [ -f "$CANON" ] || { echo "no canon at $CANON" >&2; exit 2; }
 TIME=/usr/bin/time
 "$TIME" -v true >/dev/null 2>&1 || { echo "GNU time is needed at /usr/bin/time (-v)" >&2; exit 2; }
+"$PY" -c 'import numpy, pandas, pyarrow' 2>/dev/null || { echo "$PY cannot import numpy, pandas and pyarrow (the series bundles and the comparison need them): PY=..." >&2; exit 2; }
 
 # ---- 1. the store, staged once ------------------------------------------------
 if [ -n "${STORE:-}" ]; then
@@ -98,11 +103,12 @@ else
     say "lake: moving indexes/index_membership-*.parquet into indexes/index_membership/"
     mkdir -p "$LAKE/indexes/index_membership" && mv "$LAKE"/indexes/index_membership-*.parquet "$LAKE/indexes/index_membership/"
   fi
-  # What writes a store: the data layer, the block format, the series script.
-  WRITER="crates/abt-data crates/abt-codec scripts/parity/mw14_series_bundles.py"
+  # What writes a store: the data layer's and the block format's sources (not
+  # their tests) and the series script.
+  WRITER="crates/abt-data/src crates/abt-codec/src scripts/parity/mw14_series_bundles.py"
   # shellcheck disable=SC2086
   KEY=$( { (cd "$LAKE" && find . -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum); sha256sum < "$SPXTR"; sha256sum < "$VIX"; echo "$SPANS|$LISTS|$TICKERS|reviewed=complete"
-           git rev-parse HEAD:crates/abt-data HEAD:crates/abt-codec HEAD:scripts/parity/mw14_series_bundles.py 2>/dev/null || echo no-git; git diff HEAD -- $WRITER 2>/dev/null || true; } | sha256sum | cut -c1-16)
+           git rev-parse HEAD:crates/abt-data/src HEAD:crates/abt-codec/src HEAD:scripts/parity/mw14_series_bundles.py 2>/dev/null || echo no-git; git diff HEAD -- $WRITER 2>/dev/null || true; } | sha256sum | cut -c1-16)
   BASE=$BENCH/store-$KEY
   # KEY_ONLY=1: say which store this call would use, and stop.
   if [ "${KEY_ONLY:-0}" = 1 ]; then echo "$BASE"; exit 0; fi
@@ -167,7 +173,7 @@ for i in $(seq 1 "$N"); do
   if [ "$UP" = 1 ]; then
     say "rep $i: serving after ${READY}s"
     # shellcheck disable=SC2086
-    ABT_TIMING_RELS=1 "$TIME" -v "$ABT" run --strategy mw14 --data "$SOCK" --timing --history window --start "$START" --end "$END" ${THREADS:+--threads $THREADS} $EXTRA $CORPUS >"$D/run.log" 2>&1 || RC=$?
+    ABT_TIMING_RELS=1 "$TIME" -v $WRAP "$ABT" run --strategy mw14 --data "$SOCK" --timing --history window --start "$START" --end "$END" ${THREADS:+--threads $THREADS} $EXTRA $CORPUS >"$D/run.log" 2>&1 || RC=$?
   else
     say "rep $i: the data service did not start; see $D/serve.log"
     RC=-1
