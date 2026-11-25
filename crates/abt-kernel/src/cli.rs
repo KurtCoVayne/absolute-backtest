@@ -164,43 +164,33 @@ fn run_keeping(
     tables: Option<(&Path, &crate::plan::Plan)>,
 ) -> Result<(RunResult, Vec<String>), RunError> {
     // A run writes its outputs to the data service it reads (K-7.1), what
-    // its metrics are computed from (E-66).
+    // its metrics are computed from (E-66). The ledger reads its relations
+    // after the run (E-141).
     let opts = crate::kernel::Replay {
         record_summaries: tables.is_some(),
         write_outputs: true,
+        read_after: ledger.to_vec(),
         ..Default::default()
     };
     crate::kernel::run_keeping(prog, lowered, client, cfg, &opts, |result, k| {
+        let posting = std::time::Instant::now();
+        let timing = std::env::var_os("ABT_TIMING_RELS").is_some();
         let mut notes = Vec::new();
-        if std::env::var_os("ABT_TIMING_RELS").is_some() {
-            for (name, secs, calls) in k.derive_times().iter().take(20) {
-                eprintln!("derive {:28} {:8.3} s {:8} calls", name, secs, calls);
+        // The seconds deriving every relation, read before the explanations
+        // below derive more.
+        let derive_total = k.derive_times().iter().map(|x| x.1).sum::<f64>();
+        if timing {
+            // Per relation: the seconds deriving it, its derivations, and of
+            // those the ones that left a stuck instance or a halt and the
+            // ones of a few tuples.
+            for (name, secs, calls, stuck, small) in k.derive_times().iter().take(20) {
+                eprintln!("derive {:28} {:8.3} s {:8} calls stuck_bars={} small_bars={}", name, secs, calls, stuck, small);
             }
             // The rows the stream brought each stored relation, and what the
             // retention horizon left of them.
             for (name, received, held) in k.store_counts() {
                 eprintln!("rows {:28} received={} held={}", name, received, held);
             }
-            let s = k.stats();
-            eprintln!(
-                "phases bind={:.3} check={:.3} push={:.3} open={:.3} stream={:.3} write={:.3} wait={:.3} decode={:.3} insert={:.3} fill={:.3} decide={:.3} exec={:.3} warm={:.3} trim={:.3} evict={:.3} derive_total={:.3}",
-                s.bind_secs,
-                s.check_secs,
-                s.push_secs,
-                s.open_secs,
-                s.stream_secs,
-                s.write_secs,
-                s.wait_secs,
-                s.decode_secs,
-                s.insert_secs,
-                s.fill_secs,
-                s.decide_secs,
-                s.exec_secs,
-                s.warm_secs,
-                s.trim_secs,
-                s.evict_secs,
-                k.derive_times().iter().map(|x| x.1).sum::<f64>()
-            );
         }
         let (_, causes) = observe::coverage_report(prog, &result.coverage, result.bars.len());
         for c in &causes {
@@ -232,6 +222,37 @@ fn run_keeping(
                 n
             ));
         }
+        if timing {
+            // The run's phases in the order they ran, `post` being this
+            // closure; `wait` to `loop_other` are the parts of `stream`.
+            k.stats.post_secs = posting.elapsed().as_secs_f64();
+            let s = k.stats();
+            eprintln!(
+                "phases bind={:.3} check={:.3} build={:.3} spec={:.3} push={:.3} open={:.3} stream={:.3} write={:.3} post={:.3} wait={:.3} decode={:.3} insert={:.3} fill={:.3} decide={:.3} exec={:.3} inv={:.3} observe={:.3} warm={:.3} trim={:.3} evict={:.3} loop_other={:.3} derive_total={:.3}",
+                s.bind_secs,
+                s.check_secs,
+                s.build_secs,
+                s.spec_secs,
+                s.push_secs,
+                s.open_secs,
+                s.stream_secs,
+                s.write_secs,
+                s.post_secs,
+                s.wait_secs,
+                s.decode_secs,
+                s.insert_secs,
+                s.fill_secs,
+                s.decide_secs,
+                s.exec_secs,
+                s.inv_secs,
+                s.observe_secs,
+                s.warm_secs,
+                s.trim_secs,
+                s.evict_secs,
+                s.loop_other_secs,
+                derive_total
+            );
+        }
         Ok(notes)
     })
 }
@@ -253,17 +274,20 @@ fn checked_program(args: &Args) -> (crate::check::Program, Vec<crate::check::Dia
 }
 
 /// A run under the plan whose kernel, at the end of the stream, `f` reads
-/// with the run (the state tables and the provenance commands).
+/// with the run (the state tables and the provenance commands);
+/// `read_after` names the relations `f` reads (`Replay::read_after`).
 fn with_kernel<T: Send>(
     prog: &crate::check::Program,
     client: &crate::kernel::DataClient,
     lowered: &crate::lower::Lowered,
     cfg: ExecConfig,
     record_summaries: bool,
+    read_after: &[String],
     f: impl for<'k> FnOnce(&RunResult, &mut Kernel<'k>) -> Result<T, RunError> + Send,
 ) -> Result<T, RunError> {
     let opts = crate::kernel::Replay {
         record_summaries,
+        read_after: read_after.to_vec(),
         ..Default::default()
     };
     crate::kernel::run_keeping(prog, Some(lowered), client, cfg, &opts, f).map(|(_, t)| t)
@@ -463,7 +487,7 @@ pub fn install_reporter(r: Box<Reporter>) -> bool {
 
 fn usage(code: i32) -> ! {
     eprintln!(
-        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--mode replay-sim|live-sim|live-broker [--session S] [--deployment FILE]] [--replay-of RUN [--paced]] [--deadline SECONDS|none]\n          [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--memory-budget BYTES] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt hash --strategy NAME [--json | --show] <files...>   (H(P): BLAKE3 over the program's normal form without its report block, the program's identity; --json adds the normal form as source, --show prints the bytes hashed: the RFC 8785 form of the normal form's hash view)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the compiler's plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt contract --strategy NAME [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the contract derived from the program, K-3: preconditions, invariants, postconditions and limits with their source, discharge and policy; with data, the run's status of each)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>\n          (the query language over the run, V-8: `? BODY at T = DATE | at T | over D1 .. D2 [for A = KEY]` (a rule body checked with the program, its solutions at the bars), `why R(...)` (the derivation down to supplied tuples), `why not R(A, T) [in written order]`, `trace R at DATE` (every instance attempted, fired or the literal that excluded it), `coverage [over D1 .. D2]`, `show program|plan [R]|schedule|calendars|contract`, `ledger R into NAME` (written through --data STORE|SOCKET as kernel.<run>.NAME))\n  abt data ...   (the data layer's commands: serve, ingest (a synthetic market, an imported bundle, a vendor's files), catalog, resolve, query, stats, pin, gc; each prints its usage)\n  abt plan|metrics|test|claim|feed|activation|lineage|dispute|briefs ...   (the query layer's commands: plans and their trials, a run's metrics, statistical tests and claims, feed and activation statistics, lineages, the briefs harness; each prints its usage)\n  abt query serve [--socket PATH] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]   (the query layer's service, P-3.5: a query-layer command given --query SOCKET is asked of it, the files it names sent with it)\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --memory-budget B     the memory the derived state may take (K-4.6; default half the machine's): a program whose state bound exceeds it is refused before its first barrier\n  --no-pushdown         evaluate every aggregate in the kernel rather than having the data layer answer the eligible ones (K-4.5); a test switch: both give the same bits\n  --evaluator E         set (the default: a rule's body solved over blocks of bindings) or tuple (one environment at a time, M-8); a test switch: both give the same bits\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --mode MODE           replay-sim (the default: the data layer's replay of what it holds), live-sim (--session S: a live session the data service at --data SOCKET records, its barriers emitted as its clock passes them, K-6.2) or live-broker (--deployment FILE: the orders go to the broker the deployment names, over the session --session or its recording stream names, or with neither a rehearsal over the data's replay; this build's one broker is `mock`, K-6.4)\n  --deployment FILE     a live run's deployment document (K-6.5): account, broker, session, routing, kill switch, reconciliation, deadlines, recording; hashed and logged with the run\n  --replay-of RUN       replay a live-sim run's recorded stream (its session's rows and the barriers its stream emitted, D-5.5); --paced at the data layer's clock's pace\n  --deadline S          how long after its barrier a live decision bar may be evaluated before its decisions are late (K-6.3; default one bar of the decision calendar; `none` measures nothing): the execution block's `late send|reject` decides what they become\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars: over --data STORE|SOCKET as a cache object of the data layer, its key printed; over --synthetic into --checkpoint-dir DIR as <bar>.json\n  --resume KEY|FILE     continue from a checkpoint (a cache key over --data STORE|SOCKET, else a file) of the same program, binding and window (the stream resumes at its cursor)\n  --data STORE|SOCKET   the data: a store directory, served in this process (the run's outputs written to it), or a data service's socket (abt data serve); a bundle or a directory of Parquet files is imported first (abt data ingest --adapter bundle_v2)\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --rel RELATION        the relation `table` reads; --symbol SYM keeps one instrument's tuples\n  --text QUERY          a query of `abt query` (repeatable: one run answers them all)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb and the kernel's statistics (pushed_answers: the aggregates the data layer answered)"
+        "usage:\n  abt check <files...>\n  abt run --strategy NAME (--data STORE|SOCKET | --synthetic [--days N] [--symbols A,B,C] [--seed N])\n          [--start DATE] [--end DATE] [--as-of DATE] [--param NAME=VALUE]... [--plan written|optimised]\n          [--mode replay-sim|live-sim|live-broker [--session S] [--deployment FILE]] [--replay-of RUN [--paced]] [--deadline SECONDS|none]\n          [--verify-causality] [--no-pushdown] [--evaluator set|tuple] [--memory-budget BYTES] [--all] [--fills] [--nav FILE] [--returns FILE] [--tables DIR] [--ledger R1,R2,... --ledger-out DIR] [--quiet] [--timing] <files...>\n          (the executor is the program's `execution` block and the reporting its `report` block: no option sets a cost, a policy, a price relation or the periods)\n  abt show --strategy NAME <files...>   (the program graph: every relation decide reaches, from decide upward, with its signature, kind, calendar, completeness, stratum, loop, depth, reads and rules)\n  abt ir --strategy NAME [--stage parsed|checked|normalised|analysed|rewritten|planned] [--json] <files...>   (a compiler stage's result; the normalised stage carries the program hash and the name map)\n  abt hash --strategy NAME [--json | --show] <files...>   (H(P): BLAKE3 over the program's normal form without its report block, the program's identity; --json adds the normal form as source, --show prints the bytes hashed: the RFC 8785 form of the normal form's hash view)\n  abt rewrite-log --strategy NAME [--json] <files...>   (every rewrite applied: rule, span, before, after, the law, the measure; JSON lines with --json)\n  abt show plan --strategy NAME [--observed] [--json] [--plan written|optimised] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the compiler's plan: literal order and cost per rule, aggregate implementations, stores, strata; --observed runs it and adds the counts)\n  abt contract --strategy NAME [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the contract derived from the program, K-3: preconditions, invariants, postconditions and limits with their source, discharge and policy; with data, the run's status of each)\n  abt verify --strategy NAME [--tier N] [--solver z3|cvc5] [--replay-dir DIR] [--json] [(--data STORE|SOCKET | --synthetic ...)] <files...>   (the verification report, tiers 0 to N: every obligation with its verdict, budget use and replay file; tiers 5 and 6 need a binding; exit 1 on a refuted obligation)\n  abt graph --strategy NAME <files...>   (the program graph of `show` with the compiler's facts: keyedness label, open or closed loop, demanded or elided, the abstract value of every column)\n  abt table --strategy NAME --table coverage|plan|book|binding|summary|extension|carried|derivation|failure [--rel R] [--at T] [--symbol SYM] [--out FILE] [--json] (--data STORE|SOCKET | --synthetic ...) <files...>   (a state table after the run, as text, JSON, or written to FILE as Arrow IPC, or Parquet for a .parquet name)\n  abt query --strategy NAME --text QUERY [--text QUERY]... [--json] [--out FILE] (--data STORE|SOCKET | --synthetic ...) <files...>\n          (the query language over the run, V-8: `? BODY at T = DATE | at T | over D1 .. D2 [for A = KEY]` (a rule body checked with the program, its solutions at the bars), `why R(...)` (the derivation down to supplied tuples), `why not R(A, T) [in written order]`, `trace R at DATE` (every instance attempted, fired or the literal that excluded it), `coverage [over D1 .. D2]`, `show program|plan [R]|schedule|calendars|contract`, `ledger R into NAME` (written through --data STORE|SOCKET as kernel.<run>.NAME))\n  abt data ...   (the data layer's commands: serve, ingest (a synthetic market, an imported bundle, a vendor's files), catalog, resolve, query, stats, pin, gc; each prints its usage)\n  abt plan|metrics|test|claim|feed|activation|lineage|dispute|briefs ...   (the query layer's commands: plans and their trials, a run's metrics, statistical tests and claims, feed and activation statistics, lineages, the briefs harness; each prints its usage)\n  abt query serve [--socket PATH] (--data SOCKET | --store DIR) [--kernel SOCKET... | --kernels N]   (the query layer's service, P-3.5: a query-layer command given --query SOCKET is asked of it, the files it names sent with it)\n\n  --param NAME=VALUE    override a parameter's default (repeatable; a library's as unit::name)\n  --memory-budget B     the memory the derived state may take (K-4.6; default half the machine's): a program whose state bound exceeds it is refused before its first barrier\n  --no-pushdown         evaluate every aggregate in the kernel rather than having the data layer answer the eligible ones (K-4.5); a test switch: both give the same bits\n  --evaluator E         set (the default: a rule's body solved over blocks of bindings) or tuple (one environment at a time, M-8); a test switch: both give the same bits\n  --start DATE, --end DATE  the run's window: the executor runs and the strategy decides only at bars within it; earlier bars stay data (warm-up)\n  --as-of DATE          the bundle date a ticker literal or a command-line name resolves at (default: the data's last bar)\n  --plan KIND           written (the written literal order, no rewrite) or optimised (default): the plan every run and report uses; the program's `numerics` field selects the aggregate implementation\n  --mode MODE           replay-sim (the default: the data layer's replay of what it holds), live-sim (--session S: a live session the data service at --data SOCKET records, its barriers emitted as its clock passes them, K-6.2) or live-broker (--deployment FILE: the orders go to the broker the deployment names, over the session --session or its recording stream names, or with neither a rehearsal over the data's replay; this build's one broker is `mock`, K-6.4)\n  --deployment FILE     a live run's deployment document (K-6.5): account, broker, session, routing, kill switch, reconciliation, deadlines, recording; hashed and logged with the run\n  --replay-of RUN       replay a live-sim run's recorded stream (its session's rows and the barriers its stream emitted, D-5.5); --paced at the data layer's clock's pace\n  --deadline S          how long after its barrier a live decision bar may be evaluated before its decisions are late (K-6.3; default one bar of the decision calendar; `none` measures nothing): the execution block's `late send|reject` decides what they become\n  --checkpoint-every P  write the fold's state at the end of every month (`month`) or every N bars: over --data STORE|SOCKET as a cache object of the data layer, its key printed; over --synthetic into --checkpoint-dir DIR as <bar>.json\n  --resume KEY|FILE     continue from a checkpoint (a cache key over --data STORE|SOCKET, else a file) of the same program, binding and window (the stream resumes at its cursor)\n  --data STORE|SOCKET   the data: a store directory, served in this process (the run's outputs written to it), or a data service's socket (abt data serve); a bundle or a directory of Parquet files is imported first (abt data ingest --adapter bundle_v2)\n  --nav FILE            write the book at every bar to FILE as Parquet: t,equity,cash,gross,net,leverage\n  --returns FILE        write the returns per reporting period (the report block's calendar) to FILE as Parquet: t,ret,pnl\n  --tables DIR          with `run`: write every state table of the run under DIR as Arrow IPC\n  --ledger R1,R2,...    with --ledger-out DIR: write the named relations' tuples at every bar of the run as Parquet\n  --stage STAGE         the stage `ir` prints (default normalised); --json prints a stage, a plan, a log or a report as JSON\n  --tier N              the last verification tier `verify` runs (0 checker, 1 abstract interpretation, 2 linear feasibility, 3 SMT, 4 CHC, 5 translation validation, 6 runtime; default 6)\n  --solver NAME         the SMT solver (z3, cvc5; a program on the PATH) tiers 3 and 4 drive as a subprocess; absent, they are undecided\n  --replay-dir DIR      keep every solver script as DIR/<strategy>-<obligation>.smt2 (and a CHC certificate as .model), so a verdict replays from the file alone\n  --table NAME          the state table `table` prints; --out FILE writes it (Arrow IPC, or Parquet for a .parquet name)\n  --rel RELATION        the relation `table` reads; --symbol SYM keeps one instrument's tuples\n  --text QUERY          a query of `abt query` (repeatable: one run answers them all)\n  --timing              print one stderr line: load_s (data), build_s (parse and check), run_s (kernel build and evaluation), total_s, bars, symbols, tuples, decisions, bars_per_s, peak_rss_mb, the resident memory at the stream's first barrier and the kernel's statistics (pushed_answers: the aggregates the data layer answered)"
     );
     exit(code)
 }
@@ -801,36 +825,10 @@ fn make_runner_with(args: &Args, lowered: Option<crate::lower::Lowered>) -> Box<
     })
 }
 
-/// The process's peak resident set in MB: `VmHWM` on Linux, `getrusage`'s
-/// `ru_maxrss` (bytes) on macOS, unavailable elsewhere.
+/// The process's peak resident set in MB (`fold::resident_mb`), or `None`
+/// where it is not read.
 fn peak_rss_mb() -> Option<f64> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        let line = status.lines().find(|l| l.starts_with("VmHWM:"))?;
-        let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
-        Some(kb / 1024.0)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // struct rusage: two timevals, then ru_maxrss as the first long.
-        #[repr(C)]
-        struct Rusage {
-            times: [i64; 4],
-            longs: [i64; 14],
-        }
-        extern "C" {
-            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
-        }
-        let mut u = Rusage { times: [0; 4], longs: [0; 14] };
-        // SAFETY: getrusage writes one struct rusage, whose layout on 64-bit macOS this mirrors.
-        let rc = unsafe { getrusage(0, &mut u) };
-        (rc == 0).then(|| u.longs[0] as f64 / (1024.0 * 1024.0))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        None
-    }
+    crate::kernel::fold::resident_mb().1
 }
 
 pub fn main() {
@@ -1088,7 +1086,7 @@ pub fn main_with(raw: Vec<String>) {
                 eprintln!("{}", e);
                 exit(2)
             });
-            let text = with_kernel(&prog, &client, &compiled.lowered, cfg, record, |result, k| {
+            let text = with_kernel(&prog, &client, &compiled.lowered, cfg, record, rel.as_slice(), |result, k| {
                 use crate::state::tables;
                 let result = result.clone();
                 let bars = result.bars.clone();
@@ -1196,7 +1194,19 @@ pub fn main_with(raw: Vec<String>) {
                 eprintln!("{}", e);
                 exit(2)
             });
-            let answers = with_kernel(prog, &client, &compiled.lowered, cfg, false, |result, k| {
+            // The relations the forms other than `?` read after the run (a
+            // `?` is a rule of the run).
+            let read_after: Vec<String> = queries
+                .iter()
+                .filter_map(|q| match q {
+                    crate::query::Query::Why { relation, .. }
+                    | crate::query::Query::WhyNot { relation, .. }
+                    | crate::query::Query::Trace { relation, .. }
+                    | crate::query::Query::Ledger { relation, .. } => Some(relation.clone()),
+                    _ => None,
+                })
+                .collect();
+            let answers = with_kernel(prog, &client, &compiled.lowered, cfg, false, &read_after, |result, k| {
                 // `ledger ... into` writes through the data service the run
                 // read, when its store lasts.
                 let cx = crate::query::Context {
@@ -1353,8 +1363,9 @@ pub fn main_with(raw: Vec<String>) {
                 let total = started.elapsed().as_secs_f64();
                 let run_s = total - loaded_at;
                 let s = &result.stats;
+                let mb = |m: Option<f64>| m.map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into());
                 eprintln!(
-                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={} trimmed_rows={} warm_secs={:.3} trim_secs={:.3} evict_secs={:.3}",
+                    "timing load_s={:.3} build_s={:.3} run_s={:.3} total_s={:.3} bars={} symbols={} tuples={} decisions={} bars_per_s={:.1} peak_rss_mb={} window_calls={} window_bars_solved={} window_groups={} window_rows_cached={} late_tuples={} memo_entries={} pushed_answers={} parallel_steps={} parallel_rows={} parallel_secs={:.3} rows_state_groups={} trimmed_rows={} warm_secs={:.3} trim_secs={:.3} evict_secs={:.3} rss_at_first_barrier_mb={} peak_rss_at_first_barrier_mb={} prefetch_skipped={}",
                     loaded_at - checked_at,
                     checked_at,
                     run_s,
@@ -1366,7 +1377,7 @@ pub fn main_with(raw: Vec<String>) {
                     if tuple_count > 0 { tuple_count } else { s.received_rows },
                     result.decisions.len(),
                     if run_s > 0.0 { result.bars.len() as f64 / run_s } else { 0.0 },
-                    peak_rss_mb().map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into()),
+                    mb(peak_rss_mb()),
                     s.window_calls,
                     s.window_bars_solved,
                     s.window_groups,
@@ -1381,7 +1392,10 @@ pub fn main_with(raw: Vec<String>) {
                     s.trimmed_rows,
                     s.warm_secs,
                     s.trim_secs,
-                    s.evict_secs
+                    s.evict_secs,
+                    mb(s.rss_at_first_barrier_mb),
+                    mb(s.peak_rss_at_first_barrier_mb),
+                    s.prefetch_skipped
                 );
             }
             println!(

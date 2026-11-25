@@ -219,6 +219,68 @@ fn the_optimised_plan_equals_the_written_plan_on_the_corpus() {
     assert_eq!(ran, strategies.len());
 }
 
+/// Two aggregates over one rows window share its state under the plan
+/// (R3), and over a block of names the set evaluator solves the window's
+/// conjunction for the block at once (`eval::prefetch_rows_window`): for
+/// the first aggregate only, since the second finds every group brought to
+/// the bar and would read nothing. The corpus's markets hold five names,
+/// under the block paths' 32 rows, so a market of 48 holds the shared
+/// window to the written plan, ledgers included, under both evaluators.
+#[test]
+fn a_shared_rows_window_over_a_block_equals_the_written_plan() {
+    let rules = "    rel z(A: Equity, @T, Z: Scalar)
+    z(A, T, Z) :- universe(A, T), close(A, T, P),
+        M = mean(P1) over (T1 in rows[20], close(A, T1, P1)),
+        D = std(P1) over (T1 in rows[20], close(A, T1, P1)),
+        Z = (P - M) / D.
+    rel picked(A: Equity, @T)
+    picked(A, T) :- bar(T), top[n](z(A, T, Z) by (Z desc, A asc)) within (T).
+    rel n_picked(@T, N: Count)
+    n_picked(T, N) :- bar(T), N = count(A) over (picked(A, T)) within (T), N > 0.
+";
+    let decides = "    decide(T, hold(A, W)) :- picked(A, T), n_picked(T, N), W = 0.1 / N.
+    decide(T, hold(A, 0)) :- held(A, T, _), not picked(A, T).";
+    let p = common::program(&common::strategy("shared_rows", "    n : Count = 5 in 1..10", rules, decides), "shared_rows");
+    let names: Vec<String> = (0..48).map(|i| format!("S{:03}", i)).collect();
+    let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+    let ds = synthetic_daily(&syms, (2022, 1, 3), 300, 11);
+    let mut cfg = ExecConfig::from_program(&p);
+    // One thread: a block cut across workers is four blocks of 12 rows.
+    cfg.threads = 1;
+    let numerics = Numerics::from_running_sums(cfg.running_sums);
+    let compiled = compile(
+        &p,
+        &CompileOptions {
+            numerics,
+            ..CompileOptions::default()
+        },
+    );
+    assert_eq!(compiled.lowered.shared_windows.len(), 1, "{:?}", compiled.lowered.notes);
+    let run_one = |lowered: &Lowered, set: bool| {
+        let mut cfg = cfg.clone();
+        cfg.set_eval = set;
+        common::run_keeping(&p, Some(lowered), &ds, cfg, &Default::default(), |r, k| Ok((digest(r), ledgers(k, &p, &r.bars), r.stats.clone())))
+            .map(|(_, x)| x)
+            .unwrap_or_else(|e| panic!("shared_rows: {}", e))
+    };
+    let (da, la, sa) = run_one(&Lowered::written(&p, numerics), false);
+    assert!(da.iter().any(|l| l.starts_with("fill ")), "the book never traded");
+    for set in [false, true] {
+        let (db, lb, sb) = run_one(&compiled.lowered, set);
+        assert_same("shared_rows", "runs", &da, &db);
+        assert_eq!(la.keys().collect::<Vec<_>>(), lb.keys().collect::<Vec<_>>(), "ledger sets differ");
+        for (rel, rows) in &la {
+            assert_same("shared_rows", &format!("ledger of {}", rel), rows, &lb[rel]);
+        }
+        // One state per name where the written plan keeps two, and each bar
+        // solved once for it.
+        assert_eq!((sb.rows_state_groups * 2, sb.window_bars_solved * 2), (sa.rows_state_groups, sa.window_bars_solved));
+        assert_eq!(sb.excluded_after_undefined, sa.excluded_after_undefined);
+        // The block of the second aggregate is not solved again.
+        assert_eq!(sb.prefetch_skipped > 0, set);
+    }
+}
+
 /// The two company books under the run configurations their execution
 /// blocks write, when their bundles are present.
 #[test]

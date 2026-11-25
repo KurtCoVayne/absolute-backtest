@@ -131,6 +131,11 @@ impl<'a> RowSlice<'a> {
         self.cells.chunks_exact(self.width.max(1))
     }
 
+    /// Row `i`, borrowed from the store's block.
+    pub fn row(&self, i: usize) -> &'a [Value] {
+        &self.cells[i * self.width..(i + 1) * self.width]
+    }
+
     /// The rows as tuples of their own.
     pub fn to_vec(&self) -> Vec<Tuple> {
         self.iter().map(smallvec::SmallVec::from).collect()

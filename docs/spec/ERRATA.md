@@ -2993,7 +2993,8 @@ batch driver agree on every corpus program. Each bless since:
   alone). `bind::stream_spec` streams a bound primitive only when it is
   kept. A book that fills at the close (MW14,
   `moc`) no longer receives its open, high, low, listing, tickers or
-  classification. [D] Not done, and recorded for the next step: a
+  classification (the listing since E-141 only: the code kept it until
+  then). [D] Not done, and recorded for the next step: a
   primitive read only inside a pushed-down aggregate still streams (the
   E-47 fallback to local evaluation needs its rows), so MW14's `close` and
   `volume` -- the weekly `dvol` mean of daily close×volume has no
@@ -3087,7 +3088,13 @@ batch driver agree on every corpus program. Each bless since:
   block asks a `rows` window at the same bar with the window's time
   free, the anchor and the conjunction are solved once over the block and
   each group is fed its own row's solutions; a row on which an instance
-  stuck is solved alone. (c) `eval::prefetch_bucket_window` (`479782a`):
+  stuck is solved alone. An anchor that is the conjunction's first
+  literal is solved once, the rest of the conjunction going on from its
+  block; and the solve is left out when every row's group is already at
+  the bar (the second aggregate over a shared window, R3), since no row
+  reads it then, provided it would only read: positive atoms, the derived
+  ones memoised at the window's bar with no stuck instance, and at most a
+  comparison or an assignment last (`KernelStats::prefetch_skipped`). (c) `eval::prefetch_bucket_window` (`479782a`):
   the bars the first row's group misses of a bucket or span window, each
   solved over the whole block. (d) `Kernel::call_first` (`eb3345c`): the
   executor's mark reads the one tuple of an entity from a memoised block
@@ -3149,13 +3156,17 @@ batch driver agree on every corpus program. Each bless since:
   fold's door (the rows the executor writes into the stores are not
   among them), which is not a clock and is serialised. Under
   `ABT_TIMING_RELS=1`: `phases bind= check= push= open= stream= write=
-  wait= decode= …` and `rows <relation> received= held=`; `tuples=` on
+  wait= decode= …` (later with `build=`, `spec=`, `post=`, `inv=`,
+  `observe=` and `loop_other=`, so that the parts of `stream` add up to
+  it, and `insert=` timed once per batch) and `rows <relation> received=
+  held=`; `tuples=` on
   the `timing` line of a served run is that count, where it printed 0
   (it counted the local dataset, and a served run has none).
   **Open:** the stats row still carries counters that follow a run's
   options and not its identity (`parallel_steps`, `parallel_rows`,
   `trimmed_rows`, `memo_entries`, `rows_state_groups`, the window
-  counters, `pushed_answers`), and `threads`, `trim_stores` and
+  counters, `pushed_answers`, and since E-141 `received_rows`, which
+  counts the listing when `--ledger` names it), and `threads`, `trim_stores` and
   `pushdown` are not in the run id: two runs of one program over one
   binding write the same `report` only when made with the same options,
   and a second run with another thread count or history into the same
@@ -3382,6 +3393,77 @@ batch driver agree on every corpus program. Each bless since:
   `report_periods` still reads `session` a `ScanRow` a row, for a
   sessions report calendar alone; a run whose report calendar is its
   decision calendar or `days` reads nothing there.
+- **E-141 (06-performance 3.3, E-127; the listing stayed in the
+  stream).** E-127's text says a book that fills at the close no longer
+  receives its listing. The code kept it: `Kernel::read_relations`
+  projected the companions, the tickers and the classification, and
+  `listed` fell under "everything else streams", so a book whose
+  universe is the names that traded (MW14) received a listing row per
+  name and day and read none of them. [D] `listed` is kept when a rule
+  names it (the standard universe does, and so does the one of the
+  strategy the checker writes over a class's whole demand,
+  `class_strategy_source`) or when an observation reads it
+  (`outputs::observe_bar` reads an observed relation's rows at every
+  bar); otherwise it leaves the stream and is dropped at the fold's
+  door. Nothing else in a run read the kernel's listing: the
+  preconditions scan it through the binding (`Bound::scan`), and the
+  calendars are the binding's bars. In a run whose rules do not name
+  the listing this changes the stream's specification (so the stream's
+  id; the run's id is taken before it), `received_rows` in the stats
+  row of the `report` output (`tuples=` under `--timing`), `trimmed_rows`
+  there when the stores are trimmed (the listing's rows are no longer
+  held, so none is dropped) and the coverage's count of `listed` tuples,
+  which is 0; decisions, fills and the observations' ledgers are the same
+  (the synthetic MW14 of 120 names: 900,625 tuples received become
+  720,925, the listing's 179,700 fewer). [D] A command that reads the
+  listing after the run names it before the run begins, and keeps it
+  (`Replay::read_after`, `Kernel::keep_read_after`): `abt run --ledger
+  listed`, an `abt query` form that names it (`ledger listed into NAME`,
+  `why`, `why not`, `trace`; a `?` is a rule of the run and keeps it by
+  the rule above) and `abt table --rel listed`. Such a run is the run
+  before this change, every output with it; `received_rows` then follows
+  the command as `trimmed_rows` follows `--history` (E-133's open part).
+  The review of Nov 25 found `--ledger listed` writing a ledger with no
+  row before this was done. The kernel service's queries name their
+  relation once the run has begun (`service::answer_live` between
+  barriers, `answer_held` after the run, a study's `ledger` step among
+  them, whose `kernel.<run>.<NAME>` is a stored output): of a run whose
+  rules and observations do not name the listing they read no row there,
+  as one that names an unread companion has since E-127. The service
+  could keep it only if the run's request named the relations its later
+  queries read, which `KernelRequest` does not carry.
+  [D] `Kernel::read_relations` now answers what the kernel keeps
+  (`read_rels`, computed once by `relations_read`), so the stream's
+  specification and the fold's door read one answer, and
+  `Replay::keep_unread` keeps every relation of the binding (a test's
+  switch, like `force_memo_eviction`).
+  `tests/fold.rs::a_listing_no_rule_names_is_not_streamed_and_one_a_rule_names_is`:
+  three books over one market, the stream of the first without the
+  listing and those of the other two (an observation, the standard
+  universe) with it, and the first book's run equal to its run with
+  every relation kept;
+  `abt/tests/cli_options.rs::a_ledger_of_the_listing_has_its_rows_when_no_rule_names_it`:
+  `--ledger listed,close` of a book of the names that traded writes the
+  rows the book of the listed names writes on the same market, and
+  `abt table --rel listed` and `why listed(...)` answer as they do there.
+- **E-142 (06-performance 3.3, E-127, K-7.1; an observation of a
+  projected relation) -- open, reproduced (Nov 25).** E-127's
+  projection counts the rules' atoms as readers and not the
+  observations: `observe open` (or `high`, `low`, `ticker`,
+  `classification`) in a program none of whose rules names the
+  relation, and whose orders do not read the companions, writes a
+  ledger with no row and no warning, where the relation has a row per
+  name and bar in the data (a program of three names and thirty bars:
+  84 rows in the data, 0 in the kernel and 0 in the ledger; `observe
+  close` and, since E-141, `observe listed` write 84). The fix is the
+  observed relations added to those the rules name in
+  `Kernel::relations_read`; it changes the ledgers such a program
+  writes, so it is left for a change of its own. A command that reads
+  such a relation after the run meets the same: `abt run --ledger open`
+  of `sma_crossover` (market orders) writes a ledger with no row, as it
+  did before E-141. `Kernel::keep_read_after` keeps the listing alone, so
+  that no ledger changes from what it was before E-141; the companions,
+  the tickers and the classification belong to this fix.
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

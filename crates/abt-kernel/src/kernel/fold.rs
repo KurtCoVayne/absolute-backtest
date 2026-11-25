@@ -88,6 +88,9 @@ pub struct Fold<'p, 'e> {
     decided_once: bool,
     halted: bool,
     last_bar: Option<i64>,
+    /// Whether `last_bar` is a label of the decision calendar's schedule:
+    /// a replay's always is, a live clock's barrier need not be.
+    last_scheduled: bool,
     checkpoint_every: Option<CheckpointEvery>,
     bars_since_checkpoint: usize,
     pending_checkpoint: Option<Checkpoint>,
@@ -107,6 +110,51 @@ pub struct Fold<'p, 'e> {
     /// The observed relations' ledger rows, collected at each barrier when
     /// the stores are trimmed (`outputs::observe_bar`, E-126).
     ledger_acc: Option<super::outputs::LedgerAcc>,
+    /// Whether the stream's first barrier was met (the resident memory is
+    /// read there, for `--timing`).
+    seen_barrier: bool,
+    /// Seconds inside the barriers and the checkpoints taken so far: what
+    /// a batch's clock leaves out to time its tuples (`replay_observed`).
+    outside_secs: f64,
+}
+
+/// A field of `/proc/self/status` given in kB, as MB.
+#[cfg(any(target_os = "linux", test))]
+fn status_mb(status: &str, field: &str) -> Option<f64> {
+    let line = status.lines().find(|l| l.starts_with(field))?;
+    let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024.0)
+}
+
+/// The process's resident set in MB, now and at its peak: `VmRSS` and
+/// `VmHWM` on Linux; on macOS the peak alone, `getrusage`'s `ru_maxrss`
+/// (bytes); neither elsewhere.
+pub fn resident_mb() -> (Option<f64>, Option<f64>) {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        (status_mb(&status, "VmRSS:"), status_mb(&status, "VmHWM:"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // struct rusage: two timevals, then ru_maxrss as the first long.
+        #[repr(C)]
+        struct Rusage {
+            times: [i64; 4],
+            longs: [i64; 14],
+        }
+        extern "C" {
+            fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+        }
+        let mut u = Rusage { times: [0; 4], longs: [0; 14] };
+        // SAFETY: getrusage writes one struct rusage, whose layout on 64-bit macOS this mirrors.
+        let rc = unsafe { getrusage(0, &mut u) };
+        (None, (rc == 0).then(|| u.longs[0] as f64 / (1024.0 * 1024.0)))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        (None, None)
+    }
 }
 
 /// What a live run measures (K-6.3): each decision bar's lag, the time
@@ -149,6 +197,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             decided_once: false,
             halted: false,
             last_bar: None,
+            last_scheduled: false,
             checkpoint_every: None,
             bars_since_checkpoint: 0,
             pending_checkpoint: None,
@@ -159,6 +208,8 @@ impl<'p, 'e> Fold<'p, 'e> {
             live: None,
             control: None,
             ledger_acc: None,
+            seen_barrier: false,
+            outside_secs: 0.0,
         }
     }
 
@@ -218,6 +269,11 @@ impl<'p, 'e> Fold<'p, 'e> {
     /// The last decision barrier the fold closed.
     pub fn last_bar(&self) -> Option<i64> {
         self.last_bar
+    }
+
+    /// Seconds inside the barriers and the checkpoints taken so far.
+    pub fn outside_secs(&self) -> f64 {
+        self.outside_secs
     }
 
     /// The kernel and the run so far, together (what a query between
@@ -326,6 +382,8 @@ impl<'p, 'e> Fold<'p, 'e> {
         kernel.domain_vecs.clear();
         exec.restore(cp.executor).map_err(RunError::Config)?;
         let invariants = crate::contract::check::Invariants::new(kernel.cfg.initial_cash, &cp.result);
+        let last_bar = if cp.last_bar == i64::MIN { None } else { Some(cp.last_bar) };
+        let last_scheduled = last_bar.is_some_and(|last| kernel.decides_at(last));
         Ok(Fold {
             kernel,
             exec,
@@ -333,7 +391,8 @@ impl<'p, 'e> Fold<'p, 'e> {
             result: cp.result,
             decided_once: cp.decided_once,
             halted: false,
-            last_bar: if cp.last_bar == i64::MIN { None } else { Some(cp.last_bar) },
+            last_bar,
+            last_scheduled,
             checkpoint_every: None,
             bars_since_checkpoint: 0,
             pending_checkpoint: None,
@@ -343,6 +402,8 @@ impl<'p, 'e> Fold<'p, 'e> {
             live: None,
             control: None,
             ledger_acc: None,
+            seen_barrier: false,
+            outside_secs: 0.0,
         })
     }
 
@@ -383,7 +444,9 @@ impl<'p, 'e> Fold<'p, 'e> {
                         _ => false,
                     };
                     if due || self.checkpoint_requested {
+                        let started = std::time::Instant::now();
                         self.pending_checkpoint = Some(self.checkpoint(seq)?);
+                        self.outside_secs += started.elapsed().as_secs_f64();
                         self.bars_since_checkpoint = 0;
                         self.checkpoint_requested = false;
                     }
@@ -391,13 +454,26 @@ impl<'p, 'e> Fold<'p, 'e> {
                 self.ran_decision = false;
                 // A tuple whose decision bucket was decided arrived late
                 // (K-4.4): it is available from now on, and what was derived
-                // meanwhile is recomputed on demand.
-                let dcal = self.kernel.prog.decision_cal.clone();
-                let late = self.last_bar.is_some_and(|last| self.kernel.label_on(&dcal, key).is_some_and(|l| l <= last));
-                let entity = self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity());
-                let started = std::time::Instant::now();
+                // meanwhile is recomputed on demand. Its bucket is the first
+                // label of the decision calendar's schedule at or after its
+                // key, so while the last decided label is one of the
+                // schedule's the bucket was decided exactly when the key is
+                // at or before that label, and no label is looked up. A
+                // label the schedule does not hold is compared through it.
+                let late = match self.last_bar {
+                    Some(last) if self.last_scheduled => key <= last,
+                    Some(last) => {
+                        let prog = self.kernel.prog;
+                        self.kernel.label_on(&prog.decision_cal, key).is_some_and(|l| l <= last)
+                    }
+                    None => false,
+                };
+                let entity = if late {
+                    self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity())
+                } else {
+                    None
+                };
                 self.kernel.insert_fact(rel, tuple, r)?;
-                self.kernel.stats.insert_secs += started.elapsed().as_secs_f64();
                 if late {
                     self.kernel.invalidate_from(key);
                     self.result.late.push(super::LateRecord {
@@ -411,11 +487,20 @@ impl<'p, 'e> Fold<'p, 'e> {
                 Ok(())
             }
             Event::Barrier { cal, label, at, .. } => {
+                let started = std::time::Instant::now();
+                if !self.seen_barrier {
+                    self.seen_barrier = true;
+                    let (now, peak) = resident_mb();
+                    self.kernel.stats.rss_at_first_barrier_mb = now;
+                    self.kernel.stats.peak_rss_at_first_barrier_mb = peak;
+                }
                 // Every tuple received by the barrier's instant precedes it
                 // (D-5.3): the kernel holds what was received by `now`.
                 self.kernel.now = at;
                 self.kernel.open_bucket(&cal, label);
-                self.barrier(&cal, label, at)
+                let done = self.barrier(&cal, label, at);
+                self.outside_secs += started.elapsed().as_secs_f64();
+                done
             }
         }
     }
@@ -474,15 +559,19 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.exec.on_decisions(&mut self.kernel, label, &by_equity, &mut self.result)?;
         self.kernel.stats.exec_secs += started.elapsed().as_secs_f64();
         // The invariants after the executor's take (K-3.3, K-4.2).
+        let started = std::time::Instant::now();
         let working = self.exec.working();
         let at = self.kernel.now;
         self.invariants.check(&mut self.kernel, self.exec.book(), &working, self.exec.expected(), &mut self.result, label, at)?;
+        self.kernel.stats.inv_secs += started.elapsed().as_secs_f64();
         // Bucketed by time, eviction costs only what it drops: every bar,
         // keeping the last few decision bars' entries.
         // The observed relations at this bar, before the stores are trimmed.
         if let Some(acc) = &mut self.ledger_acc {
+            let started = std::time::Instant::now();
             let prog = self.kernel.prog;
             super::outputs::observe_bar(prog, &mut self.kernel, label, acc)?;
+            self.kernel.stats.observe_secs += started.elapsed().as_secs_f64();
         }
         self.recent.push_back(label);
         if self.recent.len() > 4 {
@@ -496,6 +585,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         }
         self.decided_once = true;
         self.last_bar = Some(label);
+        self.last_scheduled = self.kernel.decides_at(label);
         self.ran_decision = true;
         self.bars_since_checkpoint += 1;
         if let Some(source) = self.control.as_ref().and_then(|c| c.halt_requested()) {
@@ -589,5 +679,26 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.result.plan = self.kernel.plan_label().to_string();
         crate::contract::check::postconditions(&mut self.result, self.kernel.prog, self.kernel.cfg.initial_cash, false);
         Ok((self.result, self.kernel))
+    }
+}
+
+#[cfg(test)]
+mod resident_tests {
+    use super::*;
+
+    #[test]
+    fn a_status_field_in_kb_is_read_as_mb() {
+        let status = "Name:\tabt\nVmHWM:\t 3670016 kB\nVmRSS:\t  524288 kB\n";
+        assert_eq!(status_mb(status, "VmRSS:"), Some(512.0));
+        assert_eq!(status_mb(status, "VmHWM:"), Some(3584.0));
+        assert_eq!(status_mb(status, "VmSwap:"), None);
+        assert_eq!(status_mb("VmRSS:\tmany kB\n", "VmRSS:"), None);
+        // Whatever this machine gives is of a running process, and the
+        // present size is not above the peak.
+        let (now, peak) = resident_mb();
+        assert!(now.is_none_or(|m| m > 0.0) && peak.is_none_or(|m| m > 0.0));
+        if let (Some(now), Some(peak)) = (now, peak) {
+            assert!(now <= peak);
+        }
     }
 }

@@ -510,6 +510,35 @@ of the run is the stream loop (221 s: `decide` 138, `fill` 49), which the
 column-block evaluator and the delivered answers of package 2's second part
 take next.
 
+**Package 3, the row path's quick wins (Nov 25): the stream loop from 221 s
+to 171 s, the same returns.** Units S01 to S03 of the evaluator's plan,
+which change today's evaluator and none of its answers. S01: the as-of walk
+probes the first bar and steps back one label at a time instead of
+collecting the relation's whole domain at every call (`prev_row` 11.9 s to
+3.7 s); a merge join binds in place instead of copying a relation's
+tuples; a parameter is resolved at build; a rows window's anchor is solved
+once and its prefetched rows are taken, not cloned twice; an aggregate's
+function is parsed once. S02: the memo keeps a chained relation's last
+evicted result whole (`Memo::latest_block`) and spills only the entities
+that left it (`evict` 6.9 s to 0.8 s); a store's kept rows are merged, not
+rebuilt and sorted at every barrier (`trim` 5.4 s to 1.9 s). S03's door:
+the listing leaves the stream when no rule, observation or after-run
+command reads it (E-141: 15.69M tuples fewer); the fold's late test is one
+comparison with the last decided label; a run of rows arriving in
+identity order is inserted without hashing (`insert` 6.9 s to 3.7 s); the
+phases line gains `build`, `spec`, `inv`, `observe`, `post` and
+`loop_other`, and the relation table `stuck_bars` and `small_bars` a
+relation.
+
+On top of package 2's first part, the same evening: 185.0 and 185.0 s
+against 235.7 and 237.1 s without these units and 331.6 s for package 1's
+tree; the front's CPU 175 s, its peak 0.97 GB; 45.8M tuples; the same
+weekly returns to the last bit. What is left: `decide` 118 s and `fill` 38
+s, the derivations themselves (`clenow` 34.5, `dvol` 28.6, `ma` 15.6,
+`eligible` 13.0, `dividend_at` 12.4, `traded@weekly` 10.9,
+`dollar_volume@base` 8.0). These are the column-block evaluator's and the
+delivered answers' (package 2's second part).
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

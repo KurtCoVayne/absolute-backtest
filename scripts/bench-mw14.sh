@@ -39,7 +39,17 @@
 #    memory, the data service's CPU seconds and peak memory, the tuples
 #    received (in all and per relation) and trimmed, the seconds per phase and
 #    per derived relation, the weekly correlation and the count of weeks equal
-#    to the canon to 1e-4, 1e-9 and 8e-15.
+#    to the canon to 1e-4, 1e-9 and 8e-15. `phases_s` is the run's `phases`
+#    line, every key of it: `bind`, `check`, `build`, `spec`, `push`, `open`,
+#    `stream`, `write` and `post` follow one another, and `unclocked_s` is
+#    what they leave of the run's seconds; `wait`, `decode`, `insert`,
+#    `fill`, `decide`, `exec`, `inv`, `observe`, `warm`, `trim`, `evict` and
+#    `loop_other` are the parts of `stream` and add up to it. Each relation
+#    of `derive` carries its derivations that left a stuck instance or a halt
+#    (`stuck_bars`) and those of at most 16 tuples (`small_bars`); `front`
+#    carries the resident memory when the stream met its first barrier and
+#    the peak until then; `prefetch_skipped` counts the rows-window block
+#    solves left out because no row would read them.
 #
 # Env: BENCH=/data/bench (stores and logs), OUT=$BENCH/run-<time> (this call's
 # logs), ABT=target/release/abt, PY=python3, THREADS (--threads, default the
@@ -224,7 +234,15 @@ phases = {}
 m = re.search(r"^phases (.*)$", log, re.M)
 if m:
     phases = {k: float(v) for k, v in re.findall(r"(\w+)=([0-9.]+)", m.group(1))}
-derive = {name: {"s": float(s), "calls": int(c)} for name, s, c in re.findall(r"^derive (\S+)\s+([0-9.]+) s\s+([0-9]+) calls", log, re.M)}
+# The run's seconds no phase's clock covers: the phases that follow one another, taken from them.
+unclocked = None
+if phases and isinstance(timing.get("run_s"), float):
+    unclocked = round(timing["run_s"] - sum(phases.get(k, 0.0) for k in ("bind", "check", "build", "spec", "push", "open", "stream", "write", "post")), 3)
+derive = {}
+for name, s, c, stuck, small in re.findall(r"^derive (\S+)\s+([0-9.]+) s\s+([0-9]+) calls(?: stuck_bars=([0-9]+) small_bars=([0-9]+))?", log, re.M):
+    derive[name] = {"s": float(s), "calls": int(c)}
+    if stuck:
+        derive[name].update(stuck_bars=int(stuck), small_bars=int(small))
 rows = {name: {"received": int(r), "held": int(h)} for name, r, h in re.findall(r"^rows (\S+)\s+received=([0-9]+) held=([0-9]+)", log, re.M)}
 try:
     compare = json.load(open(f"{d}/compare.json"))
@@ -234,10 +252,12 @@ gb = lambda kb: None if kb is None else round(kb / 1048576, 3)
 line = {
     "rep": int(rep), "rc": int(rc), "run": run or None, "commit": commit, "dirty_files": int(dirty or 0), "machine": machine, "threads": threads, "store": base,
     "serve_ready_s": round(float(ready), 2),
-    "front": {"wall_s": front.get("wall_s"), "user_s": front.get("user_s"), "sys_s": front.get("sys_s"), "rss_gb": gb(front.get("rss_kb")), "run_s": timing.get("run_s")},
+    "front": {"wall_s": front.get("wall_s"), "user_s": front.get("user_s"), "sys_s": front.get("sys_s"), "rss_gb": gb(front.get("rss_kb")), "run_s": timing.get("run_s"),
+              "rss_at_first_barrier_mb": timing.get("rss_at_first_barrier_mb"), "peak_rss_at_first_barrier_mb": timing.get("peak_rss_at_first_barrier_mb")},
     "service": {"cpu_s": None if "user_s" not in serve else round(serve["user_s"] + serve.get("sys_s", 0.0), 2), "user_s": serve.get("user_s"), "sys_s": serve.get("sys_s"), "rss_gb": gb(serve.get("rss_kb"))},
     "tuples": timing.get("tuples"), "trimmed_rows": timing.get("trimmed_rows"), "bars": timing.get("bars"), "symbols": timing.get("symbols"), "decisions": timing.get("decisions"),
-    "phases_s": phases, "derive": derive, "rows": rows, "compare": compare,
+    "prefetch_skipped": timing.get("prefetch_skipped"),
+    "phases_s": phases, "unclocked_s": unclocked, "derive": derive, "rows": rows, "compare": compare,
 }
 print(json.dumps(line, separators=(",", ":")))
 PY

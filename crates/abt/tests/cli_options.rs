@@ -255,6 +255,9 @@ fn timing_prints_one_stderr_line_with_every_field() {
         "window_rows_cached",
         "late_tuples",
         "pushed_answers",
+        "rss_at_first_barrier_mb",
+        "peak_rss_at_first_barrier_mb",
+        "prefetch_skipped",
     ] {
         assert!(names.contains(&want), "timing lacks {}: {}", want, lines[0]);
     }
@@ -264,9 +267,162 @@ fn timing_prints_one_stderr_line_with_every_field() {
     for k in ["load_s", "build_s", "run_s", "total_s"] {
         assert!(get(k).parse::<f64>().unwrap() >= 0.0, "{}", lines[0]);
     }
-    let rss = get("peak_rss_mb");
-    assert!(rss == "unavailable" || rss.parse::<f64>().unwrap() > 0.0, "{}", lines[0]);
+    for k in ["peak_rss_mb", "rss_at_first_barrier_mb", "peak_rss_at_first_barrier_mb"] {
+        let rss = get(k);
+        assert!(rss == "unavailable" || rss.parse::<f64>().unwrap() > 0.0, "{}", lines[0]);
+    }
     // Without the flag there is no timing line.
     let (_, _, stderr) = abt(&["run", "--strategy", "sma_crossover", "--synthetic", "--days", "60", "--quiet", CATALOG, LIB, SMA]);
     assert!(!stderr.contains("timing "), "{}", stderr);
+}
+
+/// Under `ABT_TIMING_RELS` each derived relation has a line: its seconds,
+/// its derivations and, of those, the ones that left a stuck instance or a
+/// halt and the ones of a few tuples (all of them on a market of a few
+/// names). That a stuck instance and a halt are counted is held by
+/// `abt-tests/tests/kernel.rs`, whose programs leave them.
+#[test]
+fn the_relation_table_counts_each_relations_stuck_and_small_bars() {
+    let out = Command::new(env!("CARGO_BIN_EXE_abt"))
+        .env("ABT_TIMING_RELS", "1")
+        .args(["run", "--strategy", "sma_crossover", "--synthetic", "--days", "60", "--timing", "--quiet", CATALOG, LIB, SMA])
+        .current_dir(abt_tests::repo_root())
+        .output()
+        .expect("abt runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr);
+    let lines: Vec<Vec<&str>> = stderr.lines().filter(|l| l.starts_with("derive ")).map(|l| l.split_whitespace().collect()).collect();
+    assert!(!lines.is_empty(), "{}", stderr);
+    for f in &lines {
+        // A library's instance has spaces in its name and a relation of a
+        // few tuples takes under a millisecond: the counts are the line's
+        // last six fields, and the seconds may print as zero.
+        let [secs, "s", calls, "calls", stuck, small] = f[f.len().saturating_sub(6)..] else {
+            panic!("{:?}", f)
+        };
+        assert!(secs.parse::<f64>().unwrap() >= 0.0, "{:?}", f);
+        let calls: u64 = calls.parse().unwrap();
+        assert_eq!(stuck.strip_prefix("stuck_bars=").map(|n| n.parse::<u64>().unwrap()), Some(0), "{:?}", f);
+        assert_eq!(small.strip_prefix("small_bars=").map(|n| n.parse::<u64>().unwrap()), Some(calls), "{:?}", f);
+    }
+}
+
+/// Under `ABT_TIMING_RELS` the `phases` line names every part of a run:
+/// those that follow one another (`bind` to `post`), which fit in the run's
+/// seconds, and the parts of `stream` (`wait` to `loop_other`), which add up
+/// to it. Each is printed to the millisecond.
+#[test]
+fn the_phases_line_names_the_parts_of_a_run_and_of_its_stream() {
+    let out = Command::new(env!("CARGO_BIN_EXE_abt"))
+        .env("ABT_TIMING_RELS", "1")
+        .args(["run", "--strategy", "sma_crossover", "--synthetic", "--days", "250", "--timing", "--quiet", CATALOG, LIB, SMA])
+        .current_dir(abt_tests::repo_root())
+        .output()
+        .expect("abt runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr);
+    let line = |name: &str| -> Vec<(String, String)> {
+        let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with(name)).collect();
+        assert_eq!(lines.len(), 1, "{}", stderr);
+        lines[0][name.len()..]
+            .split(' ')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    let phases: Vec<(String, f64)> = line("phases ").into_iter().map(|(k, v)| (k, v.parse().unwrap())).collect();
+    let run = ["bind", "check", "build", "spec", "push", "open", "stream", "write", "post"];
+    let stream = ["wait", "decode", "insert", "fill", "decide", "exec", "inv", "observe", "warm", "trim", "evict", "loop_other"];
+    let names: Vec<&str> = phases.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, run.iter().chain(&stream).chain(&["derive_total"]).copied().collect::<Vec<_>>());
+    assert!(phases.iter().all(|(_, v)| *v >= 0.0), "{:?}", phases);
+    let sum = |keys: &[&str]| -> f64 { phases.iter().filter(|(k, _)| keys.contains(&k.as_str())).map(|(_, v)| v).sum() };
+    assert!((sum(&stream) - sum(&["stream"])).abs() < 0.01, "the parts of the stream: {:?}", phases);
+    let run_s: f64 = line("timing ").iter().find(|(k, _)| k == "run_s").unwrap().1.parse().unwrap();
+    assert!(sum(&["stream"]) > 0.0 && sum(&run) <= run_s + 0.01, "the parts of a run of {} s: {:?}", run_s, phases);
+}
+
+/// `--ledger` names its relations before the run, so a listing it names is
+/// kept though no rule reads it (E-141): the book of the names that traded
+/// writes the listing's ledger the book of the listed names writes on the
+/// same market, a row per name and day. So do `abt table --rel` and the
+/// `abt query` forms, which name the relation they read.
+#[test]
+fn a_ledger_of_the_listing_has_its_rows_when_no_rule_names_it() {
+    let dir = std::env::temp_dir().join(format!("abt-cli-options-listed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let listed = "universe(A, T) :- listed(A, T), traded@base(A, T).";
+    let src = std::fs::read_to_string(abt_tests::repo_root().join(SMA)).unwrap();
+    assert!(src.contains(listed));
+    let traded = dir.join("sma_traded.dsl");
+    std::fs::write(&traded, src.replace(listed, "universe(A, T) :- traded@base(A, T).")).unwrap();
+    let rows = |strategy: &str, out: &str| -> (usize, usize) {
+        let out = dir.join(out);
+        let (code, _, stderr) = abt(&[
+            "run",
+            "--strategy",
+            "sma_crossover",
+            "--synthetic",
+            "--days",
+            "60",
+            "--ledger",
+            "listed,close",
+            "--ledger-out",
+            out.to_str().unwrap(),
+            "--quiet",
+            CATALOG,
+            LIB,
+            strategy,
+        ]);
+        assert_eq!(code, 0, "{}", stderr);
+        let n = |rel: &str| abt_kernel::table::Table::read(&out.join(format!("{}.parquet", rel))).unwrap().len();
+        (n("listed"), n("close"))
+    };
+    let named = rows(SMA, "named");
+    assert!(named.0 > 0 && named.1 > 0, "{:?}", named);
+    assert_eq!(rows(traded.to_str().unwrap(), "traded"), named);
+    let traded = traded.to_str().unwrap();
+    let extension = |strategy: &str| -> usize {
+        let (code, stdout, stderr) = abt(&[
+            "table",
+            "--strategy",
+            "sma_crossover",
+            "--table",
+            "extension",
+            "--rel",
+            "listed",
+            "--json",
+            "--synthetic",
+            "--days",
+            "60",
+            CATALOG,
+            LIB,
+            strategy,
+        ]);
+        assert_eq!(code, 0, "{}", stderr);
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap()["rows"].as_array().unwrap().len()
+    };
+    assert!(extension(SMA) > 0);
+    assert_eq!(extension(traded), extension(SMA));
+    let why = |strategy: &str| -> String {
+        let (code, stdout, stderr) = abt(&[
+            "query",
+            "--strategy",
+            "sma_crossover",
+            "--text",
+            "why listed(E1, 2022-01-20)",
+            "--synthetic",
+            "--days",
+            "60",
+            CATALOG,
+            LIB,
+            strategy,
+        ]);
+        assert_eq!(code, 0, "{}", stderr);
+        stdout
+    };
+    assert!(why(SMA).contains("supplied"), "{}", why(SMA));
+    assert_eq!(why(traded), why(SMA));
+    let _ = std::fs::remove_dir_all(&dir);
 }

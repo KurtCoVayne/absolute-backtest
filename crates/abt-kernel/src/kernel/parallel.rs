@@ -122,6 +122,8 @@ impl<'p> Kernel<'p> {
             w.in_progress.clear();
             w.stats = Default::default();
             w.coverage = vec![(0, 0, 0); self.coverage.len()];
+            w.stuck_bars = vec![0; self.stuck_bars.len()];
+            w.small_bars = vec![0; self.small_bars.len()];
             for c in &mut w.literal_counts {
                 for x in c.iter_mut() {
                     *x = (0, 0, 0);
@@ -335,6 +337,9 @@ impl<'p> Kernel<'p> {
                 a.2 += b.2;
                 *b = (0, 0, 0);
             }
+            for (a, b) in self.stuck_bars.iter_mut().zip(w.stuck_bars.iter_mut()).chain(self.small_bars.iter_mut().zip(w.small_bars.iter_mut())) {
+                *a += std::mem::take(b);
+            }
             for (a, b) in self.literal_counts.iter_mut().zip(w.literal_counts.iter_mut()) {
                 for (x, y) in a.iter_mut().zip(b.iter_mut()) {
                     x.0 += y.0;
@@ -358,6 +363,7 @@ impl super::KernelStats {
         self.window_noncanonical += o.window_noncanonical;
         self.window_backward += o.window_backward;
         self.pushed_answers += o.pushed_answers;
+        self.prefetch_skipped += o.prefetch_skipped;
         self.parallel_secs += o.parallel_secs;
     }
 }

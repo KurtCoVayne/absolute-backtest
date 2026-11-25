@@ -2,6 +2,8 @@
 //! end to end, determinism, the causality theorem, and the runtime
 //! diagnostics of section 7.
 
+#![allow(clippy::result_large_err)]
+
 use abt_tests as common;
 
 use std::collections::BTreeMap;
@@ -689,6 +691,15 @@ fn quantile_conventions_and_the_aggregate_halt() {
         }
         other => panic!("expected an arithmetic halt, got {:?}", other.map(|r| r.decisions.len())),
     }
+    // The halt counts once in `cut`'s row of the relation table
+    // (`Kernel::derive_times`), asked again or not: the second ask reads the
+    // memoised halt and derives nothing.
+    let mut k = abt_tests::loaded_kernel(&prog, &ds, ExecConfig::default());
+    for _ in 0..2 {
+        assert!(matches!(k.query("cut", day("2024-01-08"), &[]), Err(RunError::Arithmetic { .. })));
+    }
+    let times = k.derive_times();
+    assert_eq!(times.iter().find(|x| x.0 == "cut").map(|x| x.3), Some(1), "{:?}", times);
 }
 
 /// An aggregation's conjunction admits comparisons and assignments over
@@ -754,6 +765,21 @@ fn partial_arithmetic_is_only_evaluated_for_demanded_tuples() {
     let show = |r: &RunResult| -> Vec<String> { r.decisions.iter().map(|d| format!("{} {}", d.t, r.describe_decision(&d.decision))).collect() };
     assert_eq!(show(&r), show(&r2));
     assert!(r2.stats.excluded_after_undefined > 0, "{:?}", r2.stats);
+    // Each bar `w` was derived stuck at counts in its row of the relation
+    // table (`Kernel::derive_times`, `stuck_bars` under `ABT_TIMING_RELS`):
+    // the warm-up bars, not the bars after them, and no bar of a relation
+    // whose rows meet no partial operation.
+    let (_, times) = common::run_keeping(&prog2, None, &ds, allow(), &Default::default(), |_, k| Ok(k.derive_times())).unwrap();
+    let row = |rel: &str| {
+        times
+            .iter()
+            .find(|x| x.0 == rel)
+            .map(|x| (x.2 as u64, x.3))
+            .unwrap_or_else(|| panic!("no row for {}: {:?}", rel, times))
+    };
+    let (calls, stuck) = row("w");
+    assert!(stuck > 0 && stuck < calls, "{:?}", times);
+    assert_eq!(row("momentum").1, 0, "{:?}", times);
     // With nothing after it to exclude the instance, the undefined `w` is
     // stuck and halts the run on the first bar it is demanded at.
     let prog3 = common::program(&unguarded("    decide(T, hold(A, W)) :- universe(A, T), w(T, W)."), "unguarded");
