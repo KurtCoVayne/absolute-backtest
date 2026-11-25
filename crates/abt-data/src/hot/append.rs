@@ -234,6 +234,15 @@ impl Tail {
         }
     }
 
+    /// The least `f64` view of column `c` among the tail's rows: infinity
+    /// for a tail without a row, `None` when a value is not a number (it is
+    /// neither above nor below any).
+    pub fn least(&self, c: usize, kinds: &[Kind], exponents: &[u8]) -> Option<f64> {
+        (0..self.labels.len())
+            .map(|k| f64::from_bits(self.bits(k, c, kinds, exponents)))
+            .try_fold(f64::INFINITY, |least, v| (!v.is_nan()).then(|| least.min(v)))
+    }
+
     pub fn shrink_to_fit(&mut self) {
         self.labels.shrink_to_fit();
         self.rs.shrink_to_fit();
@@ -921,6 +930,53 @@ impl Overlay {
         Ok(out)
     }
 
+    /// Hands `f` the label of every appended row in `[t0, t1]`: the sealed
+    /// blocks' instrument by instrument, then the tails'. They are the
+    /// times a read of the appended rows gives, without a value decoded (of
+    /// a sealed block only its block of times is).
+    pub fn for_each_label(&mut self, t0: Option<i64>, t1: Option<i64>, f: &mut dyn FnMut(i64)) -> Result<(), DataError> {
+        let ncols = self.value_columns();
+        let within = |label: i64| t0.is_none_or(|a| label >= a) && t1.is_none_or(|b| label <= b);
+        let blocks: Vec<AppendLoc> = self
+            .instruments
+            .iter()
+            .flat_map(|inst| inst.sealed.iter())
+            .filter(|s| !(t0.is_some_and(|a| s.last_label < a) || t1.is_some_and(|b| s.first_label > b)))
+            .map(|s| s.locs[ncols + 1])
+            .collect();
+        for loc in blocks {
+            let (labels, _) = self.decode_at(loc, 0, Kind::Int)?;
+            labels.into_iter().filter(|l| within(*l)).for_each(&mut *f);
+        }
+        for inst in &self.instruments {
+            inst.tail.labels().iter().copied().filter(|l| within(*l)).for_each(&mut *f);
+        }
+        Ok(())
+    }
+
+    /// A number no appended value of tick column `c` is below: the least
+    /// of the sealed blocks' floors (`block_floor`, a header each and the
+    /// exceptions of a block that has raw ones) and of the tails' values.
+    /// Infinity when nothing was appended, `None` when a value is not a
+    /// number.
+    pub fn least_value(&mut self, c: usize) -> Result<Option<f64>, DataError> {
+        let mut least = f64::INFINITY;
+        let blocks: Vec<AppendLoc> = self.instruments.iter().flat_map(|inst| inst.sealed.iter()).map(|s| s.locs[c]).collect();
+        for loc in blocks {
+            let map = self.files[loc.file as usize].map()?;
+            let bytes = &map[loc.offset as usize..(loc.offset + loc.len as u64) as usize];
+            let h = Header::from_bytes(&bytes[..HEADER_BYTES]);
+            let exceptions = if h.raw() { parse_block(bytes).2 } else { Vec::new() };
+            let Some(floor) = block_floor(&h, &exceptions) else { return Ok(None) };
+            least = least.min(floor);
+        }
+        for inst in &self.instruments {
+            let Some(v) = inst.tail.least(c, &self.kinds, &inst.exponents) else { return Ok(None) };
+            least = least.min(v);
+        }
+        Ok(Some(least))
+    }
+
     /// The labels the overlay added beyond the published ones, sorted.
     pub fn labels(&self) -> Vec<i64> {
         let mut out: Vec<i64> = Vec::new();
@@ -1060,6 +1116,32 @@ pub fn block_hash_of(bytes: &[u8]) -> blake3::Hash {
         hasher.update(&bytes[at..at + 4 + n * 16]);
     }
     hasher.finalize()
+}
+
+/// A number no value of a tick block is below, from its header and its
+/// exceptions with no word unpacked. A value on the block's grid is
+/// `decode_value` of the base plus a multiple of the quantum, which grows
+/// with the multiple, so the base's own value is below none of them; a raw
+/// exception is its bits. `exceptions` are the block's when its header says
+/// it has raw ones (else none are needed). Infinity for an empty block,
+/// `None` when a raw value is not a number.
+pub fn block_floor(h: &Header, exceptions: &[Exception]) -> Option<f64> {
+    let mut least = f64::INFINITY;
+    let mut raw = 0usize;
+    for x in exceptions {
+        if let Exception::Raw { bits, .. } = x {
+            let v = f64::from_bits(*bits);
+            if v.is_nan() {
+                return None;
+            }
+            least = least.min(v);
+            raw += 1;
+        }
+    }
+    if h.n as usize > raw {
+        least = least.min(decode_value(h.base, h.g, h.e as u8, h.recip_exact(), h.f32(), 0));
+    }
+    Some(least)
 }
 
 /// A sealed block decoded: integers at `exponent` and the source's values.

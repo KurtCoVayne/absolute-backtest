@@ -1,0 +1,16 @@
+# proposition: E-139 (the membership check from columns: a member row a listed row answers is no problem)
+# mutation: a listed row marks no member row
+# test: cargo test -p abt-tests --test contracts the_preconditions_give
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/contract/check.rs b/crates/abt-kernel/src/contract/check.rs
+--- a/crates/abt-kernel/src/contract/check.rs
++++ b/crates/abt-kernel/src/contract/check.rs
+@@ -212,7 +212,7 @@
+     /// The relation holds a row of `s` at `t`.
+     fn mark(&mut self, s: Sym, t: i64) {
+         if let Some(i) = self.place(s, t) {
+-            self.found[s as usize][i] = true;
++            self.found[s as usize][i] = false;
+         }
+     }
+ 

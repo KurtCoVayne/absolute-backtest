@@ -1,0 +1,16 @@
+# proposition: E-138 (a scan of named columns answers each fact's latest revision)
+# mutation: the superseded rows are answered beside the latest
+# test: cargo test -p abt-data --test column_reads a_scan_of_named_columns
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store_columns.rs b/crates/abt-data/src/store_columns.rs
+--- a/crates/abt-data/src/store_columns.rs
++++ b/crates/abt-data/src/store_columns.rs
+@@ -341,7 +341,7 @@
+             let same: Option<Vec<_>> = std::iter::once(t).chain(key.iter().copied()).map(|c| same_as_next(all.column(c))).collect();
+             same.map(|same| {
+                 let revised = |i: usize| same.iter().all(|s| s(i));
+-                (n > 1 && (0..n - 1).any(&revised)).then(|| (0..n).map(|i| Some(i + 1 == n || !revised(i))).collect())
++                (n > 1 && (0..n - 1).any(&revised)).then(|| (0..n).map(|_| Some(true)).collect())
+             })
+         };
+         match superseded {

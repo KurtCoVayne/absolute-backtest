@@ -474,6 +474,42 @@ peak, 25.2M tuples (Nov 5: 95.8 s); 88.1 and 87.9 s and 3.58 GB with the
 understates the book: 9% there for either change, 20% and 17% on the real
 run.
 
+**Package 2, first part (Nov 25): 100 s before the first tuple become 14 s,
+and the front's peak falls from 3.5 GB to 1.0 GB.** The record above put 100
+s of the run before the stream opens: `bind` 55, the preconditions 37, the
+pushed aggregate 7.5. Each was a pass over relations of 13 to 16 million
+rows to answer a question about their columns. Now (E-138, E-139):
+`bind`'s distinct times and labels are read from a hot version's label
+index and from one Parquet column, with row groups skipped by their
+statistics; the preconditions read named columns through a visitor instead
+of a row object per row (the 3.5 GB peak was those objects), a comparison
+no value can pass (`price <= 0`) is answered from the blocks' and row
+groups' least values without a row read, and the listing is checked against
+the membership in one pass; a hot read with appended rows is ordered by two
+counting passes instead of a sort; the decoder resolves a batch's
+relations once and converts its cells by type. Every kernel call on the
+data layer is clocked under `ABT_TIMING_RELS` (`data <call> <relation>
+<detail> rows= secs=` lines, and a total per stage).
+
+The machine ran this evening about 10% slower than the night before, with
+nothing else on it: the tree of the record above took 331.6 s at 20:13 UTC
+against 302.3 s at night, with the same fingerprint. The comparison is
+within the evening:
+
+| | Runs | Run s | `bind` | `check` | `push` | Front peak | Service CPU s |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| The record's tree (`910b298`) | 1 | 331.6 | 56.6 | 39.7 | 7.9 | 3.51 GB | 142.0 |
+| With this part | 2 | 235.7, 237.1 | 3.5, 3.6 | 6.0, 5.5 | 4.7, 4.4 | 1.01 GB | 60.0 |
+
+The same weekly returns to the last bit (`c086a539…`). Of `bind`'s 3.5 s
+the slowest calls are the membership's distinct list (0.8 s), the listing's
+distinct times (0.7 s) and the dividends' (0.6 s); of `check`'s 5.5 to 6.0
+s, `close` read whole as columns (2.4 s), the membership (1.1 s) and the
+listing (1.0 s). The data service's CPU falls from 142 to 60 s. What remains
+of the run is the stream loop (221 s: `decide` 138, `fill` 49), which the
+column-block evaluator and the delivered answers of package 2's second part
+take next.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

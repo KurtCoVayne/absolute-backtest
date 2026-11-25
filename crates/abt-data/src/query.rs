@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use abt_wire::generated::abt::wire::{Atom, ColumnType, Constant, ConstantKind, ExplainResponse, Identity, Op, Predicate, QueryForm, RelationSchema, View};
-use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, Int64Array, RecordBatch};
+use abt_wire::generated::abt::wire::{Atom, ColumnType, Constant, ConstantKind, ExplainResponse, Identity, Op, Predicate, QueryForm, RelationSchema, Scan, View};
+use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, DictionaryArray, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use crate::error::DataError;
@@ -123,12 +123,32 @@ fn atom_mask(store: &Store, s: &RelationSchema, b: &RecordBatch, a: &Atom) -> Re
             Op::IsNull => false,
         }
     };
+    // The constants as the integers a stored column is compared with, found
+    // once for the batch (a label's code is a lookup of its text); a number
+    // has none. An `=` or `in` of many is a set: compared one by one, an
+    // `in` of a list's three thousand members cost that many comparisons a
+    // row.
+    let ints: Vec<Option<i128>> = values.iter().map(|v| constant_int(store, v)).collect();
+    let among: Option<std::collections::HashSet<i128>> = (matches!(a.op, Op::Eq | Op::In) && ints.len() > 8).then(|| ints.iter().flatten().copied().collect());
     let out = (0..n)
         .map(|i| {
             if col.is_null(i) {
                 return false;
             }
-            values.iter().any(|v| {
+            if let Some(among) = &among {
+                let x: Option<i128> = match ty {
+                    ColumnType::Entity => Some(col.as_primitive::<arrow::datatypes::UInt64Type>().value(i) as i128),
+                    ColumnType::Time => Some(col.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i) as i128),
+                    ColumnType::Count => Some(col.as_primitive::<arrow::datatypes::Int64Type>().value(i) as i128),
+                    ColumnType::Label => Some(col.as_primitive::<arrow::datatypes::UInt32Type>().value(i) as i128),
+                    ColumnType::Bool => Some(col.as_boolean().value(i) as i128),
+                    ColumnType::Num | ColumnType::Tick | ColumnType::Bytes => None,
+                };
+                if let Some(x) = x {
+                    return among.contains(&x);
+                }
+            }
+            values.iter().zip(&ints).any(|(v, int)| {
                 let ord = match ty {
                     // A tick answer (ST-10.4) compares its decimal view.
                     ColumnType::Num if matches!(col.data_type(), DataType::Decimal128(_, _)) => {
@@ -157,7 +177,7 @@ fn atom_mask(store: &Store, s: &RelationSchema, b: &RecordBatch, a: &Atom) -> Re
                             }
                             ColumnType::Bytes | ColumnType::Num => return false,
                         };
-                        constant_int(store, v).map(|c| x.cmp(&c))
+                        int.map(|c| x.cmp(&c))
                     }
                 };
                 ord.is_some_and(cmp)
@@ -261,7 +281,7 @@ fn distinct_by_bucket(
     schema: &abt_wire::generated::abt::wire::RelationSchema,
     filter: &crate::store::RowFilter,
     d: &abt_wire::generated::abt::wire::Distinct,
-) -> Result<(SchemaRef, Vec<RecordBatch>), DataError> {
+) -> Result<Answered, DataError> {
     let ci = schema
         .columns
         .iter()
@@ -317,9 +337,160 @@ fn predicate_of(form: &QueryForm) -> Option<&Predicate> {
     }
 }
 
+/// A query's answer and its schema.
+pub type Answered = (SchemaRef, Vec<RecordBatch>);
+
+/// `distinct` answered from the column alone (`store_columns`): a version's
+/// event time, or a label of the key of a Parquet version. `None` for
+/// another column, and where the column read declines.
+fn distinct_from_column(store: &Store, version: &str, schema: &RelationSchema, filter: &RowFilter, d: &abt_wire::generated::abt::wire::Distinct) -> Result<Option<Answered>, DataError> {
+    let Some(ci) = schema.columns.iter().position(|c| c.name == d.column) else { return Ok(None) };
+    let col: ArrayRef = if ci == layout(schema).t && schema.columns[ci].ty == ColumnType::Time {
+        let Some(times) = store.distinct_times(version, filter)? else { return Ok(None) };
+        Arc::new(TimestampNanosecondArray::from(times).with_timezone("UTC"))
+    } else {
+        let Some(codes) = store.distinct_codes(version, filter, ci)? else { return Ok(None) };
+        let keys = match codes.iter().copied().collect::<Option<Vec<u32>>>() {
+            Some(all) => UInt32Array::from(all),
+            None => UInt32Array::from(codes),
+        };
+        // The dictionary an answer's labels are read through (`rows::answer`).
+        let labels: ArrayRef = Arc::new(StringArray::from(store.registry.labels().to_vec()));
+        Arc::new(DictionaryArray::<arrow::datatypes::UInt32Type>::try_new(keys, labels)?)
+    };
+    let out = Arc::new(Schema::new(vec![Field::new(&d.column, col.data_type().clone(), true)]));
+    Ok(Some((out.clone(), vec![RecordBatch::try_new(out, vec![col])?])))
+}
+
+/// A scan that names its columns, over a Parquet version, answered from
+/// those columns, its predicate's, and the time and key that tell a fact's
+/// latest revision (`Store::read_columns`). `None` when the scan names no
+/// column or one the relation has not, when it needs every column anyway
+/// (the row read keeps what it decodes resident for the next reader), and
+/// where the column read declines.
+fn scan_from_columns(store: &Store, version: &str, schema: &RelationSchema, filter: &RowFilter, sc: &Scan) -> Result<Option<Answered>, DataError> {
+    let Some(wanted) = &sc.columns else { return Ok(None) };
+    let lay = layout(schema);
+    let mut columns: std::collections::BTreeSet<usize> = std::iter::once(lay.t).chain(lay.key.iter().copied()).collect();
+    let atoms = sc.predicate.iter().flat_map(|p| p.all.iter().flatten()).flat_map(|d| d.atoms.iter().map(|a| &a.column));
+    for name in wanted.iter().chain(atoms) {
+        let Some(ci) = schema.columns.iter().position(|c| c.name == *name) else { return Ok(None) };
+        columns.insert(ci);
+    }
+    if columns.len() == schema.columns.len() {
+        return Ok(None);
+    }
+    let columns: Vec<usize> = columns.into_iter().collect();
+    let Some(mut rows) = store.read_columns(version, filter, &columns)? else { return Ok(None) };
+    // The relation as the columns read: what the predicate and the answer
+    // find their columns in.
+    let narrow = RelationSchema {
+        columns: columns.iter().map(|&c| schema.columns[c].clone()).collect(),
+        ..schema.clone()
+    };
+    if let Some(p) = sc.predicate.as_deref() {
+        rows = arrow::compute::filter_record_batch(&rows, &predicate_mask(store, &narrow, &rows, p)?)?;
+    }
+    let ans = rows::answer(&narrow, &rows, store.registry.labels(), false)?;
+    let idx: Vec<usize> = wanted
+        .iter()
+        .map(|c| ans.schema().index_of(c).map_err(|_| DataError::Malformed(format!("`{}` has no column `{}`", schema.name, c))))
+        .collect::<Result<_, _>>()?;
+    let projected = ans.project(&idx)?;
+    Ok(Some((projected.schema(), vec![projected])))
+}
+
+/// Whether a predicate keeps no row of a version, told with no row read
+/// (E-139): one of its conjuncts is made of `<` and `<=` comparisons of
+/// number columns with constants that every value of the column is above
+/// (`Store::least_value`, over every row the version holds in the window's
+/// partitions, so under any cut by receipt or sequence too). A row whose
+/// value is null or not a number passes no comparison, so the bound need
+/// not count it. False wherever it cannot be told, and for a predicate
+/// naming a column the relation has not, which the row read refuses.
+fn keeps_no_row(store: &Store, version: &str, schema: &RelationSchema, filter: &RowFilter, p: &Predicate) -> Result<bool, DataError> {
+    let position = |name: &str| schema.columns.iter().position(|c| c.name == name);
+    let conjuncts = p.all.as_deref().unwrap_or_default();
+    if conjuncts.iter().flat_map(|d| &d.atoms).any(|a| position(&a.column).is_none()) {
+        return Ok(false);
+    }
+    let mut least: BTreeMap<usize, Option<f64>> = BTreeMap::new();
+    for d in conjuncts {
+        if d.atoms.is_empty() || d.atoms.iter().any(|a| !matches!(a.op, Op::Lt | Op::Le) || a.values.as_ref().is_none_or(|v| v.is_empty())) {
+            continue;
+        }
+        let mut none = true;
+        for a in &d.atoms {
+            let Some(ci) = position(&a.column) else { return Ok(false) };
+            let floor = match least.get(&ci) {
+                Some(known) => *known,
+                None => *least.entry(ci).or_insert(store.least_value(version, filter, ci)?),
+            };
+            // `x <= c` fails for every `x` at or above a floor above `c`;
+            // `x < c` for a floor at or above `c`.
+            let above = |v: &Constant| {
+                let c = if v.kind == ConstantKind::Num { v.num } else { v.int as f64 };
+                floor.is_some_and(|l| if a.op == Op::Le { l > c } else { l >= c })
+            };
+            if !a.values.iter().flatten().all(above) {
+                none = false;
+                break;
+            }
+        }
+        if none {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// A query's answer made without the relation's rows read: a predicate
+/// seen to keep no row (`keeps_no_row`) answered as the row read answers
+/// one that kept none, and, from the columns a query needs
+/// (`store_columns`), `distinct` of an event time or of a key label and a
+/// scan that names its columns. `None` for any other query and wherever
+/// such an answer cannot be sure to equal the row read's; the answer, when
+/// there is one, is `execute_rows`'s.
+pub fn shortcut(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool) -> Result<Option<Answered>, DataError> {
+    if !matches!(form, QueryForm::Distinct(_) | QueryForm::Scan(_) | QueryForm::Exists(_) | QueryForm::CountRows(_)) {
+        return Ok(None);
+    }
+    let (relation, filter) = plan(store, form, r_max, view.as_of_seq)?;
+    let version = view.version(store, &relation)?;
+    let schema = store.manifest(&version)?.schema;
+    from_columns(store, &version, &schema, &filter, form, with_seq, false)
+}
+
+/// `ticks` says the answer's number columns are decimals (a hot version
+/// asked for its ticks): the read alone knows their type, so no answer is
+/// made here of a predicate that keeps no row.
+fn from_columns(store: &Store, version: &str, schema: &RelationSchema, filter: &RowFilter, form: &QueryForm, with_seq: bool, ticks: bool) -> Result<Option<Answered>, DataError> {
+    if let (QueryForm::Scan(_) | QueryForm::Exists(_) | QueryForm::CountRows(_), Some(p), false) = (form, predicate_of(form), ticks) {
+        if keeps_no_row(store, version, schema, filter, p)? {
+            return made_of(store, schema, &layout(schema), form, Vec::new(), with_seq).map(Some);
+        }
+    }
+    match form {
+        QueryForm::Distinct(d) => distinct_from_column(store, version, schema, filter, d),
+        // An answer with `seq` reads it of every row.
+        QueryForm::Scan(sc) if !with_seq => scan_from_columns(store, version, schema, filter, sc),
+        _ => Ok(None),
+    }
+}
+
 /// Answers a query: its schema and batches; `ticks` asks for a hot
 /// relation's tick columns as `Decimal128(18, s)` (ST-10.4).
-pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool, ticks: bool) -> Result<(SchemaRef, Vec<RecordBatch>), DataError> {
+pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool, ticks: bool) -> Result<Answered, DataError> {
+    answer(store, view, form, r_max, with_seq, ticks, true)
+}
+
+/// `execute` with every answer made from the relation's rows as they are
+/// read, no column read taken: what `shortcut`'s answers are held equal to.
+pub fn execute_rows(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool, ticks: bool) -> Result<Answered, DataError> {
+    answer(store, view, form, r_max, with_seq, ticks, false)
+}
+
+fn answer(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Option<i64>, with_seq: bool, ticks: bool, columns: bool) -> Result<Answered, DataError> {
     if let QueryForm::Chain(c) = form {
         let (schema, batches, _) = crate::options::chain(store, view, c, r_max)?;
         return Ok((schema, batches));
@@ -332,6 +503,11 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
     }
     let version = view.version(store, &relation)?;
     let schema = store.manifest(&version)?.schema;
+    if columns {
+        if let Some(answered) = from_columns(store, &version, &schema, &filter, form, with_seq, ticks && store.is_hot(&version))? {
+            return Ok(answered);
+        }
+    }
     // A column's distinct values, bucket by bucket: only the values seen
     // are kept (E-120). Read whole, the membership of every list in a store
     // of every US equity (183 million rows) held three copies of itself in
@@ -339,7 +515,6 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
     if let QueryForm::Distinct(d) = form {
         return distinct_by_bucket(store, &version, &schema, &filter, d);
     }
-    let stored = stored_schema(&schema);
     let lay = layout(&schema);
     // `latest` of an identity that fixes the key reads back from `t_max` to
     // the first bucket holding its rows; any other read takes the range.
@@ -357,8 +532,14 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
             .map(|b| Ok(arrow::compute::filter_record_batch(b, &predicate_mask(store, &schema, b, p)?)?))
             .collect::<Result<_, DataError>>()?;
     }
+    made_of(store, &schema, &lay, form, parts, with_seq)
+}
+
+/// A form's answer made of the rows read for it, its predicate applied
+/// (none, for a predicate that keeps no row).
+fn made_of(store: &Store, schema: &RelationSchema, lay: &rows::Layout, form: &QueryForm, parts: Vec<RecordBatch>, with_seq: bool) -> Result<Answered, DataError> {
     // A tick answer carries its own column types (Decimal128 for Num).
-    let layout_schema = parts.first().map(|b| b.schema()).unwrap_or_else(|| stored.clone());
+    let layout_schema = parts.first().map(|b| b.schema()).unwrap_or_else(|| stored_schema(schema));
     let all = rows::concat(&layout_schema, &parts)?;
     let rows = match form {
         QueryForm::Latest(_) if all.num_rows() > 0 => {
@@ -398,7 +579,7 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
                 .iter()
                 .position(|c| c.name == d.column)
                 .ok_or_else(|| DataError::Malformed(format!("`{}` has no column `{}`", schema.name, d.column)))?;
-            let ans = rows::answer(&schema, &rows, store.registry.labels(), false)?;
+            let ans = rows::answer(schema, &rows, store.registry.labels(), false)?;
             let col = ans.column(ci).clone();
             let field = Field::new(&d.column, col.data_type().clone(), true);
             // Distinct values in their first-seen order, which is (t, identity) order.
@@ -416,7 +597,7 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
             Ok((schema.clone(), vec![RecordBatch::try_new(schema, vec![picked])?]))
         }
         QueryForm::Scan(sc) if sc.columns.is_some() => {
-            let ans = rows::answer(&schema, &rows, store.registry.labels(), with_seq)?;
+            let ans = rows::answer(schema, &rows, store.registry.labels(), with_seq)?;
             let wanted = sc.columns.clone().unwrap_or_default();
             let idx: Vec<usize> = wanted
                 .iter()
@@ -426,7 +607,7 @@ pub fn execute(store: &Store, view: &ResolvedView, form: &QueryForm, r_max: Opti
             Ok((projected.schema(), vec![projected]))
         }
         _ => {
-            let ans = rows::answer(&schema, &rows, store.registry.labels(), with_seq)?;
+            let ans = rows::answer(schema, &rows, store.registry.labels(), with_seq)?;
             Ok((ans.schema(), vec![ans]))
         }
     }

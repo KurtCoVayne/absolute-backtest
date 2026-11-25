@@ -1,0 +1,16 @@
+# proposition: E-139 (a comparison is proved to keep no row only by a bound above its constant)
+# mutation: a bound equal to the constant of a `<=` counts as above it
+# test: cargo test -p abt-data --test column_reads a_value_that_may_pass
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/query.rs b/crates/abt-data/src/query.rs
+--- a/crates/abt-data/src/query.rs
++++ b/crates/abt-data/src/query.rs
+@@ -430,7 +430,7 @@
+             // `x < c` for a floor at or above `c`.
+             let above = |v: &Constant| {
+                 let c = if v.kind == ConstantKind::Num { v.num } else { v.int as f64 };
+-                floor.is_some_and(|l| if a.op == Op::Le { l > c } else { l >= c })
++                floor.is_some_and(|l| l >= c)
+             };
+             if !a.values.iter().flatten().all(above) {
+                 none = false;

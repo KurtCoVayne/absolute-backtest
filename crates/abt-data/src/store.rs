@@ -27,6 +27,8 @@ use parquet::file::properties::{EnabledStatistics, WriterProperties};
 use parquet::schema::types::ColumnPath;
 use serde::{Deserialize, Serialize};
 
+#[path = "store_columns.rs"]
+mod store_columns;
 #[path = "store_hot.rs"]
 mod store_hot;
 pub use store_hot::HotFigures;

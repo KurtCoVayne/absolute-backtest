@@ -1,0 +1,16 @@
+# proposition: E-139 (an event batch decodes to the same events with its relations resolved once)
+# mutation: a tuple's key argument is a nanosecond late
+# test: cargo test -p abt-tests --test fold a_batch_decodes
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -2343,7 +2343,7 @@
+     fn cell(&mut self, k: &mut Kernel, cell: &mut Cell<'_>, i: usize, key: i64) -> Result<Value, RunError> {
+         let null = || RunError::Internal("a null in a stored relation's column the kernel reads".into());
+         Ok(match cell {
+-            Cell::Key => Value::Time(key),
++            Cell::Key => Value::Time(key + 1),
+             Cell::Entity(ids) => {
+                 if ids.is_null(i) {
+                     return Err(null());

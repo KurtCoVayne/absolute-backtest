@@ -1,0 +1,16 @@
+# proposition: E-139 (a hot read with appended rows is in the order of the stable sort by time, identity, receipt and sequence)
+# mutation: rows of one time and identity are left in the order they were gathered
+# test: cargo test -p abt-data --lib the_counting_order
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/version.rs b/crates/abt-data/src/hot/version.rs
+--- a/crates/abt-data/src/hot/version.rs
++++ b/crates/abt-data/src/hot/version.rs
+@@ -272,7 +272,7 @@
+     let mut shared = false;
+     for &i in &by_instrument {
+         let (i, at) = (i as usize, t_rank[i as usize] as usize);
+-        shared |= last[at] == instrument(i);
++        shared &= last[at] == instrument(i);
+         last[at] = instrument(i);
+         order[start[at]] = i;
+         start[at] += 1;

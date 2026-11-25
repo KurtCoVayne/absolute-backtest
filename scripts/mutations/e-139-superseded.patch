@@ -1,0 +1,16 @@
+# proposition: E-139 (a hot column's bound is over every row the version holds)
+# mutation: the superseded rows are left out of the bound
+# test: cargo test -p abt-data --test column_reads a_value_that_may_pass
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/version.rs b/crates/abt-data/src/hot/version.rs
+--- a/crates/abt-data/src/hot/version.rs
++++ b/crates/abt-data/src/hot/version.rs
+@@ -943,7 +943,7 @@
+             let Some(floor) = super::append::block_floor(&h, &exceptions) else { return Ok(None) };
+             least = least.min(floor);
+         }
+-        for x in &self.manifest.revisions {
++        for x in self.manifest.revisions.iter().take(0) {
+             let v = f64::from_bits(x.values.get(c).copied().unwrap_or(0));
+             if v.is_nan() {
+                 return Ok(None);

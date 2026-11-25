@@ -1,0 +1,16 @@
+# proposition: E-138 (a key label's distinct values are its column's, in first-row order, inside the window)
+# mutation: a partition the window cuts answers every label it holds
+# test: cargo test -p abt-data --test column_reads distinct_labels_of_a_parquet_relation
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store_columns.rs b/crates/abt-data/src/store_columns.rs
+--- a/crates/abt-data/src/store_columns.rs
++++ b/crates/abt-data/src/store_columns.rs
+@@ -225,7 +225,7 @@
+                     let times = b.column(ti).as_primitive::<TimestampNanosecondType>();
+                     let codes = b.column(ci).as_primitive::<UInt32Type>();
+                     for (x, code) in times.values().iter().zip(codes.iter()) {
+-                        if f.t0.is_none_or(|t0| *x >= t0) && f.t1.is_none_or(|t1| *x <= t1) {
++                        if true {
+                             seen.note(code);
+                         }
+                     }

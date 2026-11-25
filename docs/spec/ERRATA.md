@@ -3220,6 +3220,168 @@ batch driver agree on every corpus program. Each bless since:
   rows come back from the log as tails held in memory, and E-128's cut
   has no sealed label to drop them by. Answers hold; the memory E-128
   bounds does not. No test has two unpublished instruments.
+- **E-138 (D-4.1, D-3.2, P-3.1, E-120; what a binding asks is read from
+  the columns that answer it, and every call it makes is clocked).**
+  MW14's binding took 55.6 s of a 381 s run on the 1990 to 2026 store
+  (4,240 instruments, relations of up to 15.69 million rows). `bind_at`
+  asks some seventeen whole-history `distinct`s: the event time of every
+  bound relation at the base calendar and every label column. E-120's
+  read answers each bucket by bucket from rows: every column of every
+  row decoded, a hot version's sealed append blocks once for each
+  monthly bucket they overlap, every row keyed through a row converter
+  into a set. [D] `query::execute` first asks `store_columns` for the
+  answer from the columns alone, and reads rows where it declines. (1) The
+  event time of a hot version: the published labels some instrument's
+  presence marks in the window, and the labels of the appended rows (of
+  a sealed block only its block of times is decoded; the tails' labels
+  as they stand). It is the row read's set because a read cut by neither
+  receipt, sequence nor identity gives a row for every marked label of
+  every instrument, a revised label keeping its current row: a version
+  with `revisions` needs no restriction. (2) The event time of a Parquet
+  version: its time column alone (a projection), a row group whose
+  statistics put it outside the window not read. (3) A label column of a
+  Parquet version's key (the `Label` role, or a series' name): its
+  column alone, in the order of each value's first row, a null a value;
+  a row group whose statistics give one label is not decoded, and a
+  partition the window cuts is read with its times. The revisions of a
+  fact share its key, so the latest one is met where the first is. (4) A
+  `scan` that names its columns, over a Parquet version: those columns,
+  its predicate's, and the time and key that tell each fact's latest
+  revision. Declined, and read as before: a receipt filter or an
+  `as_of_seq` (a time's or a label's rows may all be cut); an identity
+  under a `distinct`; a label that is a value (a revision may change
+  it); any column but the time of a hot version, and a hot scan;
+  partitions whose spans overlap, and a file whose times are not in
+  order; a scan with `seq`, or one that names every column (the row read
+  keeps what it decodes resident, E-74; the column reads neither fill
+  nor use that cache). The answers are the same tables, row for row:
+  `query::execute_rows` keeps the row path as the oracle and
+  `query::shortcut` is the column path alone. Beside it: a predicate's
+  constants are resolved once a batch, and an `=` or `in` of more than
+  eight is a set (a label's code was looked up, and each constant
+  compared, once a row); `bind_at` asks `stats` once. The clock: the
+  kernel's `DataClient` notes every call it makes (`resolve`, `schemas`,
+  `stats`, `query` with its form, window, predicate and projection,
+  `aggregate`, `put`, `get`, `index`, `subscribe`) with the rows of its
+  answer and its seconds, the last 4,096 of them; under
+  `ABT_TIMING_RELS=1`, `bind_at` and the preconditions print theirs to
+  standard error, `data <call> <relation> <detail> rows=<n> secs=<s>` a
+  line and `data total <stage> calls= rows= secs=` after them. The log
+  is the client's: no stored output carries it (E-133).
+  `abt-data/tests/column_reads.rs` (each column read held equal to the
+  row read on a hot version with superseded rows, sealed append blocks
+  and tails, on its Parquet twin, on a membership with revisions and a
+  null label, on partitions of two row groups, on an empty relation,
+  over the whole history and windows; each cut declined),
+  `abt-data/tests/query.rs::distinct_times_of_a_hot_relation_from_its_labels_equal_the_row_read`,
+  `abt-tests/tests/list_scope.rs::a_client_logs_every_call_a_binding_and_its_preconditions_make`;
+  falsified by `scripts/mutations/e-138-hot-times.patch`,
+  `e-138-parquet-times.patch`, `e-138-key-labels.patch` and
+  `e-138-scan-columns.patch`. **Open:** not yet measured on the
+  benchmark machine. A list-gated universe's `list_members` still
+  answers a row a fact where the instruments are wanted: `Distinct`
+  takes no predicate on the wire. The preconditions' scans named no
+  columns and read rows; E-139 has them name theirs.
+- **E-139 (K-3.2, D-4.1, D-3.1, P-4; the preconditions read the columns
+  they look at, a comparison no value passes reads no row, a whole hot
+  read is ordered without a sort, and an event batch's relations are
+  resolved once).** MW14's preconditions took 38.3 s of the same 381 s
+  run. Each data check read its relation through `Bound::scan`: every
+  column of every row sent, and a `ScanRow` made of each (its numbers,
+  times and labels, three vectors a row) to read an instrument, a time
+  and at most one value; the closes went into a map of maps, the listing
+  into a vector and then an ordered set of its 15.69 million pairs, the
+  membership's label was decoded and copied a row; and the price check
+  read each of four hot price relations whole to find no row at or below
+  zero. [K] `Bound::scan_columns` asks the same scan with its columns
+  named (the instrument, the time, and the first numbers and times the
+  check counts) and hands each row to a visitor, with no allocation a
+  row. `contract::check::preconditions` reads through it:
+  (1) `pre.prices` asks for the instrument and the time of the rows at
+  or below zero, and is answered as (5) says. (2) `pre.actions` keeps
+  the closes as a run of (time, close) per instrument and walks each
+  instrument's splits and dividends beside its closes. Every
+  instrument's closes are still read: a close that moves with no action
+  to explain it is a problem of an instrument that has no action, so
+  the check cannot be narrowed to the instruments that have one. (3) The
+  listing is read once and not held. The membership (the program's
+  lists' rows, E-120) is read before it, its instrument and time alone;
+  each listed row marks the member rows it answers, in a structure the
+  size of the membership (per instrument its member times in order and
+  a mark each), and moves its instrument's last listed bar, which is all
+  `pre.delistings` reads of the listing. So the membership is asked
+  before the listing, where it was asked after: the calls change order,
+  no status or warning does. The texts are the bundle functions' own
+  (`action_problems`, `delisting_problems` and `membership_problems`
+  share them), and the statuses, the warnings, their order and their
+  first-five detail are those of the row path, which is kept as
+  `preconditions_rows` and held equal to it. [D] (4) A scan, `exists` or
+  `count` whose predicate has a conjunct made only of `<` and `<=`
+  comparisons of number columns with constants every value of the column
+  is above is answered as the row read answers a predicate that kept
+  nothing, with no row read (`query::keeps_no_row`,
+  `Store::least_value`). (5) The bound below a column's values: of a
+  Parquet version, the least value the statistics of each row group
+  state, over the partitions the window overlaps (a writer leaves a
+  value that is not a number out of them, and such a value passes no
+  comparison, as a null passes none); of a hot version, the least over
+  its published blocks, its superseded rows (`revisions`), its sealed
+  append blocks and its tails. A tick block's values on its grid are
+  `decode_value` of the base plus a multiple of the quantum, which grows
+  with the multiple, so the header's base bounds them without a word
+  unpacked; a block with raw exceptions (ST-3.2) is bounded by their
+  bits too. The bound is over every row the version holds, so it holds
+  under a receipt filter, an `as_of_seq` and an identity. Not taken, and
+  read as before: a row group without the statistic, or with nothing but
+  values that are not numbers; a hot block or tail holding a value that
+  is not a number; a column that is not `Num`; a tick answer (ST-10.4:
+  the read alone knows its columns' types); a predicate naming a column
+  the relation has not (the row read refuses it); any other operator.
+  (6) `HotVersion::read_at` ordered a read with appended rows by sorting
+  its rows' indices by (t, id, r, seq) read through them, and copied the
+  rows out two vectors a row. The order is now made in two counting
+  passes (`canonical_order`: by the rank of the instrument's id, then by
+  the rank of the time, rows of one instrument at one time then sorted
+  by receipt and sequence), which is the stable sort's order, and the
+  rows are copied a column at a time; an ordinal that does not stand for
+  one id falls back to the sort. [K] (7) `Decoder::events` looked every
+  tuple's relation up by a copy of its name, copied its arguments' plan
+  and found each cell's Arrow type at the cell. A batch's relations are
+  now resolved at their first tuple in the batch, with each argument's
+  column as the type it is read at, and a label's text is looked up once
+  a batch and code; `entity_syms` is hashed by the kernel's `FxHasher`.
+  The events are the same, in the same order, with the same labels
+  interned in the same order; `Decoder::events_by_cell` keeps the former
+  decoding as the oracle.
+  `abt-tests/tests/contracts.rs::the_preconditions_give_the_same_statuses_and_warnings_from_columns_as_from_rows`
+  (a market in order; one with a split the closes do not show, a close
+  a dividend does not explain, a split on a bar with no close, an
+  instrument that leaves the listing with no delisted record and stays a
+  member; a zero close and a negative open; every corpus program on its
+  golden market; scoped and unscoped bindings),
+  `abt-data/tests/column_reads.rs::a_comparison_no_value_passes_is_answered_with_no_row_read`
+  and `::a_value_that_may_pass_wherever_the_store_keeps_it_is_read_from_the_rows`
+  (a hot version with superseded rows, sealed append blocks and tails
+  and its Parquet twin, under windows, a receipt cut, a sequence cut and
+  `seq`; a raw exception, a zero in a tail, a superseded zero, a
+  negative value in a sealed block, values that are not numbers, nulls,
+  an empty relation),
+  `abt-data/src/hot/version.rs::tests::the_counting_order_is_the_stable_sort_by_time_identity_receipt_and_sequence`,
+  `abt-tests/tests/fold.rs::a_batch_decodes_to_the_same_events_with_its_relations_resolved_once`
+  (every corpus strategy's stream and a list-gated one's, a batch that
+  interleaves two relations' tuples among them);
+  falsified by `scripts/mutations/e-139-floor.patch`,
+  `e-139-superseded.patch`, `e-139-listed-marks.patch`,
+  `e-139-shared-key.patch` and `e-139-decoder-key.patch`. **Open:** not
+  yet measured on the benchmark machine. A hot scan still gathers every
+  value column, the receipt and the sequence of every row it reads, the
+  columns it was not asked for among them: the closes of `pre.actions`
+  are read so, and so is whatever a predicate that may pass reads. The
+  listing is still sent whole (its instrument and time), as the
+  delisting check needs every instrument's last listed bar.
+  `report_periods` still reads `session` a `ScanRow` a row, for a
+  sessions report calendar alone; a run whose report calendar is its
+  decision calendar or `days` reads nothing there.
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

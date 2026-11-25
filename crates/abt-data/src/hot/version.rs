@@ -150,15 +150,187 @@ impl Rows {
         }
     }
 
-    /// The rows reordered by `order` (indices).
-    fn permuted(&self, order: &[usize]) -> Rows {
-        let mut out = Rows::with_columns(self.ints.len());
-        for &i in order {
-            let ints: Vec<i64> = self.ints.iter().map(|c| c[i]).collect();
-            let floats: Vec<f64> = self.floats.iter().map(|c| c[i]).collect();
-            out.push(self.id[i], self.t[i], self.r[i], self.seq[i], &ints, &floats);
+    /// Row `k` of an instrument's decoded columns (each its integers and
+    /// its values).
+    fn push_row(&mut self, id: u64, t: i64, r: i64, seq: u64, cols: &[(Vec<i64>, Vec<f64>)], k: usize) {
+        self.id.push(id);
+        self.t.push(t);
+        self.r.push(r);
+        self.seq.push(seq);
+        for (c, col) in cols.iter().enumerate() {
+            self.ints[c].push(col.0[k]);
+            self.floats[c].push(col.1[k]);
         }
-        out
+    }
+
+    /// The rows reordered by `order` (indices), a column at a time.
+    fn permuted(&self, order: &[usize]) -> Rows {
+        fn pick<T: Copy>(column: &[T], order: &[usize]) -> Vec<T> {
+            order.iter().map(|&i| column[i]).collect()
+        }
+        Rows {
+            id: pick(&self.id, order),
+            t: pick(&self.t, order),
+            r: pick(&self.r, order),
+            seq: pick(&self.seq, order),
+            ints: self.ints.iter().map(|c| pick(c, order)).collect(),
+            floats: self.floats.iter().map(|c| pick(c, order)).collect(),
+        }
+    }
+}
+
+/// The order of gathered rows by time, then identity, receipt and sequence
+/// (D-3.1), a row before one of the same key gathered after it: what a
+/// stable sort by that key gives, made in two counting passes (E-139). A
+/// whole read of a relation with appended rows sorted the indices of
+/// fifteen million rows by a key read through them. `keys` holds per row
+/// its instrument's ordinal and its receipt. The rows are placed by the
+/// rank of their instrument's id, then by the rank of their time; rows of
+/// one instrument at one time (revisions, when every one is read) are then
+/// neighbours in the order they were gathered, and are sorted by receipt
+/// and sequence. Where an ordinal does not stand for one id, the sort.
+fn canonical_order(rows: &Rows, keys: &[(u32, u32, i64)]) -> Vec<usize> {
+    let n = rows.len();
+    let sorted = || {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| (rows.t[i], rows.id[i], keys[i].2, rows.seq[i]));
+        order
+    };
+    if n == 0 || n > u32::MAX as usize {
+        return sorted();
+    }
+    // The rank of each ordinal's id among the ids: an ordinal names one
+    // instrument, and an instrument has one ordinal.
+    let ordinals = keys.iter().map(|k| k.1 as usize + 1).max().unwrap_or(0);
+    let mut id_of: Vec<Option<u64>> = vec![None; ordinals];
+    for (k, &id) in keys.iter().zip(&rows.id) {
+        match id_of[k.1 as usize] {
+            None => id_of[k.1 as usize] = Some(id),
+            Some(known) if known == id => {}
+            Some(_) => return sorted(),
+        }
+    }
+    let mut by_id: Vec<usize> = (0..ordinals).filter(|&o| id_of[o].is_some()).collect();
+    by_id.sort_by_key(|&o| id_of[o]);
+    if by_id.windows(2).any(|w| id_of[w[0]] == id_of[w[1]]) {
+        return sorted();
+    }
+    let mut id_rank = vec![0u32; ordinals];
+    for (rank, &o) in by_id.iter().enumerate() {
+        id_rank[o] = rank as u32;
+    }
+    // The rank of each row's time among the times: an instrument's rows
+    // come in time order, so a row's time is beside the one before it.
+    let mut times = Times {
+        known: Vec::new(),
+        at: 0,
+        fresh: Vec::new(),
+    };
+    for &t in &rows.t {
+        times.note(t);
+    }
+    times.merge();
+    let times = times.known;
+    let mut at = 0usize;
+    let t_rank: Vec<u32> = rows
+        .t
+        .iter()
+        .map(|&t| {
+            if times[at] != t {
+                at = if times.get(at + 1) == Some(&t) { at + 1 } else { times.partition_point(|&x| x < t) };
+            }
+            at as u32
+        })
+        .collect();
+    // Where each rank's rows start, from how many rows each rank has.
+    let starts = |ranks: usize, of: &dyn Fn(usize) -> usize| {
+        let mut start = vec![0usize; ranks + 1];
+        for i in 0..n {
+            start[of(i) + 1] += 1;
+        }
+        let mut sum = 0;
+        for s in start.iter_mut() {
+            sum += *s;
+            *s = sum;
+        }
+        start
+    };
+    let instrument = |i: usize| id_rank[keys[i].1 as usize] as usize;
+    let mut start = starts(by_id.len(), &instrument);
+    let mut by_instrument = vec![0u32; n];
+    for i in 0..n {
+        let slot = &mut start[instrument(i)];
+        by_instrument[*slot] = i as u32;
+        *slot += 1;
+    }
+    let mut start = starts(times.len(), &|i| t_rank[i] as usize);
+    let mut order = vec![0usize; n];
+    // The instrument last placed at each time: the next row placed there
+    // is of the same instrument only when two rows share a key's time and
+    // identity.
+    let mut last = vec![usize::MAX; times.len()];
+    let mut shared = false;
+    for &i in &by_instrument {
+        let (i, at) = (i as usize, t_rank[i as usize] as usize);
+        shared |= last[at] == instrument(i);
+        last[at] = instrument(i);
+        order[start[at]] = i;
+        start[at] += 1;
+    }
+    if shared {
+        let same = |a: usize, b: usize| t_rank[a] == t_rank[b] && keys[a].1 == keys[b].1;
+        let mut a = 0;
+        while a < n {
+            let mut b = a + 1;
+            while b < n && same(order[a], order[b]) {
+                b += 1;
+            }
+            order[a..b].sort_by_key(|&i| (keys[i].2, rows.seq[i]));
+            a = b;
+        }
+    }
+    order
+}
+
+/// The distinct times met so far, ascending, with those met since the last
+/// merge beside them. Times arrive in ascending runs (an instrument's rows
+/// in label order), nearly all of them known already: `at` is the place of
+/// the last one among the known, and the next is looked for from there.
+struct Times {
+    known: Vec<i64>,
+    at: usize,
+    fresh: Vec<i64>,
+}
+
+impl Times {
+    fn note(&mut self, x: i64) {
+        // `at` is brought to the first known time not before `x`: one step
+        // on for the next time of a run, a search otherwise.
+        if self.known.get(self.at).is_some_and(|&k| k < x) {
+            self.at += 1;
+            if self.known.get(self.at).is_some_and(|&k| k < x) {
+                self.at += self.known[self.at..].partition_point(|&k| k < x);
+            }
+        } else if self.at > 0 && self.known[self.at - 1] >= x {
+            self.at = self.known[..self.at].partition_point(|&k| k < x);
+        }
+        if self.known.get(self.at) != Some(&x) {
+            self.fresh.push(x);
+            if self.fresh.len() >= (self.known.len() / 4).max(1024) {
+                self.merge();
+            }
+        }
+    }
+
+    /// The times met since the last merge join the known ones.
+    fn merge(&mut self) {
+        if self.fresh.is_empty() {
+            return;
+        }
+        self.known.append(&mut self.fresh);
+        self.known.sort_unstable();
+        self.known.dedup();
+        self.at = 0;
     }
 }
 
@@ -644,17 +816,17 @@ impl HotVersion {
                     Some(s) => s[k] as u64,
                     None => inst.seq_of(row),
                 };
-                let ints: Vec<i64> = cols.iter().map(|c| c.0[k]).collect();
-                let floats: Vec<f64> = cols.iter().map(|c| c.1[k]).collect();
                 let admitted = f.r_max.is_none_or(|m| r <= m) && f.as_of_seq.is_none_or(|n| seq <= n);
                 let revs = if has_revisions { self.revisions_at(inst.id, t) } else { &[] };
                 if revs.is_empty() {
                     if admitted {
-                        gathered.push(inst.id, t, r, seq, &ints, &floats);
+                        gathered.push_row(inst.id, t, r, seq, &cols, k);
                         keys.push((label_ix, o as u32, r));
                     }
                 } else {
                     // The superseded rows admitted, then the current one.
+                    let ints: Vec<i64> = cols.iter().map(|c| c.0[k]).collect();
+                    let floats: Vec<f64> = cols.iter().map(|c| c.1[k]).collect();
                     let mut candidates: Vec<(i64, u64, Vec<i64>, Vec<f64>)> = Vec::new();
                     for x in revs {
                         if f.r_max.is_none_or(|m| x.r <= m) && f.as_of_seq.is_none_or(|n| x.seq <= n) {
@@ -687,9 +859,7 @@ impl HotVersion {
         }
         if extra {
             // By time, then identity, receipt and sequence (D-3.1).
-            let mut order: Vec<usize> = (0..gathered.len()).collect();
-            order.sort_by_key(|&i| (gathered.t[i], gathered.id[i], keys[i].2, gathered.seq[i]));
-            return Ok(gathered.permuted(&order));
+            return Ok(gathered.permuted(&canonical_order(&gathered, &keys)));
         }
         let mut count = vec![0usize; labels + 1];
         for k in &keys {
@@ -706,6 +876,83 @@ impl HotVersion {
         }
         out = gathered.permuted(&place);
         Ok(out)
+    }
+
+    /// The distinct times of the base's rows in `[t0, t1]`, ascending, with
+    /// no row read: the published labels an instrument's presence marks,
+    /// and the labels of the appended rows. It is the set of times `read`
+    /// gives a filter that cuts by neither receipt, sequence nor identity:
+    /// such a read gives one row or more for every marked label of every
+    /// instrument (a revised label still has its current row) and every
+    /// appended row. A label no instrument marks is left out, as no row is
+    /// read at it.
+    pub fn distinct_labels(&self, t0: Option<i64>, t1: Option<i64>) -> Result<Vec<i64>, DataError> {
+        let presence = &self.levels[0].presence;
+        let (lo, hi) = presence.label_range(t0, t1);
+        let span = hi.saturating_sub(lo) as usize;
+        let mut marked = vec![false; span];
+        let mut left = span;
+        for inst in &presence.instruments {
+            if left == 0 {
+                break;
+            }
+            if inst.rows == 0 || inst.last < lo || inst.first >= hi {
+                continue;
+            }
+            let i0 = (lo.max(inst.first) - inst.first) as usize;
+            let i1 = (hi.min(inst.last + 1) - inst.first) as usize;
+            for bit in ones(inst.presence.words(), i0, i1) {
+                let at = (inst.first + bit as u32 - lo) as usize;
+                if !marked[at] {
+                    marked[at] = true;
+                    left -= 1;
+                }
+            }
+        }
+        let mut times = Times {
+            known: marked.iter().enumerate().filter(|(_, m)| **m).map(|(i, _)| presence.labels[lo as usize + i]).collect(),
+            at: 0,
+            fresh: Vec::new(),
+        };
+        let mut ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+        if !ov.is_empty() {
+            ov.for_each_label(t0, t1, &mut |label| times.note(label))?;
+        }
+        times.merge();
+        Ok(times.known)
+    }
+
+    /// A number no value of the base's value column `c` is below, over
+    /// every row the version holds (published, superseded and appended),
+    /// with no block decoded: the least of the published blocks' floors
+    /// (`append::block_floor`), of the superseded rows' values and of the
+    /// appended ones (`Overlay::least_value`). Infinity for a version
+    /// without a row; `None` for a column that is not a tick column and
+    /// where a value is not a number.
+    pub fn least_value(&self, c: usize) -> Result<Option<f64>, DataError> {
+        let lv = &self.levels[0];
+        if c >= self.value_columns() || !matches!(lv.entries[c].kind, Kind::Tick | Kind::TickF32) {
+            return Ok(None);
+        }
+        let mut least = f64::INFINITY;
+        for l in lv.columns[c].blocks.iter().flatten() {
+            let seg = &self.segments[l.seg as usize];
+            let (s, run) = (seg.segment(), &seg.runs[l.run as usize]);
+            let h = s.header(run, l.block as usize);
+            let exceptions = if h.raw() { s.exceptions(run, l.block as usize) } else { Vec::new() };
+            let Some(floor) = super::append::block_floor(&h, &exceptions) else { return Ok(None) };
+            least = least.min(floor);
+        }
+        for x in &self.manifest.revisions {
+            let v = f64::from_bits(x.values.get(c).copied().unwrap_or(0));
+            if v.is_nan() {
+                return Ok(None);
+            }
+            least = least.min(v);
+        }
+        let mut ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(appended) = ov.least_value(c)? else { return Ok(None) };
+        Ok(Some(least.min(appended)))
     }
 
     /// The time bounds a read over label indices `[lo, hi)` of the base
@@ -984,5 +1231,70 @@ impl Instrument {
         let i0 = (lo.max(self.first) - self.first) as usize;
         let i1 = (hi.min(self.last + 1) - self.first) as usize;
         ones(self.presence.words(), i0, i1).enumerate().map(|(k, bit)| (a + k as u64, self.first + bit as u32)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stable sort of the rows' indices by (t, id, r, seq): what
+    /// `canonical_order` stands in for.
+    fn by_sort(rows: &Rows, keys: &[(u32, u32, i64)]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_by_key(|&i| (rows.t[i], rows.id[i], keys[i].2, rows.seq[i]));
+        order
+    }
+
+    #[test]
+    fn the_counting_order_is_the_stable_sort_by_time_identity_receipt_and_sequence() {
+        let mut state = 11u64;
+        let mut below = |n: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        for round in 0..200 {
+            // Instruments whose ids are not in the ordinals' order, each
+            // with a run of rows in time order (some times shared, some
+            // rows of one time revised, some repeated whole), then a second
+            // run of some of them before or inside the first, as appended
+            // rows are gathered apart from the published ones.
+            let instruments = 1 + below(9) as usize;
+            let ids: Vec<u64> = (0..instruments).map(|o| 1_000 - 37 * o as u64 + below(30)).collect();
+            let mut rows = Rows::with_columns(0);
+            let mut keys: Vec<(u32, u32, i64)> = Vec::new();
+            for pass in 0..2 {
+                for (o, &id) in ids.iter().enumerate() {
+                    if pass == 1 && below(2) == 0 {
+                        continue;
+                    }
+                    let mut t = below(40) as i64;
+                    for _ in 0..below(60) {
+                        t += below(3) as i64;
+                        let copies = if round % 3 == 0 { 1 } else { 1 + below(3) };
+                        for _ in 0..copies {
+                            let r = t + below(4) as i64;
+                            rows.push(id, t, r, below(5), &[], &[]);
+                            keys.push((u32::MAX, o as u32, r));
+                        }
+                    }
+                }
+            }
+            assert_eq!(canonical_order(&rows, &keys), by_sort(&rows, &keys), "round {}", round);
+        }
+        // No row, one row, and ordinals that do not stand for one id each
+        // (the sort answers).
+        let none = Rows::with_columns(0);
+        assert_eq!(canonical_order(&none, &[]), Vec::<usize>::new());
+        let mut rows = Rows::with_columns(0);
+        for (id, t, seq) in [(7u64, 5i64, 1u64), (3, 5, 2), (7, 4, 3), (3, 5, 0)] {
+            rows.push(id, t, t, seq, &[], &[]);
+        }
+        let two_ids_of_one_ordinal = [(0u32, 0u32, 5i64), (0, 0, 5), (0, 0, 4), (0, 0, 5)];
+        assert_eq!(canonical_order(&rows, &two_ids_of_one_ordinal), vec![2, 3, 1, 0]);
+        let two_ordinals_of_one_id = [(0u32, 0u32, 5i64), (0, 1, 5), (0, 2, 4), (0, 3, 5)];
+        assert_eq!(canonical_order(&rows, &two_ordinals_of_one_id), vec![2, 3, 1, 0]);
+        let sound = [(0u32, 1u32, 5i64), (0, 0, 5), (0, 1, 4), (0, 0, 5)];
+        assert_eq!(canonical_order(&rows, &sound), vec![2, 3, 1, 0]);
     }
 }

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use abt_data::query::{execute, explain, ResolvedView};
+use abt_data::query::{execute, execute_rows, explain, shortcut, ResolvedView};
 use abt_data::Store;
 use abt_wire::generated::abt::wire::{
     Atom, Binding, Catalog, Chain, Constant, ConstantKind, CountRows, Disjunction, Distinct, Exists, Identity, Latest, Op, Point, Predicate, QueryForm, Scan, Section, Series, VersionRef, View,
@@ -122,6 +122,72 @@ fn closes(batches: &[RecordBatch]) -> Vec<(u64, i64, f64)> {
 fn run(s: &Store, form: QueryForm, r_max: Option<i64>) -> Vec<(u64, i64, f64)> {
     let (_, b) = execute(s, &ResolvedView::default(), &form, r_max, false, false).unwrap();
     closes(&b)
+}
+
+/// P2: a binding asks every bound relation for the distinct times of its
+/// whole history. A hot version answers from its labels (the presence of
+/// its published rows and the labels of its appended ones) what the read
+/// of its rows answers: with a revision, with a label whose only row was
+/// superseded (its correction is still a row at it), with a row appended
+/// after publication, over the whole history and over windows. Under a
+/// receipt cut a label's rows may all be cut, and the rows are read.
+#[test]
+fn distinct_times_of_a_hot_relation_from_its_labels_equal_the_row_read() {
+    let hot = || BTreeMap::from([("storage".to_string(), "hot".to_string())]);
+    let mut s = Store::temporary("query-hot-times").unwrap();
+    let mut rows = Vec::new();
+    for d in 0..5 {
+        for a in 1..=3u64 {
+            rows.push((a, T0 + d * DAY, T0 + d * DAY, 10.0 * a as f64 + d as f64));
+        }
+    }
+    // A fourth instrument's one row, at an hour no other row has.
+    let alone = T0 + 2 * DAY + DAY / 24;
+    rows.push((4, alone, alone, 7.0));
+    s.ingest("equity.close", &[close_rows(&rows)], "test", hot()).unwrap();
+    let v = s
+        .ingest("equity.close", &[close_rows(&[(1, T0 + 2 * DAY, T0 + 3 * DAY, 99.0), (4, alone, alone + DAY, 7.5)])], "test", hot())
+        .unwrap();
+    assert_eq!(s.hot(&v).unwrap().manifest.revisions.len(), 2, "two superseded rows");
+    let appended = s.ingest("equity.close", &[close_rows(&[(2, T0 + 5 * DAY, T0 + 5 * DAY, 25.0)])], "test", hot()).unwrap();
+    assert_eq!(appended, v, "the sixth day is in a tail of the same version");
+    let every = [T0, T0 + DAY, T0 + 2 * DAY, alone, T0 + 3 * DAY, T0 + 4 * DAY, T0 + 5 * DAY];
+    let view = ResolvedView::default();
+    let times = |t0: i64, t1: i64| {
+        QueryForm::Distinct(Box::new(Distinct {
+            relation: "equity.close".into(),
+            column: "T".into(),
+            t0,
+            t1,
+        }))
+    };
+    for (t0, t1) in [
+        (i64::MIN, i64::MAX),
+        (T0 + DAY, T0 + 3 * DAY),
+        (alone, alone),
+        (T0 + 2 * DAY + 1, alone - 1),
+        (T0 + 4 * DAY, i64::MAX),
+        (T0 + 9 * DAY, T0 + 10 * DAY),
+    ] {
+        let by_rows = execute_rows(&s, &view, &times(t0, t1), None, false, false).unwrap();
+        let by_labels = shortcut(&s, &view, &times(t0, t1), None, false).unwrap().expect("answered from the labels");
+        assert_eq!(by_labels.0, by_rows.0);
+        assert_eq!(by_labels.1, by_rows.1, "the times in {}..{}", t0, t1);
+        let got: Vec<i64> = by_labels
+            .1
+            .iter()
+            .flat_map(|b| b.column(0).as_primitive::<arrow::datatypes::TimestampNanosecondType>().values().to_vec())
+            .collect();
+        assert_eq!(got, every.iter().copied().filter(|t| t0 <= *t && *t <= t1).collect::<Vec<_>>());
+        let answered = execute(&s, &view, &times(t0, t1), None, false, false).unwrap();
+        assert_eq!(answered.1, by_rows.1);
+    }
+    // As received by the second day: the labels would name seven times,
+    // the rows received by then two.
+    let cut = Some(T0 + DAY);
+    assert!(shortcut(&s, &view, &times(i64::MIN, i64::MAX), cut, false).unwrap().is_none());
+    let (_, b) = execute(&s, &view, &times(i64::MIN, i64::MAX), cut, false, false).unwrap();
+    assert_eq!(b[0].num_rows(), 2);
 }
 
 #[test]
