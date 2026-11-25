@@ -16,9 +16,18 @@ has no abt counterpart.
   abt data serve --store STORE --socket SOCKET &
   abt run --strategy mw14 --data SOCKET corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
       (prints `run RUN: the outputs are kernel.RUN.{...}`)
-  python scripts/parity/mw14_compare.py STORE RUN CANON.npy [--weeks N]
+  python scripts/parity/mw14_compare.py STORE RUN CANON.npy [--weeks N] [--json FILE]
+
+`--json FILE` also writes the comparison as one JSON object (the weeks
+compared, the correlation, the counts of weeks equal to the canon to 1e-4,
+1e-9 and 8e-15, the largest difference, both sides' statistics, and a
+fingerprint of the run's own returns, `abt_sha256`, by which two runs are
+seen to be the same to the last bit): what scripts/bench-mw14.sh records
+per run.
 """
 import argparse
+import hashlib
+import json
 import sys
 
 import numpy as np
@@ -46,6 +55,7 @@ def main() -> int:
     ap.add_argument("canon")
     ap.add_argument("--weeks", type=int, default=None, help="compare the first N weeks only")
     ap.add_argument("--worst", type=int, default=10)
+    ap.add_argument("--json", default=None, help="also write the comparison to this file as JSON")
     args = ap.parse_args()
     # The return per decision bar: the report's calendar is the decision clock.
     base = abt_store.report(args.store, args.run).get("base_capital")
@@ -64,6 +74,28 @@ def main() -> int:
     d = ra - rc
     print(f"weekly correlation {np.corrcoef(ra, rc)[0, 1]:.6f}; |diff| mean {np.abs(d).mean():.2e}, max {np.abs(d).max():.2e}; "
           f"weeks equal to 1e-9: {(np.abs(d) < 1e-9).mean():.1%}, to 1e-4: {(np.abs(d) < 1e-4).mean():.1%}")
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(
+                {
+                    "weeks": int(n),
+                    "abt_weeks": int(len(a)),
+                    "canon_weeks": int(len(canon)),
+                    "first_week": str(a["t"].iloc[0].date()),
+                    "correlation": float(np.corrcoef(ra, rc)[0, 1]),
+                    "max_abs_diff": float(np.abs(d).max()),
+                    "mean_abs_diff": float(np.abs(d).mean()),
+                    "equal_1e-4": int((np.abs(d) < 1e-4).sum()),
+                    "equal_1e-9": int((np.abs(d) < 1e-9).sum()),
+                    "equal_8e-15": int((np.abs(d) <= 8e-15).sum()),
+                    # The run's own weekly returns, every bit: two runs with
+                    # the same fingerprint decided and filled the same.
+                    "abt_sha256": hashlib.sha256(np.ascontiguousarray(a["ret"].to_numpy(), dtype="<f8").tobytes()).hexdigest(),
+                    "abt": {k: float(v) for k, v in sa.items()},
+                    "canon": {k: float(v) for k, v in sc.items()},
+                },
+                f,
+            )
     if len(canon) == 1852:
         print("canon reference (RESULTS.md MW-126): cagr 0.2089947950, maxdd -0.2617817195, sharpe 1.0199, pnl 7,534,877")
     t = a["t"].to_numpy()[:n]

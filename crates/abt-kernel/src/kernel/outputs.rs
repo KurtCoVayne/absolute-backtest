@@ -734,6 +734,83 @@ pub fn ledger_into(run: &str, prog: &Program, k: &mut Kernel, client: &DataClien
 
 /// One relation's ledger as the relation `kernel.<run>.<name>`, or why it
 /// has none.
+/// One row of an observed relation's ledger: the bar, the tuple (a stuck
+/// instance's partial one) and the stuck instance's halt.
+pub type LedgerRow = (i64, Vec<Option<Value>>, Option<String>);
+
+/// The rows of every observed relation, collected at each barrier as the
+/// run goes (a run whose stores are trimmed cannot read a bar's rows after
+/// it, E-126); one list per `observe`, in the program's order.
+#[derive(Default)]
+pub struct LedgerAcc {
+    pub rows: Vec<Vec<LedgerRow>>,
+}
+
+impl LedgerAcc {
+    pub fn new(prog: &Program) -> LedgerAcc {
+        LedgerAcc {
+            rows: prog.observes.iter().map(|_| Vec::new()).collect(),
+        }
+    }
+}
+
+/// Whether every observed relation is on the decision calendar: then the
+/// ledgers can be collected at the barriers.
+pub fn observes_at_barriers(prog: &Program) -> bool {
+    prog.observes.iter().all(|o| prog.relations.get(&o.rel).map(|s| s.cal == prog.decision_cal).unwrap_or(true))
+}
+
+/// The observed relations' rows at the bar `t`, appended to `acc`.
+pub fn observe_bar(prog: &Program, k: &mut Kernel, t: i64, acc: &mut LedgerAcc) -> Result<(), RunError> {
+    let mask = k.cfg.embargo_mask.clone();
+    if mask.iter().any(|&(a, z)| a <= t && t < z) {
+        return Ok(());
+    }
+    for (i, o) in prog.observes.iter().enumerate() {
+        let (Some(sig), Some(rel)) = (prog.relations.get(&o.rel), k.relation_id(&o.rel)) else { continue };
+        let info = k.rels[rel].clone();
+        if !info.inputs.is_empty() {
+            continue;
+        }
+        let mut pattern: Vec<Option<Value>> = vec![None; sig.args.len()];
+        for (v, lit) in &o.wheres {
+            if let Some(j) = sig.args.iter().position(|a| a.name == *v) {
+                pattern[j] = Some(super::lit_value(lit, &mut k.symbols, &mut k.labels, &k.literal_equities));
+            }
+        }
+        pattern[info.key_pos] = Some(Value::Time(t));
+        let (mut live, mut stuck) = k.observe_at(rel, &pattern)?;
+        live.sort();
+        stuck.sort_by(|a, b| a.0.cmp(&b.0));
+        let rows = &mut acc.rows[i];
+        rows.extend(live.into_iter().map(|tu| (t, tu.into_iter().map(Some).collect(), None)));
+        rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e.to_string()))));
+    }
+    Ok(())
+}
+
+/// The ledgers from rows collected at the barriers (`observe_bar`).
+pub fn ledgers_from(run: &str, prog: &Program, k: &Kernel, ids: &Ids, acc: LedgerAcc) -> Result<(Tables, Vec<String>), RunError> {
+    let mut out = Vec::new();
+    let mut notes = Vec::new();
+    for (o, rows) in prog.observes.iter().zip(acc.rows) {
+        let Some(sig) = prog.relations.get(&o.rel) else {
+            notes.push(format!("`observe {}`: not a relation of the program", o.rel));
+            continue;
+        };
+        if k.relation_id(&o.rel).is_none() {
+            notes.push(format!("`observe {}`: not a relation the kernel holds", o.rel));
+            continue;
+        }
+        if k.rels[k.relation_id(&o.rel).unwrap_or(0)].inputs.is_empty() {
+            out.push(ledger_table(run, &format!("ledger.{}", o.rel), sig, k, ids, rows)?);
+        } else {
+            notes.push(format!("`observe {}`: the relation takes inputs; its extension is not enumerable", o.rel));
+        }
+    }
+    Ok((out, notes))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ledger(
     run: &str,
@@ -756,7 +833,7 @@ fn ledger(
     };
     let info = k.rels[rel].clone();
     let width = sig.args.len();
-    let mut rows: Vec<(i64, Vec<Option<Value>>, Option<String>)> = Vec::new();
+    let mut rows: Vec<LedgerRow> = Vec::new();
     if !info.inputs.is_empty() {
         return Ok(Err("the relation takes inputs; its extension is not enumerable".into()));
     }
@@ -782,6 +859,11 @@ fn ledger(
         rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e.to_string()))));
     }
     // The row's place among its bar's rows.
+    Ok(Ok(ledger_table(run, name, sig, k, ids, rows)?))
+}
+
+/// A ledger's table from its rows, in bar order.
+fn ledger_table(run: &str, name: &str, sig: &crate::ir::Signature, k: &Kernel, ids: &Ids, rows: Vec<LedgerRow>) -> Result<(RelationSchema, RecordBatch), RunError> {
     let mut place: Vec<Option<u64>> = Vec::with_capacity(rows.len());
     for (i, r) in rows.iter().enumerate() {
         place.push(Some(if i > 0 && rows[i - 1].0 == r.0 { place[i - 1].unwrap_or(0) + 1 } else { 0 }));
@@ -821,10 +903,10 @@ fn ledger(
         }
         table = table.col_named(name, Role::Value, col);
     }
-    Ok(Ok(table
+    table
         .col("stuck", Role::Value, Col::Bool(rows.iter().map(|r| Some(r.2.is_some())).collect()))
         .col("stuck_literal", Role::Value, Col::Bytes(rows.iter().map(|r| r.2.clone()).collect()))
-        .finish()?))
+        .finish()
 }
 
 /// Writes the run's outputs through the data layer: the versions put, by

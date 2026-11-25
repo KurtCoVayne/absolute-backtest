@@ -15,7 +15,6 @@
 //! (ERRATA E-36).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use abt_wire::generated::abt::wire::{
@@ -1314,7 +1313,7 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
         }
         k.pushed.insert(
             (ri, li),
-            Rc::new(super::pushdown::Pushed {
+            Arc::new(super::pushdown::Pushed {
                 shape,
                 entity_slot,
                 base_slot,
@@ -1636,8 +1635,12 @@ pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) ->
     }
     let mut relations: Vec<VersionRef> = Vec::new();
     let pairs: BTreeMap<String, String> = bound.binding.pairs.clone().unwrap_or_default().into_iter().map(|p| (p.relation, p.version)).collect();
+    // The stream carries the primitives the run reads and no other
+    // (06-performance 3.3, E-127): a bound relation nothing names is left
+    // in the data layer.
+    let read = k.read_relations();
     for (name, (stored_rel, _)) in &bound.stored {
-        if k.relation_id(name).is_some_and(|r| k.is_primitive(r)) {
+        if k.relation_id(name).is_some_and(|r| k.is_primitive(r) && read.contains(&r)) {
             relations.push(VersionRef {
                 relation: stored_rel.clone(),
                 version: pairs[stored_rel].clone(),

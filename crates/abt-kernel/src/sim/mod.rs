@@ -50,6 +50,13 @@ pub trait Executor {
     fn expected(&self) -> Option<&Expected> {
         None
     }
+    /// The oldest bar this executor's fills can read back to (its ADV and
+    /// realised-volatility windows over its own bars): what the kernel's
+    /// retention horizon must keep. `None` when it cannot say, and the
+    /// kernel then trims nothing.
+    fn retention_floor(&self, _k: &Kernel) -> Option<i64> {
+        None
+    }
 }
 
 /// An order that does not execute at the next bar's close (section 6, order
@@ -692,8 +699,9 @@ impl SimExecutor {
                     },
                 }
             };
-            // Impact: square root in participation of average daily volume.
-            let imp = match (self.cfg.impact_coef > 0.0 && !option, k.adv(sym, bars, end)) {
+            // Impact: square root in participation of average daily volume
+            // (the ADV walk runs only when impact is on).
+            let imp = match (self.cfg.impact_coef > 0.0 && !option, (self.cfg.impact_coef > 0.0 && !option).then(|| k.adv(sym, bars, end)).flatten()) {
                 (true, Some(adv)) if adv > 0.0 => self.cfg.impact_coef * (qty.abs() / adv).sqrt(),
                 _ => 0.0,
             };
@@ -1229,6 +1237,26 @@ impl SimExecutor {
 }
 
 impl Executor for SimExecutor {
+    fn retention_floor(&self, k: &Kernel) -> Option<i64> {
+        let n = k.cfg.adv_window.max(k.cfg.vol_window) + 2;
+        if k.prog.base.is_sub_daily() && k.prog.decision_cal == Cal::Base {
+            // `adv` walks back over whole days of this executor's bars.
+            let mut days = 0;
+            let mut last: Option<i64> = None;
+            for &t in self.bars.iter().rev() {
+                let d = time::day_key(t);
+                if last != Some(d) {
+                    days += 1;
+                    last = Some(d);
+                    if days > n {
+                        return Some(t);
+                    }
+                }
+            }
+            return Some(i64::MIN);
+        }
+        Some(self.bars.len().checked_sub(n).and_then(|i| self.bars.get(i).copied()).unwrap_or(i64::MIN))
+    }
     fn open_bar(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> Result<(), RunError> {
         let changed = self.open_actions(k, t, result);
         self.open_marks(k, t, result, changed)
@@ -1485,7 +1513,12 @@ impl Kernel<'_> {
         if clock_syms.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
             return Ok(BTreeMap::new());
         }
+        // With workers, the open-loop relations this decision will demand
+        // are derived first, each entity-local rule cut across the threads
+        // (F-5.3, `parallel.rs`).
+        self.warm_strata(t);
         let tuples = self.call(decide, &[Some(Value::Time(t)), None])?;
+        self.note_demanded(t);
         let mut by_equity: BTreeMap<Sym, Vec<(Decision, usize)>> = BTreeMap::new();
         for (tu, rule) in tuples.iter() {
             let Value::Decision(d) = &tu[1] else {

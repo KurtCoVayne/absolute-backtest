@@ -1,0 +1,16 @@
+# proposition: E-133 (a run's outputs carry no wall-clock time)
+# mutation: the insert phase's seconds serialised with the stats again
+# test: cargo test -p abt-tests --test outputs a_run_writes_its_outputs_at_every_checkpoint
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -683,7 +683,7 @@
+     /// binding, made with the same options, write the same bytes (E-133;
+     /// the counters that follow the thread count or the history kept are
+     /// its open part).
+-    #[serde(skip)]
++    #[serde(default)]
+     pub insert_secs: f64,
+     #[serde(skip)]
+     pub fill_secs: f64,

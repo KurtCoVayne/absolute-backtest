@@ -45,6 +45,16 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
+# The build a profile is taken from (`perf record --call-graph fp`): the
+# release build with full debug info, in its own directory
+# (`target/profiling`), so it never invalidates the release build the
+# benchmark times. Cargo has no stable profile key for frame pointers (1.99
+# reports `frame-pointers` as an unused manifest key), so the flag is passed
+# by `scripts/build-profiling.sh`, which is how this profile is built.
+[profile.profiling]
+inherits = "release"
+debug = true
+
 # The test suite runs whole programs over years of synthetic bars: the
 # workspace's own code at O1 and its dependencies at O2 keep `cargo test`
 # fast without the release profile's link time.

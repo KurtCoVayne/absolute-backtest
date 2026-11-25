@@ -4,7 +4,7 @@ Oct 12, 2026 · specification for implementation. This document and its seven co
 
 Tags on claims: **[E]** an established result, with a reference. **[N]** a new proposition, with a proof or proof sketch. **[C]** a conjecture, with what would settle it. **[D]** a design decision, with the alternative it rejects and why.
 
-Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D50` and are cited by the companions; A-D35 to A-D46 were added with `07-storage.md` (Oct 15, 2026), A-D47 onward by the iterations that implement it (`docs/iterations/`).
+Cross-references: `S-n` is `docs/semantic-model.md` section n; `F-n` is `docs/formal-foundations.md`; `V-n` is `docs/language-v2.md`; `B-n` is `docs/data-bundle.md`; `C-n` is `docs/compiler-design.md`; `D-n`, `K-n`, `Q-n`, `P-n`, `M-n`, `X-n`, `ST-n` are sections of the seven companion documents (`X` is `06-performance.md`, `ST` is `07-storage.md`). Decisions in this document are numbered `A-D1` to `A-D56` and are cited by the companions; A-D35 to A-D46 were added with `07-storage.md` (Oct 15, 2026), A-D47 onward by the iterations that implement it (`docs/iterations/`).
 
 ---
 

@@ -175,9 +175,10 @@ fn readers_at_a_sequence_keep_their_view_under_appends() {
     ];
     let expected: Snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let checked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let readers: Vec<_> = (0..3)
         .map(|_| {
-            let (store, expected, done, va, filters) = (store.clone(), expected.clone(), done.clone(), va.clone(), filters.clone());
+            let (store, expected, done, checked, va, filters) = (store.clone(), expected.clone(), done.clone(), checked.clone(), va.clone(), filters.clone());
             std::thread::spawn(move || {
                 let mut checks = 0usize;
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
@@ -187,6 +188,7 @@ fn readers_at_a_sequence_keep_their_view_under_appends() {
                         for (f, t) in filters.iter().zip(texts) {
                             assert_eq!(&read_text(&st, &va, f, Some(*seq)), t, "a reader at {} sees its rows", seq);
                             checks += 1;
+                            checked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
                 }
@@ -195,11 +197,23 @@ fn readers_at_a_sequence_keep_their_view_under_appends() {
         })
         .collect();
     for batch in &day_batches {
-        let mut st = store.write().unwrap();
-        st.ingest(REL, &[close_rows(batch)], "test", hot()).unwrap();
-        let seq = seq_high(&st, &va);
-        let texts: Vec<String> = filters.iter().map(|f| read_text(&st, &va, f, Some(seq))).collect();
-        expected.lock().unwrap().push((seq, texts));
+        {
+            let mut st = store.write().unwrap();
+            st.ingest(REL, &[close_rows(batch)], "test", hot()).unwrap();
+            let seq = seq_high(&st, &va);
+            let texts: Vec<String> = filters.iter().map(|f| read_text(&st, &va, f, Some(seq))).collect();
+            expected.lock().unwrap().push((seq, texts));
+        }
+        // The readers check between appends: a writer taking the lock
+        // again at once kept them out (a waiting writer blocks new
+        // readers), and they could end having checked nothing. A reader
+        // ends before `done` only by failing its check: the wait stops
+        // then, and the join below reports it at once.
+        let seen = checked.load(std::sync::atomic::Ordering::SeqCst);
+        let waited = std::time::Instant::now();
+        while checked.load(std::sync::atomic::Ordering::SeqCst) == seen && waited.elapsed() < std::time::Duration::from_secs(5) && !readers.iter().any(|r| r.is_finished()) {
+            std::thread::yield_now();
+        }
     }
     done.store(true, std::sync::atomic::Ordering::SeqCst);
     let checks: usize = readers.into_iter().map(|r| r.join().unwrap()).sum();
@@ -450,10 +464,10 @@ fn consolidation_keeps_every_answer_and_the_version_id() {
     assert_eq!(found, old_hashes.len());
     assert!(carried >= 1, "the appended-only instrument's blocks carry their hashes");
     // Every block but an instrument's last is full (ST-4.1).
-    for o in 0..p.instruments.len() {
+    for (o, inst) in p.instruments.iter().enumerate() {
         let n = h.column(0, o).blocks_len();
         for b in 0..n.saturating_sub(1) {
-            assert_eq!(h.block(0, o, b).ints.len(), abt_codec::BLOCK, "instrument {} block {}", p.instruments[o].id, b);
+            assert_eq!(h.block(0, o, b).ints.len(), abt_codec::BLOCK, "instrument {} block {}", inst.id, b);
         }
     }
     // The sealed rows are published rows now: the presence holds every

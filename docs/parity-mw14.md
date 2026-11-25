@@ -121,9 +121,20 @@ abt run ... --returns R.parquet        # the command above
 python scripts/parity/mw14_compare.py R.parquet ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
 ```
 
+`~/data/ref/mw14/` stands for wherever the book's inputs are kept; it is
+not a directory that exists on the owner's machine. The lake, the two series
+files and the canon are listed with their paths in `docs/handoff/README.md`,
+"Data and benchmark inputs on the Mac".
+
 Since M-4c the comparison reads the run's book from the data layer's store
 (K-9.1, ERRATA E-52): the bundle is ingested, the run reads it through the
 data service and writes its outputs there, and the script queries them.
+**This second recipe has not been run at full size on the three-layer engine,
+and may not bind**: `corpus-v2/company/mw14.dsl` has demanded `bars @1d …
+complete` and `require reviewed` since Oct 12, the v1 bundle is weekly and
+unreviewed, and the resolver refuses a stored calendar coarser than the one
+asked for (`crates/abt-data/src/resolver/plan.rs`). Package 5 of
+`docs/handoff/roadmap.md` tries it first.
 
 ```
 abt data ingest --store S --adapter bundle_v2 --from B --class equity corpus-v2/catalog corpus-v2/lib
@@ -133,3 +144,40 @@ python scripts/parity/mw14_compare.py S RUN ~/data/ref/mw14/artifacts/_canon_wkr
 ```
 
 Inputs and their checksums: `docs/parity-inputs.md`.
+
+### The lake through the Norgate adapter (M-8, E-126)
+
+The store the full replay ran on (`docs/assessment.md`, Nov 6) is the lake
+itself, staged through `abt data ingest --adapter norgate` in five-year
+chunks, with the two series the lake does not hold -- the book's own
+`spxtr_daily.parquet` (`$SPXTR` rows, the close in float32) and
+`vix_weekly.parquet` (the weekly VIX, keyed at the week's Friday) -- as two
+class-`series` bundles of the first formulation's layout (`value(Name, T, V)`,
+`T` a nanosecond timestamp, a manifest with `"tests": {}`), ingested without
+the catalog arguments:
+
+```
+abt data ingest --store S --adapter bundle_v2 --from series-spxtr --class series --base 1d
+abt data ingest --store S --adapter bundle_v2 --from series-vix   --class series --base 1w
+for span in 1990-01-01:1994-12-31 ... 2020-01-01:2026-12-31; do
+  abt data ingest --store S --adapter norgate --from LAKE \
+    --lists 'S&P 500=SP500;S&P MidCap 400=SP400;S&P SmallCap 600=SP600' --tickers 'SPY=ETF;QQQ=ETF' \
+    --start ${span%%:*} --end ${span##*:} --attributes reviewed=complete
+done
+abt data serve --store S --socket S.sock &
+abt run --strategy mw14 --data S.sock --history window --start 1991-01-04 --end 2026-07-02 corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
+python scripts/parity/mw14_compare.py S RUN ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
+```
+
+`indexes/index_membership` must be a directory of Parquet files (the lake
+names its one file with a timestamp suffix); a lake copied from macOS carries
+AppleDouble `._*` files that read as corrupt Parquet. The comparison script
+aligns by index from the run's first bar, so the run starts at the canon's
+first decision week. Through this path the kernel is not at the canon: weekly
+correlation 0.9777, CAGR 18.5% against 20.9% (the result and the profile in
+`docs/assessment.md`). The old engine is at the canon through the v1 bundle
+(above); no full-size run of the three-layer engine on that bundle is
+recorded, so the kernel and the adapter's weekly views are not yet separated
+as causes (package 5 of `docs/handoff/roadmap.md`). SPY and QQQ are not index members
+and are not ingested, as the v1 universe had no ETF either.
+
