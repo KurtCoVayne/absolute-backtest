@@ -539,6 +539,45 @@ s, the derivations themselves (`clenow` 34.5, `dvol` 28.6, `ma` 15.6,
 `dollar_volume@base` 8.0). These are the column-block evaluator's and the
 delivered answers' (package 2's second part).
 
+**Package 5, parity through the adapter (Nov 25): the weekly correlation from
+0.9776 to 0.99974, 1,825 of 1,851 weeks equal to 1e-4.** The first
+measurements against a finished run (`docs/handoff/` does not hold them;
+the counts below are the measuring agent's, from the store and a pandas
+replica of the book that equals the canon in all 1,852 weeks) found twelve
+differences and ranked them; the largest was not on the desk list. Fixed,
+each with a test that failed first (E-144 to E-149):
+
+| | What was wrong | Weeks it moved beyond 1e-4 (the replica, switched alone) |
+| --- | --- | ---: |
+| E-144 | A library rule read a daily bar at an earlier weekly label as a point read of that day: a name with no bar on a label day lost its price chain for good (10.4% of rows unpriced) | 1,069 |
+| E-146 | Every name's rows began at the run's first bar under `--history window`: the windows filled during 1991; the run now starts in 1990 and the book trades from 1991-01-04, its gate from a staged weekly index from 1988 | 162 |
+| E-145 | `dividend_at` counted a dividend only when its ex-date was the week's label (17% of them) | 386 |
+| E-149 | The adapter kept an asset only in the five-year spans where it was a member (4.4M bars missing), ended membership a day early, rounded the lake's values | 192 and 113 |
+| E-147 | The weekly VIX was keyed at the Monday plus four days: stale in holiday weeks | 22 |
+| E-148 | The target weight's arithmetic | (last bits) |
+
+On `m8-bench2`, the store staged with the new adapter options (4,319
+instruments a span, 20.1M closes against 15.7M), two runs:
+
+| | Weekly correlation | Weeks equal to 1e-4 | to 8e-15 | CAGR | Sharpe | Max drawdown |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before (`1b3bf73`) | 0.977595 | 464 | 196 | 18.54% | 0.962 | −25.90% |
+| E-144 alone | 0.987384 | 763 | 205 | 20.08% | 0.977 | −26.39% |
+| All of package 5 so far | **0.999737** | **1,825** | 479 | 21.03% | 1.024 | −26.19% |
+| The canon | 1 | 1,851 | 1,851 | 20.91% | 1.020 | −26.18% |
+
+The 52 weeks of 1990 trade nothing (the sum of their returns is 0), and
+every run label but the last is its weekly series' key (the last week,
+2026-06-24, is the data's partial week, E-147). The run costs 336.9 and
+335.5 s against 185 s for the same code at the old data: 28% more rows, 52
+more weeks, a book that now holds its names (88,874 decisions against
+6,481), and 75 s in the two relations of the membership test (`sp1500`
+46.6 s, `sp1500_day` 28.7 s, a daily relation at every bar). Open: the 26
+weeks beyond 1e-4 and the 1,346 between 1e-4 and 8e-15 (the weekly total
+return is one period on the week's closes where the book compounds each
+day's dividend; the split-day dividend, D7, which the adapter, the library
+and the book compute three ways; E-134), and a cheaper membership test.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

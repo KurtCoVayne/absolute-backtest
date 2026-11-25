@@ -1,0 +1,17 @@
+# proposition: E-145 (a dividend going ex in a bar's bucket is the bar's dividend, on every calendar)
+# mutation: `dividend_at` counts only a dividend going ex on the bar itself, `Ex = T`, as before
+# test: cargo test -p abt-tests --test dividend_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/lib/catalog.dsl b/corpus-v2/lib/catalog.dsl
+--- a/corpus-v2/lib/catalog.dsl
++++ b/corpus-v2/lib/catalog.dsl
+@@ -26,8 +26,7 @@
+     # bucket start, and no return steps into it. On a calendar finer than the
+     # actions' (a minute base) the window is refused: read it at the day.
+     rel dividend_at(A: Equity, @T, D: Price<USD>)
+-    dividend_at(A, T, D) :- universe(A, T), prev(T, T1),
+-        D = sum(Amt) over (T0 in window[1y] min 1, dividend(A, T0, Ex, _, Amt), Ex > T1, Ex <= T).
++    dividend_at(A, T, D) :- universe(A, T), D = sum(Amt) over (T0 in window[1y] min 1, dividend(A, T0, Ex, _, Amt), Ex = T).
+     rel dividend_or_zero(A: Equity, @T, D: Price<USD>)
+     dividend_or_zero(A, T, D) :- universe(A, T), D = case { dividend_at(A, T, D0) -> D0 ; else -> 0 USD/share }.
+ 

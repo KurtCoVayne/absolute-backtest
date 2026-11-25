@@ -1,0 +1,18 @@
+# proposition: E-149 (MW14 tests membership at a name's own last bar of the week, as the book does)
+# mutation: `member` read at the week's label again
+# test: cargo test -p abt-tests --test mw14_parity a_name_is_a_member_in_a_week_when_it_is_one_at_its_last_bar_of_the_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/company/mw14.dsl b/corpus-v2/company/mw14.dsl
+--- a/corpus-v2/company/mw14.dsl
++++ b/corpus-v2/company/mw14.dsl
+@@ -97,7 +97,9 @@
+     sp1500_day(A, T, F) :- close(A, T, _),
+         F = case { member(A, T, "SP500") -> 1 ; member(A, T, "SP400") -> 1 ; member(A, T, "SP600") -> 1 ; else -> 0 }.
+     rel sp1500(A: Equity, @T)
+-    sp1500(A, T) :- universe(A, T), F = last(X) over (T1 in bucket(weekly, T), sp1500_day(A, T1, X)), F > 0.
++    sp1500(A, T) :- member(A, T, "SP500").
++    sp1500(A, T) :- member(A, T, "SP400").
++    sp1500(A, T) :- member(A, T, "SP600").
+ 
+     # The universe of the book: members above the price floor and the dollar-volume floor.
+     rel eligible(A: Equity, @T, D: Notional<USD>)

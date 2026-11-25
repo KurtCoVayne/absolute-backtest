@@ -6,11 +6,15 @@
 //! `norgate_daily` made in two steps (both retired, ERRATA E-68):
 //!
 //! 1. The universe is point in time: every asset that was ever a member of
-//!    one of the indexes over the span, never the current list.
-//! 2. Membership intervals, half-open in the lake, are made inclusive,
-//!    clipped to the asset's bars and split around trading days the asset
-//!    has no bar on.
-//! 3. The delisting date is the first trading day after the last print.
+//!    one of the indexes over the span (or over the universe window the
+//!    options name), never the current list.
+//! 2. Membership intervals, half-open in the lake (`member_to` is the first
+//!    trading day out), are made inclusive, clipped to the asset's bars and
+//!    split around trading days the asset has no bar on. An option counts
+//!    `member_to` itself as a member day, the Python book's reading.
+//! 3. The delisting date is the first trading day after the last print;
+//!    when the last print is the span's last trading day, the lake's next
+//!    year is read to tell a delisting from a span's end.
 //! 4. The delisting reason is inferred (the lake has none): a ticker ending
 //!    in Q, or a last close under $1, is `bankruptcy`; a last close under
 //!    half the 60-bar high is `other`; else `acquisition`. The versions
@@ -20,9 +24,10 @@
 //! 6. A dividend on the ex-date of a split is divided by the split factor.
 //! 7. Spin-offs stay as the lake books them, cash dividends.
 //! 8. Classification is one snapshot, emitted from its snapshot date only.
-//! 9. Prices are rounded to six decimals, and a missing or non-positive
-//!    open, high or low is the close; a bar without a positive close is
-//!    dropped; of two rows of one (asset, date) the latest ingest is kept.
+//! 9. Prices and dividend amounts are rounded to six decimals, unless an
+//!    option keeps the lake's values; a missing or non-positive open, high
+//!    or low is the close; a bar without a positive close is dropped; of
+//!    two rows of one (asset, date) the latest ingest is kept.
 //! 10. Tickers are the asset's final ticker per bar (`ticker_history =
 //!     final`); of two assets carrying a ticker over overlapping dates, the
 //!     one ending first is renamed to its source symbol.
@@ -77,6 +82,21 @@ pub struct LakeOptions {
     /// the lake's last bar.
     pub from: i64,
     pub to: Option<i64>,
+    /// The window whose members are the universe, when it is not the span
+    /// itself (`None`: `from` and `to`). A store staged in several spans
+    /// names the whole history here, so that every span holds the bars of
+    /// every asset ever a member, whether or not it is one in that span
+    /// (E-149).
+    pub universe_from: Option<i64>,
+    pub universe_to: Option<i64>,
+    /// `member_to` read as the last day of membership, as the Python book
+    /// reads it (`member_from <= day <= member_to`), instead of the lake's
+    /// half-open interval whose `member_to` is the first trading day out
+    /// (E-149).
+    pub member_to_inclusive: bool,
+    /// The lake's prices and dividend amounts as it holds them, instead of
+    /// rounded to six decimals (E-149).
+    pub lake_values: bool,
     /// Only the first `n` assets by id (smoke runs).
     pub limit: Option<usize>,
     /// The classification scheme whose level 1 codes are emitted.
@@ -93,6 +113,10 @@ impl Default for LakeOptions {
             tickers: vec![],
             from: days_of("2014-01-01").unwrap_or(0),
             to: None,
+            universe_from: None,
+            universe_to: None,
+            member_to_inclusive: false,
+            lake_values: false,
             limit: None,
             scheme: "GICS".into(),
             exceptions: None,
@@ -278,15 +302,22 @@ fn bankrupt_symbol(s: &str) -> bool {
 /// The lake read: the universe's relations and the report.
 pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), DataError> {
     let mut report = Report::default();
-    // 1. The point-in-time universe.
+    // 1. The point-in-time universe: the spells that overlap the universe
+    // window, the span unless the options name another.
     let label_of: BTreeMap<&str, &str> = opts.lists.iter().map(|(i, l)| (i.as_str(), l.as_str())).collect();
+    let (window_from, window_to) = (opts.universe_from.unwrap_or(opts.from), opts.universe_to.or(opts.to));
+    // A spell's `member_to` is its first day out, or with
+    // `member_to_inclusive` its last member day, which may be the window's
+    // first (E-149).
+    let ends_before = |t: i64| if opts.member_to_inclusive { t < window_from } else { t <= window_from };
+    let outside = |f: i64, to: Option<i64>| to.is_some_and(ends_before) || window_to.is_some_and(|t| f > t);
     let mut members: Vec<(i64, &str, i64, Option<i64>)> = Vec::new();
     for b in read(lake, "indexes/index_membership", &["index_name", "asset_id", "member_from", "member_to"], |_| true)? {
         let (name, asset, from, to) = (strings(&b, "index_name")?, ints(&b, "asset_id")?, days(&b, "member_from")?, days(&b, "member_to")?);
         for i in 0..b.num_rows() {
             let (Some(n), Some(a), Some(f)) = (&name[i], asset[i], from[i]) else { continue };
             let Some(&label) = label_of.get(n.as_str()) else { continue };
-            if to[i].is_some_and(|t| t <= opts.from) || opts.to.is_some_and(|t| f > t) {
+            if outside(f, to[i]) {
                 continue;
             }
             members.push((a, label, f, to[i]));
@@ -312,7 +343,7 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
             }
         }
         for (t, (a, f, to)) in pick {
-            if to.is_some_and(|t| t <= opts.from) || opts.to.is_some_and(|t| f > t) {
+            if outside(f, to) {
                 continue;
             }
             members.push((a, want[&t], f, to));
@@ -334,6 +365,22 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     // The index series' closes by (name, day), the latest ingest kept.
     let mut series: BTreeMap<(String, i64), (i64, f64)> = BTreeMap::new();
     let mut rows_in = 0;
+    // A span followed by others of the universe window (a staging in
+    // spans): past its last day, the first trading day and the universe's
+    // assets that trade again, so that an asset whose last print is the
+    // span's last trading day is told delisted from one that trades on in
+    // the next span (decision 3).
+    let later_spans = opts.to.is_some_and(|t| window_to.is_none_or(|w| w > t));
+    let mut next_session: Option<i64> = None;
+    let mut trades_again: BTreeSet<i64> = BTreeSet::new();
+    let mut after_span = |a: i64, d: i64, equity: bool, close: Option<f64>| {
+        if equity && !bad(close) {
+            next_session = Some(next_session.map_or(d, |n| n.min(d)));
+            if idset.contains(&a) {
+                trades_again.insert(a);
+            }
+        }
+    };
     let cols = ["asset_id", "ticker", "source_symbol", "date", "open", "high", "low", "close", "volume", "ingest_ts", "series_type"];
     for b in read(lake, "curated/bars_by_date", &cols, |p| {
         year_of(p).is_none_or(|y| y >= first_year && last_year.is_none_or(|ly| y <= ly))
@@ -348,7 +395,13 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
         let kind = strings(&b, "series_type")?;
         for i in 0..b.num_rows() {
             let (Some(a), Some(d)) = (asset[i], day[i]) else { continue };
-            if d < opts.from || opts.to.is_some_and(|t| d > t) {
+            if d < opts.from {
+                continue;
+            }
+            if opts.to.is_some_and(|t| d > t) {
+                if later_spans {
+                    after_span(a, d, kind[i].as_deref() == Some("equity"), close[i]);
+                }
                 continue;
             }
             if kind[i].as_deref() == Some("index") {
@@ -387,6 +440,22 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
             }
         }
     }
+    // The year after the span's last, whose first days the span's own year
+    // files may not hold: an asset that trades again within it is not
+    // delisted at the span's end.
+    if let (true, Some(t)) = (later_spans, opts.to) {
+        let next_year = abt_wire::scalar::civil_from_days(t).0 + 1;
+        for b in read(lake, "curated/bars_by_date", &["asset_id", "date", "close", "series_type"], |p| year_of(p) == Some(next_year))? {
+            let (asset, day, close, kind) = (ints(&b, "asset_id")?, days(&b, "date")?, nums(&b, "close")?, strings(&b, "series_type")?);
+            for (((a, d), c), k) in asset.iter().zip(&day).zip(&close).zip(&kind) {
+                if let (Some(a), Some(d)) = (*a, *d) {
+                    if d > t {
+                        after_span(a, d, k.as_deref() == Some("equity"), *c);
+                    }
+                }
+            }
+        }
+    }
     report.rows_in = rows_in;
     report.drops.insert("duplicate_asset_date".into(), rows_in - latest.len());
     let mut bars: Vec<Bar> = Vec::new();
@@ -407,10 +476,12 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
             *filled.entry("volume_null_to_zero".into()).or_default() += 1;
             b.volume = 0.0;
         }
-        b.open = round6(b.open);
-        b.high = round6(b.high);
-        b.low = round6(b.low);
-        b.close = round6(b.close);
+        if !opts.lake_values {
+            b.open = round6(b.open);
+            b.high = round6(b.high);
+            b.low = round6(b.low);
+            b.close = round6(b.close);
+        }
         bars.push(b);
     }
     report.drops.insert("missing_or_nonpositive_close".into(), dropped);
@@ -446,6 +517,10 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
         span.insert(a, (f, l));
         if l < last_day {
             gone.insert(a, (l, next_day(l).expect("a day after a bar before the last")));
+        } else if let Some(d) = next_session.filter(|_| !trades_again.contains(&a)) {
+            // The last print is the span's last trading day and the asset
+            // does not trade in the next span: delisted on its first day.
+            gone.insert(a, (l, d));
         }
         let mut runs: Vec<(String, String, i64, i64)> = Vec::new();
         for &i in idx {
@@ -563,7 +638,8 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
         }
         let factor = split_on.get(&(a, e)).copied();
         rescaled += usize::from(factor.is_some());
-        divs.push((a, e, round6(c / factor.unwrap_or(1.0))));
+        let amount = c / factor.unwrap_or(1.0);
+        divs.push((a, e, if opts.lake_values { amount } else { round6(amount) }));
     }
     divs.sort_by_key(|d| (d.1, d.0));
     report.dividends = divs.len();
@@ -600,6 +676,7 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
             let f = mf.max(iv.from).max(first_bar);
             let member_end = match mt {
                 None => i64::MAX,
+                Some(t) if opts.member_to_inclusive => t,
                 Some(t) => prev_day(t).unwrap_or(t - 1),
             };
             let t = member_end.min(iv.to.unwrap_or(i64::MAX)).min(last_bar);
@@ -751,7 +828,10 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     ));
     let mut dl: (Vec<String>, Vec<i64>, Vec<String>) = Default::default();
     for (a, d0, reason) in &delisted {
-        for &d in days_all.iter().filter(|d| **d >= *d0) {
+        // A delisting on the first trading day after the span is that day's
+        // row alone: the next span holds no bar of the asset to carry it.
+        let after: &[i64] = if *d0 > last_day { std::slice::from_ref(d0) } else { &days_all };
+        for &d in after.iter().filter(|d| **d >= *d0) {
             dl.0.push(key(*a));
             dl.1.push(t_of(d));
             dl.2.push(reason.clone());
@@ -842,13 +922,28 @@ pub fn read_lake(lake: &Path, opts: &LakeOptions) -> Result<(Fetched, Report), D
     attributes.insert("prices".to_string(), "as_traded".to_string());
     attributes.insert("ticker_history".to_string(), "final".to_string());
     let names: Vec<&str> = opts.lists.iter().map(|l| l.0.as_str()).collect();
-    attributes.insert("universe".to_string(), format!("{} members since {}", names.join(", "), ymd(opts.from)));
+    let universe = match (opts.universe_from, opts.universe_to) {
+        (None, None) => format!("{} members since {}", names.join(", "), ymd(opts.from)),
+        _ => format!(
+            "{} members from {} to {}",
+            names.join(", "),
+            ymd(window_from),
+            window_to.map(ymd).unwrap_or_else(|| "the lake's last bar".to_string())
+        ),
+    };
+    attributes.insert("universe".to_string(), universe);
+    if opts.lake_values {
+        attributes.insert("values".to_string(), "lake".to_string());
+    }
     if !exceptions.is_empty() {
         attributes.insert("reviewed_exceptions".to_string(), serde_json::Value::Array(exceptions).to_string());
     }
     let mut per: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     per.entry("equity.dividend".into()).or_default().insert("dividend_dates".into(), "ex_only".into());
     per.entry("equity.delisted".into()).or_default().insert("delisting_reason".into(), "inferred".into());
+    if opts.member_to_inclusive {
+        per.entry("equity.member".into()).or_default().insert("member_to".into(), "last_day".into());
+    }
     if let Some(s) = snapshot {
         per.entry("equity.classification".into()).or_default().insert("classification".into(), format!("snapshot {}", ymd(s)));
         per.entry("equity.industry".into()).or_default().insert("classification".into(), format!("snapshot {}", ymd(s)));
@@ -901,7 +996,10 @@ impl Norgate {
     /// The adapter a catalog's source configures (D-7.1): `lake` (the
     /// lake's root), and optionally `lists` (`S&P 500=SPX;S&P MidCap
     /// 400=SP400`), `series` (`$SPXTR=SPXTR`), `from` and `to` (dates),
-    /// `limit`, `scheme`, `exceptions` (a reviewed exceptions file).
+    /// `universe_from` and `universe_to` (the window whose members are the
+    /// universe, dates), `member_to` (`first_out`, the lake's, or
+    /// `last_day`), `values` (`rounded` or `lake`), `limit`, `scheme`,
+    /// `exceptions` (a reviewed exceptions file).
     pub fn from_settings(settings: &BTreeMap<String, String>) -> Result<Norgate, DataError> {
         let lake = settings.get("lake").ok_or_else(|| DataError::Malformed("a norgate source names its `lake` in its settings".into()))?;
         let mut opts = LakeOptions::default();
@@ -924,6 +1022,22 @@ impl Norgate {
                 "tickers" => opts.tickers = pairs(k, v)?,
                 "from" => opts.from = date(k, v)?,
                 "to" => opts.to = Some(date(k, v)?),
+                "universe_from" => opts.universe_from = Some(date(k, v)?),
+                "universe_to" => opts.universe_to = Some(date(k, v)?),
+                "member_to" => {
+                    opts.member_to_inclusive = match v.as_str() {
+                        "first_out" => false,
+                        "last_day" => true,
+                        _ => return Err(DataError::Malformed(format!("the norgate setting `member_to` is `first_out` or `last_day`, not `{}`", v))),
+                    }
+                }
+                "values" => {
+                    opts.lake_values = match v.as_str() {
+                        "rounded" => false,
+                        "lake" => true,
+                        _ => return Err(DataError::Malformed(format!("the norgate setting `values` is `rounded` or `lake`, not `{}`", v))),
+                    }
+                }
                 "limit" => opts.limit = Some(v.parse().map_err(|_| DataError::Malformed(format!("the norgate setting `limit` is a count, not `{}`", v)))?),
                 "scheme" => opts.scheme = v.clone(),
                 "exceptions" => opts.exceptions = Some(PathBuf::from(v)),

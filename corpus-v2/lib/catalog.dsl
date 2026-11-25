@@ -18,9 +18,16 @@ library catalog {
     rel adj_close(A: Equity, @T, P: Price<USD>)
     adj_close(A, T, P) :- close(A, T, P0), cum_split(A, T, C), P = P0 * C.
 
-    # The dividend going ex at T, announced at or before T.
+    # The dividends going ex in T's bucket, announced at or before T: after the
+    # calendar's previous bar and at or before T (3.3), so on a weekly calendar
+    # every dividend of the week, as `split` there is the week's split; on the
+    # base calendar the bar's own, and one announced on a bar and going ex on a
+    # day with no bar at the next bar (E-145). The calendar's first bar has no
+    # bucket start, and no return steps into it. On a calendar finer than the
+    # actions' (a minute base) the window is refused: read it at the day.
     rel dividend_at(A: Equity, @T, D: Price<USD>)
-    dividend_at(A, T, D) :- universe(A, T), D = sum(Amt) over (T0 in window[1y] min 1, dividend(A, T0, Ex, _, Amt), Ex = T).
+    dividend_at(A, T, D) :- universe(A, T), prev(T, T1),
+        D = sum(Amt) over (T0 in window[1y] min 1, dividend(A, T0, Ex, _, Amt), Ex > T1, Ex <= T).
     rel dividend_or_zero(A: Equity, @T, D: Price<USD>)
     dividend_or_zero(A, T, D) :- universe(A, T), D = case { dividend_at(A, T, D0) -> D0 ; else -> 0 USD/share }.
 

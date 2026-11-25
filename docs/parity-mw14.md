@@ -149,31 +149,55 @@ Inputs and their checksums: `docs/parity-inputs.md`.
 
 The store the full replay ran on (`docs/assessment.md`, Nov 6) is the lake
 itself, staged through `abt data ingest --adapter norgate` in five-year
-chunks, with the two series the lake does not hold -- the book's own
-`spxtr_daily.parquet` (`$SPXTR` rows, the close in float32) and
-`vix_weekly.parquet` (the weekly VIX, keyed at the week's Friday) -- as two
-class-`series` bundles of the first formulation's layout (`value(Name, T, V)`,
-`T` a nanosecond timestamp, a manifest with `"tests": {}`), ingested without
-the catalog arguments:
+chunks, with the series the lake does not hold -- from the book's own
+`spxtr_daily.parquet` (`$SPXTR` rows from 1988, the close in float32) and
+`vix_weekly.parquet` -- as two class-`series` bundles of the first
+formulation's layout (`value(Name, T, V)`, `T` a nanosecond timestamp, a
+manifest with `"tests": {}`), ingested without the catalog arguments
+(`scripts/parity/mw14_series_bundles.py`): `series-spxtr`, the daily `SPXTR`,
+and `series-weekly`, what the gate and the calm test read, each row keyed at
+its week's last trading day (ERRATA E-146, E-147): the weekly VIX and the
+mart's 4-week mean of it, `VIX` and `VIX_MA4`, and the book's weekly index of
+`$SPXTR` with its 52-week mean from 1988, `SPXTR_W` and `SPXTR_W_MA52`:
 
 ```
-abt data ingest --store S --adapter bundle_v2 --from series-spxtr --class series --base 1d
-abt data ingest --store S --adapter bundle_v2 --from series-vix   --class series --base 1w
+abt data ingest --store S --adapter bundle_v2 --from series-spxtr  --class series --base 1d
+abt data ingest --store S --adapter bundle_v2 --from series-weekly --class series --base 1w
 for span in 1990-01-01:1994-12-31 ... 2020-01-01:2026-12-31; do
   abt data ingest --store S --adapter norgate --from LAKE \
     --lists 'S&P 500=SP500;S&P MidCap 400=SP400;S&P SmallCap 600=SP600' --tickers 'SPY=ETF;QQQ=ETF' \
-    --start ${span%%:*} --end ${span##*:} --attributes reviewed=complete
+    --start ${span%%:*} --end ${span##*:} --universe-start 1990-01-01 --universe-end 2026-12-31 \
+    --member-to last_day --values lake --attributes reviewed=complete
 done
 abt data serve --store S --socket S.sock &
-abt run --strategy mw14 --data S.sock --history window --start 1991-01-04 --end 2026-07-02 corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
+abt run --strategy mw14 --data S.sock --history window --start 1990-01-01 --end 2026-07-02 corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
 python scripts/parity/mw14_compare.py S RUN ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
 ```
 
-`indexes/index_membership` must be a directory of Parquet files (the lake
+The adapter's three options are the book's reading of the lake (ERRATA
+E-149): every chunk holds every bar of every asset that is a member at any
+time in 1990-2026, as the book's panel does, where a chunk alone keeps only
+its own members (4,437,783 bars from 1990 missing on Nov 25), and an asset
+whose last print is a chunk's last trading day is delisted on the next
+chunk's first; `member_to`, the lake's first trading day out, counts as a
+member day, as the book's `member_from <= week_end <= member_to` does, and
+MW14 tests membership at a name's own last bar of the week; the prices and
+dividend amounts are the lake's single-precision values, not rounded to six
+decimals. `indexes/index_membership` must be a directory of Parquet files (the lake
 names its one file with a timestamp suffix); a lake copied from macOS carries
-AppleDouble `._*` files that read as corrupt Parquet. The comparison script
-aligns by index from the run's first bar, so the run starts at the canon's
-first decision week. Through this path the kernel is not at the canon: weekly
+AppleDouble `._*` files that read as corrupt Parquet. The run starts at the
+data's first week and the program trades from its `first_trade`, 1991-01-04,
+the canon's first decision week: a run with the stores trimmed reads no row
+before its first decision bar (E-135's path), so started at 1991-01-04 its
+rows, latch and gate would begin there, where the book's were computed from
+1990 (E-146). The comparison script aligns the two series on the decision
+week from the canon's first, and reports the weeks the run decided before it,
+whose returns are 0 when the book held nothing there, and the run's labels
+that are no `SPXTR_W` key, the last exempt: the equities end on Wednesday
+2026-06-24, inside a week the index runs through, so the last label reads the
+week before's gate and VIX and decides only the book's uncompared last week
+(E-147). Through this path the
+kernel is not at the canon: weekly
 correlation 0.9777, CAGR 18.5% against 20.9% (the result and the profile in
 `docs/assessment.md`). The old engine is at the canon through the v1 bundle
 (above); no full-size run of the three-layer engine on that bundle is

@@ -1472,7 +1472,8 @@ impl<'a> Checker<'a> {
     /// key is on the rule's calendar; prev, lag, rows and windows stay on
     /// their base's; `bucket` and `session` range over the base bars;
     /// `session_of` binds a session label; an atom's fresh key is on the
-    /// relation's calendar when it has one fixed, else the rule's.
+    /// relation's calendar when it has one fixed, else the rule's (a bar
+    /// primitive has one, the base, in the strategy's own rules only).
     fn infer_cals(&mut self, body: &[ast::Literal], subst: &Subst, cals: &mut HashMap<String, Cal>, rule_cal: &Cal, unit: &str, label: &str) {
         let mut lits: Vec<&ast::Literal> = Vec::new();
         fn walk<'b>(l: &'b ast::Literal, out: &mut Vec<&'b ast::Literal>) {
@@ -1540,7 +1541,13 @@ impl<'a> Checker<'a> {
                         } else if KERNEL_RELS.contains(&name.as_str()) {
                             Some(self.decision_cal.clone())
                         } else if BAR_PRIMS.contains(&name.as_str()) {
-                            Some(Cal::Base)
+                            // A strategy's bare bar primitive is at the base
+                            // calendar. A library rule reads the bars at the
+                            // calendar it is instantiated on (7), so there a
+                            // fresh key takes the rule's calendar: the close
+                            // at a previous row is that row's bar view, not
+                            // the base bar on the label's day (E-144).
+                            (unit == self.root.name).then_some(Cal::Base)
                         } else if name == "session" {
                             Some(Cal::Sessions)
                         } else if let Some(sr) = self.strategy_rels.get(&name).filter(|_| unit == self.root.name) {
@@ -2145,6 +2152,10 @@ impl<'a> Checker<'a> {
             ast::Literal::Agg { var, agg, args, conj, within, span } => {
                 let mut cj = Vec::new();
                 let mut rows_anchor: Option<Term> = None;
+                // The literals of the conjunction that are atoms as written,
+                // by their position in it: an as-of read among them is the
+                // linker's, not the program's `asof`.
+                let mut written: Vec<usize> = Vec::new();
                 for c in conj {
                     if let ast::Literal::Window {
                         var: wv,
@@ -2155,8 +2166,61 @@ impl<'a> Checker<'a> {
                         rows_anchor = Some(wv.clone());
                     }
                     if let Some(lc) = self.lower_literal(c, ctx, true) {
+                        if matches!(c, ast::Literal::Atom(_)) {
+                            written.push(cj.len());
+                        }
                         cj.push(lc);
                     }
+                }
+                // A catalog relation held at a coarser calendar than the
+                // rule's is read as of the bar (3.4): at each bar of a window
+                // it is the latest tuple at or before that bar, so one tuple
+                // stands at every bar from its key to the next and the
+                // aggregate takes it once per bar (a dividend summed over a
+                // minute window, E-145). Such a window is refused; on the
+                // relation's own calendar or a coarser one it is read in each
+                // bar's bucket, once.
+                let wvars: Vec<&str> = cj
+                    .iter()
+                    .filter_map(|l| match l {
+                        Literal::Window { var: Term::Var(v, _), .. } => Some(v.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                for &i in &written {
+                    let Literal::AsOf {
+                        atom,
+                        at: Term::Var(v, _),
+                        within_bucket: None,
+                        span: asp,
+                    } = &cj[i]
+                    else {
+                        continue;
+                    };
+                    if atom.name == "value" || !wvars.contains(&v.as_str()) {
+                        continue;
+                    }
+                    let held = self
+                        .relations
+                        .get(&atom.name)
+                        .and_then(|s| s.native)
+                        .map(|r| self.cal_name(&r.as_calendar()))
+                        .unwrap_or_else(|| "its own calendar".into());
+                    self.diag(
+                        Code::X,
+                        &unit,
+                        Some(label.clone()),
+                        *asp,
+                        format!(
+                            "`{}` is held at `{}`, and on `{}`, a finer calendar, a window reads it as of each of its bars, so a tuple stands at every bar from its key to the next and the aggregate takes it once per bar; aggregate it on `{}` or a coarser calendar, where each bar reads its own bucket",
+                            atom.name,
+                            held,
+                            self.cal_name(&ctx.cal),
+                            held
+                        ),
+                    );
+                    ctx.errors = true;
+                    return None;
                 }
                 // The entity's own rows: anchored on the universe at the
                 // rule's calendar (7.1); an entity-less rule's rows are the

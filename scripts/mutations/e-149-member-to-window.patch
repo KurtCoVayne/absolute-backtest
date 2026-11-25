@@ -1,0 +1,16 @@
+# proposition: E-149 (`member_to = last_day`: a spell whose last member day is the universe window's first is in the universe)
+# mutation: the universe test keeps the half-open reading of member_to whatever the option says
+# test: cargo test -p abt-data --test norgate member_to_counted_as_a_member_day_is_the_books_test_at_the_names_last_bar_of_the_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/norgate.rs b/crates/abt-data/src/adapters/norgate.rs
+--- a/crates/abt-data/src/adapters/norgate.rs
++++ b/crates/abt-data/src/adapters/norgate.rs
+@@ -309,7 +309,7 @@
+     // A spell's `member_to` is its first day out, or with
+     // `member_to_inclusive` its last member day, which may be the window's
+     // first (E-149).
+-    let ends_before = |t: i64| if opts.member_to_inclusive { t < window_from } else { t <= window_from };
++    let ends_before = |t: i64| if opts.member_to_inclusive { t <= window_from } else { t <= window_from };
+     let outside = |f: i64, to: Option<i64>| to.is_some_and(ends_before) || window_to.is_some_and(|t| f > t);
+     let mut members: Vec<(i64, &str, i64, Option<i64>)> = Vec::new();
+     for b in read(lake, "indexes/index_membership", &["index_name", "asset_id", "member_from", "member_to"], |_| true)? {

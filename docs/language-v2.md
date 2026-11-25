@@ -1068,13 +1068,13 @@ to be read against the books' own rule lists.
 #             4-week mean of weekly mean daily dollar volume >= $2M
 #   R1 rank   Clenow: (exp(52 b) - 1) R^2 of the 18-row OLS of log adjusted close
 #             on time; ordinal rank, best first, ties by asset id; no score, no rank
-#   R2 enter  rank <= 7, $SPXTR above its 52-week mean, dollar-volume decile >= 5
+#   R2 enter  rank <= 7, $SPXTR's weekly index above its 52-week mean, dollar-volume decile >= 5
 #   R3 stay   rank <= 28, or adjusted close above its 40-row mean
 #   latch     in book = stay and (enter or in book at the name's previous row)
 #   R5 panic  scale 0 unless the gate holds or VIX is at or below its 4-week mean
 #   R7 dial   scale x 0.70 when more than 25% of latched names (with a 40-row
 #             mean) trade more than 50% above it
-#   R4 weight min(scale / N, 0.15) over the N latched eligible names
+#   R4 weight min(1 / N x scale, 0.15) over the N latched eligible names
 #   R6 trade  at the week's close; a name's change fires when it is at least the
 #             2.5% band (1e-12 tolerance); exits always fire
 #
@@ -1087,13 +1087,19 @@ to be read against the books' own rule lists.
 #     of the band.
 #   - Decisions on the data's last week have no next bar to settle at; the book
 #     books that week's cost with no return.
+#
+# The book trades from 1991-01-04 (`first_trade`), flat before, with its
+# features, its latch and its gate computed from the data's first week; the
+# run starts there (`--start 1990-01-01`). The gate and the calm test read the
+# book's own weekly series, keyed at the week's last trading day: $SPXTR's
+# index and its 52-week mean from 1988, the VIX and its 4-week mean.
 strategy mw14 {
   data {
     class    equity
     need     bars @1d from 1990-01-01 complete      # a reviewed store: a missing bar means the name did not trade
     need     actions, listing
     need     lists "SP500", "SP400", "SP600", "ETF"
-    need     series "SPXTR" @1d, "VIX" @1w complete
+    need     series "SPXTR_W" @1w, "SPXTR_W_MA52" @1w, "VIX" @1w, "VIX_MA4" @1w complete
     require  tested
     prefer   latest
   }
@@ -1111,9 +1117,7 @@ strategy mw14 {
     n_stay       : Count = 28
     clenow_rows  : Count = 18
     ma_rows      : Count = 40
-    gate_rows    : Count = 52
     dvol_rows    : Count = 4
-    vix_rows     : Count = 4
     rows_a_year  : Scalar = 52
     price_floor  : Price<USD> = 3 USD/share
     dvol_floor   : Notional<USD> = 2_000_000 USD
@@ -1125,6 +1129,9 @@ strategy mw14 {
     min_weight   : Scalar = 1e-6
     band         : Scalar = 0.025
     band_tol     : Scalar = 1e-12
+    # The book's first week (`run_book`'s window); a run from the data's first
+    # week holds its targets until then (E-146).
+    first_trade  : Timestamp = 1991-01-04
   }
 
   rules {
@@ -1139,11 +1146,15 @@ strategy mw14 {
         R = ols_r(log(P / P0), K)     over (T1 in rows[clenow_rows], adj_close@weekly(A, T1, P), row_number(A, T1, K)),
         S = (exp(B * rows_a_year) - 1) * R * R.
 
-    # The S&P 1500 is the union of the three indices.
+    # The S&P 1500 is the union of the three indices, tested at the name's own
+    # last bar of the week, as the book tests `member_from <= week_end <=
+    # member_to` (data.py add_membership_and_universe): a member halted on the
+    # label day is one, a name out on Wednesday and trading on is not (E-149).
+    rel sp1500_day(A: Equity, @T: base, F: Scalar)
+    sp1500_day(A, T, F) :- close(A, T, _),
+        F = case { member(A, T, "SP500") -> 1 ; member(A, T, "SP400") -> 1 ; member(A, T, "SP600") -> 1 ; else -> 0 }.
     rel sp1500(A: Equity, @T)
-    sp1500(A, T) :- member(A, T, "SP500").
-    sp1500(A, T) :- member(A, T, "SP400").
-    sp1500(A, T) :- member(A, T, "SP600").
+    sp1500(A, T) :- universe(A, T), F = last(X) over (T1 in bucket(weekly, T), sp1500_day(A, T1, X)), F > 0.
 
     # The universe of the book: members above the price floor and the dollar-volume floor.
     rel eligible(A: Equity, @T, D: Notional<USD>)
@@ -1162,11 +1173,15 @@ strategy mw14 {
         N = count(A1) over (eligible(A1, T, _)) within (T),
         decile(K, N) >= liq_decile.
 
-    # The gate and the calm test on the market series (the daily SPXTR is read as its weekly bar view).
+    # The gate and the calm test on the book's weekly series (data.py
+    # attach_gate_index, book.py 331-351, vix.py): $SPXTR's index against its
+    # 52-week mean over the index's own weeks from 1988, and the VIX against
+    # the mart's 4-week mean; read as of the label, so a missing week reads
+    # the week before, as the book fills its joined frame forward.
     rel gate(@T)
-    gate(T) :- value("SPXTR", T, V), M = mean(X) over (T1 in rows[gate_rows], value("SPXTR", T1, X)), V > M.
+    gate(T) :- value("SPXTR_W", T, V), value("SPXTR_W_MA52", T, M), V > M.
     rel calm(@T)
-    calm(T) :- value("VIX", T, V), M = mean(X) over (T1 in rows[vix_rows], value("VIX", T1, X)), V <= M.
+    calm(T) :- value("VIX", T, V), value("VIX_MA4", T, M), V <= M.
 
     # R2, R3 and the latch.
     rel ma(A: Equity, @T, M: Price<USD>)
@@ -1192,12 +1207,14 @@ strategy mw14 {
                                      crowded(T)                -> crowd_dial ;
                                      else                      -> 1 }.
 
-    # R4: equal weights over the latched eligible names, capped.
+    # R4: equal weights over the latched eligible names, capped, in the book's
+    # order of operations (engine_weighted.py: the share 1 / N, times the
+    # scale, then the cap), from the book's first week.
     rel in_book(A: Equity, @T)
     in_book(A, T) :- eligible(A, T, _), latched(A, T).
     rel target(A: Equity, @T, W: Scalar)
-    target(A, T, W) :- in_book(A, T), N = count(A1) over (in_book(A1, T)) within (T),
-        scale(T, S), W = least(S / N, name_cap), W > min_weight.
+    target(A, T, W) :- in_book(A, T), T >= first_trade, N = count(A1) over (in_book(A1, T)) within (T),
+        scale(T, S), W = least(1 / N * S, name_cap), W > min_weight.
 
     # Observed for the researcher (8.1): the scale at every week and the latch
     # with the literal that excluded each name, in the ledger, without
@@ -1227,12 +1244,14 @@ strategy mw14 {
 ```
 
 What changed and why it is the same book: the data block asks for daily
-equity bars, actions, listing, three index lists and two series from 1990
-and lets the kernel find them (3.6); the weekly facts are the daily facts
+equity bars, actions, listing, three index lists and four weekly series and
+lets the kernel find them (3.6); the weekly facts are the daily facts
 bucketed (3.3); the total-return price is the catalog's `tr_index` derived
-from close, dividend and split at the week's last bar (B-3); the S&P 1500 is
-written as the union of its three indices rather than a label built in an
-ingest script; the VIX four-week mean is a rule; the latch is the library's
+from close, the dividends going ex in the week and its split (B-3); the S&P
+1500 is written as the union of its three indices rather than a label built
+in an ingest script; the gate's index and the VIX are read with the book's
+own means, staged with their history from 1988 (ERRATA E-146, E-147); the
+latch is the library's
 `latch`; the decile is a function; the scale is one case form; and the
 sixteen flags are the `execution` and `report` blocks. The book's "a stock's
 own rows" is the universe, declared. The execution block is the

@@ -80,11 +80,13 @@ pub fn business_days(start: (i64, u32, u32), count: usize) -> Vec<i64> {
 /// drops by the dividend), the last name delisted for bankruptcy at four
 /// fifths (its rows stop; `delisted` holds from then on), open, high and
 /// low around the close, every name listed and a member of `SPX` (and of
-/// `SP500`), a `sector` classification cycling over three codes, and two
-/// series: a daily `SPXTR` index level and a weekly `VIX`. A name's drift
-/// and volatility come from one of ten profiles, so a market of hundreds of
+/// `SP500`), a `sector` classification cycling over three codes, and the
+/// series: a daily `SPXTR` index level and a weekly `VIX`, with MW14's
+/// weekly `SPXTR_W`, `SPXTR_W_MA52` and `VIX_MA4` from them (the kernel's
+/// `synthetic_daily` makes the same, bit for bit). A name's drift and
+/// volatility come from one of ten profiles, so a market of hundreds of
 /// names stays priced. Prices are on the cent and volumes whole, so every
-/// value is a tick (ST-3).
+/// bar's value is a tick (ST-3); the two weekly means are not.
 pub fn daily(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -> Market {
     let mut m = Market::default();
     let mut rng = Rng::new(seed);
@@ -157,15 +159,34 @@ pub fn daily(symbols: &[&str], start: (i64, u32, u32), days: usize, seed: u64) -
     let mut level = 1000.0;
     let mut vix_level = 18.0;
     let mut last_week: Option<i64> = None;
+    let mut weekly_index: Vec<(i64, f64)> = Vec::new();
+    let mut weekly_vix: Vec<(i64, f64)> = Vec::new();
     for (k, &t) in bars.iter().enumerate() {
         level *= (0.0003 + 0.009 * rng.normal()).exp();
-        m.add("value", vec![V::L("SPXTR".into()), V::T(t), V::N((level * 100.0).round() / 100.0)]);
+        let close = (level * 100.0).round() / 100.0;
+        m.add("value", vec![V::L("SPXTR".into()), V::T(t), V::N(close)]);
         let wk = week_key(t);
         let ends_week = bars.get(k + 1).map(|&n| week_key(n) != wk).unwrap_or(true);
         if ends_week && last_week != Some(wk) {
             vix_level = (vix_level * (0.03 * rng.normal()).exp()).clamp(9.0, 80.0);
-            m.add("value", vec![V::L("VIX".into()), V::T(t), V::N((vix_level * 100.0).round() / 100.0)]);
+            let v = (vix_level * 100.0).round() / 100.0;
+            m.add("value", vec![V::L("VIX".into()), V::T(t), V::N(v)]);
+            weekly_index.push((t, close));
+            weekly_vix.push((t, v));
             last_week = Some(wk);
+        }
+    }
+    // MW14's weekly series, keyed as the weekly VIX: the index at the week's
+    // close with its 52-week mean, and the VIX's 4-week mean, each from the
+    // week it first spans, summed and divided as the kernel's market does.
+    for (name, series, n) in [("SPXTR_W", &weekly_index, 0), ("SPXTR_W_MA52", &weekly_index, 52), ("VIX_MA4", &weekly_vix, 4)] {
+        for (i, &(t, v)) in series.iter().enumerate() {
+            let v = match n {
+                0 => v,
+                _ if i + 1 < n => continue,
+                _ => series[i + 1 - n..=i].iter().map(|(_, x)| x).sum::<f64>() / n as f64,
+            };
+            m.add("value", vec![V::L(name.into()), V::T(t), V::N(v)]);
         }
     }
     m.derive_tickers();

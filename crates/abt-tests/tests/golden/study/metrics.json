@@ -639,17 +639,17 @@
       "periods": 79,
       "periods_per_year": 52.0,
       "profit_factor": 1.485074389937855,
-      "profit_factor_trades": 1.559412795874459,
+      "profit_factor_trades": 1.5594127958744597,
       "sharpe": 0.5358198737730843,
-      "sharpe_population": 0.5392436777714584,
+      "sharpe_population": 0.5392436777714585,
       "total_pnl": 35014.62055090885,
       "trades": 8,
-      "volatility_population": 0.04274060000583833,
+      "volatility_population": 0.042740600005838326,
       "win_rate": 0.375
     },
     "periods_per_year": 52.0,
     "returns": {
-      "autocorrelation_1": -0.1294024185011413,
+      "autocorrelation_1": -0.1294024185011403,
       "cagr": 0.022373120888443898,
       "cvar_5": 0.014958013379703178,
       "kurtosis": 11.757579039527275,
@@ -657,12 +657,12 @@
       "max_drawdown_duration": 11,
       "n": 79,
       "sharpe": 0.5358198737730835,
-      "sharpe_lo": 0.5539750860456668,
+      "sharpe_lo": 0.5539750860456665,
       "sharpe_period": 0.07430484728082673,
-      "sharpe_se": 0.839959166534459,
-      "skew": -0.8789449295494844,
-      "sortino": 0.783536327145978,
-      "t_stat": 0.658336555804874,
+      "sharpe_se": 0.8399591665344586,
+      "skew": -0.8789449295494841,
+      "sortino": 0.7835363271459782,
+      "t_stat": 0.6583365558048738,
       "total_return": 0.034186658940509096,
       "volatility": 0.04301370566009954,
       "worst_month": -0.04839164317209943
@@ -674,13 +674,13 @@
       ],
       [
         2023,
-        0.8940165015470543
+        0.8940165015470545
       ]
     ],
     "trading": {
       "avg_gross": 0.12005634406199679,
       "avg_net": 0.12005634406199679,
-      "avg_participation": 0.00044389145742437336,
+      "avg_participation": 0.00044124382292657667,
       "cost_drag": 0.0020664102202074897,
       "decisions": 28,
       "dropped": 4,
@@ -688,7 +688,7 @@
       "fills": 24,
       "impact_drag": 0.0,
       "max_leverage": 0.6195973741262621,
-      "max_participation": 0.0008716302813938079,
+      "max_participation": 0.0008680662262897827,
       "turnover": 2.0664102202074903
     }
   },
