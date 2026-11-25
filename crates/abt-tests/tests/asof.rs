@@ -97,6 +97,49 @@ fn a_derived_relation_is_walked_back_over_its_own_bars() {
     assert_eq!(decided(&ds, &prog, true), want);
 }
 
+/// Two names whose only tuples of a derived relation sit at different bars:
+/// X's at the first day, Y's at the second. Each is walked back to its own
+/// (E-132: the walk's memo was keyed without the entity, so on the second
+/// day X was handed Y's "no tuple at or before the first day" and decided
+/// nothing, and nothing was decided after).
+#[test]
+fn a_derived_relation_is_walked_back_for_each_entity() {
+    let src = common::strategy(
+        "per_entity_asof",
+        "    unit : Quantity<Shares> = 1 shares
+    one : Price<USD> = 1 USD/share
+    floor : Price<USD> = 15 USD/share",
+        "    rel rich(A: Equity, @T, P: Price<USD>)
+    rich(A, T, P) :- close(A, T, P), P > floor.",
+        "    decide(T, trade(A, Q)) :- universe(A, T), rich(A, _, P) asof T, Q = P / one * unit.",
+    );
+    let prog = common::program(&src, "per_entity_asof");
+    let ds = common::markets((2024, 1, 8), &[("X", &[20.0, 10.0, 10.0, 10.0, 10.0]), ("Y", &[10.0, 30.0, 10.0, 10.0, 10.0])]);
+    let cfg = || ExecConfig {
+        initial_cash: 1_000_000.0,
+        ..ExecConfig::frictionless()
+    };
+    let per_day = |r: abt_kernel::kernel::RunResult| -> Vec<(String, Vec<f64>)> {
+        let mut out: Vec<(String, Vec<f64>)> = Vec::new();
+        for d in &r.decisions {
+            let day = format_timestamp(d.t);
+            match out.last_mut() {
+                Some((last, q)) if *last == day => q.push(d.decision.amount),
+                _ => out.push((day, vec![d.decision.amount])),
+            }
+        }
+        for (_, q) in &mut out {
+            q.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        }
+        out
+    };
+    // X reads its 20 from the first day on; Y its 30 from the second.
+    let mut want = vec![(DAYS[0].to_string(), vec![20.0])];
+    want.extend(DAYS[1..].iter().map(|d| (d.to_string(), vec![20.0, 30.0])));
+    assert_eq!(per_day(run(&prog, &ds, cfg()).unwrap()), want);
+    assert_eq!(per_day(run_socket(&prog, &ds, cfg()).unwrap()), want);
+}
+
 #[test]
 fn the_fold_reads_an_asof_tuple_from_its_availability_on() {
     let prog = stored();

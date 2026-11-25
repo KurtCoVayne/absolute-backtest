@@ -176,9 +176,22 @@ fn run_keeping(
             for (name, secs, calls) in k.derive_times().iter().take(20) {
                 eprintln!("derive {:28} {:8.3} s {:8} calls", name, secs, calls);
             }
+            // The rows the stream brought each stored relation, and what the
+            // retention horizon left of them.
+            for (name, received, held) in k.store_counts() {
+                eprintln!("rows {:28} received={} held={}", name, received, held);
+            }
             let s = k.stats();
             eprintln!(
-                "phases insert={:.3} fill={:.3} decide={:.3} exec={:.3} warm={:.3} trim={:.3} evict={:.3} derive_total={:.3}",
+                "phases bind={:.3} check={:.3} push={:.3} open={:.3} stream={:.3} write={:.3} wait={:.3} decode={:.3} insert={:.3} fill={:.3} decide={:.3} exec={:.3} warm={:.3} trim={:.3} evict={:.3} derive_total={:.3}",
+                s.bind_secs,
+                s.check_secs,
+                s.push_secs,
+                s.open_secs,
+                s.stream_secs,
+                s.write_secs,
+                s.wait_secs,
+                s.decode_secs,
                 s.insert_secs,
                 s.fill_secs,
                 s.decide_secs,
@@ -1348,7 +1361,9 @@ pub fn main_with(raw: Vec<String>) {
                     total,
                     result.bars.len(),
                     result.symbols.len(),
-                    tuple_count,
+                    // A served run holds no dataset: its tuples are the rows
+                    // the stream delivered.
+                    if tuple_count > 0 { tuple_count } else { s.received_rows },
                     result.decisions.len(),
                     if run_s > 0.0 { result.bars.len() as f64 / run_s } else { 0.0 },
                     peak_rss_mb().map(|m| format!("{:.1}", m)).unwrap_or_else(|| "unavailable".into()),

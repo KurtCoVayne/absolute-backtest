@@ -428,7 +428,7 @@ A seal record is written only after the log rows its block holds are durable, an
 
 1. Open the latest manifest and map its segments.
 2. Replay the seal journal past the manifest's high-water: journaled blocks join their block tables; bytes of append segments past the last record are truncated (a crash between writing a block and its record).
-3. Rebuild every tail from the log: per instrument, the rows after its last sealed block, at most 1,023 per (column, level); about 50M rows in the worst case of 10,000 live instruments, a sequential log read and about 100 ns an append, under 10 s.
+3. Rebuild every tail from the log: per instrument, the rows after its last sealed block, at most 1,023 per (column, level); about 50M rows in the worst case of 10,000 live instruments, a sequential log read and about 100 ns an append, under 10 s. (As measured: 34 to 70 s for the 46M-row tails of MW14's store, ERRATA E-93; the packed tail is not built.)
 4. Prefault and lock the hot store (ST-9.1), 2 to 4 s from NVMe.
 5. Resume subscriptions from their acknowledged sequences (D-5.6).
 

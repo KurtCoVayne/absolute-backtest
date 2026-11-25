@@ -309,9 +309,11 @@ all` on the same box thrashes and does not finish: the trim is what makes the
 run fit. The run is not at parity through this data path: against the canon,
 weekly correlation 0.9777, CAGR 18.5% against 20.9%, Sharpe 0.959 against
 1.020, maximum drawdown −25.9% against −26.2%, 25% of the weeks equal to 1e-4
--- the kernel reproduces the canon exactly from the v1 bundle, so the gap is
-the adapter's weekly views of the daily lake against the bundle's, and it is
-the owner's open question 7 narrowed to the data path. The ledgers of the two
+-- the old engine reproduces the canon exactly from the v1 bundle
+(`docs/parity-mw14.md`); no full-size run of the three-layer kernel on that
+bundle is recorded, so the kernel and the adapter's weekly views of the daily
+lake are not yet separated as causes of the gap (the owner's open question 7;
+package 5 of `docs/handoff/roadmap.md`). The ledgers of the two
 observed relations are written at the barriers under trimming (E-126); on a
 served synthetic market of 1,000 names both histories give the same events,
 book, fills, decisions and ledgers.
@@ -323,7 +325,7 @@ windows, 100 s), `dollar_volume@base` 14 (the daily relation `dvol` buckets,
 derived whole at 8,934 daily bars), `prev_row` 12, `dividend_at` 12,
 `traded@weekly` 11 -- the executor's fills and marks 54 s, the memo's
 eviction 17 s, the tuples' insertion 10 s, and some 75 s waiting on the
-stream of daily rows. Three increments of 3.2 are in (E-125): a positive
+stream of daily rows. Three increments of 3.2 are in (E-131): a positive
 atom over a block in entity order joined by one merge pass, a rows window's
 conjunction solved once for the whole block at the bar, the same for bucket
 and span windows; each held equal to the demand-driven evaluator by
@@ -342,6 +344,16 @@ therefore the tuple-at-a-time evaluator and its allocations, not the stream
 -- the column-block evaluator and the window states of 3.2 are the next
 step, and the aggregate pushdown of `dvol` and `traded@weekly` (E-127) is a
 memory lever before it is a time lever.
+
+(Nov 24: that reading rests on the profile, which samples the front's CPU.
+It cannot see the 75 s of the same run's clock that the front spends
+waiting on the stream, nor the data service's own work. The clock groups
+up to 140 s on the data path -- the wait, the insertion, and the three
+derivations that only bucket daily rows into weeks -- and 216 s in the
+evaluator and the executor (`docs/handoff/status.md` section 3). Which
+reading is right is measured, not argued: the benchmark of
+`docs/handoff/roadmap.md` package 1 records the data service's CPU time
+beside the front's wait.)
 
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed

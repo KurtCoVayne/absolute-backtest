@@ -1,0 +1,613 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index b841865..2f4789e 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -55,6 +55,7 @@ dependencies = [
+  "parquet",
+  "serde",
+  "serde_json",
++ "smallvec",
+ ]
+ 
+ [[package]]
+@@ -1684,6 +1685,9 @@ name = "smallvec"
+ version = "1.16.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
++dependencies = [
++ "serde",
++]
+ 
+ [[package]]
+ name = "snap"
+diff --git a/crates/abt-kernel/Cargo.toml b/crates/abt-kernel/Cargo.toml
+index 8e5be1d..1244637 100644
+--- a/crates/abt-kernel/Cargo.toml
++++ b/crates/abt-kernel/Cargo.toml
+@@ -20,4 +20,7 @@ abt-wire.workspace = true
+ arrow.workspace = true
+ parquet.workspace = true
+ serde.workspace = true
++# A tuple's values inline (K-7.1: no allocation per tuple for the two to four
++# values nearly every relation has).
++smallvec = { version = "1", features = ["serde"] }
+ serde_json.workspace = true
+diff --git a/crates/abt-kernel/src/bundle.rs b/crates/abt-kernel/src/bundle.rs
+index 09efc98..4c70cce 100644
+--- a/crates/abt-kernel/src/bundle.rs
++++ b/crates/abt-kernel/src/bundle.rs
+@@ -205,7 +205,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
+         let res = sig.native.unwrap_or(prog.base);
+         let records = ds.availability_of(rel).is_some();
+         let schema = Arc::new(schema_of(sig, records)?);
+-        let mut by_month: BTreeMap<String, Vec<(usize, &Vec<Value>)>> = BTreeMap::new();
++        let mut by_month: BTreeMap<String, Vec<(usize, &crate::kernel::Tuple)>> = BTreeMap::new();
+         for (i, tu) in tuples.iter().enumerate() {
+             let t = tu[key_pos].as_time().ok_or_else(|| format!("`{}`: a tuple without a timestamp key", rel))?;
+             by_month.entry(month_label(t)).or_default().push((i, tu));
+@@ -348,9 +348,9 @@ fn read_facts(prog: &Program, dir: &Path, m: &Manifest) -> Result<Dataset, Strin
+                     }
+                     if records {
+                         let avail = int_at(batch.column(sig.args.len()), row, &path)?;
+-                        ds.add_available(&entry.name, tuple, avail);
++                        ds.add_available(&entry.name, tuple.into(), avail);
+                     } else {
+-                        ds.add(&entry.name, tuple);
++                        ds.add(&entry.name, tuple.into());
+                     }
+                 }
+             }
+diff --git a/crates/abt-kernel/src/data.rs b/crates/abt-kernel/src/data.rs
+index 746fde5..7047a92 100644
+--- a/crates/abt-kernel/src/data.rs
++++ b/crates/abt-kernel/src/data.rs
+@@ -121,8 +121,8 @@ pub fn load_parquet_dir(prog: &Program, dir: &Path) -> Result<(Dataset, Vec<Stri
+                 None => {
+                     seen.insert(id, (row, tuple.clone()));
+                     match avail {
+-                        Some(a) => ds.add_available(name, tuple, a),
+-                        None => ds.add(name, tuple),
++                        Some(a) => ds.add_available(name, tuple.into(), a),
++                        None => ds.add(name, tuple.into()),
+                     }
+                 }
+             }
+@@ -377,7 +377,7 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
+         let vol = 0.01 + 0.004 * k;
+         for (k, &t) in bars.iter().enumerate() {
+             if i + 1 == n && n > 2 && k >= delist_bar {
+-                ds.add("delisted", vec![Value::Equity(sym), Value::Time(t), Value::Label(bankrupt)]);
++                ds.add("delisted", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(bankrupt)]);
+                 continue;
+             }
+             let spike = rng.uniform() < 0.03;
+@@ -385,14 +385,14 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
+             price *= (drift + shock + vol * rng.normal()).exp();
+             if i == 1 && n > 1 && k == split_bar {
+                 price /= 2.0;
+-                ds.add("split", vec![Value::Equity(sym), Value::Time(t), Value::Num(2.0)]);
++                ds.add("split", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(2.0)]);
+             }
+             if i == 0 && k >= 10 && (k - 10) % 63 == 0 && k + 15 < days {
+                 // Announced at k, ex at k + 10, paid at k + 25 (clamped to the data).
+                 let amount = (price * 0.005 * 100.0).round() / 100.0;
+                 ds.add(
+                     "dividend",
+-                    vec![
++                    smallvec::smallvec![
+                         Value::Equity(sym),
+                         Value::Time(t),
+                         Value::Time(bars[k + 10]),
+@@ -413,15 +413,18 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
+             let h = c.max(o) * (1.0 + 0.004 * rng.uniform());
+             let l = c.min(o) * (1.0 - 0.004 * rng.uniform());
+             let volume = (1_000_000.0 * (0.3 * rng.normal()).exp() * if spike { 3.0 } else { 1.0 }).round();
+-            ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+-            ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+-            ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+-            ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+-            ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
+-            ds.add("listed", vec![Value::Equity(sym), Value::Time(t)]);
+-            ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
+-            ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(sp500)]);
+-            ds.add("classification", vec![Value::Equity(sym), Value::Time(t), Value::Label(scheme), Value::Label(sectors[i % 3])]);
++            ds.add("open", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
++            ds.add("high", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
++            ds.add("low", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
++            ds.add("close", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
++            ds.add("volume", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
++            ds.add("listed", smallvec::smallvec![Value::Equity(sym), Value::Time(t)]);
++            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
++            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(sp500)]);
++            ds.add(
++                "classification",
++                smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(scheme), Value::Label(sectors[i % 3])],
++            );
+         }
+     }
+     // The series: a daily index level, and a weekly volatility index keyed
+@@ -431,12 +434,12 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
+     let mut last_week: Option<i64> = None;
+     for (k, &t) in bars.iter().enumerate() {
+         level *= (0.0003 + 0.009 * rng.normal()).exp();
+-        ds.add("value", vec![Value::Label(spxtr), Value::Time(t), Value::Num((level * 100.0).round() / 100.0)]);
++        ds.add("value", smallvec::smallvec![Value::Label(spxtr), Value::Time(t), Value::Num((level * 100.0).round() / 100.0)]);
+         let wk = week_key(t);
+         let ends_week = bars.get(k + 1).map(|&n| week_key(n) != wk).unwrap_or(true);
+         if ends_week && last_week != Some(wk) {
+             vix_level = (vix_level * (0.03 * rng.normal()).exp()).clamp(9.0, 80.0);
+-            ds.add("value", vec![Value::Label(vix), Value::Time(t), Value::Num((vix_level * 100.0).round() / 100.0)]);
++            ds.add("value", smallvec::smallvec![Value::Label(vix), Value::Time(t), Value::Num((vix_level * 100.0).round() / 100.0)]);
+             last_week = Some(wk);
+         }
+     }
+@@ -464,8 +467,8 @@ pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, b
+             // An overnight move, occasionally a sizeable gap.
+             let gap = 0.01 * rng.normal() + if rng.uniform() < 0.1 { -0.03 } else { 0.0 };
+             price *= (gap).exp();
+-            ds.add("listed", vec![Value::Equity(sym), Value::Time(d)]);
+-            ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(spx)]);
++            ds.add("listed", smallvec::smallvec![Value::Equity(sym), Value::Time(d)]);
++            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Label(spx)]);
+             for b in 0..bars_per_day {
+                 let t = d + 9 * time::HOUR + 31 * time::MIN + (b as i64) * time::MIN;
+                 let o = (price * 100.0).round() / 100.0;
+@@ -473,11 +476,14 @@ pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, b
+                 let c = (price * 100.0).round() / 100.0;
+                 let h = c.max(o) * (1.0 + 0.0005 * rng.uniform());
+                 let l = c.min(o) * (1.0 - 0.0005 * rng.uniform());
+-                ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+-                ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+-                ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+-                ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+-                ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num((3000.0 * (0.3 * rng.normal()).exp()).round())]);
++                ds.add("open", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
++                ds.add("high", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
++                ds.add("low", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
++                ds.add("close", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
++                ds.add(
++                    "volume",
++                    smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((3000.0 * (0.3 * rng.normal()).exp()).round())],
++                );
+             }
+         }
+     }
+@@ -512,10 +518,10 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
+             let open_t = d + 9 * time::HOUR + 30 * time::MIN;
+             let gap = 0.004 * rng.normal();
+             price += price.abs().max(1.0) * gap;
+-            ds.add("point_value", vec![Value::Equity(sym), Value::Time(d), Value::Num(50.0 - 10.0 * (i % 4) as f64)]);
+-            ds.add("commission", vec![Value::Equity(sym), Value::Time(d), Value::Num(2.0 + 0.5 * i as f64)]);
+-            ds.add("usable", vec![Value::Equity(sym), Value::Time(d)]);
+-            ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(home)]);
++            ds.add("point_value", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Num(50.0 - 10.0 * (i % 4) as f64)]);
++            ds.add("commission", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Num(2.0 + 0.5 * i as f64)]);
++            ds.add("usable", smallvec::smallvec![Value::Equity(sym), Value::Time(d)]);
++            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Label(home)]);
+             let mut last = open_t;
+             for b in 0..bars_per_session {
+                 let t = open_t + time::MIN + (b as i64) * time::MIN;
+@@ -524,14 +530,17 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
+                 let c = (price * 100.0).round() / 100.0;
+                 let h = c.max(o) + 0.01 * rng.uniform();
+                 let l = c.min(o) - 0.01 * rng.uniform();
+-                ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+-                ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+-                ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+-                ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+-                ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num((500.0 * (0.3 * rng.normal()).exp()).round())]);
++                ds.add("open", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
++                ds.add("high", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
++                ds.add("low", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
++                ds.add("close", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
++                ds.add(
++                    "volume",
++                    smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((500.0 * (0.3 * rng.normal()).exp()).round())],
++                );
+                 last = t;
+             }
+-            ds.add("session", vec![Value::Equity(sym), Value::Time(last), Value::Time(open_t)]);
++            ds.add("session", smallvec::smallvec![Value::Equity(sym), Value::Time(last), Value::Time(open_t)]);
+         }
+     }
+     ds
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+index 0b4d95b..8ef3361 100644
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1854,7 +1854,7 @@ impl Decoder {
+                     let Some(conv) = self.converter(k, bound, b, &stored_rel) else { continue };
+                     let rel = conv.rel;
+                     let args = conv.args.clone();
+-                    let mut tuple: Tuple = Vec::with_capacity(args.len());
++                    let mut tuple: Tuple = smallvec::SmallVec::with_capacity(args.len());
+                     for a in &args {
+                         let v = match a {
+                             None => Value::Time(key),
+diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
+index 0a4745b..bc11c5c 100644
+--- a/crates/abt-kernel/src/kernel/eval.rs
++++ b/crates/abt-kernel/src/kernel/eval.rs
+@@ -467,7 +467,12 @@ impl<'p> Kernel<'p> {
+         let matches = |tu: &[Value]| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
+         if info.stored {
+             let entity = info.entity_positions.first().and_then(|&e| pattern[e].as_ref());
+-            let tuples: Vec<(Tuple, usize)> = self.store_lookup(rel, key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)).collect();
++            let tuples: Vec<(Tuple, usize)> = self
++                .store_lookup(rel, key, entity)
++                .iter()
++                .filter(|tu| matches(tu))
++                .map(|tu| (smallvec::SmallVec::from(tu), usize::MAX))
++                .collect();
+             let cov = &mut self.coverage[rel];
+             cov.0 += 1;
+             cov.1 += usize::from(!tuples.is_empty());
+@@ -720,7 +725,7 @@ impl<'p> Kernel<'p> {
+             }
+             for i in 0..sols.len() {
+                 let sol = sols.row(i);
+-                let mut tu = Vec::with_capacity(rule.head.terms.len());
++                let mut tu: Tuple = smallvec::SmallVec::with_capacity(rule.head.terms.len());
+                 for term in &rule.head.terms {
+                     tu.push(self.term_value(&cr, term, sol)?);
+                 }
+@@ -1166,7 +1171,7 @@ impl<'p> Kernel<'p> {
+         let slots = self.atom_slots(cr, atom);
+         // The relation, whole at the bar.
+         let tuples: Vec<Tuple> = if stored {
+-            self.store_lookup(rel, key, None).iter().map(|tu| tu.to_vec()).collect()
++            self.store_lookup(rel, key, None).iter().map(|tu| smallvec::SmallVec::from(tu)).collect()
+         } else {
+             let mkey: super::MemoKey = (rel, vec![Value::Time(key)]);
+             // A halt the whole demand meets is the row-at-a-time path's to
+@@ -1265,7 +1270,12 @@ impl<'p> Kernel<'p> {
+             let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
+             let mut cur = t;
+             while let Some(k) = self.stores[rel].by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
+-                found.extend(self.store_lookup(rel, k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)));
++                found.extend(
++                    self.store_lookup(rel, k, entity.as_ref())
++                        .iter()
++                        .filter(|tu| matches(tu))
++                        .map(|tu| (smallvec::SmallVec::from(tu), usize::MAX)),
++                );
+                 if !found.is_empty() || k == i64::MIN {
+                     break;
+                 }
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+index 07565a5..7be7a42 100644
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -34,7 +34,9 @@ pub use events::{Book, EventKind, OrderId, RunEvent};
+ pub use fold::{Checkpoint, CheckpointEvery, Event, Fold};
+ pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
+ 
+-pub type Tuple = Vec<Value>;
++/// A relation's tuple: its values inline up to four (no allocation for
++/// nearly every tuple), on the heap beyond.
++pub type Tuple = smallvec::SmallVec<[Value; 4]>;
+ /// Memo key: relation id, then the key time and the input values.
+ pub(crate) type MemoKey = (usize, Vec<Value>);
+ 
+@@ -411,7 +413,7 @@ impl Dataset {
+         let mut out = Vec::with_capacity(rows.len());
+         for (sym, t, ticker) in rows {
+             let label = self.labels.intern(&ticker);
+-            out.push(vec![Value::Equity(sym), Value::Time(t), Value::Label(label)]);
++            out.push(smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(label)]);
+         }
+         self.facts.insert("ticker".to_string(), out);
+     }
+@@ -1920,7 +1922,7 @@ impl Store {
+             for (_, block) in old {
+                 dropped += block.len();
+                 for tu in block.iter() {
+-                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), tu.to_vec());
++                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), smallvec::SmallVec::from(tu));
+                 }
+             }
+             let mut kept: Vec<Tuple> = latest.into_values().collect();
+@@ -3034,7 +3036,7 @@ impl<'p> Kernel<'p> {
+                 }
+             }
+             for (sym, b) in facts {
+-                stores[cid].insert(b, vec![Value::Equity(sym), Value::Time(b)]);
++                stores[cid].insert(b, smallvec::smallvec![Value::Equity(sym), Value::Time(b)]);
+             }
+         }
+         // A week of slack covers `prev` across weekends and holidays at any resolution.
+@@ -4837,7 +4839,7 @@ mod store_tests {
+     const IDENTITY: [usize; 1] = [0];
+ 
+     fn tu(e: Sym, v: f64) -> Tuple {
+-        vec![Value::Equity(e), Value::Time(KEY), Value::Num(v)]
++        smallvec::smallvec![Value::Equity(e), Value::Time(KEY), Value::Num(v)]
+     }
+ 
+     fn rows(s: &Store) -> Vec<(Sym, f64)> {
+diff --git a/crates/abt-kernel/src/kernel/rows.rs b/crates/abt-kernel/src/kernel/rows.rs
+index 03cec2c..41ca225 100644
+--- a/crates/abt-kernel/src/kernel/rows.rs
++++ b/crates/abt-kernel/src/kernel/rows.rs
+@@ -133,7 +133,7 @@ impl<'a> RowSlice<'a> {
+ 
+     /// The rows as tuples of their own.
+     pub fn to_vec(&self) -> Vec<Tuple> {
+-        self.iter().map(|t| t.to_vec()).collect()
++        self.iter().map(smallvec::SmallVec::from).collect()
+     }
+ }
+ 
+@@ -158,7 +158,7 @@ mod tests {
+     use super::*;
+ 
+     fn tu(e: u32, v: f64) -> Tuple {
+-        vec![Value::Equity(e), Value::Time(7), Value::Num(v)]
++        smallvec::smallvec![Value::Equity(e), Value::Time(7), Value::Num(v)]
+     }
+ 
+     fn values(rows: RowSlice<'_>) -> Vec<(u32, f64)> {
+diff --git a/crates/abt-kernel/src/live/executor.rs b/crates/abt-kernel/src/live/executor.rs
+index cfd590f..37d6c42 100644
+--- a/crates/abt-kernel/src/live/executor.rs
++++ b/crates/abt-kernel/src/live/executor.rs
+@@ -353,7 +353,7 @@ impl BrokerExecutor {
+                 self.sim.note_filled(quantity.abs(), participation);
+                 k.last_price.insert(sym, price);
+                 let fill_rel = k.rel_id("fill");
+-                k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(quantity), Value::Num(price)]);
++                k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(quantity), Value::Num(price)]);
+                 result.costs.commissions += commission;
+                 result.costs.turnover += quantity.abs() * price * m;
+             }
+@@ -559,9 +559,9 @@ impl Executor for BrokerExecutor {
+         let cash_rel = k.rel_id("cash");
+         let book = self.sim.book_ref();
+         for (&sym, &q) in &book.positions {
+-            k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
++            k.stores[position].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
+         }
+-        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(book.cash)]);
++        k.stores[cash_rel].insert(tn, smallvec::smallvec![Value::Time(tn), Value::Num(book.cash)]);
+         Ok(())
+     }
+ 
+diff --git a/crates/abt-kernel/src/sim/equity.rs b/crates/abt-kernel/src/sim/equity.rs
+index 102aaa7..6fae702 100644
+--- a/crates/abt-kernel/src/sim/equity.rs
++++ b/crates/abt-kernel/src/sim/equity.rs
+@@ -158,7 +158,7 @@ impl SimExecutor {
+                 };
+                 result.costs.commissions += commission;
+                 result.costs.turnover += qty.abs() * price * m;
+-                k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
++                k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
+                 // The forced close takes the position to zero; the action
+                 // carries the proceeds.
+                 let fill = FillRecord {
+diff --git a/crates/abt-kernel/src/sim/future.rs b/crates/abt-kernel/src/sim/future.rs
+index 1144aeb..c5d2771 100644
+--- a/crates/abt-kernel/src/sim/future.rs
++++ b/crates/abt-kernel/src/sim/future.rs
+@@ -239,7 +239,7 @@ impl SimExecutor {
+                 Some(s) => (s.expiry, s.point_value),
+                 None => continue,
+             };
+-            k.stores[rel].insert(t, vec![Value::Equity(c), Value::Time(t), Value::Equity(root), Value::Time(expiry), Value::Num(pv)]);
++            k.stores[rel].insert(t, smallvec::smallvec![Value::Equity(c), Value::Time(t), Value::Equity(root), Value::Time(expiry), Value::Num(pv)]);
+         }
+     }
+ }
+diff --git a/crates/abt-kernel/src/sim/mod.rs b/crates/abt-kernel/src/sim/mod.rs
+index dff5366..b6f5d51 100644
+--- a/crates/abt-kernel/src/sim/mod.rs
++++ b/crates/abt-kernel/src/sim/mod.rs
+@@ -823,7 +823,7 @@ impl SimExecutor {
+             self.record(result, RunEvent::new(at, Some(sym), EventKind::Fill { fill, remainder }).rule(*rule).order(*id).cash(-cost));
+             self.limit_state.traded.push_back((at, qty.abs() * fill_price * m));
+             k.last_price.insert(sym, fill_price);
+-            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
++            k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
+             bar_costs += commission + fee + slippage + impact;
+             result.costs.commissions += commission;
+             result.costs.fees += fee;
+@@ -892,7 +892,7 @@ impl SimExecutor {
+                     result.costs.commissions += commission;
+                     result.costs.turnover += qty.abs() * p * m;
+                     k.last_price.insert(sym, p);
+-                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
++                    k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
+                     continue;
+                 }
+             }
+@@ -911,9 +911,9 @@ impl SimExecutor {
+             );
+         }
+         for (&sym, &q) in &self.book.positions {
+-            k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
++            k.stores[position].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
+         }
+-        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.book.cash)]);
++        k.stores[cash_rel].insert(tn, smallvec::smallvec![Value::Time(tn), Value::Num(self.book.cash)]);
+         Ok(())
+     }
+ 
+@@ -1026,12 +1026,12 @@ impl SimExecutor {
+             tus.clear();
+         }
+         for (&sym, &q) in &self.book.positions {
+-            k.stores[position].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
++            k.stores[position].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
+         }
+         if let Some(tus) = k.stores[cash_rel].by_time.get_mut(&t) {
+             tus.clear();
+         }
+-        k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.book.cash)]);
++        k.stores[cash_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(self.book.cash)]);
+     }
+ }
+ 
+@@ -1044,7 +1044,7 @@ impl SimExecutor {
+         if self.bars.is_empty() {
+             // Cash at the first bar, so that cash-aware rules can fire from the start.
+             let cash_rel = k.rel_id("cash");
+-            k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.book.cash)]);
++            k.stores[cash_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(self.book.cash)]);
+         }
+         self.bars.push(t);
+         result.bars.push(t);
+@@ -1145,7 +1145,7 @@ impl SimExecutor {
+                         result.costs.commissions += commission;
+                         result.costs.fees += fee;
+                         result.costs.turnover += qty.abs() * p * m;
+-                        k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
++                        k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
+                         let fill = FillRecord {
+                             t,
+                             equity: sym,
+@@ -1194,17 +1194,17 @@ impl SimExecutor {
+         // `nav(T, N)`: the book's value at T's mark, before T's decisions
+         // (data-bundle doc, section 7: what the metrics library reads).
+         let nav_rel = k.rel_id("nav");
+-        k.stores[nav_rel].insert(t, vec![Value::Time(t), Value::Num(equity)]);
++        k.stores[nav_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(equity)]);
+         // `capital(T, C)`: what a weight is a fraction of (the fixed base or
+         // the equity); `mark(A, T, P)`: the price each holding is marked at.
+         let capital_rel = k.rel_id("capital");
+-        k.stores[capital_rel].insert(t, vec![Value::Time(t), Value::Num(base)]);
++        k.stores[capital_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(base)]);
+         let mark_rel = k.rel_id("mark");
+         let held: Vec<(Sym, f64)> = self.book.positions.iter().map(|(s, q)| (*s, *q)).collect();
+         for (sym, q) in held {
+             let (mark, source) = k.mark_with_source(sym, t);
+             if let Some(p) = mark {
+-                k.stores[mark_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
++                k.stores[mark_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
+             }
+             result.holdings.push(HoldingRecord {
+                 t,
+@@ -1585,7 +1585,7 @@ impl Kernel<'_> {
+         for ds in by_equity.values() {
+             for (d, rule) in ds {
+                 result.emit(RunEvent::new(t, Some(d.equity), EventKind::Decision { decision: d.clone() }).rule(*rule));
+-                self.stores[decided].insert(t, vec![Value::Time(t), Value::Decision(Box::new(d.clone()))]);
++                self.stores[decided].insert(t, smallvec::smallvec![Value::Time(t), Value::Decision(Box::new(d.clone()))]);
+             }
+         }
+         Ok(by_equity)
+diff --git a/crates/abt-kernel/src/sim/option.rs b/crates/abt-kernel/src/sim/option.rs
+index 40fe049..0e6a5f3 100644
+--- a/crates/abt-kernel/src/sim/option.rs
++++ b/crates/abt-kernel/src/sim/option.rs
+@@ -570,7 +570,7 @@ impl SimExecutor {
+             tag(RunEvent::new(t, Some(o.underlying), EventKind::Fill { fill, remainder: None }).cash(-delivered * o.strike * m)),
+         );
+         let fill_rel = k.rel_id("fill");
+-        k.stores[fill_rel].insert(t, vec![Value::Equity(o.underlying), Value::Time(t), Value::Num(delivered), Value::Num(o.strike)]);
++        k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(o.underlying), Value::Time(t), Value::Num(delivered), Value::Num(o.strike)]);
+     }
+ 
+     /// The options the book holds, with their positions.
+@@ -913,7 +913,7 @@ impl SimExecutor {
+             self.limit_state.traded.push_back((tn, q.abs() * p * m));
+             self.record(result, RunEvent::new(tn, Some(sym), EventKind::Fill { fill, remainder: None }).rule(rule).order(id).cash(-flow));
+             k.last_price.insert(sym, p);
+-            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q), Value::Num(p)]);
++            k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(q), Value::Num(p)]);
+         }
+         Ok(false)
+     }
+@@ -929,7 +929,7 @@ impl SimExecutor {
+         let mut contracts: BTreeSet<Sym> = BTreeSet::new();
+         for need in k.chain_needs.clone() {
+             for a in k.chain_at(&need, t) {
+-                k.stores[chain_rel].insert(t, vec![Value::Equity(need.underlying), Value::Time(t), Value::Equity(a)]);
++                k.stores[chain_rel].insert(t, smallvec::smallvec![Value::Equity(need.underlying), Value::Time(t), Value::Equity(a)]);
+                 contracts.insert(a);
+             }
+         }
+@@ -941,7 +941,7 @@ impl SimExecutor {
+             if let (Some(right), Some(style), Some(settlement)) = (label(k, right_word(o.right)), label(k, style_word(o.style)), label(k, settlement)) {
+                 k.stores[spec_rel].insert(
+                     t,
+-                    vec![
++                    smallvec::smallvec![
+                         Value::Equity(a),
+                         Value::Time(t),
+                         Value::Equity(o.underlying),
+@@ -955,7 +955,7 @@ impl SimExecutor {
+                 );
+             }
+             if let Some(g) = k.option_greeks(a, t) {
+-                let mut tu = vec![Value::Equity(a), Value::Time(t)];
++                let mut tu: crate::kernel::Tuple = smallvec::smallvec![Value::Equity(a), Value::Time(t)];
+                 tu.extend(g.iter().map(|x| Value::Num(*x)));
+                 k.stores[greeks_rel].insert(t, tu);
+                 written.insert(a, g);
+diff --git a/crates/abt-kernel/src/sim/requirement.rs b/crates/abt-kernel/src/sim/requirement.rs
+index dbe617b..3c61aa6 100644
+--- a/crates/abt-kernel/src/sim/requirement.rs
++++ b/crates/abt-kernel/src/sim/requirement.rs
+@@ -138,13 +138,16 @@ impl SimExecutor {
+     /// warnings count: the bars `approx` priced, the models passed over.
+     pub(super) fn write_requirement(&mut self, k: &mut Kernel, t: i64, initial: f64, maintenance: f64, margin: Option<&Margin>) {
+         if let Some(&rel) = k.rel_ids.get("margin_req") {
+-            k.stores[rel].insert(t, vec![Value::Time(t), Value::Num(initial), Value::Num(maintenance)]);
++            k.stores[rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(initial), Value::Num(maintenance)]);
+         }
+         let Some(margin) = margin else { return };
+         if let Some(&rel) = k.rel_ids.get("margin_by") {
+             for r in &margin.rows {
+                 let Some(source) = k.labels.get(r.source.name()).map(Value::Label) else { continue };
+-                k.stores[rel].insert(t, vec![Value::Equity(r.instrument), Value::Time(t), Value::Num(r.initial), Value::Num(r.maintenance), source]);
++                k.stores[rel].insert(
++                    t,
++                    smallvec::smallvec![Value::Equity(r.instrument), Value::Time(t), Value::Num(r.initial), Value::Num(r.maintenance), source],
++                );
+             }
+         }
+         if margin.approx_used {
+@@ -222,7 +225,7 @@ impl SimExecutor {
+                     let m = k.multiplier(sym);
+                     result.costs.commissions += commission;
+                     result.costs.turnover += qty.abs() * p * m;
+-                    k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
++                    k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
+                     let fill = FillRecord {
+                         t,
+                         equity: sym,
+diff --git a/crates/abt-kernel/src/state/tables.rs b/crates/abt-kernel/src/state/tables.rs
+index 6ca69ea..44a75af 100644
+--- a/crates/abt-kernel/src/state/tables.rs
++++ b/crates/abt-kernel/src/state/tables.rs
+@@ -409,7 +409,7 @@ pub fn tuples_at(k: &mut Kernel, prog: &Program, rel: &str, t: i64, inputs: Opti
+     let mut notes = Vec::new();
+     for set in input_sets(k, prog, rel, inputs)? {
+         match k.query(rel, t, &set) {
+-            Ok(tus) => out.extend(tus),
++            Ok(tus) => out.extend(tus.into_iter().map(|tu| tu.to_vec())),
+             Err(RunError::Arithmetic { rule, bindings, expr, message }) => notes.push(format!("{}: partial arithmetic in {} at [{}]: `{}`: {}", format_timestamp(t), rule, bindings, expr, message)),
+             Err(e) => return Err(e),
+         }
+diff --git a/crates/abt-kernel/src/verify/tv.rs b/crates/abt-kernel/src/verify/tv.rs
+index f598184..6a1d171 100644
+--- a/crates/abt-kernel/src/verify/tv.rs
++++ b/crates/abt-kernel/src/verify/tv.rs
+@@ -92,7 +92,7 @@ pub fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> Ledgers {
+                 let mut all = Vec::new();
+                 for s in &symbols {
+                     match k.query(&rel, t, std::slice::from_ref(s)) {
+-                        Ok(tus) => all.extend(tus),
++                        Ok(tus) => all.extend(tus.into_iter().map(|tu| tu.to_vec())),
+                         Err(RunError::Arithmetic { .. }) => all.push(vec![Value::Count(-1)]),
+                         Err(e) => all.push(vec![Value::Count(-2), Value::Count(e.to_string().len() as i64)]),
+                     }
+@@ -100,7 +100,7 @@ pub fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> Ledgers {
+                 all
+             } else {
+                 match k.query(&rel, t, &[]) {
+-                    Ok(tus) => tus,
++                    Ok(tus) => tus.into_iter().map(|tu| tu.to_vec()).collect(),
+                     Err(RunError::Arithmetic { .. }) => vec![vec![Value::Count(-1)]],
+                     Err(e) => vec![vec![Value::Count(-2), Value::Count(e.to_string().len() as i64)]],
+                 }

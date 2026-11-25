@@ -1,0 +1,17 @@
+# proposition: E-128 (a replay keeps the rows after their instruments' sealed labels)
+# mutation: every replayed row kept, the sealed ones too
+# test: cargo test -p abt-data --test replay
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store_hot.rs b/crates/abt-data/src/store_hot.rs
+index 9da95fd..037726a 100644
+--- a/crates/abt-data/src/store_hot.rs
++++ b/crates/abt-data/src/store_hot.rs
+@@ -72,7 +72,7 @@ impl Store {
+         self.each_log_batch(relation, source, from, u64::MAX, |b| {
+             let ids = b.column(lay.identity[0]).as_primitive::<arrow::datatypes::UInt64Type>();
+             let ts = crate::rows::times(&b, lay.t);
+-            let keep: BooleanArray = (0..b.num_rows()).map(|i| Some(sealed.get(&ids.value(i)).is_none_or(|&l| ts.value(i) > l))).collect();
++            let keep: BooleanArray = (0..b.num_rows()).map(|i| Some(sealed.get(&ids.value(i)).is_none_or(|&l| ts.value(i) > l) || true)).collect();
+             let b = arrow::compute::filter_record_batch(&b, &keep)?;
+             if b.num_rows() > 0 {
+                 super::REPLAY_KEPT.fetch_add(b.num_rows() as u64, std::sync::atomic::Ordering::Relaxed);

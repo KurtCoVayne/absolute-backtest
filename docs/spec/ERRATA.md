@@ -2845,9 +2845,9 @@ batch driver agree on every corpus program. Each bless since:
   rows. `abt-tests/tests/list_scope.rs`: a list-gated universe binds its
   three members of six and runs as the same universe through a derived
   relation, bound to every instrument, does. [D] Open: a hard bound per
-  binding in the service; a suspect race in
-  `appends.rs::readers_at_a_sequence_keep_their_view_under_appends`,
-  failing in two of four full runs, passing alone.
+  binding in the service. (The suspect race in
+  `appends.rs::readers_at_a_sequence_keep_their_view_under_appends` was
+  the test's: E-129.)
 - **E-124 (K-3.1, Definition 3.2; N-hour bars over a minute base).**
   `need bars @2h` named no resolution (the lexer knows `@1m` to `@1w`),
   and no calendar constructor counted hours or minutes, so a rule on
@@ -2920,7 +2920,12 @@ batch driver agree on every corpus program. Each bless since:
   with the history streamed to it (MW14's run, E-93: 27 MB a second,
   killed past 8.5 GB) while the data layer held the same bytes. [D]
   `Kernel::trim_stores`, at every barrier after `evict_memo` when
-  `ExecConfig::trim_stores` (`abt run --history window`, the default):
+  `ExecConfig::trim_stores` (`abt run --history window`, the default of
+  that command and of no other path: the switch is off in `ExecConfig`
+  itself and not serialised, the kernel service builds a run's
+  configuration without it and `KernelRequest` has no field for it, so a
+  run made by `abt plan run` keeps its whole history; change (a) under
+  package 7 of `docs/handoff/roadmap.md`):
   every stored block keyed before the oldest bar any reader reaches from
   the barrier is dropped -- the memo's horizon, each `rows` window's count
   plus the slack a cold group walks back (`ROWS_SLACK + 3` bars of its
@@ -3005,6 +3010,216 @@ batch driver agree on every corpus program. Each bless since:
   and `trim_stores` are `#[serde(skip)]` on `ExecConfig`, as `pushdown`:
   none changes the result, so none is part of the configuration's
   identity (the binding table's `configuration` column, D-6.1).
+
+- **E-128 (ST-8.8; a replay held the log after a consolidation).** Opening
+  a hot version replays the log from `replay_from` into its tails. After
+  a consolidation that is the least sequence any tail held, so one
+  instrument's tail early in the log makes the replay read every later
+  append, most of them sealed. A Databento futures store's consolidated
+  `future.close` and `future.volume` replayed from sequence 11,139,746 of
+  137,347,262. Each open read about 126 million rows (5 GB of arrows),
+  concatenated them and normalised every row, then kept the few thousand
+  after their instruments' sealed labels. An ingest of one root (GDK, 176
+  contracts) grew from 1 GB to past 20 GB in that replay, and E-122's
+  build never ran. The served futures service carried the same peak. The
+  replay now reads the log batch by batch (`Store::each_log_batch`) and
+  cuts each batch to the rows after their instrument's last sealed label
+  before keeping it. The overlay never admits the others, and each
+  instrument's labels are cut whole, so the tails are those of before.
+  `abt-data/tests/replay.rs`: two instruments published, one with a
+  three-row tail early in the log, the other with 5,000 rows appended,
+  then a consolidation and a fresh open. The replay keeps exactly the
+  tails' 907 rows of the 5,003 after its start, and every answer is
+  unchanged; under the mutation it keeps all 5,003. [D] Open: the replay
+  still reads the log after `replay_from` at each open; consolidation
+  folding the tails into the base would end it. (Written in the
+  amendments tree on Oct 20 as its E-125, a number PR #80 had taken for
+  entity-parallel evaluation; the pipeline's `01-mvp.md:182` cites it
+  under the old number.)
+- **E-129 (ST-8.1's test; readers that never read).**
+  `appends.rs::readers_at_a_sequence_keep_their_view_under_appends`
+  appended a batch per write lock, took the lock again at once, and
+  asserted at the end that its three reader threads had checked a
+  snapshot. A waiting writer blocks new readers, so on a busy machine the
+  readers reached the end having checked none: two failures in four full
+  runs, then five in five alone. No read was wrong; the test checked
+  nothing. The writer now waits after each append, up to 5 s, until a
+  reader has checked a snapshot, so every append is interleaved with
+  reads. (The amendments tree's E-126; this is the race E-120 left open.)
+- **E-130 (06-performance 3.2; a slot map cached under a literal's
+  address).** Commit `9a255d9` kept each atom's slot map (the position in
+  the rule's environment that each of its terms binds) on the kernel
+  under `(rule, the atom's address)`, on the comment that "a literal's
+  address is stable for the run". It is not: a window's conjunction is
+  reordered into a temporary on every evaluation (`eval::conj_order`
+  returns a vector of cloned literals, at the three window paths), the
+  temporary is freed, and the next one's atoms can land at the same
+  addresses. Under one rule index `close(_, T, P1)` was then handed the
+  map of `close(_, T, P)`, bound `P` twice and left `P1` unbound:
+  `kernel.rs::quantile_conventions_and_the_aggregate_halt` panicked with
+  ``Internal("variable `P1` unbound in rule cut::cut#1")`` in CI from
+  that commit on. Whether an address is reused is the allocator's, so it
+  was reproduced on Linux (the benchmark machine at `eb3345c`: three
+  failures in three runs) and passes there with the cache gone; a pass
+  on macOS says nothing. Because `cargo test` stops at the first failing binary, the 42
+  `abt-tests` binaries after `kernel` and every crate tested after
+  `abt-tests` did not run in CI from `9a255d9` to the fix. [D] The cache
+  is removed and the map computed at each use, as before the commit: its
+  own measurement was 114.2 to 113.1 user-seconds on 1,000 synthetic
+  names for the three changes together, within noise. Rejected: a key
+  that does not depend on an address (the rule and the literal's position
+  in its body), since `atom_slots` is not handed the position and the
+  window paths solve reordered sub-conjunctions whose positions are not
+  the body's.
+- **E-131 (06-performance 3.2; the block evaluator's first increments,
+  as built).** 3.2 lowers a rule to a plan over column blocks. Until that
+  evaluator exists (package 3 of `docs/handoff/roadmap.md`), four paths
+  of the set evaluator answer for a whole block of bindings what `step`
+  answered per row, each falling back to the row-at-a-time path when its
+  form does not hold, and each yielding the rows the fallback would, in
+  its order. (a) `eval::merge_join_atom` (`09f0c0b`): a positive atom
+  with no constructor term and no inputs, over a block of at least 32
+  rows that bind its entity in ascending order and its time to one bar,
+  is demanded once, whole, and walked beside the block; a halt the whole
+  demand meets, or any stuck instance at the bar, leaves the literal to
+  the row-at-a-time path, which places the halt on the rows it belongs
+  to. (b) `eval::prefetch_rows_window` (`5dd1a64`): when every row of a
+  block asks a `rows` window at the same bar with the window's time
+  free, the anchor and the conjunction are solved once over the block and
+  each group is fed its own row's solutions; a row on which an instance
+  stuck is solved alone. (c) `eval::prefetch_bucket_window` (`479782a`):
+  the bars the first row's group misses of a bucket or span window, each
+  solved over the whole block. (d) `Kernel::call_first` (`eb3345c`): the
+  executor's mark reads the one tuple of an entity from a memoised block
+  of more than `SORTED_MIN` tuples by binary search, without building the
+  result set; any other case is `call`. The loop over the block's rows
+  remains in (b) and (c): each row's `step` reads the prefetched result.
+  [D] These are increments under today's row-major `Value` blocks, not
+  the plan of 3.2; `docs/assessment.md` credited them to E-125, whose
+  text is the parallel cut. Held equal by `tests/eval_set.rs` on every
+  corpus program and both books. Measured: 377 s to 367 s on the full
+  MW14; 27.8 to 23.1 CPU-seconds on a served store of 1,000 synthetic
+  names.
+- **E-132 (K-3.4, the as-of join on a derived relation; a walk's answer
+  served to another entity).** `R(...) asof T` on a derived relation
+  walks R's own bars back from T and remembers, for every bar walked,
+  the bar the walk ended at (`Kernel::asof_memo`). The memo was keyed by
+  (relation, the relation's inputs, bar), without the atom's other bound
+  terms, though the walk's answer is "the latest bar with a tuple
+  matching this pattern": with the entity bound, one entity's answer was
+  served to the next entity asking as of the same bar -- a bar where that
+  entity has no tuple, or "no tuple at or before here" though it has one
+  -- and it read nothing. PR #80 listed the hazard. No synthetic market of
+  the suite met it (every name there has a row at every bar, and a read
+  of the previous row is answered by the walk's first step, without the
+  memo); a name with a missing bar does, which the real lake has: the
+  full MW14 through the Norgate adapter decides 6,481 times with this
+  batch against 6,455 on Nov 6 (E-130's fix is in the same batch, and
+  the two are not separated). The key is now the atom's whole
+  pattern with the time unbound. `abt-tests/tests/asof.rs::
+  a_derived_relation_is_walked_back_for_each_entity`: two names whose
+  only tuples sit at different bars each read their own from the second
+  day on; under the old key the first name is handed, on the second day,
+  the second name's "no tuple at or before the first day" and decides
+  nothing, and nothing is decided after
+  (`scripts/mutations/e-132-asof-entity.patch`).
+- **E-133 (A-4, K-7.1, G3; wall-clock seconds in a run's outputs).**
+  Commit `54b6640` put the fold's phase clocks (`insert_secs`,
+  `fill_secs`, `decide_secs`, `exec_secs`, later `warm_secs`, `trim_secs`,
+  `evict_secs`) in `KernelStats`, beside `parallel_secs` of E-125. The
+  stats are serialised: they are the `stats` row of a run's `report`
+  output (`outputs.rs`) and a part of every checkpoint. So two runs of one
+  program over one binding wrote different `report` tables, against the
+  identity of A-4 (the same run id, the same bytes):
+  `outputs.rs::a_run_writes_its_outputs_at_every_checkpoint`, which holds
+  a checkpointing run's outputs equal to a plain run's, failed from that
+  commit on. It was not seen: `outputs` sorts after `kernel`, where E-130
+  stopped every CI run, and the first whole suite since (the benchmark
+  machine, Nov 25) found it. [D] Every `*_secs` field of `KernelStats` is
+  `#[serde(skip)]`: `--timing` reads them from the result in process, and
+  nothing stored or sent carries a clock. A run made through the kernel
+  service reports no phase seconds to its caller; a resumed run's clock
+  starts at its checkpoint. The clock gains what the fold did not time: `bind_secs`,
+  `check_secs` (the preconditions), `push_secs` (the pushed aggregates
+  asked of the data layer), `open_secs` (the subscription), `wait_secs`
+  (blocked on the stream's next batch), `decode_secs` (a batch turned
+  into tuples), `stream_secs` (the whole stream loop) and `write_secs`
+  (the ledgers and outputs after the last barrier); and the stats gain
+  `received_rows`, the tuples the stream delivered, counted at the
+  fold's door (the rows the executor writes into the stores are not
+  among them), which is not a clock and is serialised. Under
+  `ABT_TIMING_RELS=1`: `phases bind= check= push= open= stream= write=
+  wait= decode= …` and `rows <relation> received= held=`; `tuples=` on
+  the `timing` line of a served run is that count, where it printed 0
+  (it counted the local dataset, and a served run has none).
+  **Open:** the stats row still carries counters that follow a run's
+  options and not its identity (`parallel_steps`, `parallel_rows`,
+  `trimmed_rows`, `memo_entries`, `rows_state_groups`, the window
+  counters, `pushed_answers`), and `threads`, `trim_stores` and
+  `pushdown` are not in the run id: two runs of one program over one
+  binding write the same `report` only when made with the same options,
+  and a second run with another thread count or history into the same
+  store is refused at its write ("two rows of one identity ... differ").
+  The same refusal meets a later build that decides differently on a
+  store an earlier build's run was written to: `scripts/bench-mw14.sh`
+  refuses a store that holds `kernel.*`.
+- **E-134 (E-126, A-D56; a trimmed run and an entity absent for longer
+  than the horizon) -- open, found by reading (Nov 25), not reproduced.**
+  With the stores trimmed, a call of a derived relation behind the
+  memo's oldest bucket with its entity bound is answered from the
+  latest tuples the eviction kept for that entity (`eval.rs`, "Behind
+  the memo's oldest bucket"), and the eviction keeps them for the
+  temporally recursive relations only (`Memo::evict_before`). So
+  `prev_row`'s `universe(A, T1) asof T0` finds nothing for a name whose
+  last row is behind the horizon: `first_row` holds again and the
+  name's chains (`row_number`, `cum_split`, `tr_index`) start over,
+  where the whole history steps from the name's last row. Keeping the
+  latest tuples of the relations read through `asof` as well is not
+  enough: a rule that reads a non-recursive relation at the previous
+  row (`total_return`'s `close(A, T0, P0)`) would then find `prev_row`
+  and no close, and the chain would have no tuple from there on. The
+  eviction has to keep the latest tuples per entity of every derived
+  relation, which is a cost on a phase that is 17 s of the full MW14
+  today. `tests/retention.rs` does not meet the case: every synthetic
+  name has a row at every bar. To do with package 5 of
+  `docs/handoff/roadmap.md`, with a retention case of a name absent for
+  longer than the horizon and the count of such names in the lake.
+- **E-135 (K-7.2, K-4.4, E-126; the memo cleared in mid-run under
+  trimming) -- open, found by reading (Nov 25), not reproduced.**
+  `Fold::restore` (a resumed run) and `Kernel::invalidate_from` (a late
+  tuple) clear the memo. The trimmed-read path of E-126 takes the
+  memo's oldest bucket as the sign that rows were dropped, and after a
+  clear the oldest bucket is the first bar memoised since: an
+  entity-bound read of a derived relation at any earlier bar is then
+  answered with nothing though the stores hold its rows, and the
+  latest tuples the eviction had kept are gone (neither is in the
+  checkpoint). `abt run` keeps trimming on for `--checkpoint-every` and
+  `--resume`. `tests/fold_checkpoint.rs` resumes with trimming off and
+  the command-line resume tests compare the final cash. The fix is the
+  eviction's cutoff kept on the kernel and in the checkpoint with the
+  kept tuples, and read in place of the oldest bucket; it belongs with
+  change (a) of package 7, which puts the horizon on the plan path,
+  where runs are resumed.
+- **E-136 (ST-8.3, E-90; the replay keeps the earliest row of a label
+  where the append kept the latest) -- open, found by reading (Nov 25),
+  not reproduced.** One appended batch holding two rows of an
+  instrument at one new label (a bar and its correction in one file) is
+  admitted as an append (`write_hot` tests each row against the overlay
+  before either is pushed); `Tail::insert` keeps the later. At the next
+  open `replay_tails` pushes the earlier and skips the later, since the
+  tail then holds the label: the store answers the superseded value
+  after a restart. E-128 did not change this (its cut drops whole
+  labels). Such a batch should be a revision, as `admits` says.
+- **E-137 (ST-8.4; a seal record's ordinal after a restart) -- open,
+  found by reading (Nov 25), not reproduced.** A seal record stores its
+  instrument's overlay ordinal; a restart numbers the unpublished
+  instruments in the order of their first seal record. When an
+  unpublished instrument sealed before one that arrived earlier,
+  `apply_record` reports the mismatch and `replay_journal` cuts the
+  journal there: the blocks recorded after stop being sealed, their
+  rows come back from the log as tails held in memory, and E-128's cut
+  has no sealed label to drop them by. Answers hold; the memory E-128
+  bounds does not. No test has two unpublished instruments.
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

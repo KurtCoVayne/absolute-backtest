@@ -50,6 +50,16 @@ pub const CONSOLIDATE_BYTES: u64 = 512 << 20;
 const FILES_KEPT: usize = 8192;
 const MANIFESTS_KEPT: usize = 4096;
 
+/// The log rows hot versions' replays have kept for their tails in this
+/// process (E-128's test).
+static REPLAY_KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The log rows replays kept for tails so far in this process: the rows
+/// after their instruments' sealed labels (E-128).
+pub fn replay_kept() -> u64 {
+    REPLAY_KEPT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The families of relations the layers derive rather than ingest (E-110):
 /// a run's outputs, the query layer's records, the aggregates' cache
 /// objects. They are no run's inputs, and their Parquet partitions are
@@ -649,6 +659,17 @@ impl Store {
     /// A log's rows with seq in `from..=to`, in acceptance order (D-5.4),
     /// refusing a gap or a reversal in the sequence (D-8.3).
     pub fn read_log(&self, relation: &str, source: &str, from: u64, to: u64) -> Result<Vec<RecordBatch>, DataError> {
+        let mut out = Vec::new();
+        self.each_log_batch(relation, source, from, to, |b| {
+            out.push(b);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// `read_log`'s batches handed to `f` one at a time, as they are read
+    /// (E-128: a caller keeping a few rows of a long log holds those).
+    pub fn each_log_batch(&self, relation: &str, source: &str, from: u64, to: u64, mut f: impl FnMut(RecordBatch) -> Result<(), DataError>) -> Result<(), DataError> {
         let dir = self.root.join("log").join(relation).join(source);
         let mut segments: Vec<(u64, u64, PathBuf)> = Vec::new();
         if dir.exists() {
@@ -663,7 +684,6 @@ impl Store {
             }
         }
         segments.sort();
-        let mut out = Vec::new();
         let mut expect = segments.first().map(|s| s.0).unwrap_or(1);
         for (a, b, p) in segments {
             if a != expect {
@@ -679,10 +699,10 @@ impl Store {
                 let seq_col = batch.num_columns() - 1;
                 let seqs = rows::seqs(&batch, seq_col);
                 let keep: BooleanArray = seqs.iter().map(|s| Some(s.is_some_and(|s| s >= from && s <= to))).collect();
-                out.push(arrow::compute::filter_record_batch(&batch, &keep)?);
+                f(arrow::compute::filter_record_batch(&batch, &keep)?)?;
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     // ------------------------------------------------------------ reading

@@ -602,7 +602,7 @@ impl<'p> Kernel<'p> {
             if let (Some(Value::Time(t)), Some(e)) = (pattern.get(info.key_pos).cloned().flatten(), info.entity_positions.first().copied()) {
                 if let Some(v) = pattern[e].as_ref() {
                     let memo_key: super::MemoKey = (rel, vec![Value::Time(t)]);
-                    if self.memo_stuck.get(&memo_key).is_none() {
+                    if !self.memo_stuck.contains_key(&memo_key) {
                         if let Some(hit) = self.memo_get(&memo_key) {
                             if hit.len() > SORTED_MIN {
                                 let lo = hit.partition_point(|(tu, _)| tu[e] < *v);
@@ -1077,20 +1077,17 @@ impl<'p> Kernel<'p> {
         }
     }
 
-    /// The pattern an atom presents to `call`, and whether each term needs
-    /// post-matching (constructor patterns and fresh variables).
-    /// The slot each term of an atom binds, computed once per (rule, atom)
-    /// and kept on the kernel (a literal's address is stable for the run).
-    fn atom_slots(&mut self, cr: &CompiledRule, atom: &Atom) -> Arc<Vec<Option<usize>>> {
-        let key = (cr.idx, atom as *const Atom as usize);
-        if let Some(s) = self.atom_slot_cache.get(&key) {
-            return s.clone();
-        }
-        let slots: Arc<Vec<Option<usize>>> = Arc::new(atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect());
-        self.atom_slot_cache.insert(key, slots.clone());
-        slots
+    /// The slot each term of an atom binds. Computed at each use: a literal
+    /// has no address that is stable for the run (a window's conjunction is
+    /// reordered into a temporary on every evaluation, `conj_order`), so a
+    /// cache keyed by the atom's address served one atom's map to another
+    /// (E-130).
+    fn atom_slots(cr: &CompiledRule, atom: &Atom) -> Vec<Option<usize>> {
+        atom.terms.iter().map(|t| if let Term::Var(v, _) = t { Some(cr.slots[v]) } else { None }).collect()
     }
 
+    /// The pattern an atom presents to `call`, and whether each term needs
+    /// post-matching (constructor patterns and fresh variables).
     fn atom_pattern(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>]) -> Result<Vec<Option<Value>>, RunError> {
         let mut pat = Vec::with_capacity(atom.terms.len());
         for term in &atom.terms {
@@ -1163,7 +1160,7 @@ impl<'p> Kernel<'p> {
             }
         }
         shared[key_pos] = Some(Value::Time(key));
-        let slots = self.atom_slots(cr, atom);
+        let slots = Self::atom_slots(cr, atom);
         // The relation, whole at the bar.
         let tuples: Vec<Tuple> = if stored {
             self.store_lookup(rel, key, None).iter().map(|tu| tu.to_vec()).collect()
@@ -1224,7 +1221,7 @@ impl<'p> Kernel<'p> {
             let Some(Value::Time(key)) = pat[key_pos] else {
                 return Err(RunError::Internal(format!("`{}` requested with an unbound temporal key", atom.name)));
             };
-            let slots = self.atom_slots(cr, atom);
+            let slots = Self::atom_slots(cr, atom);
             let entity = entity_pos.and_then(|e| pat[e].clone());
             for tu in self.store_lookup(rel, key, entity.as_ref()) {
                 if !pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true)) {
@@ -1285,14 +1282,17 @@ impl<'p> Kernel<'p> {
             }
             Arc::new(found)
         } else {
-            let mut mkey: Vec<Value> = Vec::with_capacity(info.inputs.len());
             for &i in &info.inputs {
-                match &pat[i] {
-                    Some(v) => mkey.push(v.clone()),
-                    None => return Err(RunError::Internal(format!("`{}` requested as of {} with its input #{} unbound", info.name, t, i + 1))),
+                if pat[i].is_none() {
+                    return Err(RunError::Internal(format!("`{}` requested as of {} with its input #{} unbound", info.name, t, i + 1)));
                 }
             }
             let entity = info.entity_positions.first().and_then(|&e| pat[e].as_ref()).and_then(|v| v.as_equity());
+            // The walk's answer is the latest bar with a tuple matching this
+            // pattern, so its memo is keyed by the whole pattern (the key
+            // unbound), the entity with it: keyed by the inputs alone, one
+            // entity's bar was served to the next (E-132).
+            let akey: Vec<Option<Value>> = pat.clone();
             let rel_dom: Vec<i64> = self.domain_for(&info.cal, entity)?.range(floor..=t).rev().copied().collect();
             // The common case: the latest bar itself has a tuple (a relation
             // read at its previous row). Answered directly, nothing memoised.
@@ -1306,7 +1306,7 @@ impl<'p> Kernel<'p> {
             let mut walked: Vec<i64> = Vec::new();
             let mut found: Option<i64> = None;
             for k in rel_dom {
-                if let Some(hit) = self.asof_memo.get(&(rel, mkey.clone(), k)) {
+                if let Some(hit) = self.asof_memo.get(&(rel, akey.clone(), k)) {
                     found = *hit;
                     break;
                 }
@@ -1318,7 +1318,7 @@ impl<'p> Kernel<'p> {
                 }
             }
             for k in walked {
-                self.asof_memo.insert((rel, mkey.clone(), k), found);
+                self.asof_memo.insert((rel, akey.clone(), k), found);
             }
             match found {
                 Some(k) => {
@@ -1335,7 +1335,7 @@ impl<'p> Kernel<'p> {
     /// match, into a sink, in the tuples' order.
     fn bind_tuples_into<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, env: &[Option<Value>], tuples: &super::Derived, out: &mut S) -> Result<(), RunError> {
         if !atom.terms.iter().any(|t| matches!(t, Term::Ctor(..))) {
-            let slots = self.atom_slots(cr, atom);
+            let slots = Self::atom_slots(cr, atom);
             for (tu, _) in tuples.iter() {
                 bind_row(env, &slots, tu, out);
             }

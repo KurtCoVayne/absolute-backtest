@@ -2,11 +2,11 @@
 //! from a hot version: a child of `store`, so it reaches the store's
 //! fields.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use abt_wire::generated::abt::wire::RelationSchema;
-use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, TimestampNanosecondArray, UInt32Array, UInt64Array};
+use arrow::array::{ArrayRef, AsArray, BooleanArray, Float64Array, Int64Array, RecordBatch, TimestampNanosecondArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, SchemaRef};
 
 use super::{Manifest, PartitionRef, Store};
@@ -55,12 +55,34 @@ impl Store {
     /// before an instrument's last sealed label is sealed or superseded).
     fn replay_tails(&self, v: &HotVersion, relation: &str, source: &str) -> Result<(), DataError> {
         let from = v.manifest.replay_from.unwrap_or(v.manifest.seq_high + 1);
-        let batches = self.read_log(relation, source, from, u64::MAX)?;
+        let schema = &v.manifest.schema;
+        let lay = layout(schema);
+        // A row at or before its instrument's last sealed label is sealed
+        // or superseded, and the overlay never admits it: each log batch is
+        // cut to the other rows as it is read (E-128). After a
+        // consolidation the replay starts at the least sequence a tail
+        // held, and the log after it is mostly sealed: a futures store's
+        // replay read 126 million rows, held and normalised them all, to
+        // keep its tails.
+        let sealed: HashMap<u64, i64> = {
+            let ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
+            ov.by_id.iter().filter_map(|(&id, &o)| ov.instruments[o].last_sealed().map(|l| (id, l))).collect()
+        };
+        let mut batches = Vec::new();
+        self.each_log_batch(relation, source, from, u64::MAX, |b| {
+            let ids = b.column(lay.identity[0]).as_primitive::<arrow::datatypes::UInt64Type>();
+            let ts = crate::rows::times(&b, lay.t);
+            let keep: BooleanArray = (0..b.num_rows()).map(|i| Some(sealed.get(&ids.value(i)).is_none_or(|&l| ts.value(i) > l))).collect();
+            let b = arrow::compute::filter_record_batch(&b, &keep)?;
+            if b.num_rows() > 0 {
+                super::REPLAY_KEPT.fetch_add(b.num_rows() as u64, std::sync::atomic::Ordering::Relaxed);
+                batches.push(b);
+            }
+            Ok(())
+        })?;
         if batches.is_empty() {
             return Ok(());
         }
-        let schema = &v.manifest.schema;
-        let lay = layout(schema);
         let kinds: Vec<Kind> = v.manifest.columns.iter().map(|c| c.kind).collect();
         let normalised = crate::staging::normalise::normalise(
             schema,

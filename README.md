@@ -85,7 +85,7 @@ errata:
 
 | Document | What it fixes |
 | --- | --- |
-| `docs/spec/00-architecture.md` | The three programs, the decisions record A-D1 to A-D46, the cross-layer invariants, the modes, the identifiers, the gates G1 to G10 and the targets of A-7.3 |
+| `docs/spec/00-architecture.md` | The three programs, the decisions record A-D1 to A-D56, the cross-layer invariants, the modes, the identifiers, the gates G1 to G10 and the targets of A-7.3 |
 | `docs/spec/01-data.md` | The data layer (D): the data model and its registries, the storage engine, the query interface, streams, aggregates, the resolver, the data-side checks |
 | `docs/spec/02-kernel.md` | The kernel (K): the program form, contracts derived from structure, the pipeline and the fold, market simulation for equities, futures and options with their margin and cost models, the executor modes, the state tables and the query service |
 | `docs/spec/03-query.md` | The query layer (Q): plans, metrics, the test framework and its starting set, claims, feed and activation statistics, reports |
@@ -1316,7 +1316,9 @@ The migration of `docs/spec/05-migration.md` has landed, M-0 to M-10:
   the deployment document, reconciliation, the order lifecycle and the kill
   switch, over a mock broker (ERRATA E-82).
 
-M-8's entity-parallel strata were not built (ERRATA E-77 says why). No
+M-8's entity-parallel evaluation is built one level below the design:
+per rule application over the row-at-a-time block solver, not per stratum
+over column blocks (ERRATA E-125; E-77 has the history). No
 broker adapter is part of this build: IBKR's is the live deployment's
 (A-D27).
 

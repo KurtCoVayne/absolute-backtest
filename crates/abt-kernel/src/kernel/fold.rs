@@ -363,6 +363,11 @@ impl<'p, 'e> Fold<'p, 'e> {
         match ev {
             Event::Tuple { seq, rel, key, r, tuple } => {
                 self.kernel.received_r = self.kernel.received_r.max(r);
+                self.kernel.stats.received_rows += 1;
+                if self.kernel.received.len() <= rel {
+                    self.kernel.received.resize(rel + 1, 0);
+                }
+                self.kernel.received[rel] += 1;
                 // A tuple of a relation nothing in the run reads is not kept (the
                 // stream projection at the kernel's door, E-127: a live session
                 // streams whole).

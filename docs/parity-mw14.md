@@ -121,9 +121,20 @@ abt run ... --returns R.parquet        # the command above
 python scripts/parity/mw14_compare.py R.parquet ~/data/ref/mw14/artifacts/_canon_wkret_mw14_full.npy
 ```
 
+`~/data/ref/mw14/` stands for wherever the book's inputs are kept; it is
+not a directory that exists on the owner's machine. The lake, the two series
+files and the canon are listed with their paths in `docs/handoff/README.md`,
+"Data and benchmark inputs on the Mac".
+
 Since M-4c the comparison reads the run's book from the data layer's store
 (K-9.1, ERRATA E-52): the bundle is ingested, the run reads it through the
 data service and writes its outputs there, and the script queries them.
+**This second recipe has not been run at full size on the three-layer engine,
+and may not bind**: `corpus-v2/company/mw14.dsl` has demanded `bars @1d …
+complete` and `require reviewed` since Oct 12, the v1 bundle is weekly and
+unreviewed, and the resolver refuses a stored calendar coarser than the one
+asked for (`crates/abt-data/src/resolver/plan.rs`). Package 5 of
+`docs/handoff/roadmap.md` tries it first.
 
 ```
 abt data ingest --store S --adapter bundle_v2 --from B --class equity corpus-v2/catalog corpus-v2/lib
@@ -164,7 +175,9 @@ AppleDouble `._*` files that read as corrupt Parquet. The comparison script
 aligns by index from the run's first bar, so the run starts at the canon's
 first decision week. Through this path the kernel is not at the canon: weekly
 correlation 0.9777, CAGR 18.5% against 20.9% (the result and the profile in
-`docs/assessment.md`); through the v1 bundle it is, so the difference is the
-adapter's weekly views against the bundle's. SPY and QQQ are not index members
+`docs/assessment.md`). The old engine is at the canon through the v1 bundle
+(above); no full-size run of the three-layer engine on that bundle is
+recorded, so the kernel and the adapter's weekly views are not yet separated
+as causes (package 5 of `docs/handoff/roadmap.md`). SPY and QQQ are not index members
 and are not ingested, as the v1 universe had no ETF either.
 

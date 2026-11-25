@@ -37,6 +37,9 @@ pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 pub type Tuple = Vec<Value>;
 /// Memo key: relation id, then the key time and the input values.
 pub(crate) type MemoKey = (usize, Vec<Value>);
+/// The key of an as-of walk's memo: the relation, the atom's bound terms
+/// with its time unbound, and the bar walked from (`Kernel::asof_memo`).
+pub(crate) type AsofKey = (usize, Vec<Option<Value>>, i64);
 
 /// The memo of derived results, bucketed by the temporal key so that
 /// dropping the past costs only what is dropped; the latest old result of
@@ -663,7 +666,7 @@ pub struct KernelStats {
     #[serde(default)]
     pub parallel_rows: usize,
     /// Seconds the main thread spent inside cut steps (workers running).
-    #[serde(default)]
+    #[serde(skip)]
     pub parallel_secs: f64,
     /// Live incremental window groups (`rows_state`), the main kernel's and
     /// the workers' together at the end of the run.
@@ -674,24 +677,29 @@ pub struct KernelStats {
     pub trimmed_rows: usize,
     /// Seconds in the fold's phases: the stream's tuples inserted, the
     /// barriers' fills, decisions and executor steps, and the wait for the
-    /// next batch.
-    #[serde(default)]
+    /// next batch. Every `*_secs` field is wall-clock time, so none is
+    /// serialised: the stats are a row of the run's `report` output and a
+    /// part of its checkpoints, and two runs of one program over one
+    /// binding, made with the same options, write the same bytes (E-133;
+    /// the counters that follow the thread count or the history kept are
+    /// its open part).
+    #[serde(skip)]
     pub insert_secs: f64,
-    #[serde(default)]
+    #[serde(skip)]
     pub fill_secs: f64,
-    #[serde(default)]
+    #[serde(skip)]
     pub decide_secs: f64,
-    #[serde(default)]
+    #[serde(skip)]
     pub exec_secs: f64,
-    #[serde(default)]
+    #[serde(skip)]
     pub wait_secs: f64,
     /// Seconds in the recursive relations' warm-up, the trim of the stores
     /// and the memo's eviction.
-    #[serde(default)]
+    #[serde(skip)]
     pub warm_secs: f64,
-    #[serde(default)]
+    #[serde(skip)]
     pub trim_secs: f64,
-    #[serde(default)]
+    #[serde(skip)]
     pub evict_secs: f64,
     /// Running-sums windows built at the bar asked for because the buffer
     /// no longer held the checkpoint's window (a departure from the
@@ -705,6 +713,34 @@ pub struct KernelStats {
     /// Aggregate literals answered by the data layer's pass (K-4.5).
     #[serde(default)]
     pub pushed_answers: usize,
+    /// Tuples the stream delivered, of every relation, kept or not (the
+    /// fold counts them at its door; the rows the executor and the kernel
+    /// write into the stores themselves are not among them): what
+    /// `--timing` prints as `tuples=` for a served run.
+    #[serde(default)]
+    pub received_rows: usize,
+    /// Seconds turning the stream's event batches into the kernel's tuples
+    /// (`bind::Decoder::events`); `wait_secs` is the time blocked on the
+    /// next batch, which is the data layer's merge and the transport.
+    #[serde(skip)]
+    pub decode_secs: f64,
+    /// Seconds of a run outside its fold (`replay_observed`): the binding
+    /// resolved, the preconditions checked, the pushed aggregates asked of
+    /// the data layer, the subscription opened, and, after the last
+    /// barrier, the ledgers and the outputs written. `stream_secs` is the
+    /// whole stream loop, the fold's phases and its per-event bookkeeping.
+    #[serde(skip)]
+    pub bind_secs: f64,
+    #[serde(skip)]
+    pub check_secs: f64,
+    #[serde(skip)]
+    pub push_secs: f64,
+    #[serde(skip)]
+    pub open_secs: f64,
+    #[serde(skip)]
+    pub stream_secs: f64,
+    #[serde(skip)]
+    pub write_secs: f64,
 }
 
 /// What the evaluator derived for one relation over a run: how many times
@@ -2192,8 +2228,6 @@ pub struct Kernel<'p> {
     /// a strictly earlier bar: a total-return index, a cumulative split):
     /// extended at every barrier before the stores are trimmed (E-126).
     pub(crate) recursive_rels: Vec<usize>,
-    /// The slot map of each atom, by (rule, the atom's address) (`eval::atom_slots`).
-    pub(crate) atom_slot_cache: FxHashMap<(usize, usize), Arc<Vec<Option<usize>>>>,
     /// A scratch vector for a window group's fresh bars.
     pub(crate) fresh_scratch: Vec<i64>,
     /// The solutions of a rows window's conjunction at the bar for every row
@@ -2202,9 +2236,11 @@ pub struct Kernel<'p> {
     pub(crate) prefetch: Option<eval::Prefetch>,
     pub(crate) prefetch_bucket: Option<eval::PrefetchBucket>,
     pub(crate) prefetch_row: usize,
-    /// `R(...) asof T` on a derived relation: for (relation, inputs, bar)
-    /// the latest bar at or before it with a tuple, a cache like `memo`.
-    pub(crate) asof_memo: FxHashMap<(usize, Vec<Value>, i64), Option<i64>>,
+    /// `R(...) asof T` on a derived relation: for (relation, the atom's
+    /// bound terms with the key unbound, bar) the latest bar at or before
+    /// it with a matching tuple, a cache like `memo` (E-132: the entity is
+    /// in the key).
+    pub(crate) asof_memo: FxHashMap<AsofKey, Option<i64>>,
     pub(crate) in_progress: FxHashSet<MemoKey>,
     /// Calls that halted on a stuck instance, by memo key (see `call`).
     pub(crate) memo_errors: FxHashMap<MemoKey, RunError>,
@@ -2238,6 +2274,10 @@ pub struct Kernel<'p> {
     /// answers read since the last decision barrier's checks (what
     /// `inv.no_read_past` and `inv.pushdown_receipt` compare with at(T)).
     pub(crate) received_r: i64,
+    /// The tuples the stream delivered per relation id since the kernel
+    /// was built (a resumed run's count starts at its checkpoint; the
+    /// total, `KernelStats::received_rows`, is kept across it).
+    pub(crate) received: Vec<u64>,
     pub(crate) pushed_read_r: i64,
     pub(crate) price_rel: Option<usize>,
     pub(crate) price_col: usize,
@@ -3069,7 +3109,6 @@ impl<'p> Kernel<'p> {
             warm_next: None,
             read_rels: Vec::new(),
             recursive_rels: Vec::new(),
-            atom_slot_cache: Default::default(),
             fresh_scratch: Vec::new(),
             prefetch: None,
             prefetch_bucket: None,
@@ -3086,6 +3125,7 @@ impl<'p> Kernel<'p> {
             pushed: Default::default(),
             now: i64::MIN,
             received_r: i64::MIN,
+            received: Vec::new(),
             pushed_read_r: i64::MIN,
             price_rel,
             price_col,
@@ -3223,6 +3263,21 @@ impl<'p> Kernel<'p> {
         self.rows_floor.clear();
         self.rows_anchor.clear();
         self.rows_state.clear();
+        // The worker kernels hold the same caches for the rows they are cut
+        // (parallel.rs): what the late tuple contradicts here it contradicts
+        // there.
+        for w in &mut self.workers {
+            w.asof_memo.clear();
+            w.memo_errors.clear();
+            w.memo_stuck.clear();
+            for cache in w.windows.values_mut() {
+                let keep = std::mem::take(cache);
+                *cache = keep.into_iter().filter(|(t, _)| *t < key).collect();
+            }
+            w.rows_floor.clear();
+            w.rows_anchor.clear();
+            w.rows_state.clear();
+        }
         self.stats.late_tuples += 1;
     }
 
@@ -3237,7 +3292,8 @@ impl<'p> Kernel<'p> {
         // then the memo is evicted at every barrier, since what it would
         // keep is unreachable and it would be the run's unbounded holder
         // otherwise (its entries are keys, a few per bar).
-        if !self.cfg.trim_stores && self.memo.len() < self.memo_min && self.asof_memo.len() < self.memo_min {
+        let memo_min = self.memo_min;
+        if !self.cfg.trim_stores && self.memo.len() < memo_min && self.asof_memo.len() < memo_min && self.workers.iter().all(|w| w.asof_memo.len() < memo_min) {
             return;
         }
         let mut cutoff = (t - h).min(keep_from);
@@ -3256,6 +3312,14 @@ impl<'p> Kernel<'p> {
         if self.asof_memo.len() >= self.asof_memo_next {
             self.asof_memo.retain(|(_, _, k), _| *k >= cutoff);
             self.asof_memo_next = (2 * self.asof_memo.len()).max(self.memo_min);
+        }
+        // The workers' shortcuts, one entry per entity and bar walked since
+        // E-132: evicted with this kernel's, or they are held for the run.
+        for w in &mut self.workers {
+            if w.asof_memo.len() >= w.asof_memo_next {
+                w.asof_memo.retain(|(_, _, k), _| *k >= cutoff);
+                w.asof_memo_next = (2 * w.asof_memo.len()).max(memo_min);
+            }
         }
         self.stats.evict_secs += started.elapsed().as_secs_f64();
     }
@@ -3384,6 +3448,22 @@ impl<'p> Kernel<'p> {
             .map(|((r, s), c)| (r.name.clone(), *s, c.0))
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    /// The relations by the tuples the stream delivered of each, with the
+    /// rows its store holds now (what the retention horizon left, and
+    /// nothing for a relation the run does not read): the count the stream
+    /// projection is judged by (06-performance 3.3).
+    pub fn store_counts(&self) -> Vec<(String, u64, usize)> {
+        let mut v: Vec<(String, u64, usize)> = self
+            .received
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(rel, n)| (self.rels[rel].name.clone(), *n, self.stores.get(rel).map(|s| s.len()).unwrap_or(0)))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
     }
 
@@ -4440,7 +4520,9 @@ pub fn replay_observed<'p>(
         (None, Some(s)) => Some(s.to_string()),
         (None, None) => None,
     };
+    let binding = std::time::Instant::now();
     let mut bound = bind::bind_at(prog, client, &bind::point_of(prog, &cfg.param_overrides), preferred.as_deref())?;
+    let bind_secs = binding.elapsed().as_secs_f64();
     // A live-sim run's bars are its session's plan, which its data does not
     // hold yet; a replay of one reads the bars its stream recorded (K-6.2,
     // D-5.5). The data layer would answer a pushed aggregate at the bucket's
@@ -4472,9 +4554,11 @@ pub fn replay_observed<'p>(
         cfg.pushdown = false;
     }
     // The preconditions, before the first barrier (K-3.2).
+    let checking = std::time::Instant::now();
     let mut contract = crate::contract::contract(prog);
     let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, &bound, client, &cfg)?;
     let periods = report_periods(prog, &bound, client)?;
+    let check_secs = checking.elapsed().as_secs_f64();
     // A truncated stream resolves ticker literals where it ends.
     let probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
     let identity = Identity {
@@ -4552,9 +4636,13 @@ pub fn replay_observed<'p>(
     kernel.identity = identity;
     // A literal the data layer does not answer is evaluated here: the run
     // says so (E-47).
+    let pushing = std::time::Instant::now();
     for message in bind::push_down(&mut kernel, &bound, client, &spec)? {
         kernel.run_warnings.push(RunWarning { bias: "pushdown".into(), message });
     }
+    kernel.stats.bind_secs += bind_secs;
+    kernel.stats.check_secs += check_secs;
+    kernel.stats.push_secs += pushing.elapsed().as_secs_f64();
     kernel.run_warnings.extend(pre_warnings);
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
     let mut fold = match &opts.from {
@@ -4597,9 +4685,20 @@ pub fn replay_observed<'p>(
         on_progress(Progress::Started { run_id: run.clone() }, k, r)?;
     }
     if to_seq.is_none_or(|t| t >= from) {
+        let opening = std::time::Instant::now();
         let mut sub = client.subscribe_paced(spec, from, to_seq, opts.paced)?;
-        'stream: while let Some(b) = sub.next_batch()? {
-            for ev in decoder.events(&mut fold.kernel, &bound, &b)? {
+        fold.kernel.stats.open_secs += opening.elapsed().as_secs_f64();
+        let streaming = std::time::Instant::now();
+        'stream: loop {
+            // The run's clock: blocked on the next batch (the data layer's
+            // merge and the transport), then decoding it.
+            let waiting = std::time::Instant::now();
+            let Some(b) = sub.next_batch()? else { break };
+            fold.kernel.stats.wait_secs += waiting.elapsed().as_secs_f64();
+            let decoding = std::time::Instant::now();
+            let events = decoder.events(&mut fold.kernel, &bound, &b)?;
+            fold.kernel.stats.decode_secs += decoding.elapsed().as_secs_f64();
+            for ev in events {
                 let before = fold.last_bar();
                 if let Err(e) = fold.step(ev.into()) {
                     halt = Some(e);
@@ -4634,6 +4733,7 @@ pub fn replay_observed<'p>(
                 }
             }
         }
+        fold.kernel.stats.stream_secs += streaming.elapsed().as_secs_f64();
     }
     // The run's outputs, under its namespace (K-7.1): a halted run writes
     // what it has, and its halt is the error whether or not they could be.
@@ -4653,6 +4753,7 @@ pub fn replay_observed<'p>(
         }
         return Err(e);
     }
+    let writing = std::time::Instant::now();
     let ledger_acc = fold.take_ledger_acc();
     let (mut result, mut kernel) = fold.finish()?;
     result.run_id = run.clone();
@@ -4669,6 +4770,7 @@ pub fn replay_observed<'p>(
                 },
             );
         }
+        kernel.stats.write_secs += writing.elapsed().as_secs_f64();
         return Ok((result, kernel));
     }
     let ids = kernel.data_ids.clone();
@@ -4683,6 +4785,7 @@ pub fn replay_observed<'p>(
     let mut tables = outputs::tables(&run, prog, &bound, &ids, &kernel.cfg, &result, "completed", written)?;
     tables.extend(ledgers);
     outputs::write(client, tables)?;
+    kernel.stats.write_secs += writing.elapsed().as_secs_f64();
     Ok((result, kernel))
 }
 
