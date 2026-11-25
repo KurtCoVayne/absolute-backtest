@@ -119,7 +119,7 @@ fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> BTreeMap<String, Vec
         let mut rows = Vec::new();
         for t in own {
             let found: Vec<Vec<Value>> = match k.query(&rel, t, &[]) {
-                Ok(tus) => tus,
+                Ok(tus) => tus.into_iter().map(|tu| tu.into_vec()).collect(),
                 Err(RunError::Arithmetic { .. }) => vec![vec![Value::Count(-1)]],
                 Err(e) => panic!("{}: {}", rel, e),
             };

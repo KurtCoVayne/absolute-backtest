@@ -147,7 +147,7 @@ fn the_fold_reads_an_asof_tuple_from_its_availability_on() {
     let spx = ds.intern_label("SPXTR");
     // Day 4's value is recorded on day 5.
     let late = vec![Value::Label(spx), Value::Time(common::day(DAYS[3])), Value::Num(3.0)];
-    ds.facts.get_mut("value").unwrap().retain(|tu| *tu != late);
+    ds.facts.get_mut("value").unwrap().retain(|tu| tu[..] != late[..]);
     ds.add_available("value", late, common::day(DAYS[4]));
     let fold = decided(&ds, &prog, true);
     assert_eq!(fold.iter().map(|(_, q)| *q).collect::<Vec<_>>(), vec![1.0, 1.0, 1.0, 1.0, 3.0], "{:?}", fold);

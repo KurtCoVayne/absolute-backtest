@@ -239,7 +239,7 @@ impl SimExecutor {
                 Some(s) => (s.expiry, s.point_value),
                 None => continue,
             };
-            k.stores[rel].insert(t, vec![Value::Equity(c), Value::Time(t), Value::Equity(root), Value::Time(expiry), Value::Num(pv)]);
+            k.stores[rel].insert(t, smallvec::smallvec![Value::Equity(c), Value::Time(t), Value::Equity(root), Value::Time(expiry), Value::Num(pv)]);
         }
     }
 }

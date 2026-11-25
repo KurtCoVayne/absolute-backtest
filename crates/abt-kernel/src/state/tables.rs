@@ -409,7 +409,7 @@ pub fn tuples_at(k: &mut Kernel, prog: &Program, rel: &str, t: i64, inputs: Opti
     let mut notes = Vec::new();
     for set in input_sets(k, prog, rel, inputs)? {
         match k.query(rel, t, &set) {
-            Ok(tus) => out.extend(tus),
+            Ok(tus) => out.extend(tus.into_iter().map(|tu| tu.to_vec())),
             Err(RunError::Arithmetic { rule, bindings, expr, message }) => notes.push(format!("{}: partial arithmetic in {} at [{}]: `{}`: {}", format_timestamp(t), rule, bindings, expr, message)),
             Err(e) => return Err(e),
         }

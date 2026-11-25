@@ -92,7 +92,7 @@ pub fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> Ledgers {
                 let mut all = Vec::new();
                 for s in &symbols {
                     match k.query(&rel, t, std::slice::from_ref(s)) {
-                        Ok(tus) => all.extend(tus),
+                        Ok(tus) => all.extend(tus.into_iter().map(|tu| tu.to_vec())),
                         Err(RunError::Arithmetic { .. }) => all.push(vec![Value::Count(-1)]),
                         Err(e) => all.push(vec![Value::Count(-2), Value::Count(e.to_string().len() as i64)]),
                     }
@@ -100,7 +100,7 @@ pub fn ledgers(k: &mut Kernel, prog: &Program, bars: &[i64]) -> Ledgers {
                 all
             } else {
                 match k.query(&rel, t, &[]) {
-                    Ok(tus) => tus,
+                    Ok(tus) => tus.into_iter().map(|tu| tu.to_vec()).collect(),
                     Err(RunError::Arithmetic { .. }) => vec![vec![Value::Count(-1)]],
                     Err(e) => vec![vec![Value::Count(-2), Value::Count(e.to_string().len() as i64)]],
                 }

@@ -158,7 +158,7 @@ impl SimExecutor {
                 };
                 result.costs.commissions += commission;
                 result.costs.turnover += qty.abs() * price * m;
-                k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
+                k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(price)]);
                 // The forced close takes the position to zero; the action
                 // carries the proceeds.
                 let fill = FillRecord {

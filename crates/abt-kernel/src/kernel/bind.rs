@@ -1854,7 +1854,7 @@ impl Decoder {
                     let Some(conv) = self.converter(k, bound, b, &stored_rel) else { continue };
                     let rel = conv.rel;
                     let args = conv.args.clone();
-                    let mut tuple: Tuple = Vec::with_capacity(args.len());
+                    let mut tuple: Tuple = smallvec::SmallVec::with_capacity(args.len());
                     for a in &args {
                         let v = match a {
                             None => Value::Time(key),

@@ -570,7 +570,7 @@ impl SimExecutor {
             tag(RunEvent::new(t, Some(o.underlying), EventKind::Fill { fill, remainder: None }).cash(-delivered * o.strike * m)),
         );
         let fill_rel = k.rel_id("fill");
-        k.stores[fill_rel].insert(t, vec![Value::Equity(o.underlying), Value::Time(t), Value::Num(delivered), Value::Num(o.strike)]);
+        k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(o.underlying), Value::Time(t), Value::Num(delivered), Value::Num(o.strike)]);
     }
 
     /// The options the book holds, with their positions.
@@ -913,7 +913,7 @@ impl SimExecutor {
             self.limit_state.traded.push_back((tn, q.abs() * p * m));
             self.record(result, RunEvent::new(tn, Some(sym), EventKind::Fill { fill, remainder: None }).rule(rule).order(id).cash(-flow));
             k.last_price.insert(sym, p);
-            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q), Value::Num(p)]);
+            k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(q), Value::Num(p)]);
         }
         Ok(false)
     }
@@ -929,7 +929,7 @@ impl SimExecutor {
         let mut contracts: BTreeSet<Sym> = BTreeSet::new();
         for need in k.chain_needs.clone() {
             for a in k.chain_at(&need, t) {
-                k.stores[chain_rel].insert(t, vec![Value::Equity(need.underlying), Value::Time(t), Value::Equity(a)]);
+                k.stores[chain_rel].insert(t, smallvec::smallvec![Value::Equity(need.underlying), Value::Time(t), Value::Equity(a)]);
                 contracts.insert(a);
             }
         }
@@ -941,7 +941,7 @@ impl SimExecutor {
             if let (Some(right), Some(style), Some(settlement)) = (label(k, right_word(o.right)), label(k, style_word(o.style)), label(k, settlement)) {
                 k.stores[spec_rel].insert(
                     t,
-                    vec![
+                    smallvec::smallvec![
                         Value::Equity(a),
                         Value::Time(t),
                         Value::Equity(o.underlying),
@@ -955,7 +955,7 @@ impl SimExecutor {
                 );
             }
             if let Some(g) = k.option_greeks(a, t) {
-                let mut tu = vec![Value::Equity(a), Value::Time(t)];
+                let mut tu: crate::kernel::Tuple = smallvec::smallvec![Value::Equity(a), Value::Time(t)];
                 tu.extend(g.iter().map(|x| Value::Num(*x)));
                 k.stores[greeks_rel].insert(t, tu);
                 written.insert(a, g);

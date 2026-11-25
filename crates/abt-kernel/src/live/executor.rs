@@ -353,7 +353,7 @@ impl BrokerExecutor {
                 self.sim.note_filled(quantity.abs(), participation);
                 k.last_price.insert(sym, price);
                 let fill_rel = k.rel_id("fill");
-                k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(quantity), Value::Num(price)]);
+                k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(quantity), Value::Num(price)]);
                 result.costs.commissions += commission;
                 result.costs.turnover += quantity.abs() * price * m;
             }
@@ -559,9 +559,9 @@ impl Executor for BrokerExecutor {
         let cash_rel = k.rel_id("cash");
         let book = self.sim.book_ref();
         for (&sym, &q) in &book.positions {
-            k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
+            k.stores[position].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
         }
-        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(book.cash)]);
+        k.stores[cash_rel].insert(tn, smallvec::smallvec![Value::Time(tn), Value::Num(book.cash)]);
         Ok(())
     }
 

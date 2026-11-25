@@ -823,7 +823,7 @@ impl SimExecutor {
             self.record(result, RunEvent::new(at, Some(sym), EventKind::Fill { fill, remainder }).rule(*rule).order(*id).cash(-cost));
             self.limit_state.traded.push_back((at, qty.abs() * fill_price * m));
             k.last_price.insert(sym, fill_price);
-            k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
+            k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(fill_price)]);
             bar_costs += commission + fee + slippage + impact;
             result.costs.commissions += commission;
             result.costs.fees += fee;
@@ -892,7 +892,7 @@ impl SimExecutor {
                     result.costs.commissions += commission;
                     result.costs.turnover += qty.abs() * p * m;
                     k.last_price.insert(sym, p);
-                    k.stores[fill_rel].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
+                    k.stores[fill_rel].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(qty), Value::Num(p)]);
                     continue;
                 }
             }
@@ -911,9 +911,9 @@ impl SimExecutor {
             );
         }
         for (&sym, &q) in &self.book.positions {
-            k.stores[position].insert(tn, vec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
+            k.stores[position].insert(tn, smallvec::smallvec![Value::Equity(sym), Value::Time(tn), Value::Num(q)]);
         }
-        k.stores[cash_rel].insert(tn, vec![Value::Time(tn), Value::Num(self.book.cash)]);
+        k.stores[cash_rel].insert(tn, smallvec::smallvec![Value::Time(tn), Value::Num(self.book.cash)]);
         Ok(())
     }
 
@@ -1026,12 +1026,12 @@ impl SimExecutor {
             tus.clear();
         }
         for (&sym, &q) in &self.book.positions {
-            k.stores[position].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
+            k.stores[position].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(q)]);
         }
         if let Some(tus) = k.stores[cash_rel].by_time.get_mut(&t) {
             tus.clear();
         }
-        k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.book.cash)]);
+        k.stores[cash_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(self.book.cash)]);
     }
 }
 
@@ -1044,7 +1044,7 @@ impl SimExecutor {
         if self.bars.is_empty() {
             // Cash at the first bar, so that cash-aware rules can fire from the start.
             let cash_rel = k.rel_id("cash");
-            k.stores[cash_rel].insert(t, vec![Value::Time(t), Value::Num(self.book.cash)]);
+            k.stores[cash_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(self.book.cash)]);
         }
         self.bars.push(t);
         result.bars.push(t);
@@ -1145,7 +1145,7 @@ impl SimExecutor {
                         result.costs.commissions += commission;
                         result.costs.fees += fee;
                         result.costs.turnover += qty.abs() * p * m;
-                        k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
+                        k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
                         let fill = FillRecord {
                             t,
                             equity: sym,
@@ -1194,17 +1194,17 @@ impl SimExecutor {
         // `nav(T, N)`: the book's value at T's mark, before T's decisions
         // (data-bundle doc, section 7: what the metrics library reads).
         let nav_rel = k.rel_id("nav");
-        k.stores[nav_rel].insert(t, vec![Value::Time(t), Value::Num(equity)]);
+        k.stores[nav_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(equity)]);
         // `capital(T, C)`: what a weight is a fraction of (the fixed base or
         // the equity); `mark(A, T, P)`: the price each holding is marked at.
         let capital_rel = k.rel_id("capital");
-        k.stores[capital_rel].insert(t, vec![Value::Time(t), Value::Num(base)]);
+        k.stores[capital_rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(base)]);
         let mark_rel = k.rel_id("mark");
         let held: Vec<(Sym, f64)> = self.book.positions.iter().map(|(s, q)| (*s, *q)).collect();
         for (sym, q) in held {
             let (mark, source) = k.mark_with_source(sym, t);
             if let Some(p) = mark {
-                k.stores[mark_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
+                k.stores[mark_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(p)]);
             }
             result.holdings.push(HoldingRecord {
                 t,
@@ -1585,7 +1585,7 @@ impl Kernel<'_> {
         for ds in by_equity.values() {
             for (d, rule) in ds {
                 result.emit(RunEvent::new(t, Some(d.equity), EventKind::Decision { decision: d.clone() }).rule(*rule));
-                self.stores[decided].insert(t, vec![Value::Time(t), Value::Decision(Box::new(d.clone()))]);
+                self.stores[decided].insert(t, smallvec::smallvec![Value::Time(t), Value::Decision(Box::new(d.clone()))]);
             }
         }
         Ok(by_equity)

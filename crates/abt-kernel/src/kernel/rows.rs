@@ -133,7 +133,7 @@ impl<'a> RowSlice<'a> {
 
     /// The rows as tuples of their own.
     pub fn to_vec(&self) -> Vec<Tuple> {
-        self.iter().map(|t| t.to_vec()).collect()
+        self.iter().map(smallvec::SmallVec::from).collect()
     }
 }
 
@@ -158,7 +158,7 @@ mod tests {
     use super::*;
 
     fn tu(e: u32, v: f64) -> Tuple {
-        vec![Value::Equity(e), Value::Time(7), Value::Num(v)]
+        smallvec::smallvec![Value::Equity(e), Value::Time(7), Value::Num(v)]
     }
 
     fn values(rows: RowSlice<'_>) -> Vec<(u32, f64)> {
