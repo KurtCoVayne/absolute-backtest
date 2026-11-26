@@ -778,7 +778,16 @@ now two halves: `agg::prepare` computes under the read lock, `agg::finish`
 stores under the write lock and takes an answer another pass stored
 first. The kernel asks its distinct pushed requests on four threads and
 checks the preconditions on a thread of their own while it builds and
-pushes.
+pushes. MW14 on the parity store: 78.7 s to 68.1 s, the same fingerprint
+(`be605991…`), 1,851 of 1,851 weeks to 8e-15. The clock before the stream
+is 16.6 s where it was 26.4 (`check` 13.2 s and `push` 11.1 s now
+overlap; each is slower than alone, the machine having four cores); the
+stream is the 51.3 s it was (`decide` 22.8, `fill` 10.4, `insert` 5.3,
+`decode` 3.4, `trim` 2.4, the invariants 2.4). The front peaks at
+1.11 GB; the data service at 7.61 GB with 89 s of CPU, which is now the
+run's memory. `--threads 4` on the same store takes 72.7 s (`decide`
+28.4): under the block evaluator the windowed rules are not cut across
+workers, so the workers add their overhead and nothing else.
 
 ### The panel
 

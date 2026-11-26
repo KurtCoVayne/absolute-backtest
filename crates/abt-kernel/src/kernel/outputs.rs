@@ -790,6 +790,10 @@ pub fn observe_bar(prog: &Program, k: &mut Kernel, prev: Option<i64>, t: i64, ac
     Ok(())
 }
 
+/// What an observed relation holds at a bar: its tuples, and each instance
+/// that could not be derived with the kernel's reason.
+type Observed = (Vec<Tuple>, Vec<(Vec<Option<Value>>, String)>);
+
 /// A relation's rows at the bar `b` as a ledger lists them: the tuples in
 /// their order, then the stuck instances in theirs, each with its halt.
 /// `at_clock`: under a session-offset clock an observed relation on the
@@ -800,7 +804,7 @@ pub fn observe_bar(prog: &Program, k: &mut Kernel, prev: Option<i64>, t: i64, ac
 /// bar"), and under such a clock a base bar is one for the instruments of
 /// `Kernel::clock_syms_at` alone. A relation with no instrument among its
 /// arguments is read at every bar some clock strikes at.
-fn observed_at(k: &mut Kernel, rel: usize, info: &super::RelInfo, pattern: &mut [Option<Value>], b: i64, at_clock: bool) -> Result<(Vec<Tuple>, Vec<(Vec<Option<Value>>, String)>), RunError> {
+fn observed_at(k: &mut Kernel, rel: usize, info: &super::RelInfo, pattern: &mut [Option<Value>], b: i64, at_clock: bool) -> Result<Observed, RunError> {
     pattern[info.key_pos] = Some(Value::Time(b));
     let clock = if at_clock { k.clock_syms_at(b) } else { None };
     let (mut live, stuck) = match (clock, info.entity_positions.first().copied()) {

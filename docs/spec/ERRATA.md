@@ -5041,6 +5041,10 @@ batch driver agree on every corpus program. Each bless since:
   second half stores without looking). The pushed answers and the
   preconditions' statuses are held equal by the tests that held them
   (`tests/pushdown.rs`, `tests/contracts.rs`, `tests/list_scope.rs`).
+  Measured on MW14's parity store: 78.7 s to 68.1 s with the same
+  returns (1,851 of 1,851 weeks to 8e-15), 16.6 s before the stream where
+  it was 26.4 (`docs/assessment.md`, "The work before the stream,
+  together").
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
