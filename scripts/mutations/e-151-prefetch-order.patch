@@ -1,0 +1,16 @@
+# proposition: E-151 (over a frame of 32 rows or more the window operator reads its bar's relations before any entity's older bars, as the row path's solve of the bar over the whole block derives them, so that a windowed relation of the conjunction is asked in the row path's order and the stats row is the set evaluator's)
+# mutation: the bar's relations are read only as entities reach them
+# test: cargo test -p abt-tests --test eval_set the_window_operator_derives_a_windowed_relation_in_the_row_paths_order
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -153,7 +153,7 @@
+         // is asked at the older bars after this one, behind its groups'
+         // last bar, as there. A bar whose own relations are not columns
+         // declines before any entity is read.
+-        if ids.len() >= eval::PREFETCH_MIN_ROWS {
++        if ids.len() >= usize::MAX {
+             let mut bar = BarCols {
+                 t,
+                 blocks: vec![None; op.atoms.len()],

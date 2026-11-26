@@ -3841,6 +3841,148 @@ batch driver agree on every corpus program. Each bless since:
   the entity is unbound, or the checker refuses an as-of read whose entity
   no earlier literal binds (E-149's open item, a bucket read's answer
   depending on whether its entity is bound, is the same defect).
+  writes, so it is left for a change of its own.
+- **E-150 (06-performance 3.1, 3.2; the block evaluator's seam and its
+  first plans).** 3.2 compiles every rule to a block plan run stratum by
+  stratum over column chunks that replace the stores and the memo
+  (3.1). [D] The block evaluator is built at the miss of `Kernel::call`,
+  one (relation, bar) at a time, beside the row path, before any typed
+  store: under `--evaluator block` (`ExecConfig::block_eval`, not in the
+  configuration's identity) a derived relation with one entity argument
+  and no input, open-loop and not temporally recursive, whose every
+  rule's literals in the plan's order are a first atom at the bar
+  (`Scan`), later atoms at the bar with the entity bound (`Join`),
+  assignments (`Let`), comparisons (`Test`) or, first, an aggregate the
+  data layer answers (`Pushed`), is derived over the bar's columns
+  (`kernel/colplan.rs`), its expressions compiled once
+  (`kernel/cexpr.rs`) over the one arithmetic `eval_expr` applies
+  (`bin_value`, `call1_value`, `least_greatest`, `compare_num`). An
+  operator declines the (relation, bar) to `derive_rules` wherever it
+  could not do exactly what the rules do: an input that is not one tuple
+  per entity in entity order (a result of 16 tuples or fewer from
+  several rules is in derivation order), a partial operation on any row
+  (the rules then raise or exclude the instance), a pushed answer not
+  yet received. No plan runs and nothing is read as columns behind
+  `Kernel::horizon_floor` (the last cutoff of the eviction and of the
+  trim), before the memo's oldest bucket when the stores are trimmed,
+  or after the memo is cleared under trimming until the next trim, so
+  E-134 and E-135 keep today's answers. A plan's literal counts and the
+  pushed answers it read are the kernel's only when it does not
+  decline. Its result is memoised as tuples built from its columns, at
+  once (every planned relation of MW14 is also read as rows), and its
+  columns in a block memo inside `Memo` (`kernel/col.rs`), which the
+  eviction, the clears and the workers' shares cover and which
+  `Memo::len` does not count; another relation read as columns has its
+  result turned into a block once, kept there; a stored relation's bar
+  is read into columns at each read, not kept. A column holds one kind
+  unboxed, or the values when its rows' kinds differ (`split_factor` is
+  the Count 1 where there is no split and a number where there is one).
+  Only the main kernel plans; a worker derives by the rules. Stage 3.5
+  of `docs/handoff/roadmap.md` is not built and typed stores (3.1) come
+  last. On one thread the `report` output's stats row, the coverage and
+  the literal counts equal the set evaluator's on every corpus program
+  and on MW14 (below); on worker kernels a planned relation is not cut,
+  so `parallel_steps` and `parallel_rows` follow the evaluator as they
+  follow the thread count (E-133's open part). `tests/eval_set.rs`: six
+  legs (tuple; set on 1, 2, 4 workers; block on 1 and 4 with every
+  relation without a plan served through its columns, the identity
+  plan of `ExecConfig::block_identity`) on every corpus program and both
+  books; `the_block_evaluator_counts_what_the_set_evaluator_counts_on_every_corpus_program`;
+  `the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes`
+  (120 names over six years, four names missing bars and one absent 60
+  weeks, written and optimised plans, whole and trimmed, 1 and 4
+  workers; `adj_close`, `close@weekly`, `dollar_volume@base`, `scored`,
+  `stay`, `latched`, `extension`, `in_book` planned);
+  `compiled_expressions_give_the_row_paths_values_and_halts`;
+  `tests/retention.rs` with block legs; unit tests in `col.rs` and
+  `cexpr.rs`. Falsified: `scripts/mutations/e-150-partial-declines.patch`
+  (a division by zero over a column gives NaN instead of declining).
+  Measured on the full MW14, one cold run each under `--evaluator
+  block`, the weekly returns' fingerprint unchanged: the seam with no
+  plan 282.3 s (280.2 s without the flag); with the plans 274.3 s,
+  `dollar_volume@base` 8.1 s to 1.2 s, `adj_close` 1.6 s to under
+  0.9 s, `decide` 119.3 s to 110.2 s. Every planned relation derives
+  through its plan at every bar it is asked for but `dollar_volume@base`
+  at one, and `latched` and `in_book` at 157 of 1,852, where the latch
+  holds 16 names or fewer in its rules' order.
+
+- **E-151 (06-performance 3.2, 3.4; the block evaluator's rows
+  windows).** 3.4 plans a window as an operator over the column chunks
+  of 3.2. [D] Under `--evaluator block` a `rows[n]` aggregate is an
+  operator of its relation's plan (`ColOp::RowsAgg`, `kernel/colops.rs`)
+  when its group is the rule's entity and is bound by the plan before
+  it, its count and minimum are constants, its conjunction in the row
+  path's solve order is atoms of derived relations at the window's bar
+  with that entity, the anchor first, each binding fresh variables, its
+  arguments are expressions over those and the rule's other bindings,
+  and the numerics are two-pass (under running sums no window has a
+  plan). The operator keeps each entity's window state where the row
+  path keeps it (`eval::EntRows`, a table per window dense by entity,
+  which the row path uses too) and brings it to the bar with the row
+  path's functions (`RowsState::feed`, `window`, `trim`,
+  `Kernel::rows_serve`); a bar the state lacks is read from the
+  conjunction's relations there as columns (`Kernel::cols_of`), each
+  fetched when an entity first reaches it, as the row path demands it;
+  over a frame of 32 rows or more the bar's own come first, the anchor's
+  and then each later atom's while an entity of the frame is in the
+  ones before, as the row path's solve of the bar over the whole block
+  (`prefetch_rows_window`) derives them before it brings any entity
+  over older bars, so that a relation of the conjunction with a window
+  of its own is asked at those bars after this one, behind its groups'
+  last bar, as there (a bar whose own relations are not columns
+  declines). The arguments are computed by the arithmetic `eval_expr` applies
+  (`CExpr::value_in`: the same logarithm, division and Count
+  conversion). Where the columns cannot answer an entity as the row
+  path would (no state yet, whose walk back is the row path's; a bar
+  behind the horizon, or whose relation is not one tuple per entity; a
+  partial operation on its row; a request behind its state; a window
+  its buffer does not hold; a reduction that halts) the operator runs
+  the row path's step for that entity alone, which goes on from the
+  state where the columns left it. A step that halts declines the bar:
+  the steps run before it are kept by their bindings
+  (`Kernel::rows_replay`) and `derive_rules` meets each outcome as it
+  was instead of running the step twice, so the bar's window calls,
+  bars solved, exclusions, coverage and literal counts are the row
+  path's. A bar whose own relations are not columns there, or hold a
+  stuck instance or a halt, declines whole. A rule with such an
+  operator is not cut across worker kernels under the block evaluator,
+  so that each entity has one state whether a bar is planned or not.
+  Assignments and comparisons of constants before the plan's first atom
+  are operators too (`clenow` binds `P0` first). `ma`, `eligible` and
+  `clenow` are planned (`clenow`'s two regressions keep a state each,
+  as the row path keeps them: the plan shares none between them).
+  `tests/eval_set.rs`:
+  `the_window_operator_feeds_what_the_row_path_feeds_under_every_asking_pattern`
+  (windows asked at every bar, at some, first late; a mean, a count
+  with a minimum of one, two regressions over `log(Q / P0 - x)` and a
+  Count; whole and trimmed, 1 and 4 workers, the counts and the stats
+  row on one; a price planted where the logarithm is partial declines
+  the bars that read it and leaves the same stuck instances),
+  `the_window_operator_derives_a_windowed_relation_in_the_row_paths_order`
+  (a window over a windowed relation asked at month starts over 40
+  names, the memo kept and evicted at every barrier, whole and trimmed:
+  the stats row with its requests behind a group's last bar, and the
+  coverage), and the MW14 test with holes with `ma`, `eligible` and
+  `clenow` planned;
+  `tests/retention.rs` block legs; `kernel/eval.rs`
+  `rows_state_tests` (the flat state against the deque it replaced).
+  Falsified: `scripts/mutations/e-151-window-replay.patch` (a declined
+  bar's steps run twice: the counts differ) and
+  `scripts/mutations/e-151-prefetch-order.patch` (the bar's relations
+  read only as entities reach them: the inner windows are asked in
+  order, and the stats row differs). Measured on the full MW14,
+  one cold run each, the weekly returns' fingerprint unchanged: the row
+  path's state dense and flat, without the flag, 258.5 s (280.2 s
+  before; `clenow` 34.6 s to 21.0 s, `ma` 15.7 s to 8.4 s, `eligible`
+  13.1 s to 8.8 s); under `--evaluator block` with `ma` and `eligible`
+  planned 239.4 s (3.4 s and 3.3 s), with `clenow` too 226.6 s
+  (`clenow` 8.3 s, `decide` 62.3 s), and with a new group's walk back
+  reading its anchor as `call` reads it (`Kernel::anchor_holds`: a
+  memoised result, or the latest tuples the eviction kept, checked
+  against the solve in debug builds) 222.2 s (`clenow` 6.7 s, `ma` and
+  `eligible` 2.6 s each, `decide` 59.2 s); the three planned at every
+  bar and none declined, the stats row's counters those of the set
+  evaluator.
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

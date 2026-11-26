@@ -112,7 +112,7 @@ impl<'p> Kernel<'p> {
             w.stores = Shared::new(Vec::new());
             w.memo = Shared::default();
             w.overlay = Memo::default();
-            w.rows_state.clear();
+            w.clear_rows_states();
             w.windows.clear();
             w.rows_floor.clear();
             w.rows_anchor.clear();

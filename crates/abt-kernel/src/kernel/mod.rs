@@ -3,6 +3,10 @@
 //! memoisation; every derived tuple is requested at a bound temporal key, and
 //! WF-4 and WF-8 guarantee that every such request terminates.
 
+pub(crate) mod cexpr;
+pub(crate) mod col;
+pub(crate) mod colops;
+pub(crate) mod colplan;
 pub mod eval;
 pub(crate) mod eval_set;
 pub mod rows;
@@ -63,6 +67,10 @@ pub(crate) struct Memo {
     /// entities a later result no longer holds move to `latest_rows`.
     latest_block: FxHashMap<usize, LatestBlock>,
     len: usize,
+    /// The derived results read as columns (the block evaluator), by
+    /// relation and bar: each is the result the row memo holds at that key,
+    /// so it is counted once, and evicted with it.
+    pub(crate) blocks: col::BlockMemo,
 }
 
 /// A relation's last evicted result, whole (`Memo::latest_block`).
@@ -158,6 +166,7 @@ impl Memo {
     /// Drop every result keyed before `cutoff`, keeping the latest of each
     /// `keep` relation per inputs.
     fn evict_before(&mut self, cutoff: i64, keep: &FxHashSet<usize>, entity_pos: &[Option<usize>], chained: &FxHashSet<usize>) {
+        self.blocks.evict_before(cutoff);
         let recent = self.by_time.split_off(&cutoff);
         let old = std::mem::replace(&mut self.by_time, recent);
         for (t, bucket) in old {
@@ -844,6 +853,13 @@ pub struct KernelStats {
     /// not serialised (E-133).
     #[serde(skip)]
     pub prefetch_skipped: usize,
+    /// The rows window groups walked back from their first call
+    /// (`eval::Kernel::rows_walk`), and the bars the walks visited: a
+    /// measure of the run's work, never stored.
+    #[serde(skip)]
+    pub rows_walks: usize,
+    #[serde(skip)]
+    pub rows_walked_bars: usize,
     /// The process's resident set in MB when the stream reached its first
     /// barrier, and its peak until then (`fold::resident_mb`): what the
     /// binding, the preconditions and the first batch hold before anything
@@ -1121,6 +1137,19 @@ pub struct ExecConfig {
     /// configuration's identity: both give the same bits.
     #[serde(skip, default = "pushdown_on")]
     pub set_eval: bool,
+    /// Under the set evaluator, derive a relation that has a plan over
+    /// columns (`colplan.rs`) a whole bar at a time, declining to the rules
+    /// wherever the plan cannot do exactly what they do (`--evaluator
+    /// block`, ERRATA E-150). Not part of the configuration's identity:
+    /// both give the same bits (`tests/eval_set.rs`).
+    #[serde(skip)]
+    pub block_eval: bool,
+    /// A test switch of the block evaluator: every derived relation the
+    /// rules derive whose result has columns is served as tuples built
+    /// back from its columns (the identity plan), so that the suites hold
+    /// the columns' round trip and their memo to the row path's results.
+    #[serde(skip)]
+    pub block_identity: bool,
     /// Worker kernels for the entity-local rules (F-5.3): `1` is one thread,
     /// `0` the machine's cores up to four. The result does not depend on it,
     /// so it is not part of the configuration's identity (D-6.1), nor are
@@ -1310,6 +1339,8 @@ impl Default for ExecConfig {
             window_cache: true,
             pushdown: true,
             set_eval: true,
+            block_eval: false,
+            block_identity: false,
             threads: 1,
             parallel_min_rows: 64,
             trim_stores: false,
@@ -2632,7 +2663,19 @@ pub struct Kernel<'p> {
     pub(crate) rows_plans: FxHashMap<(usize, usize), Arc<eval::RowsPlan>>,
     /// Per (rule, literal): what an aggregation's calls share.
     pub(crate) agg_plans: FxHashMap<(usize, usize), Arc<eval::AggPlan>>,
-    pub(crate) rows_state: FxHashMap<eval::WindowKey, eval::RowsState>,
+    pub(crate) rows_state: FxHashMap<eval::WindowKey, Box<eval::RowsState>>,
+    /// The rows window groups' states dense by entity, one table per group
+    /// with a state per entity (`eval::RowsPlan::ent`).
+    pub(crate) ent_rows: Vec<eval::EntRows>,
+    /// The window steps the block evaluator's window operator ran on the
+    /// row path at a bar it then declined, by (rule, literal, binding):
+    /// what the rules' derivation of the bar meets instead of running them
+    /// again (`colops.rs`).
+    pub(crate) rows_replay: Vec<colops::Replayed>,
+    /// Per rule, the window steps that operator handed to the row path (an
+    /// entity with no state yet, a bar the columns cannot read). Never
+    /// stored.
+    pub(crate) row_steps: Vec<u64>,
     /// Each calendar's time domain as a sorted vector, for the running
     /// sums' bar walk.
     pub(crate) domain_vecs: FxHashMap<(Cal, Option<Sym>), Arc<Vec<i64>>>,
@@ -2695,6 +2738,24 @@ pub struct Kernel<'p> {
     /// seconds in `--timing`'s per-relation table; never stored.
     pub(crate) stuck_bars: Vec<u64>,
     pub(crate) small_bars: Vec<u64>,
+    /// Per relation, under the block evaluator: its plan over columns
+    /// (`colplan.rs`), the bars it derived and those it declined to the
+    /// rules, and the results built back into tuples from columns (row
+    /// views). Never stored.
+    pub(crate) col_plans: Vec<Option<Arc<colplan::ColPlan>>>,
+    pub(crate) plan_bars: Vec<u64>,
+    pub(crate) plan_declined_bars: Vec<u64>,
+    pub(crate) row_views: Vec<u64>,
+    /// Per relation, whether it reads the executor's state
+    /// (`plan::planner::closed_loop`): never read as columns.
+    pub(crate) closed_rels: Vec<bool>,
+    /// The bar before which no plan runs and no relation is read as
+    /// columns: the last cutoff of the memo's eviction and of the stores'
+    /// trim, `i64::MAX` once the memo is cleared under trimming (a late
+    /// tuple, a resumed run) until the next trim. `evict_cutoff` is the
+    /// eviction's last.
+    pub(crate) horizon_floor: i64,
+    pub(crate) evict_cutoff: i64,
     /// What the build noticed about the program against this data (a label
     /// the data never carries); reported with the run's warnings.
     pub(crate) run_warnings: Vec<RunWarning>,
@@ -2768,6 +2829,8 @@ impl<'p> Kernel<'p> {
         self.shared_windows = lowered.shared_windows.iter().map(|(k, v)| (*k, *v)).collect();
         // The numerics setting of the plan is the executor configuration's.
         self.cfg.running_sums = lowered.numerics == crate::lower::Numerics::Running;
+        // The plans over columns follow the literal orders and the rules skipped.
+        self.compile_col_plans();
     }
 
     /// The plan this kernel evaluates under (`written` when none was applied).
@@ -3501,6 +3564,9 @@ impl<'p> Kernel<'p> {
             rows_plans: Default::default(),
             agg_plans: Default::default(),
             rows_state: Default::default(),
+            ent_rows: Vec::new(),
+            rows_replay: Vec::new(),
+            row_steps: vec![0; prog.rules.len()],
             domain_vecs: Default::default(),
             recording: false,
             summary_rows: Vec::new(),
@@ -3515,6 +3581,13 @@ impl<'p> Kernel<'p> {
             derive_stack: Vec::new(),
             stuck_bars: vec![0; n_rels],
             small_bars: vec![0; n_rels],
+            col_plans: vec![None; n_rels],
+            plan_bars: vec![0; n_rels],
+            plan_declined_bars: vec![0; n_rels],
+            row_views: vec![0; n_rels],
+            closed_rels: vec![true; n_rels],
+            horizon_floor: i64::MIN,
+            evict_cutoff: i64::MIN,
             run_warnings,
         };
         let read = k.relations_read();
@@ -3529,6 +3602,7 @@ impl<'p> Kernel<'p> {
                     })
             })
             .collect();
+        k.compile_col_plans();
         Ok(k)
     }
 
@@ -3560,9 +3634,21 @@ impl<'p> Kernel<'p> {
             window_groups: self.windows.len(),
             window_rows_cached: self.windows.values().map(|m| m.len()).sum(),
             memo_entries: self.memo.len(),
-            rows_state_groups: self.rows_state.len() + self.workers.iter().map(|w| w.rows_state.len()).sum::<usize>(),
+            rows_state_groups: self.rows_state_groups() + self.workers.iter().map(|w| w.rows_state_groups()).sum::<usize>(),
             ..self.stats.clone()
         }
+    }
+
+    /// The rows window groups this kernel holds a state for.
+    fn rows_state_groups(&self) -> usize {
+        self.rows_state.len() + self.ent_rows.iter().map(|e| e.live()).sum::<usize>()
+    }
+
+    /// Every rows window group's state forgotten, the dense tables kept
+    /// (the plans name them).
+    pub(crate) fn clear_rows_states(&mut self) {
+        self.rows_state.clear();
+        self.ent_rows.iter_mut().for_each(eval::EntRows::clear);
     }
 
     /// Insert one primitive fact (already in the kernel's symbol order) and
@@ -3602,6 +3688,7 @@ impl<'p> Kernel<'p> {
     /// `key` on. Decisions already emitted stand (`decided` is a log).
     pub fn invalidate_from(&mut self, key: i64) {
         self.memo.clear();
+        self.memo_cleared();
         self.asof_memo.clear();
         self.memo_errors.clear();
         self.memo_stuck.clear();
@@ -3611,7 +3698,7 @@ impl<'p> Kernel<'p> {
         }
         self.rows_floor.clear();
         self.rows_anchor.clear();
-        self.rows_state.clear();
+        self.clear_rows_states();
         // The worker kernels hold the same caches for the rows they are cut
         // (parallel.rs): what the late tuple contradicts here it contradicts
         // there.
@@ -3625,7 +3712,7 @@ impl<'p> Kernel<'p> {
             }
             w.rows_floor.clear();
             w.rows_anchor.clear();
-            w.rows_state.clear();
+            w.clear_rows_states();
         }
         self.stats.late_tuples += 1;
     }
@@ -3656,6 +3743,10 @@ impl<'p> Kernel<'p> {
         let entity_pos: Vec<Option<usize>> = self.rels.iter().map(|r| if r.stored { None } else { r.entity_positions.first().copied() }).collect();
         let chained: FxHashSet<usize> = self.recursive_rels.iter().copied().collect();
         self.memo.evict_before(cutoff, &self.asof_read, &entity_pos, &chained);
+        self.evict_cutoff = cutoff;
+        if self.horizon_floor != i64::MAX {
+            self.horizon_floor = self.horizon_floor.max(cutoff);
+        }
         self.memo_stuck.retain(|k, _| Memo::time_of(k) >= cutoff);
         // The as-of shortcuts are not bucketed: scanned only once they double.
         if self.asof_memo.len() >= self.asof_memo_next {
@@ -3720,6 +3811,10 @@ impl<'p> Kernel<'p> {
         for (rel, st) in self.stores.iter_mut().enumerate() {
             dropped += st.trim_before(cutoff, &rels[rel].identity, asof_read.contains(&rel));
         }
+        self.horizon_floor = match self.horizon_floor {
+            i64::MAX => self.evict_cutoff.max(cutoff),
+            h => h.max(cutoff),
+        };
         self.stats.trimmed_rows += dropped;
         self.stats.trim_secs += started.elapsed().as_secs_f64();
     }

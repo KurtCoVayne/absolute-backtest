@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 use abt_agg::{Function, ShiftedSums};
 
+use super::cexpr;
+use super::col;
+use super::colplan;
 use super::eval_set::{Block, Sink};
 use super::time;
 use super::value::{Ctor, Decision, Order, OrderKind, Tif, Value};
@@ -135,14 +138,14 @@ pub(crate) struct PrefetchBucket {
 
 #[derive(Debug)]
 pub(crate) struct RowsPlan {
-    literal: usize,
+    pub(crate) literal: usize,
     wslot: usize,
     base: Term,
-    dur: Expr,
-    outer: Vec<usize>,
-    shareable: bool,
+    pub(crate) dur: Expr,
+    pub(crate) outer: Vec<usize>,
+    pub(crate) shareable: bool,
     /// `prior_rows`: the bar itself is excluded.
-    prior: bool,
+    pub(crate) prior: bool,
     order: Vec<Literal>,
     anchor: Vec<Literal>,
     /// The anchor is the first literal of `order`, so a block solved past
@@ -150,7 +153,7 @@ pub(crate) struct RowsPlan {
     /// constructor pattern, since `call` counts each time a stored relation
     /// is asked through it (the coverage) and the anchor would be asked
     /// once where it is asked twice.
-    anchor_first: bool,
+    pub(crate) anchor_first: bool,
     /// The derived relations the conjunction reads, when a block solve of
     /// it is a pure reading wherever each of them is memoised without a
     /// stuck instance at the window's bar: every literal a positive atom
@@ -161,8 +164,11 @@ pub(crate) struct RowsPlan {
     /// counted). `None` for any other conjunction. `prefetch_rows_window`
     /// leaves such a solve out when no row would read it.
     replayable: Option<Vec<usize>>,
-    /// Every slot the conjunction mentions, ascending.
-    conj_slots: Vec<usize>,
+    /// The group's states dense by entity (`Kernel::ent_rows`), when the
+    /// outer bindings hold the rule's entity (at `ent_pos` of `outer`) and
+    /// the window is shared across calls.
+    pub(crate) ent: Option<usize>,
+    pub(crate) ent_pos: usize,
 }
 
 /// What an aggregation literal's calls share, computed once per (rule,
@@ -200,9 +206,10 @@ pub(crate) struct WindowPlan {
     order: Vec<Literal>,
 }
 
-/// A window's rows as their count and the aggregate's argument columns, or
-/// the aggregate itself when running sums answered it (no columns then).
-type Columns = (usize, Vec<Vec<f64>>, Option<f64>);
+/// A rows window served: its rows' count, and the aggregate over them
+/// (computed only when the count reaches the window's minimum; an error is
+/// partial arithmetic).
+pub(crate) type Served = (usize, Result<Option<Value>, String>);
 
 /// A calendar window's rows as their count and the aggregate's argument
 /// columns.
@@ -224,8 +231,8 @@ fn window_at(st: &RowsState, b: i64, n: usize) -> Option<(usize, usize)> {
     } else {
         return None;
     };
-    let lo = st.rows.partition_point(|(t1, _, _)| *t1 < lo_t);
-    let hi = st.rows.partition_point(|(t1, _, _)| *t1 <= b);
+    let lo = st.rows.partition_point(|t1| *t1 < lo_t);
+    let hi = st.rows.partition_point(|t1| *t1 <= b);
     Some((lo, hi))
 }
 
@@ -247,12 +254,16 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
     let it = bars.binary_search(&t).ok()?;
     let ic = it - it % k;
     let rebuild = |st: &mut RowsState, b: i64, lo: usize, hi: usize| {
-        let first = st.rows.get(lo).filter(|_| lo < hi).map(|r| &r.2);
-        let shift = (first.and_then(|f| f.first().copied()).unwrap_or(0.0), first.and_then(|f| f.get(1).copied()).unwrap_or(0.0));
+        let first = (lo < hi && lo < st.rows.len()).then(|| st.rows.pair(lo));
+        let shift = match first {
+            Some((v, k)) => (if k > 0 { v[0] } else { 0.0 }, if k > 1 { v[1] } else { 0.0 }),
+            None => (0.0, 0.0),
+        };
         let shift = (if shift.0.is_finite() { shift.0 } else { 0.0 }, if shift.1.is_finite() { shift.1 } else { 0.0 });
         let mut r = RunningSums::new(st.base_id + lo as u64, shift);
-        for row in st.rows.iter().take(hi).skip(lo) {
-            r.apply(&row.2, 1.0);
+        for i in lo..hi.min(st.rows.len()) {
+            let (v, k) = st.rows.pair(i);
+            r.apply(&v[..k], 1.0);
         }
         r.hi = st.base_id + hi as u64;
         r.at = b;
@@ -264,10 +275,12 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
         let rows = &st.rows;
         let r = st.sums.as_mut().unwrap();
         for id in r.hi.max(lo_id)..hi_id {
-            r.apply(&rows[(id - base) as usize].2, 1.0);
+            let (v, k) = rows.pair((id - base) as usize);
+            r.apply(&v[..k], 1.0);
         }
         for id in r.lo..lo_id.min(r.hi) {
-            r.apply(&rows[(id - base) as usize].2, -1.0);
+            let (v, k) = rows.pair((id - base) as usize);
+            r.apply(&v[..k], -1.0);
         }
         r.lo = lo_id.max(r.lo);
         r.hi = hi_id.max(r.hi);
@@ -326,22 +339,27 @@ fn running_value(st: &mut RowsState, agg: &str, t: i64, n: usize, bars: &[i64], 
 /// abt-agg's rows windows keep the same.
 pub(crate) const ROWS_SLACK: usize = abt_agg::window::ROWS_SLACK;
 
+/// The rows from which a block's rows window has its conjunction solved at
+/// the bar over the whole block (`Kernel::prefetch_rows_window`), and the
+/// block evaluator's window operator reads the bar's relations before any
+/// entity's older bars (`colops.rs`), as that solve derives them.
+pub(crate) const PREFETCH_MIN_ROWS: usize = 32;
+
 /// A rows window group's running state: its last N anchored bars and the
-/// rows among them (time, the row's locally bound slots in slot order, which
-/// is the order the general path sorts environments by, and the aggregate's
-/// argument values), through `upto`.
+/// rows among them, through `upto`. A bar holds at most one row here (a
+/// group whose bar has two is the general path's), so the rows' order is
+/// their bars': the order the general path sorts a window's environments
+/// to (E-46).
 #[derive(Clone, Debug)]
 pub(crate) struct RowsState {
-    upto: i64,
+    pub(crate) upto: i64,
     /// The buffer reaches the group's first bar.
     from_start: bool,
     anchors: std::collections::VecDeque<i64>,
-    rows: std::collections::VecDeque<(i64, Vec<Value>, Vec<f64>)>,
-    /// The id of `rows[0]`; a row's id is its position since the group began.
+    rows: FlatRows,
+    /// The id of the buffer's first row; a row's id is its position since
+    /// the group began.
     base_id: u64,
-    /// Row ids in the general path's order (their bound values, then time),
-    /// kept as rows arrive and leave, when that is not time order.
-    sorted: Vec<u64>,
     /// Sums over the window last served, for the moment aggregates.
     sums: Option<RunningSums>,
 }
@@ -352,12 +370,224 @@ impl Default for RowsState {
             upto: i64::MIN,
             from_start: false,
             anchors: Default::default(),
-            rows: Default::default(),
+            rows: FlatRows::default(),
             base_id: 0,
-            sorted: Vec::new(),
             sums: None,
         }
     }
+}
+
+impl RowsState {
+    /// A group no call has fed: the first call walks back for it.
+    pub(crate) fn is_new(&self) -> bool {
+        self.anchors.is_empty() && self.rows.is_empty() && self.upto == i64::MIN
+    }
+
+    /// Bar `t1` taken in: an anchored bar, and the row there with the
+    /// aggregate's arguments, if the conjunction holds there.
+    pub(crate) fn feed(&mut self, t1: i64, anchored: bool, vals: Option<&[f64]>) {
+        if anchored {
+            self.anchors.push_back(t1);
+        }
+        if let Some(vals) = vals {
+            self.rows.push(t1, vals);
+        }
+    }
+
+    /// The window served at `t`, as positions `lo..hi` of the buffer: the
+    /// rows among its last `n` anchored bars at or before `t` (all of them
+    /// when the buffer reaches the group's first bar). `None` when the
+    /// buffer holds too few anchored bars and does not reach the first.
+    pub(crate) fn window(&self, t: i64, n: usize) -> Option<(usize, usize)> {
+        let hi = self.anchors.partition_point(|a| *a <= t);
+        if hi < n && !self.from_start {
+            return None;
+        }
+        let lo_t = if hi >= n && n > 0 {
+            self.anchors[hi - n]
+        } else if hi > 0 {
+            self.anchors[0]
+        } else {
+            i64::MAX
+        };
+        let lo = self.rows.partition_point(|t1| *t1 < lo_t);
+        let hi_r = self.rows.partition_point(|t1| *t1 <= t);
+        Some((lo, hi_r.max(lo)))
+    }
+
+    /// The argument `j` over the rows `lo..hi`, in their order.
+    pub(crate) fn col(&self, j: usize, lo: usize, hi: usize) -> &[f64] {
+        self.rows.col(j, lo, hi)
+    }
+
+    /// Keep N plus a checkpoint's span plus slack anchored bars (a call a
+    /// few bars back, and the rebuild at the checkpoint before any bar,
+    /// are served from the buffer), and the rows from the oldest on.
+    pub(crate) fn trim(&mut self, n: usize) {
+        while self.anchors.len() > n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
+            self.anchors.pop_front();
+            self.from_start = false;
+        }
+        let oldest = self.anchors.front().copied().unwrap_or(i64::MAX);
+        while self.rows.front().is_some_and(|t1| t1 < oldest) {
+            self.rows.pop_front();
+            self.base_id += 1;
+        }
+    }
+}
+
+/// A rows window group's rows, flat: each row's bar, and each argument's
+/// values as a column, from `start` on. A row that leaves the window
+/// advances `start` (the buffers are compacted once half of them is behind
+/// it), so a window is a slice of each column, handed to the reduction as
+/// it is.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FlatRows {
+    times: Vec<i64>,
+    cols: Vec<Vec<f64>>,
+    start: usize,
+}
+
+impl FlatRows {
+    pub(crate) fn len(&self) -> usize {
+        self.times.len() - self.start
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn front(&self) -> Option<i64> {
+        self.times.get(self.start).copied()
+    }
+
+    fn partition_point(&self, pred: impl FnMut(&i64) -> bool) -> usize {
+        self.times[self.start..].partition_point(pred)
+    }
+
+    /// A row at `t` with the aggregate's arguments `vals` (none for a
+    /// count): a group's rows all have as many.
+    fn push(&mut self, t: i64, vals: &[f64]) {
+        if self.cols.len() != vals.len() {
+            debug_assert!(self.is_empty(), "a group's rows have one width");
+            self.times.clear();
+            self.start = 0;
+            self.cols = vec![Vec::new(); vals.len()];
+        }
+        self.times.push(t);
+        for (c, v) in self.cols.iter_mut().zip(vals) {
+            c.push(*v);
+        }
+    }
+
+    fn pop_front(&mut self) {
+        self.start += 1;
+        if self.start == self.times.len() {
+            self.times.clear();
+            self.cols.iter_mut().for_each(Vec::clear);
+            self.start = 0;
+        } else if self.start >= 32 && 2 * self.start >= self.times.len() {
+            self.times.drain(..self.start);
+            for c in &mut self.cols {
+                c.drain(..self.start);
+            }
+            self.start = 0;
+        }
+    }
+
+    /// Argument `j` over rows `lo..hi`; a group that never held a row has
+    /// no columns, and its every window is empty.
+    fn col(&self, j: usize, lo: usize, hi: usize) -> &[f64] {
+        match self.cols.get(j) {
+            Some(c) => &c[self.start + lo..self.start + hi],
+            None => &[],
+        }
+    }
+
+    /// Row `i`'s first two arguments (zero where it has fewer), and how
+    /// many it has of them: what running sums read of a row.
+    fn pair(&self, i: usize) -> ([f64; 2], usize) {
+        let mut out = [0.0; 2];
+        let k = self.cols.len().min(2);
+        for (j, slot) in out.iter_mut().enumerate().take(k) {
+            *slot = self.cols[j][self.start + i];
+        }
+        (out, k)
+    }
+}
+
+/// The states of one rows window group (an aggregation literal of a rule,
+/// or the literal whose state it shares), one per entity and indexed by
+/// its symbol (`RowsPlan::ent`), for the calls whose outer values other
+/// than the entity are those of the group's first call (`rest`); a call
+/// with others keeps its state in `Kernel::rows_state` by its whole key.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EntRows {
+    rest: Option<Vec<Option<Value>>>,
+    states: Vec<Option<Box<RowsState>>>,
+    live: usize,
+}
+
+impl EntRows {
+    /// The states held.
+    pub(crate) fn live(&self) -> usize {
+        self.live
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.rest = None;
+        self.states.clear();
+        self.live = 0;
+    }
+
+    pub(crate) fn get(&self, s: Sym) -> Option<&RowsState> {
+        self.states.get(s as usize).and_then(|st| st.as_deref())
+    }
+
+    pub(crate) fn take(&mut self, s: Sym) -> Option<Box<RowsState>> {
+        let st = self.states.get_mut(s as usize).and_then(Option::take);
+        if st.is_some() {
+            self.live -= 1;
+        }
+        st
+    }
+
+    pub(crate) fn put(&mut self, s: Sym, st: Box<RowsState>) {
+        let i = s as usize;
+        if self.states.len() <= i {
+            self.states.resize_with(i + 1, || None);
+        }
+        if self.states[i].replace(st).is_none() {
+            self.live += 1;
+        }
+    }
+
+    /// Whether a call whose outer values other than the entity are `rest`
+    /// keeps its state here, the first call naming them.
+    pub(crate) fn admits(&mut self, rest: impl Iterator<Item = Option<Value>>) -> bool {
+        match &self.rest {
+            Some(r) => r.iter().cloned().eq(rest),
+            None => {
+                self.rest = Some(rest.collect());
+                true
+            }
+        }
+    }
+
+    fn admits_now(&self, rest: impl Iterator<Item = Option<Value>>) -> bool {
+        self.rest.as_ref().is_none_or(|r| r.iter().cloned().eq(rest))
+    }
+}
+
+/// Symbols at or above this keep their rows window states in the map: the
+/// dense states are a vector by symbol.
+pub(crate) const ENT_ROWS_MAX: Sym = 1 << 20;
+
+/// Where a rows window group's state is kept: dense by its entity, or in
+/// the map by its whole key.
+pub(crate) enum GroupAt {
+    Ent(usize, Sym),
+    Map(WindowKey),
 }
 
 /// Running sums over the rows with ids in `lo..hi` of a group: abt-agg's
@@ -628,7 +858,17 @@ impl<'p> Kernel<'p> {
             )));
         }
         self.derive_stack.push((rel, std::time::Instant::now(), 0.0));
-        let derived = self.derive_rules(&info, pattern);
+        // Under the block evaluator a relation with a plan is derived over
+        // the bar's columns, or the plan declines and the rules derive it.
+        let planned = if self.cfg.block_eval && self.cfg.set_eval { self.run_plan(rel, key) } else { None };
+        let derived = match planned {
+            Some(_) => Ok((Vec::new(), Vec::new())),
+            None => {
+                let d = self.derive_rules(&info, pattern);
+                self.forget_replay(rel);
+                d
+            }
+        };
         if let Some((r, started, inner)) = self.derive_stack.pop() {
             let total = started.elapsed().as_secs_f64();
             self.derive_secs[r] += total - inner;
@@ -653,21 +893,47 @@ impl<'p> Kernel<'p> {
             self.memo_stuck.insert(memo_key.clone(), Arc::new(stucks));
             self.stuck_bars[rel] += 1;
         }
-        if results.len() <= SORTED_MIN {
-            self.small_bars[rel] += 1;
-        }
-        if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
-            // The block solver yields its rows in the first generator's order,
-            // the universe's entity order: a linear check spares the sort.
-            if !results.windows(2).all(|w| w[0].0[e] <= w[1].0[e]) {
-                results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+        // A plan's result is in the order `call` leaves the rules' in (the
+        // plan sorts it as below), and its columns are memoised beside it.
+        let (rc, block) = match planned {
+            Some(colplan::Planned::Block(b)) => {
+                let (rows, built) = b.rows();
+                if built {
+                    self.row_views[rel] += 1;
+                }
+                (rows, Some(col::BlockEntry::Cols(b)))
             }
+            Some(colplan::Planned::Rows(rows)) => (Arc::new(rows), Some(col::BlockEntry::NotCols)),
+            None => {
+                if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
+                    // The block solver yields its rows in the first generator's order,
+                    // the universe's entity order: a linear check spares the sort.
+                    if !results.windows(2).all(|w| w[0].0[e] <= w[1].0[e]) {
+                        results.sort_by(|a, b| a.0[e].cmp(&b.0[e]));
+                    }
+                }
+                let rc = Arc::new(results);
+                let block = if self.cfg.block_eval && self.cfg.block_identity && !self.memo_stuck.contains_key(&memo_key) {
+                    self.identity_block(rel, key, &rc)
+                } else {
+                    None
+                };
+                match block {
+                    Some((rows, b)) => (rows, Some(col::BlockEntry::Cols(b))),
+                    None => (rc, None),
+                }
+            }
+        };
+        if rc.len() <= SORTED_MIN {
+            self.small_bars[rel] += 1;
         }
         let cov = &mut self.coverage[rel];
         cov.0 += 1;
-        cov.1 += usize::from(!results.is_empty());
-        cov.2 += results.len();
-        let rc = Arc::new(results);
+        cov.1 += usize::from(!rc.is_empty());
+        cov.2 += rc.len();
+        if let (Some(b), None) = (block, self.worker) {
+            self.memo.blocks.insert(rel, key, b);
+        }
         self.memo_insert(memo_key.clone(), rc.clone());
         if let Some((_, e)) = self.memo_stuck.get(&memo_key).and_then(|st| st.iter().find(|(p, _)| compatible(p))) {
             return Err(e.clone());
@@ -1816,6 +2082,14 @@ impl<'p> Kernel<'p> {
                 // The literal's position in the body, found once for the
                 // pushed answers and the plan, which are both kept by it.
                 let pos = self.body_position(cr, lit);
+                // This binding's window step, run by the block evaluator's
+                // operator before it declined the bar: its outcome as it was.
+                if !self.rows_replay.is_empty() {
+                    if let Some(i) = self.rows_replay.iter().position(|(ri, li, e, _)| *ri == cr.idx && Some(*li) == pos && e.as_slice() == env) {
+                        let (_, _, _, outcome) = self.rows_replay.swap_remove(i);
+                        return outcome.map(|rows| rows.iter().for_each(|r| out.push_env(r)));
+                    }
+                }
                 if self.pushed_answers(cr, pos, var, env, out) {
                     return Ok(());
                 }
@@ -1849,23 +2123,14 @@ impl<'p> Kernel<'p> {
                 // environments are materialised and nothing is sorted.
                 let mut in_order = false;
                 if has_rows && self.cfg.window_cache && !grouped {
-                    if let Some((count, cols, running)) = self.rows_columns(cr, lit, conj, agg, args, env)? {
+                    if let Some((count, value)) = self.rows_columns(cr, lit, conj, agg, args, env, plan.f, min_count)? {
                         if (count as i64) < min_count {
                             return Ok(());
                         }
-                        let value = if agg == "count" {
-                            Value::Count(count as i64)
-                        } else if let Some(v) = running {
-                            Value::Num(v)
-                        } else {
-                            match plan.f.map_or_else(|| aggregate(agg, &cols), |f| reduce_columns(f, &cols)) {
-                                Ok(Some(v)) => v,
-                                Ok(None) => return Ok(()),
-                                Err(m) => {
-                                    let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
-                                    return Err(self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), &m));
-                                }
-                            }
+                        let value = match value {
+                            Ok(Some(v)) => v,
+                            Ok(None) => return Ok(()),
+                            Err(m) => return Err(self.agg_error(cr, env, agg, args, &m)),
                         };
                         out.push_with(env, cr.slots[var], Some(value));
                         return Ok(());
@@ -2574,7 +2839,7 @@ impl<'p> Kernel<'p> {
     /// once and kept while it can be among the group's last N; a walk stops
     /// at the group's first bar once it is known.
     /// The static shape of a rows window (rule, literal): computed once.
-    fn rows_plan(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Result<Arc<RowsPlan>, RunError> {
+    pub(crate) fn rows_plan(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Result<Arc<RowsPlan>, RunError> {
         let literal = self.literal_index(cr, lit);
         if let Some(p) = self.rows_plans.get(&(cr.idx, literal)) {
             return Ok(p.clone());
@@ -2637,6 +2902,15 @@ impl<'p> Kernel<'p> {
             }
             Some(derived)
         });
+        // A group per entity of the rule: its states dense by the entity.
+        let ent_pos = cr.entity_slot.and_then(|e| outer.iter().position(|&s| s == e));
+        let ent = match ent_pos {
+            Some(_) if shareable && !prior => {
+                self.ent_rows.push(EntRows::default());
+                Some(self.ent_rows.len() - 1)
+            }
+            _ => None,
+        };
         let plan = Arc::new(RowsPlan {
             literal,
             wslot,
@@ -2649,27 +2923,13 @@ impl<'p> Kernel<'p> {
             replayable,
             order,
             anchor,
-            conj_slots: {
-                let mut vars = Vec::new();
-                for l in conj {
-                    literal_vars(l, &mut vars);
-                }
-                let mut slots: Vec<usize> = vars.iter().map(|v| cr.slots[v]).collect();
-                slots.sort_unstable();
-                slots.dedup();
-                slots
-            },
+            ent,
+            ent_pos: ent_pos.unwrap_or(0),
         });
         self.rows_plans.insert((cr.idx, literal), plan.clone());
         Ok(plan)
     }
 
-    /// A time-ordered rows window as columns of its aggregate's arguments, in
-    /// time order, kept incrementally per group: each call solves only the
-    /// bars since the group's previous call, and the group holds its last N
-    /// anchored bars and their rows. `None` when the window cannot be served
-    /// so (a bar with more than one row, a base time read by the rows, or a
-    /// call earlier than the group's last): the general path answers then.
     /// The rows window's conjunction solved at the bar for every row of the
     /// block at once (`Prefetch`), when every row asks the same bar with the
     /// window's time free and reads the window per instrument. Each row's
@@ -2677,8 +2937,7 @@ impl<'p> Kernel<'p> {
     /// (the block solver's, V-5); a row on which an instance stuck is left to
     /// the row-at-a-time path.
     fn prefetch_rows_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>, live: &Block) -> Result<Option<Prefetch>, RunError> {
-        const MIN_ROWS: usize = 32;
-        if live.len() < MIN_ROWS || !self.cfg.window_cache {
+        if live.len() < PREFETCH_MIN_ROWS || !self.cfg.window_cache {
             return Ok(None);
         }
         let has_rows = conj.iter().any(|l| {
@@ -2720,17 +2979,9 @@ impl<'p> Kernel<'p> {
         // pure reading: one that derives a relation, or meets a stuck
         // instance, is counted in the run's statistics and coverage.
         if let Some(derived) = &plan.replayable {
-            let mut key = WindowKey {
-                rule: cr.idx,
-                literal: plan.literal,
-                outer: Vec::with_capacity(plan.outer.len()),
-            };
             let mut unread = true;
             for i in 0..live.len() {
-                let row = live.row(i);
-                key.outer.clear();
-                key.outer.extend(plan.outer.iter().map(|&s| row[s].clone()));
-                if self.rows_state.get(&key).is_none_or(|st| st.upto != t) {
+                if self.group_state(cr, &plan, live.row(i)).is_none_or(|st| st.upto != t) {
                     unread = false;
                     break;
                 }
@@ -2800,72 +3051,58 @@ impl<'p> Kernel<'p> {
         }))
     }
 
-    fn rows_columns(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], agg: &str, args: &[Expr], env: &[Option<Value>]) -> Result<Option<Columns>, RunError> {
+    /// A time-ordered rows window kept incrementally per group: each call
+    /// solves only the bars since the group's previous call, and the group
+    /// holds its last N anchored bars and their rows (`rows_*` below, which
+    /// the block evaluator's window operator runs too). The rows' count
+    /// and, when there are at least `min_count`, the aggregate over them
+    /// (`f`, parsed once, or the aggregate by name). `None` when the window
+    /// cannot be served so (a bar with more than one row, a base time read
+    /// by the rows, or a call earlier than the group's last): the general
+    /// path answers then.
+    #[allow(clippy::too_many_arguments)]
+    fn rows_columns(
+        &mut self,
+        cr: &Arc<CompiledRule>,
+        lit: &Literal,
+        conj: &[Literal],
+        agg: &str,
+        args: &[Expr],
+        env: &[Option<Value>],
+        f: Option<Function>,
+        min_count: i64,
+    ) -> Result<Option<Served>, RunError> {
         let plan = self.rows_plan(cr, lit, conj, args)?;
         if !plan.shareable || plan.prior || env[plan.wslot].is_some() {
             return Ok(None);
         }
         let t = self.time_of(cr, &plan.base, env)?;
         let n = self.eval_expr(cr, &plan.dur, env)?.as_f64().unwrap_or(0.0).max(0.0) as usize;
-        // The slots the rows bind. A window is read in its time order, the
-        // general path's sort (E-46), and a bar holds one row here, so the
-        // rows' order is the bars'.
-        let locals: Vec<usize> = plan.conj_slots.iter().copied().filter(|&s| env[s].is_none()).collect();
-        let time_first = true;
-        let key = WindowKey {
-            rule: cr.idx,
-            literal: plan.literal,
-            outer: plan.outer.iter().map(|&s| env[s].clone()).collect(),
-        };
         // A request behind the group's last bar (a query after the run, a
         // recursion reaching back) is served from a buffer rebuilt by walking
         // back from that bar, exactly as a group first asked there would be,
         // so that the running sums answer it along the same canonical walk;
         // the group's own buffer is left as it is.
-        let mut original = self.rows_state.remove(&key);
+        let at = self.group_claim(cr, &plan, env);
+        let mut original = self.group_take(&at);
         let backward = original.as_ref().map(|s| s.upto != i64::MIN && t < s.upto).unwrap_or(false);
-        let mut st = if backward { RowsState::default() } else { original.take().unwrap_or_default() };
+        let mut st = if backward { Box::default() } else { original.take().unwrap_or_default() };
         if backward {
             self.stats.window_backward += 1;
         }
         // Bring the group up to t: a new group walks back to N (plus slack)
         // anchored bars; a known one solves only the bars since its last call.
-        let fresh: Vec<i64> = if st.anchors.is_empty() && st.rows.is_empty() && st.upto == i64::MIN {
-            let mut bars: Vec<i64> = Vec::new();
-            let mut anchors = 0usize;
-            let mut upper = t;
-            st.from_start = true;
-            'walk: loop {
-                let chunk: Vec<i64> = self.domain(cr, env)?.range(..=upper).rev().take(64).copied().collect();
-                if chunk.is_empty() {
-                    break;
-                }
-                for &t1 in &chunk {
-                    let mut e = env.to_vec();
-                    e[plan.wslot] = Some(Value::Time(t1));
-                    if plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e])?.is_empty() {
-                        anchors += 1;
-                    }
-                    bars.push(t1);
-                    if anchors >= n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
-                        st.from_start = false;
-                        break 'walk;
-                    }
-                }
-                match chunk.last() {
-                    Some(&last) if last > i64::MIN => upper = last - 1,
-                    _ => break,
-                }
-            }
-            bars.reverse();
-            bars
+        let (fresh, walked) = if st.is_new() {
+            let (bars, anchored, from_start) = self.rows_walk(cr, &plan, env, t, n)?;
+            st.from_start = from_start;
+            (bars, Some(anchored))
         } else if t > st.upto {
             let mut v = std::mem::take(&mut self.fresh_scratch);
             v.clear();
             v.extend(self.domain(cr, env)?.range((std::ops::Bound::Excluded(st.upto), std::ops::Bound::Included(t))).copied());
-            v
+            (v, None)
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         // The block's own solve of this bar (`Prefetch`), when the bar is the
         // one the group lacks. The row's entry is taken, not copied: it is
@@ -2880,132 +3117,319 @@ impl<'p> Kernel<'p> {
         } else {
             None
         };
-        for &t1 in fresh.iter() {
-            let (anchored, sols) = match pre.take() {
+        for (i, &t1) in fresh.iter().enumerate() {
+            let solved = match pre.take() {
                 Some(solved) => solved,
-                None => {
-                    let mut e = env.to_vec();
-                    e[plan.wslot] = Some(Value::Time(t1));
-                    let anchored = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
-                    (anchored, self.solve(cr, &plan.order, vec![e])?)
-                }
+                None => self.rows_solve_bar(cr, &plan, env, t1, walked.as_ref().map(|a| a[i]))?,
             };
-            self.stats.window_bars_solved += 1;
-            if sols.len() > 1 {
+            if !self.rows_feed_solved(cr, args, agg, &mut st, t1, solved)? {
                 return Ok(None);
-            }
-            if anchored {
-                st.anchors.push_back(t1);
-            }
-            if let Some(row) = sols.first() {
-                let vals = if agg == "count" { Vec::new() } else { self.agg_args(cr, args, row)? };
-                let key: Vec<Value> = if time_first {
-                    Vec::new()
-                } else {
-                    locals.iter().map(|&s| row[s].clone().unwrap_or(Value::Count(0))).collect()
-                };
-                let id = st.base_id + st.rows.len() as u64;
-                if !time_first {
-                    let base = st.base_id;
-                    let pos = st.sorted.partition_point(|&i| st.rows[(i - base) as usize].1 <= key);
-                    st.sorted.insert(pos, id);
-                }
-                st.rows.push_back((t1, key, vals));
             }
         }
         if fresh.capacity() > self.fresh_scratch.capacity() {
             self.fresh_scratch = fresh;
         }
         st.upto = st.upto.max(t);
-        // Serve t from the buffer: its last N anchored bars at or before t
-        // (all of them when the buffer reaches the group's first bar).
-        let hi = st.anchors.partition_point(|a| *a <= t);
-        let served = if hi >= n || st.from_start {
-            let lo_t = if hi >= n && n > 0 {
-                st.anchors[hi - n]
-            } else if hi > 0 {
-                st.anchors[0]
-            } else {
-                i64::MAX
-            };
-            let lo = st.rows.partition_point(|(t1, _, _)| *t1 < lo_t);
-            let hi_r = st.rows.partition_point(|(t1, _, _)| *t1 <= t);
-            let count = hi_r.saturating_sub(lo);
-            let running = if self.cfg.running_sums && moment_aggregate(agg) && count >= 2 {
-                let bars = self.domain_bars(cr, env)?;
-                let mut noncanonical = 0;
-                let v = running_value(&mut st, agg, t, n, &bars, &mut noncanonical);
-                self.stats.window_noncanonical += noncanonical;
-                v
-            } else {
-                None
-            };
-            if self.recording {
-                let sums = if running.is_some() { st.sums.as_ref() } else { None };
-                self.summary_rows.push(super::SummaryRow {
-                    rule: key.rule,
-                    literal: key.literal,
-                    outer: key.outer.clone(),
-                    bar: t,
-                    agg: agg.to_string(),
-                    rows: count,
-                    path: if running.is_some() { "running" } else { "two_pass" },
-                    shift: sums.map(|r| r.sums.shift),
-                    sums: sums.map(|r| r.sums.s.map(|x| x.value())),
-                    value: running,
-                });
-            }
-            let mut cols: Vec<Vec<f64>> = vec![Vec::with_capacity(count); args.len()];
-            if agg != "count" && count > 0 && running.is_none() {
-                let (lo_id, hi_id) = (st.base_id + lo as u64, st.base_id + hi_r as u64);
-                let mut push = |vals: &[f64]| {
-                    for (j, v) in vals.iter().enumerate() {
-                        cols[j].push(*v);
-                    }
-                };
-                if time_first {
-                    for row in st.rows.iter().take(hi_r).skip(lo) {
-                        push(&row.2);
-                    }
-                } else {
-                    for &id in st.sorted.iter().filter(|&&id| lo_id <= id && id < hi_id) {
-                        push(&st.rows[(id - st.base_id) as usize].2);
-                    }
-                }
-            }
-            Some((count, cols, running))
-        } else {
-            None
-        };
-        // Keep N plus a checkpoint's span plus slack anchored bars (a call a
-        // few bars back, and the rebuild at the checkpoint before any bar,
-        // are served from the buffer).
-        while st.anchors.len() > n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
-            st.anchors.pop_front();
-            st.from_start = false;
-        }
-        let oldest = st.anchors.front().copied().unwrap_or(i64::MAX);
-        while st.rows.front().map(|(t1, _, _)| *t1 < oldest).unwrap_or(false) {
-            if !st.sorted.is_empty() {
-                let (base, front) = (st.base_id, &st.rows[0].1);
-                let pos = st.sorted.partition_point(|&i| {
-                    let k = &st.rows[(i - base) as usize].1;
-                    k < front || (k == front && i < base)
-                });
-                st.sorted.remove(pos);
-            }
-            st.rows.pop_front();
-            st.base_id += 1;
-        }
+        let served = self.rows_serve(cr, &plan, &mut st, env, t, n, agg, f, args.len(), min_count)?;
+        st.trim(n);
         match (backward, original) {
-            (true, Some(o)) => {
-                self.rows_state.insert(key, o);
+            (true, Some(o)) => self.group_put(at, o),
+            _ => self.group_put(at, st),
+        }
+        Ok(served)
+    }
+
+    /// Where the group of a rows window call keeps its state: dense by the
+    /// entity when the plan has a group per entity, the entity is in range
+    /// and the call's other outer values are the group's, in the map by
+    /// its whole key otherwise.
+    pub(crate) fn group_at(&self, cr: &CompiledRule, plan: &RowsPlan, env: &[Option<Value>]) -> GroupAt {
+        if let (Some(ent), Some(Value::Equity(s))) = (plan.ent, env[plan.outer[plan.ent_pos]].as_ref()) {
+            if *s < ENT_ROWS_MAX && self.ent_rows[ent].admits_now(Self::rest_of(plan, env)) {
+                return GroupAt::Ent(ent, *s);
             }
-            _ => {
+        }
+        GroupAt::Map(WindowKey {
+            rule: cr.idx,
+            literal: plan.literal,
+            outer: plan.outer.iter().map(|&s| env[s].clone()).collect(),
+        })
+    }
+
+    /// A call's outer values other than the entity, in the plan's order.
+    fn rest_of<'e>(plan: &'e RowsPlan, env: &'e [Option<Value>]) -> impl Iterator<Item = Option<Value>> + Clone + 'e {
+        plan.outer.iter().enumerate().filter(move |(i, _)| *i != plan.ent_pos).map(move |(_, &s)| env[s].clone())
+    }
+
+    /// The group's state, if it has one.
+    pub(crate) fn group_state(&self, cr: &CompiledRule, plan: &RowsPlan, env: &[Option<Value>]) -> Option<&RowsState> {
+        match self.group_at(cr, plan, env) {
+            GroupAt::Ent(ent, s) => self.ent_rows[ent].get(s),
+            GroupAt::Map(key) => self.rows_state.get(&key).map(|b| &**b),
+        }
+    }
+
+    /// The group's state taken out while a call works on it.
+    pub(crate) fn group_take(&mut self, at: &GroupAt) -> Option<Box<RowsState>> {
+        match at {
+            GroupAt::Ent(ent, s) => self.ent_rows[*ent].take(*s),
+            GroupAt::Map(key) => self.rows_state.remove(key),
+        }
+    }
+
+    /// The group's state put back; the first state of a dense group names
+    /// the outer values its states are for.
+    pub(crate) fn group_put(&mut self, at: GroupAt, st: Box<RowsState>) {
+        match at {
+            GroupAt::Ent(ent, s) => self.ent_rows[ent].put(s, st),
+            GroupAt::Map(key) => {
                 self.rows_state.insert(key, st);
             }
         }
-        Ok(served)
+    }
+
+    /// `group_at` for a call that will keep its state: the first call of a
+    /// dense group names its outer values other than the entity.
+    pub(crate) fn group_claim(&mut self, cr: &CompiledRule, plan: &RowsPlan, env: &[Option<Value>]) -> GroupAt {
+        if let (Some(ent), Some(Value::Equity(s))) = (plan.ent, env[plan.outer[plan.ent_pos]].as_ref()) {
+            if *s < ENT_ROWS_MAX && self.ent_rows[ent].admits(Self::rest_of(plan, env)) {
+                return GroupAt::Ent(ent, *s);
+            }
+        }
+        self.group_at(cr, plan, env)
+    }
+
+    /// A new group's walk back from `t`: the domain's bars from the latest
+    /// back until N plus a checkpoint's span plus slack of them are
+    /// anchored, or the domain's first bar, in time order with whether each
+    /// is anchored, and whether the walk reached the first bar. Each bar's
+    /// anchor is what feeding the bar (`rows_solve_bar`) would find, so a
+    /// fed bar takes the walk's answer: read as `call` reads it where that
+    /// is a lookup (`anchor_holds`), solved otherwise.
+    pub(crate) fn rows_walk(&mut self, cr: &Arc<CompiledRule>, plan: &RowsPlan, env: &[Option<Value>], t: i64, n: usize) -> Result<(Vec<i64>, Vec<bool>, bool), RunError> {
+        let mut bars: Vec<i64> = Vec::new();
+        let mut flags: Vec<bool> = Vec::new();
+        let mut anchors = 0usize;
+        let mut upper = t;
+        let mut from_start = true;
+        let mut e = env.to_vec();
+        let probe = self.anchor_probe(cr, plan, env);
+        let mut key: super::MemoKey = (probe.as_ref().map(|p| p.0).unwrap_or(0), vec![Value::Time(t)]);
+        'walk: loop {
+            let chunk: Vec<i64> = self.domain(cr, env)?.range(..=upper).rev().take(64).copied().collect();
+            if chunk.is_empty() {
+                break;
+            }
+            for &t1 in &chunk {
+                let read = probe.as_ref().and_then(|(rel, ent)| self.anchor_holds(*rel, ent, t1, &mut key));
+                let anchored = match read {
+                    // Debug builds (the tests) solve it too: a lookup is
+                    // what the solve would read, with nothing derived.
+                    Some(a) if cfg!(debug_assertions) => {
+                        e[plan.wslot] = Some(Value::Time(t1));
+                        let solved = plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty();
+                        assert_eq!(solved, a, "the anchor read at {} differs from the anchor solved", t1);
+                        a
+                    }
+                    Some(a) => a,
+                    None => {
+                        e[plan.wslot] = Some(Value::Time(t1));
+                        plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty()
+                    }
+                };
+                if anchored {
+                    anchors += 1;
+                }
+                bars.push(t1);
+                flags.push(anchored);
+                if anchors >= n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
+                    from_start = false;
+                    break 'walk;
+                }
+            }
+            match chunk.last() {
+                Some(&last) if last > i64::MIN => upper = last - 1,
+                _ => break,
+            }
+        }
+        bars.reverse();
+        flags.reverse();
+        self.stats.rows_walks += 1;
+        self.stats.rows_walked_bars += bars.len();
+        Ok((bars, flags, from_start))
+    }
+
+    /// The anchor of a walk back read without solving it (`anchor_holds`):
+    /// its relation and the call's entity, when the anchor is an atom of a
+    /// derived relation with no input whose terms are the rule's entity,
+    /// bound, the window's bar, and wildcards (the universe the checker
+    /// anchors a window on).
+    fn anchor_probe(&self, cr: &CompiledRule, plan: &RowsPlan, env: &[Option<Value>]) -> Option<(usize, Value)> {
+        let [Literal::Atom(a)] = plan.anchor.as_slice() else { return None };
+        let rel = *self.rel_ids.get(&a.name)?;
+        let info = &self.rels[rel];
+        let (es, epos) = (cr.entity_slot?, *info.entity_positions.first()?);
+        if info.stored || !info.inputs.is_empty() || info.entity_positions.len() != 1 || a.terms.len() <= epos.max(info.key_pos) {
+            return None;
+        }
+        let ok = a.terms.iter().enumerate().all(|(p, term)| match term {
+            Term::Var(v, _) if p == epos => cr.slots.get(v) == Some(&es),
+            Term::Var(v, _) if p == info.key_pos => cr.slots.get(v) == Some(&plan.wslot),
+            Term::Wild(_) => p != epos && p != info.key_pos,
+            _ => false,
+        });
+        let e = env[es].clone().filter(|v| matches!(v, Value::Equity(_)))?;
+        ok.then_some((rel, e))
+    }
+
+    /// Whether the anchor `rel(e, t1, _...)` holds, read as `Kernel::call`
+    /// reads it where that reading is a lookup, branch for branch: a
+    /// memoised result (the entity's tuples in it, found as `call` narrows
+    /// it), or, behind the memo's oldest bucket with the stores trimmed,
+    /// the latest tuples the eviction kept for the entity (E-126). `None`
+    /// where `call` would halt, meet a stuck instance or derive: the walk
+    /// then solves the anchor. `key` is the memo key, rewritten in place.
+    fn anchor_holds(&self, rel: usize, e: &Value, t1: i64, key: &mut super::MemoKey) -> Option<bool> {
+        key.1[0] = Value::Time(t1);
+        let info = &self.rels[rel];
+        let (epos, kpos) = (info.entity_positions[0], info.key_pos);
+        let held = |d: &super::Derived| {
+            let at = |tu: &Tuple| tu[epos] == *e && tu[kpos] == Value::Time(t1);
+            if d.len() > SORTED_MIN {
+                let lo = d.partition_point(|(tu, _)| tu[epos] < *e);
+                let hi = lo + d[lo..].partition_point(|(tu, _)| tu[epos] <= *e);
+                d[lo..hi].iter().any(|(tu, _)| at(tu))
+            } else {
+                d.iter().any(|(tu, _)| at(tu))
+            }
+        };
+        if let Some(hit) = self.memo_get(key) {
+            if self.memo_stuck.contains_key(key) {
+                return None;
+            }
+            return Some(held(hit));
+        }
+        if self.memo_errors.contains_key(key) {
+            return None;
+        }
+        match self.memo.oldest() {
+            Some(oldest) if self.cfg.trim_stores && t1 < oldest => Some(match self.memo.latest_row(rel, e) {
+                Some((t, d)) if t == t1 => held(d),
+                _ => false,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The window's conjunction at bar `t1` for the call's bindings: whether
+    /// the anchor holds there and the solutions. `anchored` is the walk's
+    /// answer for the bar, when a walk solved it. With the anchor first in
+    /// the solve order it is solved once and the rest goes on from it, and
+    /// a bar it does not hold at has no solution; otherwise the anchor and
+    /// the conjunction are solved apart. Either way the bar yields what
+    /// solving the anchor and then the whole conjunction yields.
+    pub(crate) fn rows_solve_bar(&mut self, cr: &Arc<CompiledRule>, plan: &RowsPlan, env: &[Option<Value>], t1: i64, anchored: Option<bool>) -> Result<(bool, Vec<Env>), RunError> {
+        let mut e = env.to_vec();
+        e[plan.wslot] = Some(Value::Time(t1));
+        if plan.anchor_first {
+            if anchored == Some(false) {
+                return Ok((false, Vec::new()));
+            }
+            let order: Vec<usize> = (0..plan.order.len()).collect();
+            let (live, stuck) = self.solve_kleene(cr, &plan.order, &order[..1], vec![e], None)?;
+            if let Some(s) = stuck.into_iter().next() {
+                return Err(s.error);
+            }
+            if live.is_empty() {
+                return Ok((false, live));
+            }
+            let (live, stuck) = self.solve_kleene_from(cr, &plan.order, &order[1..], live, Vec::new(), None)?;
+            return match stuck.into_iter().next() {
+                Some(s) => Err(s.error),
+                None => Ok((true, live)),
+            };
+        }
+        let anchored = match anchored {
+            Some(a) => a,
+            None => plan.anchor.is_empty() || !self.solve(cr, &plan.anchor, vec![e.clone()])?.is_empty(),
+        };
+        Ok((anchored, self.solve(cr, &plan.order, vec![e])?))
+    }
+
+    /// Bar `t1` solved on the row path, fed to the group: counted as a
+    /// solved bar, then its row's arguments evaluated. `false` when it has
+    /// more than one solution (the general path's window).
+    fn rows_feed_solved(&mut self, cr: &CompiledRule, args: &[Expr], agg: &str, st: &mut RowsState, t1: i64, (anchored, sols): (bool, Vec<Env>)) -> Result<bool, RunError> {
+        self.stats.window_bars_solved += 1;
+        if sols.len() > 1 {
+            return Ok(false);
+        }
+        if anchored {
+            st.anchors.push_back(t1);
+        }
+        if let Some(row) = sols.first() {
+            let vals = if agg == "count" { Vec::new() } else { self.agg_args(cr, args, row)? };
+            st.rows.push(t1, &vals);
+        }
+        Ok(true)
+    }
+
+    /// The window at `t` of a group brought up to it: the rows' count and,
+    /// when there are at least `min_count`, the aggregate over them (from
+    /// running sums under `numerics running`, else the two-pass reduction
+    /// of the columns' slices). The summary row is recorded when asked.
+    /// `None` when the buffer does not hold the window.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rows_serve(
+        &mut self,
+        cr: &CompiledRule,
+        plan: &RowsPlan,
+        st: &mut RowsState,
+        env: &[Option<Value>],
+        t: i64,
+        n: usize,
+        agg: &str,
+        f: Option<Function>,
+        nargs: usize,
+        min_count: i64,
+    ) -> Result<Option<Served>, RunError> {
+        let Some((lo, hi)) = st.window(t, n) else { return Ok(None) };
+        let count = hi - lo;
+        let running = if self.cfg.running_sums && moment_aggregate(agg) && count >= 2 {
+            let bars = self.domain_bars(cr, env)?;
+            let mut noncanonical = 0;
+            let v = running_value(st, agg, t, n, &bars, &mut noncanonical);
+            self.stats.window_noncanonical += noncanonical;
+            v
+        } else {
+            None
+        };
+        if self.recording {
+            let sums = if running.is_some() { st.sums.as_ref() } else { None };
+            self.summary_rows.push(super::SummaryRow {
+                rule: cr.idx,
+                literal: plan.literal,
+                outer: plan.outer.iter().map(|&s| env[s].clone()).collect(),
+                bar: t,
+                agg: agg.to_string(),
+                rows: count,
+                path: if running.is_some() { "running" } else { "two_pass" },
+                shift: sums.map(|r| r.sums.shift),
+                sums: sums.map(|r| r.sums.s.map(|x| x.value())),
+                value: running,
+            });
+        }
+        let value = if (count as i64) < min_count {
+            Ok(None)
+        } else if agg == "count" {
+            Ok(Some(Value::Count(count as i64)))
+        } else if let Some(v) = running {
+            Ok(Some(Value::Num(v)))
+        } else {
+            let cols: smallvec::SmallVec<[&[f64]; 2]> = (0..nargs).map(|j| st.col(j, lo, hi)).collect();
+            rows_reduce(agg, f, &cols)
+        };
+        Ok(Some((count, value)))
     }
 
     /// Whether a rows window's time variable is the lowest slot among the
@@ -3196,6 +3620,12 @@ impl<'p> Kernel<'p> {
         self.arith_text(cr, env, expr.to_string(), message)
     }
 
+    /// The halt of an aggregate whose reduction is partial, naming it.
+    fn agg_error(&self, cr: &CompiledRule, env: &[Option<Value>], agg: &str, args: &[Expr], message: &str) -> RunError {
+        let a: Vec<String> = args.iter().map(|e| e.to_string()).collect();
+        self.arith_text(cr, env, format!("{}({}) over (...)", agg, a.join(", ")), message)
+    }
+
     /// The partial-arithmetic halt of section 7, with the offending
     /// expression given as text (an aggregate names the whole aggregate).
     fn arith_text(&self, cr: &CompiledRule, env: &[Option<Value>], expr: String, message: &str) -> RunError {
@@ -3228,36 +3658,16 @@ impl<'p> Kernel<'p> {
             Expr::Var(v, _) => env[cr.slots[v]].clone().ok_or_else(|| RunError::Internal(format!("variable `{}` unbound in rule {}", v, cr.label))),
             Expr::Param(p, _) => self.param_value(cr, p),
             Expr::Lit(l, _) => Ok(super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities)),
-            Expr::Neg(x, _) => match self.eval_expr(cr, x, env)? {
-                Value::Num(v) => Ok(Value::Num(-v)),
-                Value::Count(c) => Ok(Value::Count(-c)),
-                _ => Err(self.arith(cr, env, e, "cannot negate a non-numeric value")),
-            },
+            // The arithmetic is `cexpr`'s, which the block evaluator's
+            // compiled expressions apply to whole columns.
+            Expr::Neg(x, _) => {
+                let v = self.eval_expr(cr, x, env)?;
+                cexpr::neg_value(&v).map_err(|m| self.arith(cr, env, e, m))
+            }
             Expr::Bin(op, a, b, _) => {
                 let x = self.eval_expr(cr, a, env)?;
                 let y = self.eval_expr(cr, b, env)?;
-                match (op, &x, &y) {
-                    (BinOp::Add, Value::Count(p), Value::Count(q)) => Ok(Value::Count(p + q)),
-                    (BinOp::Sub, Value::Count(p), Value::Count(q)) => Ok(Value::Count(p - q)),
-                    (BinOp::Mul, Value::Count(p), Value::Count(q)) => Ok(Value::Count(p * q)),
-                    _ => {
-                        let (p, q) = match (x.as_f64(), y.as_f64()) {
-                            (Some(p), Some(q)) => (p, q),
-                            _ => return Err(self.arith(cr, env, e, "arithmetic on non-numeric values")),
-                        };
-                        Ok(Value::Num(match op {
-                            BinOp::Add => p + q,
-                            BinOp::Sub => p - q,
-                            BinOp::Mul => p * q,
-                            BinOp::Div => {
-                                if q == 0.0 {
-                                    return Err(self.arith(cr, env, e, "division by zero"));
-                                }
-                                p / q
-                            }
-                        }))
-                    }
-                }
+                cexpr::bin_value(*op, &x, &y).map_err(|m| self.arith(cr, env, e, m))
             }
             Expr::Call(f, args, _) => {
                 let mut vals = Vec::with_capacity(args.len());
@@ -3265,38 +3675,10 @@ impl<'p> Kernel<'p> {
                     vals.push(self.eval_expr(cr, a, env)?);
                 }
                 let num = |v: &Value| v.as_f64();
+                if let Some(f1) = cexpr::Fn1::parse(f) {
+                    return cexpr::call1_value(f1, &vals[0]).map_err(|m| self.arith(cr, env, e, &m));
+                }
                 match f.as_str() {
-                    "log" => {
-                        let x = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "log of a non-numeric value"))?;
-                        if x <= 0.0 {
-                            return Err(self.arith(cr, env, e, &format!("log of a non-positive value ({})", x)));
-                        }
-                        Ok(Value::Num(x.ln()))
-                    }
-                    "exp" => Ok(Value::Num(num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "exp of a non-numeric value"))?.exp())),
-                    "sqrt" => {
-                        let x = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "sqrt of a non-numeric value"))?;
-                        if x < 0.0 {
-                            return Err(self.arith(cr, env, e, &format!("sqrt of a negative value ({})", x)));
-                        }
-                        Ok(Value::Num(x.sqrt()))
-                    }
-                    "abs" => match &vals[0] {
-                        Value::Count(c) => Ok(Value::Count(c.abs())),
-                        v => Ok(Value::Num(num(v).ok_or_else(|| self.arith(cr, env, e, "abs of a non-numeric value"))?.abs())),
-                    },
-                    "sign" => {
-                        let x = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "sign of a non-numeric value"))?;
-                        Ok(Value::Num(if x > 0.0 {
-                            1.0
-                        } else if x < 0.0 {
-                            -1.0
-                        } else {
-                            0.0
-                        }))
-                    }
-                    "floor" => Ok(Value::Num(num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "floor of a non-numeric value"))?.floor())),
-                    "ceil" => Ok(Value::Num(num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "ceil of a non-numeric value"))?.ceil())),
                     "clamp" => {
                         let x = num(&vals[0]).ok_or_else(|| self.arith(cr, env, e, "clamp of a non-numeric value"))?;
                         let lo = num(&vals[1]).ok_or_else(|| self.arith(cr, env, e, "clamp of a non-numeric value"))?;
@@ -3315,43 +3697,7 @@ impl<'p> Kernel<'p> {
                         }
                         Ok(Value::Count(((r / n) * 10.0).ceil().clamp(1.0, 10.0) as i64))
                     }
-                    "least" | "greatest" => {
-                        // An integer literal is a Count and a Scalar is a Num; the
-                        // checker admits the mix (`least(1, W)`), so the comparison
-                        // is numeric across the two, never the enum's variant order.
-                        let num = |v: &Value| match v {
-                            Value::Num(x) => Some(*x),
-                            Value::Count(c) => Some(*c as f64),
-                            _ => None,
-                        };
-                        let mut best = vals[0].clone();
-                        for v in &vals[1..] {
-                            let better = match (num(v), num(&best)) {
-                                (Some(a), Some(b)) => {
-                                    if f == "least" {
-                                        a < b
-                                    } else {
-                                        a > b
-                                    }
-                                }
-                                _ => {
-                                    if f == "least" {
-                                        v < &best
-                                    } else {
-                                        v > &best
-                                    }
-                                }
-                            };
-                            if better {
-                                best = v.clone();
-                            }
-                        }
-                        // The result has the checker's type: a Scalar when any argument is one.
-                        if let (Value::Count(c), true) = (&best, vals.iter().any(|v| matches!(v, Value::Num(_)))) {
-                            best = Value::Num(*c as f64);
-                        }
-                        Ok(best)
-                    }
+                    "least" | "greatest" => Ok(cexpr::least_greatest(f == "least", &vals)),
                     n if PRICING_FUNCTIONS.contains(&n) => self.pricing(cr, env, e, n, &vals),
                     _ => Err(RunError::Internal(format!("unknown function `{}`", f))),
                 }
@@ -3592,20 +3938,12 @@ pub(crate) fn compare(op: CmpOp, a: &Value, b: &Value) -> bool {
     let ord = match (a, b) {
         (Value::Dur(x), Value::Dur(y)) => x.approx_days().partial_cmp(&y.approx_days()).unwrap_or(std::cmp::Ordering::Equal),
         _ => match (a.as_f64(), b.as_f64()) {
-            (Some(x), Some(y)) => match x.partial_cmp(&y) {
-                Some(o) => o,
-                None => return false,
-            },
+            // Two numbers as the block evaluator's tests compare them.
+            (Some(x), Some(y)) => return cexpr::compare_num(op, x, y),
             _ => a.cmp(b),
         },
     };
-    match op {
-        CmpOp::Lt => ord == std::cmp::Ordering::Less,
-        CmpOp::Le => ord != std::cmp::Ordering::Greater,
-        CmpOp::Eq => ord == std::cmp::Ordering::Equal,
-        CmpOp::Gt => ord == std::cmp::Ordering::Greater,
-        CmpOp::Ge => ord != std::cmp::Ordering::Less,
-    }
+    cexpr::holds(op, ord)
 }
 
 /// The closed aggregate set (section 1), reduced by abt-agg's two-pass
@@ -3631,16 +3969,27 @@ pub fn aggregate(name: &str, cols: &[Vec<f64>]) -> Result<Option<Value>, String>
 /// aggregation literal's plan): the two-pass reduction of the columns `f`
 /// reads, in their order; no tuple for an empty group.
 fn reduce_columns(f: Function, cols: &[Vec<f64>]) -> Result<Option<Value>, String> {
-    let reduced = match (f.arity(), cols) {
-        (_, [x, ..]) if x.is_empty() => return Ok(None),
-        (1, [x, ..]) => abt_agg::reduce(f, abt_agg::Mode::TwoPass, &[x.as_slice()]),
-        (2, [x, y, ..]) => abt_agg::reduce(f, abt_agg::Mode::TwoPass, &[x.as_slice(), y.as_slice()]),
-        _ => {
-            let columns: Vec<&[f64]> = cols.iter().take(f.arity()).map(|c| c.as_slice()).collect();
-            abt_agg::reduce(f, abt_agg::Mode::TwoPass, &columns)
-        }
-    };
-    reduced.map(|v| v.map(Value::Num)).map_err(|e| e.to_string())
+    let slices: smallvec::SmallVec<[&[f64]; 2]> = cols.iter().map(|c| c.as_slice()).collect();
+    reduce_slices(f, &slices)
+}
+
+/// `reduce_columns` over slices of the columns (a rows window's buffer,
+/// read in place).
+pub(crate) fn reduce_slices(f: Function, cols: &[&[f64]]) -> Result<Option<Value>, String> {
+    if cols.first().is_some_and(|x| x.is_empty()) {
+        return Ok(None);
+    }
+    let k = f.arity().min(cols.len());
+    abt_agg::reduce(f, abt_agg::Mode::TwoPass, &cols[..k]).map(|v| v.map(Value::Num)).map_err(|e| e.to_string())
+}
+
+/// A rows window's aggregate over its argument columns: by `f` when it was
+/// parsed once, else by name (`quantile`, whose level a row gives).
+pub(crate) fn rows_reduce(agg: &str, f: Option<Function>, cols: &[&[f64]]) -> Result<Option<Value>, String> {
+    match f {
+        Some(f) => reduce_slices(f, cols),
+        None => aggregate(agg, &cols.iter().map(|c| c.to_vec()).collect::<Vec<Vec<f64>>>()),
+    }
 }
 
 #[cfg(test)]
@@ -3814,8 +4163,7 @@ mod running_tests {
     fn state(rows: &[(f64, f64)]) -> RowsState {
         let mut st = RowsState::default();
         for (i, (a, b)) in rows.iter().enumerate() {
-            st.rows.push_back((i as i64, Vec::new(), vec![*a, *b]));
-            st.anchors.push_back(i as i64);
+            st.feed(i as i64, true, Some(&[*a, *b]));
         }
         st.from_start = true;
         st
@@ -3899,5 +4247,169 @@ mod running_tests {
             }
             assert_eq!(nc, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod rows_state_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// The state a rows window group kept before its rows were flat (a
+    /// deque of rows each with its own argument vector), with its serving
+    /// rule and its trim: the oracle.
+    #[derive(Default)]
+    struct Deque {
+        upto: i64,
+        from_start: bool,
+        anchors: VecDeque<i64>,
+        rows: VecDeque<(i64, Vec<f64>)>,
+    }
+
+    impl Deque {
+        fn serve(&self, t: i64, n: usize) -> Option<(usize, Vec<Vec<f64>>)> {
+            let hi = self.anchors.partition_point(|a| *a <= t);
+            if !(hi >= n || self.from_start) {
+                return None;
+            }
+            let lo_t = if hi >= n && n > 0 {
+                self.anchors[hi - n]
+            } else if hi > 0 {
+                self.anchors[0]
+            } else {
+                i64::MAX
+            };
+            let lo = self.rows.partition_point(|(t1, _)| *t1 < lo_t);
+            let hi_r = self.rows.partition_point(|(t1, _)| *t1 <= t);
+            let count = hi_r.saturating_sub(lo);
+            let width = self.rows.front().map(|r| r.1.len()).unwrap_or(0);
+            let mut cols: Vec<Vec<f64>> = vec![Vec::new(); width];
+            for row in self.rows.iter().take(hi_r).skip(lo) {
+                for (j, v) in row.1.iter().enumerate() {
+                    cols[j].push(*v);
+                }
+            }
+            Some((count, cols))
+        }
+
+        fn trim(&mut self, n: usize) {
+            while self.anchors.len() > n + abt_agg::checkpoint_period(n) + ROWS_SLACK {
+                self.anchors.pop_front();
+                self.from_start = false;
+            }
+            let oldest = self.anchors.front().copied().unwrap_or(i64::MAX);
+            while self.rows.front().map(|(t1, _)| *t1 < oldest).unwrap_or(false) {
+                self.rows.pop_front();
+            }
+        }
+    }
+
+    fn next(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    fn bits(v: &Result<Option<Value>, String>) -> String {
+        match v {
+            Ok(Some(Value::Num(x))) => format!("{:016x}", x.to_bits()),
+            other => format!("{:?}", other),
+        }
+    }
+
+    /// Random feeds through the flat state and the deque: groups asked at
+    /// every bar, every third bar and after long gaps, bars not anchored,
+    /// anchored bars without a row, groups that reach their first bar and
+    /// groups that do not, and requests behind the group's last bar (served
+    /// from a group built fresh). Each serve gives the same window and the
+    /// same reduced bits, through one argument and two, and a count.
+    #[test]
+    fn the_flat_state_serves_what_the_deque_served() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut served = 0;
+        for case in 0..400 {
+            let n = [1usize, 2, 4, 18, 40][case % 5];
+            let width = [0usize, 1, 2][case % 3];
+            let mut flat = RowsState::default();
+            let mut deque = Deque { upto: i64::MIN, ..Default::default() };
+            let from_start = case % 4 != 0;
+            flat.from_start = from_start;
+            deque.from_start = from_start;
+            let mut t = 0i64;
+            for _ in 0..300 {
+                // The bars since the last call: some not anchored, some
+                // anchored with no row; a long gap now and then.
+                let gap = if next(&mut x).is_multiple_of(50) { 30 + next(&mut x) % 80 } else { 1 + next(&mut x) % 3 };
+                for _ in 0..gap {
+                    t += 1;
+                    let r = next(&mut x) % 10;
+                    let anchored = r < 8;
+                    let row = r < 7 || r == 9;
+                    let vals: Vec<f64> = (0..width).map(|j| ((next(&mut x) % 20_000) as f64 - 10_000.0) / 7.0 + j as f64 * 1e6).collect();
+                    flat.feed(t, anchored, row.then_some(vals.as_slice()));
+                    if anchored {
+                        deque.anchors.push_back(t);
+                    }
+                    if row {
+                        deque.rows.push_back((t, vals));
+                    }
+                }
+                flat.upto = t;
+                deque.upto = t;
+                let ask = |st: &RowsState, at: i64| st.window(at, n).map(|(lo, hi)| (hi - lo, (0..width).map(|j| st.col(j, lo, hi).to_vec()).collect::<Vec<Vec<f64>>>()));
+                let a = ask(&flat, t);
+                let b = deque.serve(t, n).map(|(c, cols)| (c, if cols.is_empty() { vec![Vec::new(); width] } else { cols }));
+                assert_eq!(a, b, "case {} at {}", case, t);
+                if let Some((count, cols)) = a {
+                    served += 1;
+                    let (lo, hi) = flat.window(t, n).unwrap();
+                    let slices: Vec<&[f64]> = (0..width).map(|j| flat.col(j, lo, hi)).collect();
+                    assert_eq!(hi - lo, count);
+                    for agg in ["mean", "sum", "std", "max", "last", "ols_slope", "corr"] {
+                        let f = Function::parse(agg, None).ok();
+                        if width == 0 || (width < 2 && matches!(agg, "ols_slope" | "corr")) {
+                            continue;
+                        }
+                        let want = f.map_or_else(|| aggregate(agg, &cols), |f| reduce_columns(f, &cols));
+                        assert_eq!(bits(&rows_reduce(agg, f, &slices)), bits(&want), "case {} {} at {}", case, agg, t);
+                    }
+                }
+                // A request a few bars back, as a recursion reaching its
+                // previous row makes it, is served from the buffer alike.
+                let back = t - (next(&mut x) % 6) as i64;
+                assert_eq!(ask(&flat, back).map(|(c, _)| c), deque.serve(back, n).map(|(c, _)| c), "case {} back at {}", case, back);
+                flat.trim(n);
+                deque.trim(n);
+                assert_eq!(flat.anchors, deque.anchors);
+                assert_eq!(flat.rows.len(), deque.rows.len());
+                assert_eq!(flat.from_start, deque.from_start);
+            }
+        }
+        assert!(served > 50_000, "{} windows served", served);
+    }
+
+    /// The dense table of a group's states: put, take and the count of
+    /// states held, by symbol, and the outer values its first call names.
+    #[test]
+    fn the_dense_states_are_held_by_symbol() {
+        let mut e = EntRows::default();
+        let rest = |v: f64| vec![None, Some(Value::Num(v))].into_iter();
+        assert!(e.admits(rest(1.0)), "the first call names the outer values");
+        assert!(e.admits(rest(1.0)) && !e.admits(rest(2.0)) && e.admits_now(rest(1.0)) && !e.admits_now(rest(2.0)));
+        for s in [7u32, 0, 3000, 7] {
+            let mut st = Box::<RowsState>::default();
+            st.upto = s as i64;
+            e.put(s, st);
+        }
+        assert_eq!(e.live(), 3);
+        assert_eq!(e.get(3000).map(|s| s.upto), Some(3000));
+        assert!(e.get(5).is_none() && e.get(1 << 19).is_none());
+        assert_eq!(e.take(7).map(|s| s.upto), Some(7));
+        assert!(e.take(7).is_none());
+        assert_eq!(e.live(), 2);
+        e.clear();
+        assert_eq!(e.live(), 0);
+        assert!(e.get(0).is_none() && e.admits(rest(2.0)), "a cleared table is named again");
     }
 }
