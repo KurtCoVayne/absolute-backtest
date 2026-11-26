@@ -578,6 +578,36 @@ return is one period on the week's closes where the book compounds each
 day's dividend; the split-day dividend, D7, which the adapter, the library
 and the book compute three ways; E-134), and a cheaper membership test.
 
+**Package 5, second part (Nov 25): the membership test from 76.5 s to about 3
+s, and the residual explained.** E-160: `eligible` reads `sp1500@base` at
+the name's own last bar of the week, the key of its latest daily close as
+of the label (`close@base(A, L, _) asof T`), instead of a daily relation
+derived at every bar; the same answers, the same fingerprint
+(`6e72c9bb…`), the run 337.2 s to 251.6 s on the parity store. The 26
+weeks beyond 1e-4 and the 1,346 between 1e-4 and 8e-15 were then measured
+against the replica with one switch per mechanism, added in turn: five
+switches reproduce the run in all 1,851 weeks to 8e-15.
+
+| Mechanism | Weeks beyond 1e-4 | Between 1e-4 and 8e-15 |
+| --- | ---: | ---: |
+| The weekly total return is one period on the week's closes, `(P·F + D)/P0`; the book compounds each day, `(c + D)·s/c₋₁` | 24 | 1,235 |
+| The split-day dividend (D7): the store's `D/F` added to `P·F`, where the book takes `(P + D)·F` | 0 | 3 |
+| Two dividends of one name in one week: the weekly read keeps the latest (349 asset-weeks) | 0 | 5 |
+| A delisting is applied at the bar of the week that holds its session; the book drops the name at no cost the week after | 0 | 16 |
+| The name is bought again after that exit (it still has a row that week) and can never be sold | 2 | 87 |
+
+Measured and changing no week: E-134's restarts (25), halts, the
+membership's edge cases. The 105 names stuck after a re-buy (95) or
+delisted with no delisting event (10) make 83,830 expired exit orders,
+94% of the run's 88,874 decisions, at no cost to the returns but not to
+the clock. What each needs: the library's total return as the book's
+product over the week's dividends, `(P·F/P0)·Π(1 + D_i·F_i/Pex_i) − 1`,
+one close read a dividend (a product aggregate, and the next fix); a
+window over an event relation on a coarser calendar that returns every
+tuple of the bucket; the executor applying a delisting at the first
+decision bar whose week has no print of the name, and expiring orders on
+a delisted name.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

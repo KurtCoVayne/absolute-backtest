@@ -14,9 +14,13 @@
 
 #![allow(clippy::result_large_err)]
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use abt_kernel::check::Program;
+use abt_kernel::compiler::{compile, CompileOptions};
 use abt_kernel::kernel::time::{format_timestamp, parse_timestamp};
-use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, RunResult, Value};
+use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, RunResult, Sym, Value};
+use abt_kernel::lower::Numerics;
 use abt_kernel::Lit;
 use abt_tests as common;
 
@@ -142,9 +146,7 @@ fn the_target_is_one_over_the_count_times_the_scale_capped() {
     assert!(parted > 0, "no week where S / N and (1 / N) S part: the test proves nothing");
 }
 
-/// The names `eligible` holds at the label `day`: `sp1500` read with the
-/// name bound, as the program reads it (unbound, a bucket read answers the
-/// bucket's latest day with any row, here the label's).
+/// The names `eligible` holds at the label `day`.
 fn members_at(k: &mut Kernel, day: &str) -> Vec<String> {
     let t = parse_timestamp(day).unwrap();
     let mut out: Vec<String> = k
@@ -198,4 +200,182 @@ fn a_name_is_a_member_in_a_week_when_it_is_one_at_its_last_bar_of_the_week() {
     assert!(has(&week, "E5"), "S04 joined on Wednesday: {:?}", week);
     assert!(has(&week, "E6"), "S05's last bar of the week, Tuesday, is a member day: {:?}", week);
     assert!(!has(&after, "E4") && has(&after, "E5") && has(&after, "E6"), "{:?}", after);
+}
+
+/// The names `eligible` holds at the label `t`.
+fn eligible_at(k: &mut Kernel, t: i64) -> BTreeSet<String> {
+    k.query("eligible", t, &[])
+        .unwrap()
+        .iter()
+        .filter_map(|tu| tu.iter().find(|v| matches!(v, Value::Equity(_))).map(|v| k.show(v)))
+        .collect()
+}
+
+/// A name's last bar of the week before the label (E-149, E-160): in the
+/// week of Friday 2011-03-11, S06 to S09 (`E7` to `E10`) have no bar on
+/// Thursday or Friday. S06's membership ends on Wednesday, S07's on
+/// Thursday and S08's on Friday, their rows on the days without a bar kept
+/// as a lake interval holds them; S09's ends on Tuesday. The book's
+/// `week_end` for each is Wednesday: the first three are members that week,
+/// the fourth is not, and so is S03 (`E4`), out on Wednesday and trading
+/// to Friday.
+#[test]
+fn a_name_whose_last_bar_of_the_week_is_wednesday_is_a_member_by_its_membership_on_wednesday() {
+    let p = mw14();
+    let mut ds = market(&p);
+    let names: Vec<_> = ["E4", "E7", "E8", "E9", "E10"].iter().map(|s| ds.intern(s)).collect();
+    let (s03, s06, s07, s08, s09) = (names[0], names[1], names[2], names[3], names[4]);
+    let day = |d: &str| parse_timestamp(d).unwrap();
+    let (wednesday, thursday, friday) = (day("2011-03-09"), day("2011-03-10"), day("2011-03-11"));
+    let time = |tu: &abt_kernel::kernel::Tuple| tu[1].as_time().unwrap_or(i64::MIN);
+    let of = |tu: &abt_kernel::kernel::Tuple, s| tu[0] == Value::Equity(s);
+    let halted = |tu: &abt_kernel::kernel::Tuple| [s06, s07, s08, s09].iter().any(|&s| of(tu, s)) && (thursday..=friday).contains(&time(tu));
+    for (rel, tuples) in ds.facts.iter_mut() {
+        match rel.as_str() {
+            "member" => tuples.retain(|tu| {
+                let t = time(tu);
+                !(of(tu, s03) && t >= wednesday) && !(of(tu, s06) && (thursday..=friday).contains(&t)) && !(of(tu, s07) && t == friday) && !(of(tu, s09) && (wednesday..=friday).contains(&t))
+            }),
+            "open" | "high" | "low" | "close" | "volume" | "listed" => tuples.retain(|tu| !halted(tu)),
+            _ => {}
+        }
+    }
+    let (_, mut k) = common::run_kernel(&p, &ds, ExecConfig::from_program(&p)).unwrap();
+    let before = eligible_at(&mut k, day("2011-03-04"));
+    let week = eligible_at(&mut k, friday);
+    for s in ["E4", "E7", "E8", "E9", "E10"] {
+        assert!(before.contains(s), "{} is a member the week before: {:?}", s, before);
+    }
+    assert!(week.contains("E7"), "S06's membership ends on its last bar of the week, Wednesday: {:?}", week);
+    assert!(week.contains("E8"), "S07's membership ends on Thursday, after its last bar of the week: {:?}", week);
+    assert!(week.contains("E9"), "S08's membership ends on Friday, after its last bar of the week: {:?}", week);
+    assert!(!week.contains("E10"), "S09's membership ended on Tuesday, before its last bar of the week: {:?}", week);
+    assert!(!week.contains("E4"), "S03 left on Wednesday and closed the week out of the index: {:?}", week);
+}
+
+/// MW14 without its membership test: `eligible` holds the names above the
+/// price and dollar-volume floors (its rule cut after the second floor).
+fn floors_only() -> Program {
+    let src = common::corpus_source("company", "mw14");
+    let floor = "D >= dvol_floor";
+    let at = src.find(floor).expect("mw14's `eligible` has its dollar-volume floor") + floor.len();
+    let end = at + src[at..].find(".\n").expect("the rule ends");
+    let cut = format!("{}{}", &src[..at], &src[end..]);
+    let rule = &cut[cut.find("eligible(A, T, D) :-").expect("the rule")..at];
+    assert!(!rule.contains("sp1500") && !rule.contains("member"), "the floors' rule still tests membership: {}", rule);
+    common::program(&cut, "mw14")
+}
+
+/// The book's membership test (data.py `add_membership_and_universe`) over a
+/// market where every name halts now and then, for one to four days, with or
+/// without member rows on the halted days, and moves between the three
+/// lists, into two at once and out of all of them, on every weekday. At every
+/// week `eligible` holds exactly the names above the floors that are members
+/// at their own last bar of it, as computed here from the facts; a read at
+/// the label and a read of the week's latest member row each miss some of
+/// those weeks. The run's decisions and fills are also those of the
+/// optimised plan over trimmed stores, as `abt run` runs it.
+#[test]
+fn eligible_holds_the_names_above_the_floors_that_are_members_at_their_own_last_bar_of_the_week() {
+    let p = mw14();
+    let mut ds = market(&p);
+    let lists = [ds.intern_label("SP500"), ds.intern_label("SP400"), ds.intern_label("SP600")];
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut draw = |n: usize| -> usize {
+        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 33) % n as u64) as usize
+    };
+    // Every name's bar days, in order.
+    let mut days: BTreeMap<Sym, Vec<i64>> = BTreeMap::new();
+    for tu in &ds.facts["close"] {
+        if let (Some(s), Some(t)) = (tu[0].as_equity(), tu[1].as_time()) {
+            days.entry(s).or_default().push(t);
+        }
+    }
+    let mut halted: BTreeSet<(Sym, i64)> = BTreeSet::new();
+    let mut member: Vec<(i64, Sym, Sym)> = Vec::new();
+    for (&s, d) in days.iter_mut() {
+        d.sort_unstable();
+        for _ in 0..10 {
+            let (from, len) = (draw(d.len()), 1 + draw(4));
+            halted.extend(d[from..(from + len).min(d.len())].iter().map(|&t| (s, t)));
+        }
+        let mut cuts: Vec<usize> = (0..14).map(|_| draw(d.len())).collect();
+        cuts.sort_unstable();
+        let (mut seg, mut held) = (0, draw(5));
+        for (i, &t) in d.iter().enumerate() {
+            while seg < cuts.len() && cuts[seg] <= i {
+                seg += 1;
+                held = draw(5);
+            }
+            if halted.contains(&(s, t)) && draw(2) == 0 {
+                continue;
+            }
+            // 0: out of the three; 1 to 3: one list; 4: the S&P 500 and the 400 at once.
+            match held {
+                0 => {}
+                4 => member.extend([(t, s, lists[0]), (t, s, lists[1])]),
+                k => member.push((t, s, lists[k - 1])),
+            }
+        }
+    }
+    for (rel, tuples) in ds.facts.iter_mut() {
+        match rel.as_str() {
+            "member" => tuples.retain(|tu| !matches!(tu[2], Value::Label(l) if lists.contains(&l))),
+            "open" | "high" | "low" | "close" | "volume" | "listed" => tuples.retain(|tu| !matches!((tu[0].as_equity(), tu[1].as_time()), (Some(s), Some(t)) if halted.contains(&(s, t)))),
+            _ => {}
+        }
+    }
+    member.sort_unstable();
+    for (t, s, l) in &member {
+        ds.add("member", vec![Value::Equity(*s), Value::Time(*t), Value::Label(*l)]);
+    }
+    let members: BTreeSet<(Sym, i64)> = member.iter().map(|&(t, s, _)| (s, t)).collect();
+    let (r, mut k) = common::run_kernel(&p, &ds, ExecConfig::from_program(&p)).unwrap();
+    let floors = floors_only();
+    let (_, mut kf) = common::run_kernel(&floors, &ds, ExecConfig::from_program(&floors)).unwrap();
+    let (mut weeks, mut names, mut at_label, mut latest) = (0, 0, 0, 0);
+    let mut from = i64::MIN;
+    for &t in &r.bars {
+        let above = eligible_at(&mut kf, t);
+        let mut book: BTreeSet<String> = BTreeSet::new();
+        for (&s, d) in &days {
+            let name = ds.symbols.name(s).to_string();
+            let traded: Vec<i64> = d.iter().copied().filter(|&x| x > from && x <= t && !halted.contains(&(s, x))).collect();
+            let Some(&last) = traded.last() else { continue };
+            if !above.contains(&name) {
+                continue;
+            }
+            let is = members.contains(&(s, last));
+            at_label += usize::from(is != members.contains(&(s, t)));
+            latest += usize::from(is != traded.iter().any(|&x| members.contains(&(s, x))));
+            if is {
+                book.insert(name);
+            }
+        }
+        names += book.len();
+        assert_eq!(eligible_at(&mut k, t), book, "{}: `eligible` against the floors and the book's membership test", format_timestamp(t));
+        weeks += 1;
+        from = t;
+    }
+    assert!(weeks > 100 && names > 1000, "{} weeks, {} eligible name-weeks", weeks, names);
+    assert!(
+        at_label > 0 && latest > 0,
+        "the market has no week where a read at the label ({}) or of the week's latest member row ({}) parts from the book",
+        at_label,
+        latest
+    );
+    let cfg = ExecConfig::from_program(&p);
+    let numerics = Numerics::from_running_sums(cfg.running_sums);
+    let compiled = compile(
+        &p,
+        &CompileOptions {
+            numerics,
+            ..CompileOptions::default()
+        },
+    );
+    let trimmed = common::run_planned(&p, &compiled.lowered, &ds, ExecConfig { trim_stores: true, ..cfg }).unwrap();
+    assert!(fills(&r, i64::MIN).len() > 20, "{} fills", fills(&r, i64::MIN).len());
+    assert_eq!(decisions(&r, i64::MIN), decisions(&trimmed, i64::MIN));
+    assert_eq!(fills(&r, i64::MIN), fills(&trimmed, i64::MIN));
 }

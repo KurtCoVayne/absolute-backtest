@@ -3509,7 +3509,8 @@ batch driver agree on every corpus program. Each bless since:
   strategy's own rules keep the base reading: `prev_row(A, T, T0),
   close(A, T0, P0)` written in a weekly strategy is accepted and reads
   the daily close on the label's day, where V-3.4 would have WF-16
-  refuse it as it refuses `close(A, T, P)`; no corpus program writes it.
+  refuse it as it refuses `close(A, T, P)`; no corpus program writes it
+  (MW14's membership test names `close@base` for this reason, E-160).
   (2) With the stores trimmed (E-126) the view read at a previous row is
   a non-recursive derived relation read behind the memo, which is E-134's
   case: a name whose previous row is the bucket just evicted finds
@@ -3729,8 +3730,9 @@ batch driver agree on every corpus program. Each bless since:
   `member_to <= from`; before, such an asset had no bar and no member
   row that day, as `two_span_lake`'s 16 in a span from 2015-01-05; not
   met by `bench-mw14.sh`, whose window starts on a holiday). MW14 tests
-  the three lists at the name's own last bar of the week
-  (`sp1500_day@base`, its `last` over the bucket). (d) Decision 9
+  the three lists at the name's own last bar of the week (here
+  `sp1500_day@base` and its `last` over the bucket; since E-160
+  `sp1500@base` read in `eligible` at that bar). (d) Decision 9
   rounded prices and dividend
   amounts to six decimals; the lake's are single-precision floats widened
   (2017: none of 976,389 closes off `f32`, 909,946 off the 1e-6 grid): on
@@ -3765,6 +3767,80 @@ batch driver agree on every corpus program. Each bless since:
   3.685%, the engine 3.437%; CSR 2018-12-28, a 1:10 reverse split: 4.04%
   against 144%). Not changed: none fell on a held name's label on Nov 25,
   and the vendor's convention (per old or new share) is the owner's call.
+- **E-160 (E-149 (c); MW14's membership at a name's last bar of the
+  week, at the cost of a weekly test).** E-149 wrote the book's test as a
+  daily relation, `sp1500_day@base`, derived at every base bar for every
+  name with a close (about 9,300 bars), and `sp1500` as its `last` over
+  the week's bucket: exact, and in the run of wave 1's tree on m8-bench2
+  (`p5res-1`, 337.2 s) 76.5 s of it (`sp1500` 47.8 s, `sp1500_day`
+  28.7 s) for a book that decides weekly. [D] `sp1500@base` is the union
+  of the three lists at a day, and `eligible` reads it at the name's last
+  bar of the week, bound as the key of its latest daily close as of the
+  label, `close@base(A, L, _) asof T`, after the two floors. The read names
+  the base calendar, so `L` is a base time and `sp1500(A, L)` a plain read
+  at `L` whatever becomes of E-144's open item (1) (a bare `close` would
+  read `close@weekly` there if that item is closed as V-3.4 reads, and `L`
+  would be the label); the as-of read of a stored
+  relation with the name bound (`universe(A, T)` binds it first, and the
+  schedule and the planner keep it first, since the as-of reads `A`)
+  probes the label's day and, for a name without a bar there, the days
+  before it, at most the week's. `sp1500` is derived only at the bars it
+  is read at, the label's day and the last bars of the names halted
+  before it. The same answers: `member_from <= week_end <= member_to`
+  with `week_end` the name's own last bar (`data.py` `to_weekly`,
+  `add_membership_and_universe`). Measured on m8-bench2 against the
+  parity store, fingerprint unchanged (`6e72c9bb…`): 251.6 s
+  (`p5b-member-2`), `sp1500_day` gone, `eligible` 18.2 s against 16.1 s
+  in `p5res-1` and 15.7 s in `p5b-member-1`, and `sp1500` under 2.1 s (not
+  among the slowest sixteen relations printed; about 1 s by the ratio
+  measured in process): about 3.3 s for the test, at most 4.6 s, where it
+  took 76.5 s. Measured on the way: the same read in a weekly `sp1500`, the
+  three lists in one case form (`universe(A, T), close(A, L, _) asof T,
+  F = case { member(A, L, "SP500") -> 1 ; ... }, F > 0`): 258.5 s, that
+  relation 8.8 s (`p5b-member-1`). MW14 no longer reads `member` in a
+  bucket but in the universe's ETF test, so E-149's open item (a bucket
+  read's answer depends on whether its entity is bound) no longer
+  touches its membership. Rejected: the week's latest member row with
+  the name bound (`universe(A, T), member(A, T, "SP500")`, a bucket
+  read), which keeps a name whose membership ends mid-week while it
+  trades on, the store-only direction of Nov 25's 578 asset-weeks; the
+  time of the last bar as a bucket aggregate (`max(T1) over (T1 in
+  bucket(weekly, T), close(A, T1, _))`), which walks the week's daily
+  rows per name in the evaluator, since the pushdown takes only an
+  aggregate of a value column (`pushdown.rs`, condition (a)), as
+  `dvol`'s bucket mean does in 48.6 s; the label's day bound once per
+  week (`bar@base(L) asof T`) with the names halted on it in a second
+  rule behind `not close(A, L, _)`, in process a third cheaper than the
+  case form and no cheaper than this formulation; a change of the linker or the
+  evaluator, which the language does not need for this. Tests:
+  `tests/mw14_parity.rs::a_name_whose_last_bar_of_the_week_is_wednesday_is_a_member_by_its_membership_on_wednesday`
+  (no bar after Wednesday, the membership ending on Wednesday, Thursday,
+  Friday or Tuesday),
+  `::eligible_holds_the_names_above_the_floors_that_are_members_at_their_own_last_bar_of_the_week`
+  (40 names halting for one to four days and moving between the lists,
+  into two and out of all of them, on every weekday: 140 weeks and 4,456
+  eligible name-weeks against the floors of the program without its
+  membership test and the book's test computed from the facts, where a
+  read at the label parts from it in 81 name-weeks and any member row of
+  the week in 69; the optimised plan over trimmed stores decides and
+  fills as the written plan over the whole history). Mutations: the
+  label read (`scripts/mutations/e-149-member-week.patch`, rebased on
+  this) and any member row of the week
+  (`e-160-member-latest.patch`) each fail
+  `a_name_whose_last_bar_of_the_week_is_wednesday_is_a_member_by_its_membership_on_wednesday`,
+  `eligible_holds_the_names_above_the_floors_that_are_members_at_their_own_last_bar_of_the_week`
+  and E-149's `a_name_is_a_member_in_a_week_when_it_is_one_at_its_last_bar_of_the_week`.
+  Other programs: only MW14's program hash moves; its golden run is
+  unchanged (the corpus's synthetic market has a member row on every
+  bar). **Open:** the answer depends on the literals' order, which
+  Proposition V-5.5 says it must not: written first in the body, the
+  as-of read is planned as the generator with `A` unbound, and
+  `asof_matches` then stops at the latest key with any close, the label's
+  day, so names halted on it leave `eligible`. `abt check` accepts that
+  order with no warning. Either the evaluator walks back per entity when
+  the entity is unbound, or the checker refuses an as-of read whose entity
+  no earlier literal binds (E-149's open item, a bucket read's answer
+  depending on whether its entity is bound, is the same defect).
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

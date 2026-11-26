@@ -89,21 +89,24 @@ strategy mw14 {
         R = ols_r(log(P / P0), K)     over (T1 in rows[clenow_rows], adj_close@weekly(A, T1, P), row_number(A, T1, K)),
         S = (exp(B * rows_a_year) - 1) * R * R.
 
-    # The S&P 1500 is the union of the three indices, tested at the name's own
-    # last bar of the week, as the book tests `member_from <= week_end <=
-    # member_to` (data.py add_membership_and_universe): a member halted on the
-    # label day is one, a name out on Wednesday and trading on is not (E-149).
-    rel sp1500_day(A: Equity, @T: base, F: Scalar)
-    sp1500_day(A, T, F) :- close(A, T, _),
-        F = case { member(A, T, "SP500") -> 1 ; member(A, T, "SP400") -> 1 ; member(A, T, "SP600") -> 1 ; else -> 0 }.
-    rel sp1500(A: Equity, @T)
-    sp1500(A, T) :- universe(A, T), F = last(X) over (T1 in bucket(weekly, T), sp1500_day(A, T1, X)), F > 0.
+    # The S&P 1500 at a day: the union of the three indices.
+    rel sp1500(A: Equity, @T: base)
+    sp1500(A, T) :- member(A, T, "SP500").
+    sp1500(A, T) :- member(A, T, "SP400").
+    sp1500(A, T) :- member(A, T, "SP600").
 
-    # The universe of the book: members above the price floor and the dollar-volume floor.
+    # The universe of the book: members above the price floor and the
+    # dollar-volume floor. Membership is tested at the name's own last bar of
+    # the week, L, the key of its latest daily close as of the label, as the book tests
+    # `member_from <= week_end <= member_to` (data.py
+    # add_membership_and_universe): a member halted on the label day is one, a
+    # name out on Wednesday and trading on is not (E-149). `sp1500` is derived
+    # at those bars alone, not at every day (E-160).
     rel eligible(A: Equity, @T, D: Notional<USD>)
-    eligible(A, T, D) :- universe(A, T), sp1500(A, T),
+    eligible(A, T, D) :- universe(A, T),
         close@weekly(A, T, P), P >= price_floor,
-        D = mean(X) over (T1 in rows[dvol_rows], dvol(A, T1, X)), D >= dvol_floor.
+        D = mean(X) over (T1 in rows[dvol_rows], dvol(A, T1, X)), D >= dvol_floor,
+        close@base(A, L, _) asof T, sp1500(A, L).
 
     rel scored(A: Equity, @T, S: Scalar)
     scored(A, T, S) :- eligible(A, T, _), clenow(A, T, S).
