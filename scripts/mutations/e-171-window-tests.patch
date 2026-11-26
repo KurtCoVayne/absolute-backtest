@@ -1,0 +1,16 @@
+# proposition: E-171 (the block evaluator's calendar window applies the call's tests to each cached row, as `window_columns` does)
+# mutation: the tests are not applied
+# test: cargo test -p abt-tests --test eval_set the_case_and_the_calendar_window_over_actions_are_the_row_paths
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -642,7 +642,7 @@
+                     }
+                     'rows: for k in order {
+                         let (row, vals) = &bar[k];
+-                        if !op.late.is_empty() {
++                        if !op.late.is_empty() && false {
+                             for &s in &unbound {
+                                 tested[s] = row[s].clone();
+                             }

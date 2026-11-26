@@ -1,0 +1,16 @@
+# proposition: E-170 (the block evaluator's case takes, per row, the first branch whose guard holds; the `else` value only for the rows no guard holds of)
+# mutation: a row a guard took is offered to the later branches and the `else` again
+# test: cargo test -p abt-tests --test eval_set the_case_and_the_calendar_window_over_actions_are_the_row_paths
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colplan.rs b/crates/abt-kernel/src/kernel/colplan.rs
+--- a/crates/abt-kernel/src/kernel/colplan.rs
++++ b/crates/abt-kernel/src/kernel/colplan.rs
+@@ -1143,7 +1143,7 @@
+                         }
+                         let mut taken = hit.iter().peekable();
+                         open.retain(|r| {
+-                            let took = taken.peek() == Some(&r);
++                            let took = taken.peek() == Some(&r) && false;
+                             if took {
+                                 taken.next();
+                             }

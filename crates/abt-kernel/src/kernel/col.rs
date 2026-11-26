@@ -240,30 +240,31 @@ impl ColBlock {
         if let Some(d) = self.rows.get() {
             return (d.clone(), false);
         }
-        let arity = self.cols.len() + 2;
-        let mut out: Vec<(Tuple, usize)> = Vec::with_capacity(self.len());
-        for (i, &id) in self.ids.iter().enumerate() {
-            let mut tu: Tuple = smallvec::SmallVec::with_capacity(arity);
-            let mut others = self.cols.iter();
-            for p in 0..arity {
-                if p == self.key_pos {
-                    tu.push(Value::Time(self.t));
-                } else if p == self.entity_pos {
-                    tu.push(Value::Equity(id));
-                } else {
-                    tu.push(others.next().expect("a column per argument").value(i));
-                }
-            }
-            out.push((tu, self.tags.at(i)));
-        }
+        let out: Vec<(Tuple, usize)> = (0..self.len()).map(|i| (self.tuple(i), self.tags.at(i))).collect();
         // Two readers on one bar (worker kernels) build the same tuples;
         // the first one set is kept.
         let built = self.rows.set(Arc::new(out)).is_ok();
         (self.rows.get().expect("set above").clone(), built)
     }
 
+    /// Row `i` as a tuple of the relation.
+    pub(crate) fn tuple(&self, i: usize) -> Tuple {
+        let arity = self.cols.len() + 2;
+        let mut tu: Tuple = smallvec::SmallVec::with_capacity(arity);
+        let mut others = self.cols.iter();
+        for p in 0..arity {
+            if p == self.key_pos {
+                tu.push(Value::Time(self.t));
+            } else if p == self.entity_pos {
+                tu.push(Value::Equity(self.ids[i]));
+            } else {
+                tu.push(others.next().expect("a column per argument").value(i));
+            }
+        }
+        tu
+    }
+
     /// The row of entity `id`, the first when it has several.
-    #[cfg(test)]
     pub(crate) fn find(&self, id: u32) -> Option<usize> {
         let i = self.ids.partition_point(|&x| x < id);
         (self.ids.get(i) == Some(&id)).then_some(i)

@@ -1,0 +1,16 @@
+# proposition: E-153 (the block evaluator's `prev(T, T0)` binds the label before the bar on the time's calendar, as the row path's builtin does)
+# mutation: the label two before the bar is bound
+# test: cargo test -p abt-tests --test eval_set the_previous_row_over_columns_is_the_row_paths_across_holes_and_the_horizon
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colplan.rs b/crates/abt-kernel/src/kernel/colplan.rs
+--- a/crates/abt-kernel/src/kernel/colplan.rs
++++ b/crates/abt-kernel/src/kernel/colplan.rs
+@@ -961,7 +961,7 @@
+                 ColOp::Prev { t: ts, cal, t1 } => {
+                     let Some(FCol::Const(Value::Time(at))) = &f.cols[*ts] else { return None };
+                     let at = *at;
+-                    match self.domain_for(cal, None).ok()?.range(..at).next_back().copied() {
++                    match self.domain_for(cal, None).ok()?.range(..at).rev().nth(1).copied() {
+                         Some(p) => {
+                             if let Some(s) = t1 {
+                                 f.cols[*s] = Some(FCol::Const(Value::Time(p)));

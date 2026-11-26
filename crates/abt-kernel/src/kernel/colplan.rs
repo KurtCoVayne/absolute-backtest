@@ -21,11 +21,11 @@ use std::sync::Arc;
 
 use super::cexpr::{CExpr, FCol};
 use super::col::{BlockEntry, Col, ColBlock, RuleTag};
-use super::colops::{ConjAtom, RowsAggOp};
+use super::colops::{ConjAtom, RowsAggOp, WindowAggOp};
 use super::eval;
 use super::hash::FxHashMap;
-use super::{Kernel, MemoKey, Tuple, Value};
-use crate::ir::{CmpOp, Literal, Term, WindowKind};
+use super::{CompiledRule, Kernel, MemoKey, Tuple, Value};
+use crate::ir::{Atom, Builtin, Cal, CmpOp, Literal, Term, WindowKind};
 
 /// One operator of a rule's plan.
 #[derive(Debug)]
@@ -58,6 +58,106 @@ pub(crate) enum ColOp {
     PushedJoin { eslot: usize, vslot: usize },
     /// A `rows[n]` aggregate over the entity's own rows (`colops.rs`).
     RowsAgg(Box<RowsAggOp>),
+    /// A later atom with the entity bound, keyed at a time each row binds
+    /// (`R(A, L, ..)` after `L` is bound): the rows whose entity has the
+    /// relation's one tuple at the row's time, with its arguments bound.
+    GatherAt { rel: usize, tslot: usize, binds: Vec<Option<usize>> },
+    /// An as-of read of a stored relation with the entity bound
+    /// (`R(A, L, ..) asof T`): per row, what the row path's walk finds
+    /// (`Kernel::asof_stored_into`) for the pattern of the entity and the
+    /// constants `pat`, at most one tuple, its key and other arguments
+    /// bound by `binds` (tuple position, slot).
+    AsofStored {
+        rel: usize,
+        at: usize,
+        within: Option<Cal>,
+        epos: usize,
+        pat: Vec<Option<Value>>,
+        binds: Vec<(usize, usize)>,
+    },
+    /// An as-of read of a derived relation with the entity bound
+    /// (`R(A, T1) asof T0`, an entity's previous row): per row, the bar the
+    /// row path's walk finds (`Kernel::asof_walk`), the relation read at
+    /// each bar from its columns where they are held and by the row path's
+    /// call where they are not; at most one tuple, its key and other
+    /// arguments bound by `binds` (tuple position, slot).
+    AsofDerived { rel: usize, at: usize, within: Option<Cal>, binds: Vec<(usize, usize)> },
+    /// `not R(A, T, ..)`: the rows whose entity has no tuple of the
+    /// relation at the bar matching the constants (column, value).
+    AntiJoin { rel: usize, consts: Vec<(usize, NegConst)> },
+    /// `prev(T, T0)` of a time every row shares: the label before it on its
+    /// calendar, bound to `t1` (`None` for a wildcard); with none, no row.
+    Prev { t: usize, cal: Cal, t1: Option<usize> },
+    /// `X = case { guard -> value ; ... ; else -> value }` with `X` unbound,
+    /// each guard one read with the frame's entity bound: per row the first
+    /// branch whose guard finds the entity's one tuple, its value over the
+    /// guard's bindings and the row's; the `else` value for the rows no
+    /// guard holds of, or no row without one.
+    Case { out: usize, branches: Vec<CaseBranch>, otherwise: Option<CaseValue> },
+    /// A calendar window's aggregate over a stored relation read as of each
+    /// of the window's bars (`colops.rs`).
+    WindowAgg(Box<WindowAggOp>),
+}
+
+/// A branch of a case: its guard, and its value with the frame's slots
+/// the value reads.
+#[derive(Debug)]
+pub(crate) struct CaseBranch {
+    pub guard: Guard,
+    pub value: CaseValue,
+}
+
+/// A case's value: the expression, and the frame's slots it reads.
+#[derive(Debug)]
+pub(crate) struct CaseValue {
+    pub expr: CExpr,
+    pub reads: Vec<usize>,
+}
+
+/// A case's guard: an atom at the bar with the frame's entity (a `Join`'s
+/// shape), or an as-of read of a stored relation (an `AsofStored`'s), each
+/// other variable it binds local to the branch.
+#[derive(Debug)]
+pub(crate) enum Guard {
+    Atom {
+        rel: usize,
+        binds: Vec<Option<usize>>,
+    },
+    AsofStored {
+        rel: usize,
+        at: usize,
+        within: Option<Cal>,
+        epos: usize,
+        pat: Vec<Option<Value>>,
+        binds: Vec<(usize, usize)>,
+    },
+}
+
+/// A constant of a negated atom: a parameter's value, or a literal, whose
+/// value is the row path's own (`lit_value`) at the bar it is first read.
+#[derive(Debug)]
+pub(crate) enum NegConst {
+    Value(Value),
+    Lit(crate::ir::Lit),
+}
+
+/// An as-of read's time for the rows that share it, its floor, the latest
+/// label at or before it and the relation's columns there.
+#[derive(Clone)]
+struct AsofAt {
+    t0: i64,
+    floor: i64,
+    first: Option<i64>,
+    block: Option<Arc<ColBlock>>,
+}
+
+/// An operator's refusal of the bar: the row path derives it.
+pub(crate) struct Decline;
+
+impl From<super::RunError> for Decline {
+    fn from(_: super::RunError) -> Decline {
+        Decline
+    }
 }
 
 /// What a head argument other than the key and the entity takes.
@@ -138,7 +238,7 @@ impl<'p> Kernel<'p> {
             .iter()
             .flatten()
             .flat_map(|p| p.rules.iter())
-            .filter(|rp| rp.ops.iter().any(|(_, op)| matches!(op, ColOp::RowsAgg(_))))
+            .filter(|rp| rp.ops.iter().any(|(_, op)| matches!(op, ColOp::RowsAgg(_) | ColOp::WindowAgg(_))))
             .map(|rp| rp.ri)
             .collect();
         for ri in 0..self.prog.rules.len() {
@@ -149,10 +249,16 @@ impl<'p> Kernel<'p> {
 
     /// The plan of `rel`, if every literal of its rules maps to an operator
     /// and its head to the frame: a derived relation with one entity
-    /// argument and no input, open-loop, not temporally recursive.
+    /// argument and no input, open-loop. A temporally recursive relation
+    /// reads itself at an earlier bar a row binds (`GatherAt`): its columns
+    /// there, which the chain's extension at each barrier memoised
+    /// (`Kernel::trim_stores`), or derived there first through `cols_of`
+    /// as the row path's call derives them; behind the horizon the bar
+    /// declines, and the row path reads the entity's latest tuples there
+    /// (E-126).
     fn compile_col_plan(&self, rel: usize) -> Option<ColPlan> {
         let info = &self.rels[rel];
-        if info.stored || !info.inputs.is_empty() || info.entity_positions.len() != 1 || info.rules.is_empty() || self.closed_rels[rel] || self.recursive_rels.contains(&rel) {
+        if info.stored || !info.inputs.is_empty() || info.entity_positions.len() != 1 || info.rules.is_empty() || self.closed_rels[rel] {
             return None;
         }
         let (key_pos, entity_pos) = (info.key_pos, info.entity_positions[0]);
@@ -188,10 +294,14 @@ impl<'p> Kernel<'p> {
                         return None;
                     }
                     let (k2, e2) = (ri2.key_pos, ri2.entity_positions[0]);
-                    if slot_of(atom.terms.get(k2)?)? != key_slot {
+                    let ks = slot_of(atom.terms.get(k2)?)?;
+                    let es = slot_of(&atom.terms[e2])?;
+                    // Keyed at another time than the rule's: one a row has
+                    // bound, read with the frame's entity.
+                    let gather = ks != key_slot;
+                    if gather && (!bound[ks] || ks == es || eslot != Some(es)) {
                         return None;
                     }
-                    let es = slot_of(&atom.terms[e2])?;
                     // The atom's other arguments bind fresh variables, once
                     // each, or are wildcards.
                     let mut binds = Vec::new();
@@ -213,6 +323,7 @@ impl<'p> Kernel<'p> {
                         }
                     }
                     match eslot {
+                        _ if gather => ColOp::GatherAt { rel: r, tslot: ks, binds },
                         None => {
                             if bound[es] {
                                 return None;
@@ -228,6 +339,51 @@ impl<'p> Kernel<'p> {
                             ColOp::Join { rel: r, binds }
                         }
                     }
+                }
+                Literal::AsOf { atom, at, within_bucket, .. } if eslot.is_some() => self.compile_asof(cr, atom, at, within_bucket.as_ref(), &mut bound, eslot)?,
+                // `not R(A, T, ..)` at the bar with the frame's entity, its
+                // other terms wildcards or constants.
+                Literal::Neg(atom) if eslot.is_some() => {
+                    let r = *self.rel_ids.get(&atom.name)?;
+                    let ri2 = &self.rels[r];
+                    if !ri2.inputs.is_empty() || ri2.entity_positions.len() != 1 || atom.terms.len() < 2 {
+                        return None;
+                    }
+                    let (k2, e2) = (ri2.key_pos, ri2.entity_positions[0]);
+                    if slot_of(atom.terms.get(k2)?)? != key_slot || slot_of(atom.terms.get(e2)?) != eslot {
+                        return None;
+                    }
+                    let mut consts = Vec::new();
+                    for (c, term) in atom.terms.iter().enumerate().filter(|(p, _)| *p != k2 && *p != e2).map(|(_, t)| t).enumerate() {
+                        match term {
+                            Term::Wild(_) => {}
+                            Term::Param(name, _) => consts.push((c, NegConst::Value(cr.params.get(name)?.clone()))),
+                            Term::Lit(l, _) => consts.push((c, NegConst::Lit(l.clone()))),
+                            _ => return None,
+                        }
+                    }
+                    ColOp::AntiJoin { rel: r, consts }
+                }
+                // `prev(T, T0)` of a time the frame binds once: a constant.
+                Literal::Builtin(Builtin::Prev { t, t1 }, _) => {
+                    let ts = slot_of(t)?;
+                    let cal = self.term_cal(cr, t);
+                    if !bound[ts] || cal.per_entity() {
+                        return None;
+                    }
+                    let t1 = match t1 {
+                        Term::Wild(_) => None,
+                        Term::Var(..) => {
+                            let s = slot_of(t1)?;
+                            if bound[s] {
+                                return None;
+                            }
+                            bound[s] = true;
+                            Some(s)
+                        }
+                        _ => return None,
+                    };
+                    ColOp::Prev { t: ts, cal, t1 }
                 }
                 // Before the first atom an assignment or a test reads the
                 // bar and constants only, on the one starting binding.
@@ -256,10 +412,42 @@ impl<'p> Kernel<'p> {
                     bound[vslot] = true;
                     ColOp::PushedJoin { eslot: eslot?, vslot }
                 }
-                Literal::Agg { .. } if eslot.is_some() => {
-                    let op = self.compile_rows_agg(ri, li, &bound, eslot?, key_slot)?;
-                    bound[op.out] = true;
-                    ColOp::RowsAgg(Box::new(op))
+                Literal::Agg { .. } if eslot.is_some() => match self.compile_rows_agg(ri, li, &bound, eslot?, key_slot) {
+                    Some(op) => {
+                        bound[op.out] = true;
+                        ColOp::RowsAgg(Box::new(op))
+                    }
+                    None => {
+                        let op = self.compile_window_agg(ri, li, &bound, eslot?, key_slot)?;
+                        bound[op.out] = true;
+                        ColOp::WindowAgg(Box::new(op))
+                    }
+                },
+                // `X = case { .. }` with `X` unbound, each guard one read
+                // with the frame's entity; a guard's variables are the
+                // branch's, its value over them and the frame's slots.
+                Literal::Case { var, branches, otherwise, .. } if eslot.is_some() => {
+                    let es = eslot?;
+                    let out = *cr.slots.get(var)?;
+                    if bound[out] {
+                        return None;
+                    }
+                    let mut arms = Vec::with_capacity(branches.len());
+                    for b in branches {
+                        let [g] = b.guard.as_slice() else { return None };
+                        let mut local = bound.clone();
+                        let guard = self.compile_guard(cr, g, key_slot, es, &mut local)?;
+                        arms.push(CaseBranch {
+                            guard,
+                            value: self.compile_case_value(cr, &b.value, &local, es)?,
+                        });
+                    }
+                    let otherwise = match otherwise {
+                        Some(e) => Some(self.compile_case_value(cr, e, &bound, es)?),
+                        None => None,
+                    };
+                    bound[out] = true;
+                    ColOp::Case { out, branches: arms, otherwise }
                 }
                 // A pushed aggregate binds the entity the head names (its
                 // group) and its value; whether the data layer answers it
@@ -410,26 +598,7 @@ impl<'p> Kernel<'p> {
         frame_slots.dedup();
         // The group, as the row path takes it (`agg_plan_at`): bound, so
         // the call binds only the aggregate.
-        let group: Vec<String> = match within {
-            Some(w) => w.clone(),
-            None => {
-                let mut aggregated: Vec<String> = Vec::new();
-                if let Term::Var(v, _) = wv {
-                    aggregated.push(v.clone());
-                }
-                for a in args {
-                    let mut vs = Vec::new();
-                    a.vars(&mut vs);
-                    aggregated.extend(vs.into_iter().map(|(v, _)| v));
-                }
-                let outer = eval::outer_vars(rule, lit);
-                let mut mentioned: Vec<String> = Vec::new();
-                for l in conj {
-                    eval::literal_vars(l, &mut mentioned);
-                }
-                mentioned.into_iter().filter(|v| !aggregated.contains(v) && outer.contains(v)).collect()
-            }
-        };
+        let group = eval::group_vars(rule, lit, conj, args, within.as_deref());
         if group.iter().filter_map(|v| cr.slots.get(v)).any(|&s| !bound[s]) {
             return None;
         }
@@ -453,6 +622,271 @@ impl<'p> Kernel<'p> {
         match super::pushdown::eligibility(self.prog, ri, li) {
             Ok(s) => !matches!(s.window, WindowKind::Rows | WindowKind::PriorRows) && cr.slots.get(&s.entity_var) == Some(&eslot) && cr.slots.get(&s.base_var) == Some(&key_slot),
             Err(_) => false,
+        }
+    }
+
+    /// An as-of read whose entity the frame binds (`eslot`), at a bound
+    /// time; its key and other variables fresh (bound in `bound`), its
+    /// other terms wildcards or, of a stored relation, constants, which the
+    /// walk matches as the row path's pattern does. A derived relation is
+    /// walked over its own calendar's labels.
+    fn compile_asof(&self, cr: &CompiledRule, atom: &Atom, at: &Term, within_bucket: Option<&Cal>, bound: &mut [bool], eslot: Option<usize>) -> Option<ColOp> {
+        let r = *self.rel_ids.get(&atom.name)?;
+        let ri2 = &self.rels[r];
+        if !ri2.inputs.is_empty() || ri2.entity_positions.len() != 1 || within_bucket.is_some_and(|c| c.per_entity()) {
+            return None;
+        }
+        let stored = ri2.stored;
+        if !stored && (ri2.cal.per_entity() || self.closed_rels[r]) {
+            return None;
+        }
+        let (k2, e2) = (ri2.key_pos, ri2.entity_positions[0]);
+        let at = var_slot(cr, at)?;
+        if !bound[at] || var_slot(cr, atom.terms.get(e2)?) != eslot {
+            return None;
+        }
+        let mut pat = vec![None; atom.terms.len()];
+        let mut binds = Vec::new();
+        for (p, term) in atom.terms.iter().enumerate() {
+            if p == e2 {
+                continue;
+            }
+            match term {
+                Term::Wild(_) => {}
+                Term::Var(..) => {
+                    let s = var_slot(cr, term)?;
+                    if bound[s] {
+                        return None;
+                    }
+                    bound[s] = true;
+                    binds.push((p, s));
+                }
+                Term::Param(name, _) if p != k2 && stored => pat[p] = Some(cr.params.get(name)?.clone()),
+                Term::Lit(l, _) if p != k2 && stored => pat[p] = Some(literal(l)?),
+                _ => return None,
+            }
+        }
+        let within = within_bucket.cloned();
+        Some(if stored {
+            ColOp::AsofStored {
+                rel: r,
+                at,
+                within,
+                epos: e2,
+                pat,
+                binds,
+            }
+        } else {
+            ColOp::AsofDerived { rel: r, at, within, binds }
+        })
+    }
+
+    /// A case's guard: an atom at the bar (`key_slot`) with the frame's
+    /// entity (`es`) whose other terms are wildcards or fresh variables, or
+    /// an as-of read of a stored relation; the variables it binds marked in
+    /// the branch's `bound`.
+    fn compile_guard(&self, cr: &CompiledRule, lit: &Literal, key_slot: usize, es: usize, bound: &mut [bool]) -> Option<Guard> {
+        match lit {
+            Literal::Atom(atom) => {
+                let r = *self.rel_ids.get(&atom.name)?;
+                let info = &self.rels[r];
+                if !info.inputs.is_empty() || info.entity_positions.len() != 1 || atom.terms.len() < 2 || self.closed_rels[r] {
+                    return None;
+                }
+                let (k2, e2) = (info.key_pos, info.entity_positions[0]);
+                if var_slot(cr, atom.terms.get(k2)?)? != key_slot || var_slot(cr, atom.terms.get(e2)?)? != es {
+                    return None;
+                }
+                let mut binds = Vec::new();
+                for (p, term) in atom.terms.iter().enumerate() {
+                    if p == k2 || p == e2 {
+                        continue;
+                    }
+                    match term {
+                        Term::Wild(_) => binds.push(None),
+                        Term::Var(..) => {
+                            let s = var_slot(cr, term)?;
+                            if bound[s] {
+                                return None;
+                            }
+                            bound[s] = true;
+                            binds.push(Some(s));
+                        }
+                        _ => return None,
+                    }
+                }
+                Some(Guard::Atom { rel: r, binds })
+            }
+            Literal::AsOf { atom, at, within_bucket, .. } => match self.compile_asof(cr, atom, at, within_bucket.as_ref(), bound, Some(es))? {
+                ColOp::AsofStored { rel, at, within, epos, pat, binds } => Some(Guard::AsofStored { rel, at, within, epos, pat, binds }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A case's value over the slots `bound` (the entity's aside), with the
+    /// slots it reads.
+    fn compile_case_value(&self, cr: &CompiledRule, e: &crate::ir::Expr, bound: &[bool], es: usize) -> Option<CaseValue> {
+        let expr = self.compile_expr(cr, e, bound, es)?;
+        let mut reads = Vec::new();
+        expr.slots(&mut reads);
+        reads.sort_unstable();
+        reads.dedup();
+        Some(CaseValue { expr, reads })
+    }
+
+    /// A calendar window's aggregate the columns can serve (`colops.rs`):
+    /// one window over the rule's calendar (not a rows window, not one of
+    /// the entity's sessions) whose base is the rule's key, its length and
+    /// minimum constants, that the row path serves from its per-bar cache
+    /// (`Kernel::window_plan`); the cached conjunction one as-of read of a
+    /// stored relation at the window's bar with the frame's entity, its
+    /// other variables fresh, its other terms wildcards or constants; the
+    /// tests applied at each call comparisons over the frame's slots, the
+    /// window's bar and the read's, as the arguments are; its group bound
+    /// by the frame; not under running sums and not `quantile`.
+    fn compile_window_agg(&self, ri: usize, li: usize, bound: &[bool], es: usize, key_slot: usize) -> Option<WindowAggOp> {
+        if !self.cfg.window_cache || self.cfg.running_sums {
+            return None;
+        }
+        let cr = &self.compiled[ri];
+        let rule = &self.prog.rules[ri];
+        let lit = &rule.body[li];
+        let Literal::Agg { var, agg, args, conj, within, .. } = lit else { return None };
+        let out = *cr.slots.get(var)?;
+        if bound[out] || agg == "quantile" || (agg != "count" && abt_agg::Function::parse(agg, None).is_err()) {
+            return None;
+        }
+        let wp = self.window_plan(cr, lit, conj, args)?;
+        let Literal::Window {
+            var: wv @ Term::Var(..),
+            kind,
+            base: bv @ Term::Var(..),
+            dur,
+            min,
+            lo,
+            ..
+        } = &conj[wp.window]
+        else {
+            return None;
+        };
+        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) || self.per_entity_window(kind) {
+            return None;
+        }
+        let (wslot, bslot) = (var_slot(cr, wv)?, var_slot(cr, bv)?);
+        let mut consts = Vec::new();
+        dur.vars(&mut consts);
+        min.vars(&mut consts);
+        if let Some(l) = lo {
+            l.vars(&mut consts);
+        }
+        if bslot != key_slot || wslot != wp.wslot || bound[wslot] || !consts.is_empty() {
+            return None;
+        }
+        let [Literal::AsOf { atom, at, within_bucket, .. }] = wp.order.as_slice() else { return None };
+        if var_slot(cr, at)? != wslot {
+            return None;
+        }
+        let r = *self.rel_ids.get(&atom.name)?;
+        let info = &self.rels[r];
+        if !info.stored || !info.inputs.is_empty() || info.entity_positions.len() != 1 || within_bucket.as_ref().is_some_and(|c| c.per_entity()) {
+            return None;
+        }
+        let (k2, e2) = (info.key_pos, info.entity_positions[0]);
+        if var_slot(cr, atom.terms.get(e2)?)? != es {
+            return None;
+        }
+        // The read's variables, each fresh and bound once.
+        let mut local = vec![false; cr.nslots];
+        let mut pat = vec![None; atom.terms.len()];
+        let mut binds = Vec::new();
+        for (p, term) in atom.terms.iter().enumerate() {
+            if p == e2 {
+                continue;
+            }
+            match term {
+                Term::Wild(_) => {}
+                Term::Var(..) => {
+                    let s = var_slot(cr, term)?;
+                    if bound[s] || local[s] || s == wslot {
+                        return None;
+                    }
+                    local[s] = true;
+                    binds.push((p, s));
+                }
+                Term::Param(name, _) if p != k2 => pat[p] = Some(cr.params.get(name)?.clone()),
+                Term::Lit(l, _) if p != k2 => pat[p] = Some(literal(l)?),
+                _ => return None,
+            }
+        }
+        // A row's slots: the frame's but its entity, the window's bar, the
+        // read's.
+        let row_slot = |v: &str| cr.slots.get(v).copied().filter(|&s| s != es && (bound[s] || local[s] || s == wslot));
+        let param = |p: &str| cr.params.get(p).cloned();
+        let mut late = Vec::with_capacity(wp.late.len());
+        for (l, need) in &wp.late {
+            let Literal::Cmp { op, lhs, rhs, .. } = l else { return None };
+            if need.iter().any(|&s| !bound[s]) {
+                return None;
+            }
+            late.push((*op, CExpr::compile(lhs, &row_slot, &param)?, CExpr::compile(rhs, &row_slot, &param)?));
+        }
+        let mut cargs = Vec::with_capacity(args.len());
+        for a in args.iter().filter(|_| agg != "count") {
+            cargs.push(CExpr::compile(a, &row_slot, &param)?);
+        }
+        if eval::group_vars(rule, lit, conj, args, within.as_deref()).iter().filter_map(|v| cr.slots.get(v)).any(|&s| !bound[s]) {
+            return None;
+        }
+        Some(WindowAggOp {
+            li,
+            out,
+            eslot: es,
+            rel: r,
+            epos: e2,
+            within: within_bucket.clone(),
+            pat,
+            binds,
+            args: cargs,
+            late,
+        })
+    }
+
+    /// The rows of `open` (ascending rows of the frame) a case's guard holds
+    /// of at bar `t`, ascending, each with the guard's one tuple bound into
+    /// `sub` (a column per slot, over those rows). `None` where the guard
+    /// would find two tuples for a row or cannot be read as columns.
+    fn case_guard(&mut self, g: &Guard, f: &Frame, open: &[u32], t: i64, sub: &mut [Option<FCol>]) -> Option<Vec<u32>> {
+        match g {
+            Guard::Atom { rel, binds } => {
+                let b = self.cols_of(*rel, t).filter(|b| b.unique)?;
+                let (mut hit, mut at) = (Vec::with_capacity(open.len().min(b.len())), Vec::with_capacity(open.len().min(b.len())));
+                let mut j = 0usize;
+                for &r in open {
+                    let id = f.ids[r as usize];
+                    while j < b.ids.len() && b.ids[j] < id {
+                        j += 1;
+                    }
+                    if j < b.ids.len() && b.ids[j] == id {
+                        hit.push(r);
+                        at.push(j as u32);
+                    }
+                }
+                for (c, s) in b.cols.iter().zip(binds) {
+                    if let Some(s) = s {
+                        sub[*s] = Some(FCol::Col(c.gather(&at)));
+                    }
+                }
+                Some(hit)
+            }
+            Guard::AsofStored { rel, at, within, epos, pat, binds } => {
+                let found = self.asof_stored_frame(*rel, f.cols[*at].as_ref()?, within.as_ref(), *epos, pat, &f.ids, open)?;
+                for (s, c) in bind_cols(&found, binds) {
+                    sub[s] = Some(FCol::Col(c));
+                }
+                Some(found.into_iter().map(|(r, _)| r).collect())
+            }
         }
     }
 
@@ -714,6 +1148,185 @@ impl<'p> Kernel<'p> {
                     f.keep(&keep);
                     f.cols[op.out] = Some(FCol::Col(Col::of_values(values.into_iter().flatten().collect())));
                 }
+                ColOp::WindowAgg(op) => {
+                    let values = self.run_window_agg(rp.ri, op, &f.ids, &f.cols, t, calls)?;
+                    let keep: Vec<u32> = values.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32).collect();
+                    f.keep(&keep);
+                    f.cols[op.out] = Some(FCol::Col(Col::of_values(values.into_iter().flatten().collect())));
+                }
+                ColOp::Case { out, branches, otherwise } => {
+                    let n = f.ids.len();
+                    let mut vals: Vec<Option<Value>> = vec![None; n];
+                    // The rows no branch has taken, ascending: each branch's
+                    // guard is read for them alone, as the row path tries a
+                    // row's branches in turn.
+                    let mut open: Vec<u32> = (0..n as u32).collect();
+                    for br in branches {
+                        if open.is_empty() {
+                            break;
+                        }
+                        let mut sub: Vec<Option<FCol>> = vec![None; rp.nslots];
+                        let hit = self.case_guard(&br.guard, &f, &open, t, &mut sub)?;
+                        if hit.is_empty() {
+                            continue;
+                        }
+                        for &s in &br.value.reads {
+                            if sub[s].is_none() {
+                                sub[s] = f.cols[s].as_ref().map(|c| c.gather(&hit));
+                            }
+                        }
+                        let v = br.value.expr.eval(&sub, hit.len())?;
+                        for (k, &r) in hit.iter().enumerate() {
+                            vals[r as usize] = Some(v.value(k));
+                        }
+                        let mut taken = hit.iter().peekable();
+                        open.retain(|r| {
+                            let took = taken.peek() == Some(&r);
+                            if took {
+                                taken.next();
+                            }
+                            !took
+                        });
+                    }
+                    if let (Some(e), false) = (otherwise, open.is_empty()) {
+                        let mut sub: Vec<Option<FCol>> = vec![None; rp.nslots];
+                        for &s in &e.reads {
+                            sub[s] = f.cols[s].as_ref().map(|c| c.gather(&open));
+                        }
+                        let v = e.expr.eval(&sub, open.len())?;
+                        for (k, &r) in open.iter().enumerate() {
+                            vals[r as usize] = Some(v.value(k));
+                        }
+                    }
+                    let keep: Vec<u32> = vals.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32).collect();
+                    f.keep(&keep);
+                    f.cols[*out] = Some(FCol::Col(Col::of_values(vals.into_iter().flatten().collect())));
+                }
+                ColOp::GatherAt { rel, tslot, binds } => {
+                    // The relation at each time the rows bind, in the order
+                    // the rows first reach it, as the row path demands it.
+                    let mut at: Vec<(u32, u32)> = Vec::with_capacity(f.ids.len());
+                    let mut keep: Vec<u32> = Vec::with_capacity(f.ids.len());
+                    let mut blocks: Vec<(i64, Arc<ColBlock>)> = Vec::new();
+                    let mut index: FxHashMap<i64, usize> = FxHashMap::default();
+                    let mut last = usize::MAX;
+                    for (i, &id) in f.ids.iter().enumerate() {
+                        let Value::Time(t1) = f.cols[*tslot].as_ref()?.value(i) else { return None };
+                        let k = match blocks.get(last) {
+                            Some((t, _)) if *t == t1 => last,
+                            _ => match index.get(&t1) {
+                                Some(&k) => k,
+                                None => {
+                                    let b = self.cols_of(*rel, t1).filter(|b| b.unique)?;
+                                    blocks.push((t1, b));
+                                    index.insert(t1, blocks.len() - 1);
+                                    blocks.len() - 1
+                                }
+                            },
+                        };
+                        last = k;
+                        if let Some(j) = blocks[k].1.find(id) {
+                            keep.push(i as u32);
+                            at.push((k as u32, j as u32));
+                        }
+                    }
+                    f.keep(&keep);
+                    for (c, s) in binds.iter().enumerate() {
+                        if let Some(s) = s {
+                            f.cols[*s] = Some(FCol::Col(match blocks.as_slice() {
+                                [(_, b)] => b.cols[c].gather(&at.iter().map(|&(_, j)| j).collect::<Vec<u32>>()),
+                                _ => {
+                                    let mut col: Option<Col> = None;
+                                    for &(k, j) in &at {
+                                        let v = blocks[k as usize].1.cols[c].value(j as usize);
+                                        col.get_or_insert_with(|| Col::like(&v, at.len())).push(&v);
+                                    }
+                                    col.unwrap_or(Col::Num(Vec::new()))
+                                }
+                            }));
+                        }
+                    }
+                }
+                ColOp::AsofStored { rel, at, within, epos, pat, binds } => {
+                    let rows: Vec<u32> = (0..f.ids.len() as u32).collect();
+                    let found = self.asof_stored_frame(*rel, f.cols[*at].as_ref()?, within.as_ref(), *epos, pat, &f.ids, &rows)?;
+                    let keep: Vec<u32> = found.iter().map(|(r, _)| *r).collect();
+                    f.keep(&keep);
+                    for (s, c) in bind_cols(&found, binds) {
+                        f.cols[s] = Some(FCol::Col(c));
+                    }
+                }
+                ColOp::AsofDerived { rel, at, within, binds } => {
+                    let (cal, arity) = {
+                        let info = &self.rels[*rel];
+                        (info.cal.clone(), self.prog.relations.get(&info.name).map(|s| s.args.len())?)
+                    };
+                    let mut keep: Vec<u32> = Vec::with_capacity(f.ids.len());
+                    let mut cols: Vec<Option<Col>> = vec![None; binds.len()];
+                    // For the rows' time (every row's one, mostly).
+                    let mut here: Option<AsofAt> = None;
+                    for (i, &id) in f.ids.iter().enumerate() {
+                        let Value::Time(t0) = f.cols[*at].as_ref()?.value(i) else { return None };
+                        if here.as_ref().is_none_or(|h| h.t0 != t0) {
+                            let floor = self.asof_floor(within.as_ref(), None, t0).ok()?;
+                            let first = eval::asof_latest(self.domain_for(&cal, None).ok()?, floor, t0);
+                            let block = first.and_then(|k| self.cols_of(*rel, k));
+                            here = Some(AsofAt { t0, floor, first, block });
+                        }
+                        let Some(AsofAt { floor, first: Some(first), block, .. }) = here.clone() else { continue };
+                        let Some(tu) = self.asof_derived_tuple(*rel, &cal, arity, id, first, floor, block.as_deref()).ok()? else {
+                            continue;
+                        };
+                        keep.push(i as u32);
+                        for ((p, _), c) in binds.iter().zip(cols.iter_mut()) {
+                            c.get_or_insert_with(|| Col::like(&tu[*p], f.ids.len())).push(&tu[*p]);
+                        }
+                    }
+                    f.keep(&keep);
+                    for ((_, s), c) in binds.iter().zip(cols) {
+                        f.cols[*s] = Some(FCol::Col(c.unwrap_or(Col::Num(Vec::new()))));
+                    }
+                }
+                ColOp::AntiJoin { rel, consts } => {
+                    let mut want: Vec<(usize, Value)> = Vec::with_capacity(consts.len());
+                    for (c, k) in consts {
+                        want.push((
+                            *c,
+                            match k {
+                                NegConst::Value(v) => v.clone(),
+                                NegConst::Lit(l) => super::lit_value(l, &mut self.symbols, &mut self.labels, &self.literal_equities),
+                            },
+                        ));
+                    }
+                    let b = self.cols_of(*rel, t)?;
+                    // Both sides ascend: one merge pass, each entity's run of
+                    // the relation searched for a tuple the constants match.
+                    let mut keep: Vec<u32> = Vec::with_capacity(f.ids.len());
+                    let mut j = 0usize;
+                    for (i, &id) in f.ids.iter().enumerate() {
+                        while j < b.ids.len() && b.ids[j] < id {
+                            j += 1;
+                        }
+                        let run = j..j + b.ids[j..].iter().take_while(|&&x| x == id).count();
+                        if !run.into_iter().any(|r| want.iter().all(|(c, v)| b.cols[*c].value(r) == *v)) {
+                            keep.push(i as u32);
+                        }
+                    }
+                    f.keep(&keep);
+                }
+                ColOp::Prev { t: ts, cal, t1 } => {
+                    let Some(FCol::Const(Value::Time(at))) = &f.cols[*ts] else { return None };
+                    let at = *at;
+                    match self.domain_for(cal, None).ok()?.range(..at).next_back().copied() {
+                        Some(p) => {
+                            if let Some(s) = t1 {
+                                f.cols[*s] = Some(FCol::Const(Value::Time(p)));
+                            }
+                        }
+                        None if scanned => f.keep(&[]),
+                        None => alive = false,
+                    }
+                }
                 ColOp::Pushed { eslot, vslot } => {
                     let p = self.pushed.get(&(rp.ri, *li)).cloned()?;
                     if p.base_slot != rp.key_slot || p.entity_slot != *eslot {
@@ -907,6 +1520,29 @@ fn table_answers<'a>(p: &super::pushdown::Pushed, answers: impl Iterator<Item = 
     } else {
         Col::Num(answers.map(|a| a.value.unwrap_or(f64::NAN)).collect())
     }
+}
+
+/// The slot of a variable term of a rule.
+fn var_slot(cr: &CompiledRule, t: &Term) -> Option<usize> {
+    match t {
+        Term::Var(v, _) => cr.slots.get(v).copied(),
+        _ => None,
+    }
+}
+
+/// The columns of the tuples `found` (one per row) at the positions
+/// `binds` names, each with its slot.
+fn bind_cols(found: &[(u32, Tuple)], binds: &[(usize, usize)]) -> Vec<(usize, Col)> {
+    binds
+        .iter()
+        .map(|&(p, s)| {
+            let mut col: Option<Col> = None;
+            for (_, tu) in found {
+                col.get_or_insert_with(|| Col::like(&tu[p], found.len())).push(&tu[p]);
+            }
+            (s, col.unwrap_or(Col::Num(Vec::new())))
+        })
+        .collect()
 }
 
 /// A literal as a value without interning anything: a number, a time.

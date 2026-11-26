@@ -5,12 +5,12 @@
 diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
 --- a/crates/abt-kernel/src/kernel/eval.rs
 +++ b/crates/abt-kernel/src/kernel/eval.rs
-@@ -1383,7 +1383,7 @@
-             // pattern, so its memo is keyed by the whole pattern (the key
-             // unbound), the entity with it: keyed by the inputs alone, one
-             // entity's bar was served to the next (E-132).
+@@ -1612,7 +1612,7 @@
+                 return self.bind_tuples_into(cr, atom, env, &latest, out);
+             }
+             pat[info.key_pos] = None;
 -            let akey: Vec<Option<Value>> = pat.clone();
 +            let akey: Vec<Option<Value>> = info.inputs.iter().map(|&i| pat[i].clone()).collect();
-             let mut probe: super::AsofKey = (rel, akey, first);
-             let mut walked: Vec<i64> = Vec::new();
-             let mut found: Option<i64> = None;
+             let key_pos = info.key_pos;
+             let found = self.asof_walk(rel, &info.cal, entity, akey, first, floor, |k: &mut Self, at: i64| -> Result<bool, RunError> {
+                 pat[key_pos] = Some(Value::Time(at));

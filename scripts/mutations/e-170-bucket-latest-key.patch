@@ -1,0 +1,16 @@
+# proposition: E-170 (the as-of read of every entity at once finds, per entity, the latest key of the bucket that holds its tuple, as the row path's walk back does)
+# mutation: the earliest key of the bucket answers
+# test: cargo test -p abt-tests --test eval_set the_case_and_the_calendar_window_over_actions_are_the_row_paths
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -454,7 +454,7 @@
+         // of it the pattern admits.
+         let mut answered: FxHashMap<u32, i64> = FxHashMap::default();
+         let mut out: Vec<(u32, Tuple)> = Vec::new();
+-        for (&k, block) in st.by_time.range(floor..=t).rev() {
++        for (&k, block) in st.by_time.range(floor..=t) {
+             for tu in block.iter().filter(|tu| admits(tu)) {
+                 let Value::Equity(e) = tu[epos] else { return None };
+                 if *answered.entry(e).or_insert(k) == k {

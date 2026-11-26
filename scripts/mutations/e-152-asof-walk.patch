@@ -1,0 +1,15 @@
+# proposition: E-152 (the block evaluator's as-of read of a stored relation with the entity bound finds, per entity, the bar the row path's walk finds: the latest key at or before the read's time with a row of the entity, through the one walk both take)
+# mutation: the operator keeps only a row at the read's own time, as if the walk stopped there
+# test: cargo test -p abt-tests --test eval_set an_as_of_read_with_the_entity_bound_finds_the_row_paths_bar_and_the_read_there_its_tuple
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -512,6 +512,7 @@
+             pat[epos] = Some(Value::Equity(ids[r as usize]));
+             found.clear();
+             self.asof_stored_into(rel, lo, t0, &pat, &mut found);
++            found.retain(|(tu, _)| tu.contains(&Value::Time(t0)));
+             match found.as_mut_slice() {
+                 [] => {}
+                 [(tu, _)] => out.push((r, std::mem::take(tu))),

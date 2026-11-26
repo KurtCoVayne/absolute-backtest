@@ -323,6 +323,19 @@ impl CExpr {
         })
     }
 
+    /// The slots the expression reads, appended to `out`.
+    pub(crate) fn slots(&self, out: &mut Vec<usize>) {
+        match self {
+            CExpr::Slot(s) => out.push(*s),
+            CExpr::Const(_) => {}
+            CExpr::Neg(x) | CExpr::Call1(_, x) => x.slots(out),
+            CExpr::Bin(_, a, b) | CExpr::Call2(_, a, b) => {
+                a.slots(out);
+                b.slots(out);
+            }
+        }
+    }
+
     /// The expression over `n` rows whose slots are `cols`: a column, or
     /// one value when it reads no column; `None` when any row's operation
     /// is partial (or a slot it reads is unbound).

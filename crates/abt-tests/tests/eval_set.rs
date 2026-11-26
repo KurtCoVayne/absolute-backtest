@@ -9,7 +9,7 @@
 #![allow(clippy::result_large_err)]
 
 use abt_kernel::compiler::{compile, CompileOptions};
-use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, Replay, RunError, RunResult, SimExecutor};
+use abt_kernel::kernel::{Dataset, ExecConfig, Kernel, Replay, RunError, RunResult, SimExecutor, Value};
 use abt_kernel::lower::{Lowered, Numerics};
 use abt_kernel::verify::tv;
 use abt_kernel::Program;
@@ -151,7 +151,8 @@ fn with_holes(mut ds: Dataset) -> Dataset {
 }
 
 /// MW14 over 120 names and six years with holes in the bars (names missing
-/// bars, a name absent 60 weeks and returning): the block evaluator against
+/// bars, a name absent 60 weeks and returning, a split and a dividend in a
+/// name's first week): the block evaluator against
 /// the set evaluator, in the written order and under the optimised plan
 /// the command line runs, with the whole history and trimmed, alone and on
 /// four workers. Every relation with a plan derives through it at some bar.
@@ -160,7 +161,35 @@ fn the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes() 
     let names: Vec<String> = (0..120).map(|i| format!("S{:03}", i)).collect();
     let syms: Vec<&str> = names.iter().map(String::as_str).collect();
     let p = abt_tests::program(&abt_tests::corpus_source("company", "mw14"), "mw14");
-    let ds = with_holes(abt_kernel::data::synthetic_for_program(&p, &syms, (2010, 1, 4), 1500, 11));
+    let mut ds = with_holes(abt_kernel::data::synthetic_for_program(&p, &syms, (2010, 1, 4), 1500, 11));
+    // A split and a dividend in a name's first week: the chains of the
+    // split factor and the total-return index start on them.
+    let mut days: Vec<i64> = ds.facts["close"].iter().filter_map(|tu| tu[1].as_time()).collect();
+    days.sort_unstable();
+    days.dedup();
+    ds.add("split", vec![Value::Equity(2), Value::Time(days[1]), Value::Num(3.0)]);
+    ds.add("dividend", vec![Value::Equity(2), Value::Time(days[0]), Value::Time(days[2]), Value::Time(days[12]), Value::Num(0.4)]);
+    // Two splits of a name in one week (the week's latest is its split),
+    // and a split on a week's last bar.
+    let friday = |from: usize| (from..days.len()).find(|&i| abt_kernel::kernel::time::weekday(days[i]) == 4).unwrap();
+    let f = friday(400);
+    ds.add("split", vec![Value::Equity(5), Value::Time(days[f - 3]), Value::Num(2.0)]);
+    ds.add("split", vec![Value::Equity(5), Value::Time(days[f - 1]), Value::Num(1.5)]);
+    ds.add("split", vec![Value::Equity(6), Value::Time(days[f]), Value::Num(4.0)]);
+    // Three dividends of a name going ex on one day, announced over two
+    // weeks (two in the first, on different days), and one announced after
+    // the day it goes ex.
+    let g = friday(700);
+    for (announced, amount) in [(g - 4, 0.25), (g - 2, 0.5), (g + 3, 0.75)] {
+        ds.add(
+            "dividend",
+            vec![Value::Equity(7), Value::Time(days[announced]), Value::Time(days[g + 4]), Value::Time(days[g + 20]), Value::Num(amount)],
+        );
+    }
+    ds.add(
+        "dividend",
+        vec![Value::Equity(8), Value::Time(days[g + 2]), Value::Time(days[g]), Value::Time(days[g + 20]), Value::Num(1.25)],
+    );
     let base = ExecConfig::from_program(&p);
     let compiled = compile(
         &p,
@@ -223,11 +252,8 @@ fn the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes() 
             }
         }
     }
-    // `eligible` reads the name's last bar of the week through an as-of read
-    // of a stored relation (E-160), which no operator plans yet: it derives
-    // on the row path, and the run above holds it equal there. The weekly
-    // last close, the weekly count of bars and the weekly mean dollar volume
-    // read the answers the stream delivers (E-175).
+    // The weekly last close, the weekly count of bars and the weekly mean
+    // dollar volume read the answers the stream delivers (E-175).
     for name in [
         "adj_close",
         "scored",
@@ -240,10 +266,389 @@ fn the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes() 
         "close@weekly",
         "traded@weekly",
         "dvol",
+        "eligible",
+        "universe",
+        "prev_row",
+        "first_row",
+        "row_number",
+        "cum_split",
+        "tr_index",
+        "total_return",
+        "latch[enter, stay]",
+        "split_factor",
+        "dividend_or_zero",
+        "dividend_at",
     ] {
         assert!(planned_rels.iter().any(|r| r == name), "`{}` has no plan; the plans: {:?}", name, planned_rels);
     }
-    assert!(!planned_rels.iter().any(|r| r == "eligible"), "`eligible` is planned: lift its row-path note above");
+}
+
+/// A weekly book reading each name at its own last bar of the week through
+/// an as-of read of a stored relation, and its close there through a
+/// relation of the base calendar (`seen`); `early` holds the names read
+/// before the label.
+fn last_bar_book() -> String {
+    let rules = "    rel px(A: Equity, @T: base, P: Price<USD>)\n    px(A, T, P) :- close(A, T, P).\n    rel seen(A: Equity, @T, L: Timestamp, P: Price<USD>)\n    seen(A, T, L, P) :- universe(A, T), close@base(A, L, _) asof T, px(A, L, P).\n    rel early(A: Equity, @T)\n    early(A, T) :- seen(A, T, L, _), L < T.\n";
+    abt_tests::StrategyParts {
+        name: "lastbar".into(),
+        needs: "need bars @1d complete   need listing".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        clock: "decide on weekly".into(),
+        universe: "universe(A, T) :- traded@weekly(A, T).".into(),
+        params: "    w : Scalar = 0.01\n    hi : Price<USD> = 100 USD/share".into(),
+        rules: rules.into(),
+        decides: "    decide(T, hold(A, w)) :- seen(A, T, L, P), P >= hi, not early(A, T).\n    decide(T, hold(A, 0)) :- seen(A, T, L, P), P < hi.\n    decide(T, hold(A, 0)) :- early(A, T).".into(),
+        execution: abt_tests::FRICTIONLESS.into(),
+        report: "calendar weekly   periods 52 per year".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// A daily book over an entity's previous row, its first rows and its row
+/// count: the close at the previous row (`back`) and the first three rows
+/// (`fresh`, through `row_number`).
+fn previous_row_book() -> String {
+    let rules = "    rel back(A: Equity, @T, T0: Timestamp, P0: Price<USD>)\n    back(A, T, T0, P0) :- universe(A, T), prev_row(A, T, T0), close(A, T0, P0).\n    rel fresh(A: Equity, @T, K: Count)\n    fresh(A, T, K) :- universe(A, T), row_number(A, T, K), K < 3.\n";
+    let decides = "    decide(T, hold(A, w)) :- back(A, T, T0, P0), P0 > 100 USD/share, not fresh(A, T, _).\n    decide(T, hold(A, 0)) :- back(A, T, T0, P0), P0 <= 100 USD/share.\n    decide(T, hold(A, 0)) :- fresh(A, T, K).";
+    abt_tests::StrategyParts {
+        name: "previous".into(),
+        needs: "need bars @1d complete   need listing".into(),
+        params: "    w : Scalar = 0.01".into(),
+        rules: rules.into(),
+        decides: decides.into(),
+        execution: abt_tests::FRICTIONLESS.into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// A weekly book over the catalog's corporate actions, as MW14 reads them:
+/// the week's split factor and dividend (`split_factor`, a case over an
+/// as-of read of `split` within the week; `dividend_or_zero`, a case over
+/// `dividend_at`), the dividends going ex in the week (`dividend_at`, a
+/// window over a year of weeks of `dividend` read as of each, tested
+/// against the week at each call), and `paid`: a sum of an expression of
+/// the dividends over half a year, with a test of what only the call binds,
+/// and a count over the quarter before, with none. Its numerics are
+/// two-pass, as both books' are: under running sums no window has a plan.
+fn dividend_book() -> String {
+    let rules = "    rel paid(A: Equity, @T, S: Price<USD>, N: Count)\n    paid(A, T, S, N) :- universe(A, T), prev(T, T1),\n        S = sum(Amt * 2 - 0.01 USD/share) over (T0 in window[6mo] min 1, dividend(A, T0, Ex, _, Amt), Ex > T1),\n        N = count(Amt) over (T0 in prior_window[3mo] min 0, dividend(A, T0, _, _, Amt)).\n    rel seen(A: Equity, @T, D: Price<USD>, F: Scalar)\n    seen(A, T, D, F) :- dividend_or_zero(A, T, D), split_factor(A, T, F).\n";
+    let decides = "    decide(T, hold(A, w)) :- seen(A, T, D, F), paid(A, T, S, N), D > 0 USD/share, N > 0.\n    decide(T, hold(A, 0)) :- seen(A, T, D, F), paid(A, T, S, N), D <= 0 USD/share, S * F > 0.5 USD/share.";
+    abt_tests::StrategyParts {
+        name: "dividends".into(),
+        needs: "need bars @1d complete   need actions, listing".into(),
+        uses: "calendar, catalog, book".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        clock: "decide on weekly".into(),
+        universe: "universe(A, T) :- traded@weekly(A, T).".into(),
+        params: "    w : Scalar = 0.01".into(),
+        rules: rules.into(),
+        decides: decides.into(),
+        execution: abt_tests::FRICTIONLESS.replace("numerics running", "numerics two_pass"),
+        report: "calendar weekly   periods 52 per year".into(),
+        ..Default::default()
+    }
+    .render()
+}
+
+/// The actions the dividend book reads, on `names` names over the market's
+/// days: about every 13 weeks a name's dividend, going ex a few days after
+/// it is announced or, one in seven, two days before; one in four with a
+/// second announced two days after it, in the same week or the next; a
+/// split of every fifth name, every tenth's with a second three days later;
+/// name 9's dividends received three days after their announcement. A day
+/// a name's dividend is already announced on is left as it is.
+fn add_actions(ds: &mut Dataset, names: u32, seed: u64) {
+    let mut days: Vec<i64> = ds.facts["close"].iter().filter_map(|tu| tu[1].as_time()).collect();
+    days.sort_unstable();
+    days.dedup();
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = move |n: usize| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % n as u64) as usize
+    };
+    let day = 86_400_000_000_000i64;
+    // A name holds one dividend per announcement day (its identity): the
+    // market's own are kept.
+    let held: Vec<(Option<u32>, Option<i64>)> = ds.facts.get("dividend").map(|v| v.iter().map(|tu| (tu[0].as_equity(), tu[1].as_time())).collect()).unwrap_or_default();
+    for e in 0..names {
+        let mut i = 5 + (e as usize * 7) % 60;
+        while i + 30 < days.len() {
+            let ex = if next(7) == 0 { i - 2 } else { i + 3 + next(12) };
+            let amount = 0.05 + next(100) as f64 / 400.0;
+            let mut events = vec![(i, ex, amount)];
+            if next(4) == 0 {
+                events.push((i + 2, ex + next(3), amount / 2.0));
+            }
+            for (at, ex, amount) in events {
+                if held.contains(&(Some(e), Some(days[at]))) {
+                    continue;
+                }
+                let tu = vec![Value::Equity(e), Value::Time(days[at]), Value::Time(days[ex]), Value::Time(days[ex + 10]), Value::Num(amount)];
+                if e == 9 {
+                    ds.add_available("dividend", tu, days[at] + 3 * day);
+                } else {
+                    ds.add("dividend", tu);
+                }
+            }
+            i += 55 + next(20);
+        }
+        if e % 5 == 0 {
+            let at = 100 + next(days.len() - 200);
+            ds.add("split", vec![Value::Equity(e), Value::Time(days[at]), Value::Num(2.0)]);
+            if e % 10 == 0 {
+                ds.add("split", vec![Value::Equity(e), Value::Time(days[at + 3]), Value::Num(1.5)]);
+            }
+        }
+    }
+}
+
+/// The case over a read with the entity bound and the calendar window over
+/// an as-of read of a stored relation (ERRATA E-170, E-171), on the
+/// dividend book over names that miss bars, with random actions (two
+/// dividends announced in one week, dividends announced after they go ex,
+/// two splits in a week, a name's dividends received late): the block
+/// evaluator against the set evaluator, whole and trimmed, alone and on
+/// four workers, the counts and the stats row on one thread; each relation
+/// is planned.
+#[test]
+fn the_case_and_the_calendar_window_over_actions_are_the_row_paths() {
+    let p = abt_tests::program(&dividend_book(), "dividends");
+    let names: Vec<String> = (0..60).map(|i| format!("S{:03}", i)).collect();
+    let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut ds = with_holes(abt_kernel::data::synthetic_for_program(&p, &syms, (2018, 1, 2), 1000, 21));
+    add_actions(&mut ds, 60, 21);
+    for trim in [false, true] {
+        let run = |block: bool, threads: usize| {
+            let mut cfg = ExecConfig::from_program(&p);
+            cfg.block_eval = block;
+            cfg.trim_stores = trim;
+            cfg.threads = threads;
+            cfg.parallel_min_rows = 1;
+            let (r, mut k) = run_kernel(&p, &ds, cfg).expect("the book runs");
+            let counted = (r.coverage.clone(), k.literal_counts().to_vec(), serde_json::to_string(&r.stats).unwrap());
+            let planned: Vec<(String, u64, u64)> = k.plan_counts().into_iter().filter(|c| c.1).map(|c| (c.0, c.2, c.3)).collect();
+            let ledgers = if trim { Default::default() } else { tv::ledgers(&mut k, &p, &r.bars) };
+            let outcome: Outcome = Ok((tv::digest(&r), ledgers));
+            (outcome, counted, planned, r.late.len())
+        };
+        let (set, set_counted, _, late) = run(false, 1);
+        assert!(late > 5, "{} late tuples", late);
+        if !trim {
+            let ledger = &set.as_ref().unwrap().1;
+            let split = ledger["split_factor"].iter().filter(|row| !row.ends_with(" 1")).count();
+            assert!(
+                ledger["dividend_at"].len() > 300 && ledger["paid"].len() > 1000 && split > 5,
+                "{} dividends, {} paid, {} splits",
+                ledger["dividend_at"].len(),
+                ledger["paid"].len(),
+                split
+            );
+        }
+        for threads in [1, 4] {
+            let (block, counted, planned, _) = run(true, threads);
+            let name = format!("actions ({}, block evaluator, {} thread(s))", if trim { "trimmed" } else { "whole" }, threads);
+            same_runs(&name, &set, &block);
+            if threads == 1 {
+                assert!(set_counted == counted, "{}: the coverage, the literal counts or the stats row differ", name);
+            }
+            for rel in ["split_factor", "dividend_or_zero", "dividend_at", "paid", "seen"] {
+                let bars = planned.iter().find(|(r, ..)| r == rel).map(|(_, b, _)| *b).unwrap_or(0);
+                assert!(bars > 100, "{}: `{}` planned at {} bars: {:?}", name, rel, bars, planned);
+            }
+        }
+    }
+}
+
+/// An as-of read of a stored relation with the entity bound, then a read
+/// of a daily relation at the time it bound (ERRATA E-152): a weekly book
+/// over names that miss bars, some on the week's last day, each read at
+/// its own last bar of the week (`close@base(A, L, _) asof T`, MW14's
+/// membership test) and its close read there through a relation of the
+/// base calendar (`px(A, L, P)`); a name absent 60 weeks returns. The block
+/// evaluator against the set evaluator, whole and trimmed, alone and on
+/// four workers, the counts and the stats row on one thread; the relation
+/// is planned, and reads bars other than the label.
+#[test]
+fn an_as_of_read_with_the_entity_bound_finds_the_row_paths_bar_and_the_read_there_its_tuple() {
+    let p = abt_tests::program(&last_bar_book(), "lastbar");
+    let names: Vec<String> = (0..60).map(|i| format!("S{:03}", i)).collect();
+    let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+    let ds = with_holes(abt_kernel::data::synthetic_for_program(&p, &syms, (2018, 1, 2), 1000, 3));
+    for trim in [false, true] {
+        let run = |block: bool, threads: usize| {
+            let mut cfg = ExecConfig::from_program(&p);
+            cfg.block_eval = block;
+            cfg.trim_stores = trim;
+            cfg.threads = threads;
+            cfg.parallel_min_rows = 1;
+            let (r, mut k) = run_kernel(&p, &ds, cfg).expect("the book runs");
+            let counted = (r.coverage.clone(), k.literal_counts().to_vec(), serde_json::to_string(&r.stats).unwrap());
+            let planned = k.plan_counts().into_iter().find(|c| c.0 == "seen").map(|c| (c.1, c.2, c.3));
+            let ledgers = if trim { Default::default() } else { tv::ledgers(&mut k, &p, &r.bars) };
+            let outcome: Outcome = Ok((tv::digest(&r), ledgers));
+            (outcome, counted, planned)
+        };
+        let (set, set_counted, _) = run(false, 1);
+        if !trim {
+            let ledger = &set.as_ref().unwrap().1;
+            assert!(ledger["early"].len() > 50 && ledger["seen"].len() > 5000, "{} names read before the label", ledger["early"].len());
+        }
+        for threads in [1, 4] {
+            let (block, counted, planned) = run(true, threads);
+            let name = format!("last bars ({}, block evaluator, {} thread(s))", if trim { "trimmed" } else { "whole" }, threads);
+            same_runs(&name, &set, &block);
+            if threads == 1 {
+                assert!(set_counted == counted, "{}: the coverage, the literal counts or the stats row differ", name);
+            }
+            let (has, bars, _) = planned.expect("`seen` is counted");
+            assert!(has && bars > 100, "{}: `seen` planned at {} bars", name, bars);
+        }
+    }
+}
+
+/// An entity's previous row and its first row over columns (ERRATA E-153):
+/// a daily book whose names miss bars, one absent 300 days, longer than
+/// the run's horizon, so that its previous row on its return is behind it
+/// (read as the row path reads it there, E-126); `prev_row` (`prev`, then
+/// an as-of read of `universe` with the entity bound), `first_row` (a
+/// negated read of `prev_row`), the close at the previous row and a count
+/// of rows over the chain (`row_number`). The block evaluator against the
+/// set evaluator, whole and trimmed, alone and on four workers, the counts
+/// and the stats row on one thread; each relation is planned.
+#[test]
+fn the_previous_row_over_columns_is_the_row_paths_across_holes_and_the_horizon() {
+    let p = abt_tests::program(&previous_row_book(), "previous");
+    let names: Vec<String> = (0..60).map(|i| format!("S{:03}", i)).collect();
+    let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+    let ds = with_holes(abt_kernel::data::synthetic_for_program(&p, &syms, (2018, 1, 2), 1000, 13));
+    for trim in [false, true] {
+        let run = |block: bool, threads: usize| {
+            let mut cfg = ExecConfig::from_program(&p);
+            cfg.block_eval = block;
+            cfg.trim_stores = trim;
+            cfg.threads = threads;
+            cfg.parallel_min_rows = 1;
+            let (r, mut k) = run_kernel(&p, &ds, cfg).expect("the book runs");
+            let counted = (r.coverage.clone(), k.literal_counts().to_vec(), serde_json::to_string(&r.stats).unwrap());
+            let planned: Vec<(String, u64)> = k.plan_counts().into_iter().filter(|c| c.1).map(|c| (c.0, c.2)).collect();
+            let ledgers = if trim { Default::default() } else { tv::ledgers(&mut k, &p, &r.bars) };
+            let outcome: Outcome = Ok((tv::digest(&r), ledgers));
+            (outcome, counted, planned)
+        };
+        let (set, set_counted, _) = run(false, 1);
+        if !trim {
+            let ledger = &set.as_ref().unwrap().1;
+            assert!(
+                ledger["back"].len() > 20_000 && ledger["first_row"].len() >= 60,
+                "{} rows back, {} first rows",
+                ledger["back"].len(),
+                ledger["first_row"].len()
+            );
+        }
+        for threads in [1, 4] {
+            let (block, counted, planned) = run(true, threads);
+            let name = format!("previous rows ({}, block evaluator, {} thread(s))", if trim { "trimmed" } else { "whole" }, threads);
+            same_runs(&name, &set, &block);
+            if threads == 1 {
+                assert!(set_counted == counted, "{}: the coverage, the literal counts or the stats row differ", name);
+            }
+            for rel in ["prev_row", "first_row", "back"] {
+                let bars = planned.iter().find(|(r, _)| r == rel).map(|(_, b)| *b).unwrap_or(0);
+                assert!(bars > 100, "{}: `{}` planned at {} bars: {:?}", name, rel, bars, planned);
+            }
+        }
+    }
+}
+
+/// The block evaluator resumed from a checkpoint, and fed tuples received
+/// after their bar (ERRATA E-150: a memo the late tuple or the resume
+/// cleared plans nothing behind the horizon until the next trim): the
+/// last-bar book, the previous-row book and the dividend book (whose window
+/// caches the late tuple cuts back) over names missing bars, with a name's
+/// closes of some days received three days late, decide as the
+/// set evaluator does, whole and trimmed; resumed from monthly
+/// checkpoints, as the set evaluator resumed from the same checkpoint
+/// does (with the whole history, as the unbroken run).
+#[test]
+fn the_block_evaluator_resumed_or_fed_late_tuples_decides_as_the_set_evaluator() {
+    use abt_kernel::kernel::CheckpointEvery;
+    for (src, name) in [(previous_row_book(), "previous"), (last_bar_book(), "lastbar"), (dividend_book(), "dividends")] {
+        let p = abt_tests::program(&src, name);
+        let names: Vec<String> = (0..60).map(|i| format!("S{:03}", i)).collect();
+        let syms: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut ds = with_holes(abt_kernel::data::synthetic_for_program(&p, &syms, (2018, 1, 2), 950, 17));
+        if name == "dividends" {
+            add_actions(&mut ds, 60, 17);
+        }
+        // Name 7's close every 37th bar (on every weekday in turn) arrives
+        // three days after its bar.
+        let closes = std::mem::take(ds.facts.get_mut("close").unwrap());
+        let mut late = 0;
+        for (i, tu) in closes.into_iter().enumerate() {
+            match (tu[0].as_equity(), tu[1].as_time()) {
+                (Some(7), Some(t)) if i % 37 == 0 => {
+                    ds.add_available("close", tu, t + 3 * 86_400_000_000_000);
+                    late += 1;
+                }
+                _ => ds.add("close", tu),
+            }
+        }
+        assert!(late > 5, "{} late closes", late);
+        for trim in [false, true] {
+            let cfg = |block: bool| {
+                let mut cfg = ExecConfig::from_program(&p);
+                cfg.block_eval = block;
+                cfg.trim_stores = trim;
+                cfg
+            };
+            let c = abt_tests::client(&p, &ds);
+            // On the kernel's own thread, as a run is: a memo the late
+            // tuple cleared is derived again down each name's chains.
+            let replayed = |cfg: ExecConfig, opts: &Replay| {
+                abt_kernel::kernel::on_kernel_thread(|| {
+                    let mut exec = SimExecutor::new(cfg.clone());
+                    let mut kept = Vec::new();
+                    let (r, _) = abt_kernel::kernel::replay(&p, None, &c, cfg, &mut exec, opts, &mut |cp| kept.push(cp))?;
+                    Ok((tv::digest(&r), r.late.len(), kept))
+                })
+                .expect("the book runs")
+            };
+            let monthly = Replay {
+                checkpoint_every: Some(CheckpointEvery::Month),
+                ..Replay::default()
+            };
+            let (set, set_late, checkpoints) = replayed(cfg(false), &monthly);
+            let (block, block_late, _) = replayed(cfg(true), &monthly);
+            let label = format!("{} ({})", name, if trim { "trimmed" } else { "whole" });
+            assert!(set_late > 5 && set_late == block_late, "{}: {} late tuples, {} under the block evaluator", label, set_late, block_late);
+            same_runs(&format!("{}, late tuples", label), &Ok((set.clone(), Default::default())), &Ok((block, Default::default())));
+            assert!(checkpoints.len() > 6, "{}: {} checkpoints", label, checkpoints.len());
+            // Resumed, each evaluator from the same checkpoint: what the
+            // horizon dropped before the resume is read as the row path
+            // reads it (E-135), so the two resumed runs are compared.
+            let mut resumed_apart = 0;
+            for cp in checkpoints.into_iter().step_by(5) {
+                let at = cp.last_bar;
+                let (by_set, _, _) = replayed(
+                    cfg(false),
+                    &Replay {
+                        from: Some(cp.clone()),
+                        ..Replay::default()
+                    },
+                );
+                let (by_block, _, _) = replayed(cfg(true), &Replay { from: Some(cp), ..Replay::default() });
+                resumed_apart += usize::from(by_set != set);
+                same_runs(&format!("{}, resumed after {}", label, at), &Ok((by_set, Default::default())), &Ok((by_block, Default::default())));
+            }
+            if !trim {
+                assert_eq!(resumed_apart, 0, "{}: a resumed run differs from the unbroken one", label);
+            }
+        }
+    }
 }
 
 /// The window operator over columns (ERRATA E-151) against the row path,
@@ -303,7 +708,7 @@ fn the_window_operator_feeds_what_the_row_path_feeds_under_every_asking_pattern(
     let mut planted = clean.clone();
     for tu in planted.facts.get_mut("close").unwrap().iter_mut() {
         if tu[0].as_equity() == Some(target) && tu[1].as_time() == Some(at) {
-            tu[2] = abt_kernel::kernel::Value::Num(0.1);
+            tu[2] = Value::Num(0.1);
         }
     }
     for (ds, label) in [(&clean, "clean"), (&planted, "a price below the logarithm's domain planted")] {

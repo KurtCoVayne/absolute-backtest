@@ -667,6 +667,33 @@ a fifth of the CPU in `case_value` and a seventh in `window_columns`
 (`dividend_at`, `split_factor`, `dividend_or_zero`: S13, S14), `push` 15.8
 s, `check` 8.3 s, the data service 92 s of CPU beside the front's 110 s.
 
+**Package 3, the column-block evaluator's remaining operators (Nov 26): the
+parity run from 134 s to 81 s, the same returns.** E-152 to E-154, E-170,
+E-171. An as-of read of a stored relation with the entity bound
+(`ColOp::AsofStored`, through the walk the row path uses,
+`Kernel::asof_stored_into`) and a read at a time a row binds
+(`ColOp::GatherAt`): `eligible` and `total_return` planned again. The
+previous row (`ColOp::AsofDerived`, `AntiJoin`, `Prev`, over the row
+path's `asof_walk` and its memo): `prev_row`, `universe`, `first_row`.
+Temporally recursive relations planned, their read of an earlier bar a
+`GatherAt` (`row_number`, `cum_split`, `tr_index`, the latch). The case
+(`ColOp::Case`: `split_factor`, `dividend_or_zero`) and a calendar window
+over an as-of read of a stored relation (`ColOp::WindowAgg`:
+`dividend_at`). Each held equal to the row path by `eval_set.rs` (the
+corpus, both books, MW14 over 120 names with holes, resumed and fed late
+tuples, whole and trimmed, 1 and 4 workers, the stored counters on one),
+with a mutation each.
+
+On `m8-bench2`, the parity store, `--evaluator block`, on top of package
+2's second part: 81.4 s against 134 s, the fingerprint `6e72c9bb…`
+unchanged; `decide` 42.5 s to 22.8, `fill` 44.2 to 15.6; the front's CPU
+59.8 s; `dividend_at` 10.3 s, `clenow` 8.0, `eligible` 3.9, `ma` 2.8, the
+rest under 1.3 s each. Before the first tuple: `bind` 3.6 s, `check` 7.8,
+`push` 14.1 (the data service's three passes). The units' own runs, on
+package 3's first operators without the delivered answers: 180.2 s,
+167.1 (the as-of read), 159.2 (the previous row), 149.4 (the chains),
+141.5 (the case).
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

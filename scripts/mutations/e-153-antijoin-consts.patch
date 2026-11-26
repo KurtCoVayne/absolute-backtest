@@ -1,0 +1,16 @@
+# proposition: E-153 (the block evaluator's negated read keeps the rows whose entity has no tuple of the relation at the bar matching the atom's constants, as the row path's negation does)
+# mutation: any tuple of the entity excludes it, whatever the constants
+# test: cargo test -p abt-tests --test eval_set the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colplan.rs b/crates/abt-kernel/src/kernel/colplan.rs
+--- a/crates/abt-kernel/src/kernel/colplan.rs
++++ b/crates/abt-kernel/src/kernel/colplan.rs
+@@ -952,7 +952,7 @@
+                             j += 1;
+                         }
+                         let run = j..j + b.ids[j..].iter().take_while(|&&x| x == id).count();
+-                        if !run.into_iter().any(|r| want.iter().all(|(c, v)| b.cols[*c].value(r) == *v)) {
++                        if !run.into_iter().any(|r| want.iter().all(|(c, _)| b.cols[*c].len() > r)) {
+                             keep.push(i as u32);
+                         }
+                     }
