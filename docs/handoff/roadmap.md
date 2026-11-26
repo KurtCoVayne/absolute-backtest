@@ -68,7 +68,7 @@ The run's clock does not count rows per relation. Add that count to the `timing`
 
 Add a `[profile.profiling]` section to `Cargo.toml` (frame pointers, debug info), which issue #79 asked for, so a profile does not need `RUSTFLAGS`.
 
-For iteration between full runs there is a faster cell, also to be run on the machine: `abt run --strategy mw14 --synthetic --days 2520 --symbols S000,…,S999 --timing …`. On Nov 5 it took 95.8 s before PR #80's changes and 93.8 s with four threads after the first of them. Its time at the head is not recorded.
+There is no faster cell for iteration between full runs since Nov 26: the synthetic 1,000-name market that served as one (95.8 s on Nov 5 before PR #80's changes, 93.8 s with four threads after the first of them) is retired by the owner's rule that a benchmark reads real history (`benchmark.md`, "Real history only"). The full run takes about 70 s.
 
 **Gate.** Five repetitions reproduce 367 s within 3% and a weekly correlation of 0.9777. Record them in `docs/assessment.md`. If they do not reproduce, that is the first finding and nothing else starts.
 

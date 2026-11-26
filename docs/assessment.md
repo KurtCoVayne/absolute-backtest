@@ -789,7 +789,76 @@ run's memory. `--threads 4` on the same store takes 72.7 s (`decide`
 28.4): under the block evaluator the windowed rules are not cut across
 workers, so the workers add their overhead and nothing else.
 
+**Real history only (Nov 26).** The owner's rule from this day: a
+benchmark or a validation run reads real market history, never a
+synthetic market and never a lake cloned wider. The records above that
+were made on a synthetic market (R8L's of this morning, the 1,000-name
+cell of Nov 5) are kept as what was measured then and are not the
+project's numbers. What follows was run on the vendors' data, brought up
+to date the same day.
+
+*The data.* Norgate: the lake in `s3://ndlake-094828274452`, the newest
+there is, bars to 2026-10-26 (`_meta/manifest.json`, watermark
+2026-10-27) where the Mac's lake ends on 2026-06-24. Its index
+membership file was last written on Sep 19: the lists are those of that
+day carried forward. A newer lake needs the Norgate updater on the
+owner's Windows machine and its upload. Databento: the 81 futures roots
+the pipeline holds, pulled again from 2026-08-01 through the pipeline's
+cost gate (every request priced at $0.00 before it was made), to the
+session of 2026-11-25; the history before it is the pipeline machine's
+(2010-06-07 for CME, 2018-12-23 for ICE). TradeStation, the R8L parity
+record's source from 2000, ends on 2026-08-24 and is extended only by an
+export of the owner's.
+
+*MW14 on the lake of Oct 27.* The book's two series are carried to the
+lake's last day by `scripts/mw14-series.py`, each from the source the
+book's own file was made from: `$SPXTR` from the lake, equal to the
+book's file on each of the 9,717 days they share; the weekly VIX from
+CBOE's history (the week's last close and its 4-week mean), equal to the
+book's file in each of its 1,906 whole weeks. The lake's own `$VIX` is
+not used: its weekly last close differs from CBOE's in 11 of those weeks.
+The run: 71.8 s, 1,869 weeks from 1991-01-04 to 2026-10-23, 17 past the
+canon's last (timed before the series script existed, with the lake's
+`$VIX` in the 16 weeks after the book's file, which the canon's weeks do
+not read). Against the canon over the 1,852 weeks they share:
+correlation 0.9983, CAGR 21.16% where the canon has 20.90%, Sharpe 1.030
+against 1.020, the same drawdown (26.19% and 26.18%), 417 weeks equal to
+8e-15 and 1,469 to 1e-4, the largest difference 3.3% (the week of
+1994-07-29). The same tree on the June lake equals the canon in every
+week, so the difference is the lake's, and it was measured file against
+file over the days both hold (to 2026-06-24, the three lists' names):
+
+- The memberships are the same, 6,004 intervals.
+- 77 names that were S&P 500 members on 1990-01-02 have no bar in the
+  June lake and their whole history in the lake of Oct 27: most were
+  delisted between 1994 and 2006 (Grumman, Gerber, Syntex, American
+  Cyanamid, the old McKesson, UAL), and CNA and NL still trade. They are
+  63,541 member-days of 18.7 million. The canon's book never saw them;
+  this one ranks them.
+- Of 20.1 million shared bars: the close differs in 10 (two names), a
+  dividend in 10 (six names; four moved from June 24 to June 23), the
+  volume in 1,194 (985 names).
+
+So the canon is not the reference for this lake. The reference would be
+the Python book run on the same lake, which is the owner's to make
+(`strategy/ivmom/data.py` builds the panel the canon was frozen from).
+The lake also carries `curated/bars_by_date/archive/`, 2.9 million bars
+from 1896 to 1989 that repeat some rows of the yearly partitions (505
+days of `$SPXTR`, the same bar twice); no (asset, day) is repeated inside
+a partition and the archive ends on 1989-12-29, so nothing a stage reads
+(from 1990) is repeated.
+
+*The log compressed (E-169).* A log segment is written with the Arrow
+IPC format's zstd body compression. On the real 6J the log goes from
+1,350 MB to 374 MB and the store from 1,865 MB to 890 MB, with the same
+versions, an ingest of 73 s where it took 80 and the same 5.0 GB peak.
+
 ### The panel
+
+(This first record was made before the rule above: three of its four
+stores were synthetic. `scripts/panel.sh` now runs two groups, each on
+real history: R8L on its 26 roots from Databento and the corpus's daily
+strategies on the S&P 500 lake.)
 
 The owner's instruction of Nov 26: a change made for one book is measured
 on every program. `scripts/panel.sh NAME TREE` runs each program but MW14

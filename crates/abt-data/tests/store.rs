@@ -190,6 +190,45 @@ fn unchanged_buckets_keep_their_files_and_the_index_answers_as_a_full_read() {
     assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
 }
 
+/// ERRATA E-169: a log segment is written with the Arrow IPC format's zstd
+/// body compression and reads as the rows accepted; a segment written
+/// without it, as every store before the erratum holds, reads the same.
+#[test]
+fn a_log_segment_is_compressed_and_an_uncompressed_one_still_reads() {
+    let mut s = Store::temporary("logzstd").unwrap();
+    let t = 19_000 * DAY;
+    // Minute bars of four instruments: a price that moves by a tick, as a
+    // real log's does.
+    let rows: Vec<(u64, i64, i64, f64)> = (0..40_000i64)
+        .map(|i| (1 + (i % 4) as u64, t + (i / 4) * 60_000_000_000, t + (i / 4) * 60_000_000_000, 100.0 + ((i * 7) % 13) as f64 * 0.25))
+        .collect();
+    s.ingest("equity.close", &[close_rows(&rows)], "x", BTreeMap::new()).unwrap();
+    let dir = s.root().join("log").join("equity.close").join("x");
+    let segment = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "arrows"))
+        .unwrap();
+    let written = rows_of(&s.read_log("equity.close", "x", 1, u64::MAX).unwrap());
+    assert_eq!(written.len(), rows.len());
+    assert_eq!(written.iter().map(|r| (r.0, r.1, r.2, r.3)).collect::<Vec<_>>(), rows);
+    let bytes = std::fs::read(&segment).unwrap();
+    // The same rows in a segment without compression, as an earlier store
+    // wrote it, under the same name.
+    let batches: Vec<RecordBatch> = arrow::ipc::reader::StreamReader::try_new(&bytes[..], None).unwrap().map(|b| b.unwrap()).collect();
+    {
+        let mut w = arrow::ipc::writer::StreamWriter::try_new(std::fs::File::create(&segment).unwrap(), &batches[0].schema()).unwrap();
+        for b in &batches {
+            w.write(b).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    // The segment as the store wrote it is under half of that one.
+    let plain = std::fs::metadata(&segment).unwrap().len() as usize;
+    assert!(bytes.len() * 2 < plain, "the segment holds {} bytes, {plain} without compression", bytes.len());
+    assert_eq!(rows_of(&s.read_log("equity.close", "x", 1, u64::MAX).unwrap()), written);
+}
+
 #[test]
 fn pinned_versions_survive_gc_and_the_cache_returns_what_was_put() {
     let mut s = Store::temporary("gc").unwrap();

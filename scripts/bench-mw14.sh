@@ -88,13 +88,15 @@ WRAP=${WRAP:-}
 KEEP=${KEEP:-0}
 OUT=${OUT:-$BENCH/run-$(date -u +%Y%m%dT%H%M%S)}
 CORPUS="corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl"
-SPANS="1990-01-01:1994-12-31 1995-01-01:1999-12-31 2000-01-01:2004-12-31 2005-01-01:2009-12-31 2010-01-01:2014-12-31 2015-01-01:2019-12-31 2020-01-01:2026-12-31"
+SPANS=${SPANS:-"1990-01-01:1994-12-31 1995-01-01:1999-12-31 2000-01-01:2004-12-31 2005-01-01:2009-12-31 2010-01-01:2014-12-31 2015-01-01:2019-12-31 2020-01-01:2026-12-31"}
 # The adapter's options for the book (E-149): every span holds every asset that
 # is a member at any time from the first span's start to the last span's end, as
 # the book reads every bar of every name ever a member; `member_to` is a member
 # day, as the book's test is inclusive; the lake's prices and amounts unrounded.
 NORGATE_OPTS="--universe-start ${SPANS%%:*} --universe-end ${SPANS##*:} --member-to last_day --values lake"
-LISTS='S&P 500=SP500;S&P MidCap 400=SP400;S&P SmallCap 600=SP600'
+# LISTS and SPANS may be the caller's: the book's rules on another real membership (the Russell 3000 as
+# 'Russell 1000=SP500;Russell Mid Cap=SP400;Russell 2000=SP600', whose union it is), in spans a 16 GB machine holds.
+LISTS=${LISTS:-'S&P 500=SP500;S&P MidCap 400=SP400;S&P SmallCap 600=SP600'}
 TICKERS='SPY=ETF;QQQ=ETF'
 mkdir -p "$BENCH" "$OUT"
 say() { echo "[$(date -u +%H:%M:%S)] $*" >&2; }

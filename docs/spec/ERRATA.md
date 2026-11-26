@@ -5045,6 +5045,36 @@ batch driver agree on every corpus program. Each bless since:
   returns (1,851 of 1,851 weeks to 8e-15), 16.6 s before the stream where
   it was 26.4 (`docs/assessment.md`, "The work before the stream,
   together").
+- **E-169 (D-3.1, 06-performance 2, ST-8.8; a log's segments are
+  compressed).** A log segment was an Arrow IPC stream of uncompressed
+  buffers: 38.7 bytes a row of a bar relation (the instrument, `T`, the
+  value, `r`, the sequence number). The log was 72% of a futures store's
+  bytes and 80% of MW14's parity store (5,754 of 7,201 MB), and a served
+  store reads it only from a hot version's `replay_from` (E-128). R8L's
+  26 roots staged from Databento came to 332 bytes a bar on the first
+  root, about 32 GB for the book's 96 million bars, on a machine with
+  32 GB of disk free. [D] `Store::append_log` writes a segment with the
+  IPC format's own body compression, zstd at the library's default level
+  (`IpcWriteOptions::try_with_compression`; arrow's `ipc_compression`
+  feature, whose two crates the workspace already built for Parquet).
+  Each record batch's message names its codec, so `each_log_batch` is
+  told nothing: a store written before the erratum reads as it did, and
+  gains compressed segments after its uncompressed ones. A binary built
+  before the erratum refuses a compressed segment (its reader has no
+  codec), so a store staged after it is served by a binary after it.
+  [D] The format's compression and not a file of our own or a compressed
+  file: the segment stays an Arrow IPC stream that any reader of the
+  format opens, which is D-3.1's wording. 06-performance's line for the
+  log, "replay is a sequential read at disk bandwidth", is now a read at
+  the codec's speed. The versions do not change: a version's id hashes
+  its partitions (E-15), not its log. Measured on the real 6J (5,613,212
+  one-minute bars, 2010-06-07 to 2026-11-25, the pipeline machine): the
+  log 1,350 MB to 374 MB, the store 1,865 MB to 890 MB, the ingest 73 s
+  where it took 80, its peak 5.0 GB both times, every version's id the
+  same.
+  `abt-data/tests/store.rs::a_log_segment_is_compressed_and_an_uncompressed_one_still_reads`;
+  falsified: `scripts/mutations/e-169-plain-log.patch` (the segment
+  written without the codec).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

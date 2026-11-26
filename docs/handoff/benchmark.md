@@ -204,36 +204,58 @@ kill -TERM $SRV 2>/dev/null; sleep 2; kill -KILL $SRV 2>/dev/null
 
 The profiling scripts of issue #79, which sweep the universe size and stub one relation at a time, are in `/Users/alejandro/absolute-backtest/docs/perf/` (`run_prof.sh`, `prof_prep.py`, `prof_summarize.py`). They drive the old engine's command line and would need adapting.
 
-## A faster cell for iteration
+## Real history only
 
-A synthetic market of 1,000 names over ten years, no store needed. On Nov 5 it took 95.8 s before PR #80's changes and 93.8 s on four threads after the first of them (`docs/assessment.md`). Its time at the head, where `--history window` exists, is not recorded.
+The owner's rule of Nov 26, 2026: a benchmark or a validation run reads real market history. The synthetic 1,000-name cell this section used to hold, the synthetic stores of the panel and the lake cloned wider (`scripts/widen-lake.py`) are retired; their numbers of Nov 5 and Nov 26 stay in `docs/assessment.md` as what was measured then. A program with no real history to read (`opening_gap` and `resampled_momentum` on minute bars of equities, `pairs_trading` on two tickers no market lists) is not measured.
+
+## The freshest data
+
+| What | Where | To |
+|---|---|---|
+| Norgate lake | `s3://ndlake-094828274452` (its watermark in `_meta/manifest.json`); a copy on the machine at `/data/ndlake-20261027` | bars to 2026-10-26; the index memberships as written on Sep 19 |
+| `$SPXTR` daily and the weekly VIX | `scripts/mw14-series.py LAKE BOOK_SPXTR BOOK_VIX CBOE_CSV OUT_DIR`: the book's files carried to the lake's last day, `$SPXTR` from the lake and the VIX from CBOE's history, each checked equal to the book's file where they overlap | the lake's last day |
+| Databento futures, minute bars | the pipeline machine, `/srv/absolute/data/vendor/dbn*` (bucket `dbn-futures-094828274452`); the pull of Nov 26 is `dbn-refresh-20261126` | the session of 2026-11-25 |
+
+A newer lake needs the Norgate updater on the owner's Windows machine and its upload. The lake carries `curated/bars_by_date/archive/`, bars before 1990 that repeat some rows of the `year=` partitions; nothing from 1990 on is repeated, and every stage starts there. As on Nov 6, the membership file must be moved into a directory (`indexes/index_membership/data.parquet`).
+
+MW14 on the fresh lake is the same script with the fresh series (there is no canon for it: the canon was frozen on the June lake, which lacks the bars of 77 members of the early 1990s, so `compare` reports a difference that is the lake's):
 
 ```
-syms=$(python3.12 -c "print(','.join('S%03d' % i for i in range(1000)))")
-abt run --strategy mw14 --synthetic --days 2520 --symbols "$syms" --timing --history window \
-  corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
+python3.12 scripts/mw14-series.py /data/ndlake-20261027 /data/spxtr_daily.parquet /data/vix_weekly.parquet VIX_History.csv /data/fresh
+END=2026-10-27 EXTRA="--evaluator block" scripts/bench-mw14.sh /data/ndlake-20261027 /data/fresh/spxtr_daily.parquet /data/fresh/vix_weekly.parquet /data/canon.npy 1
 ```
-
-It says nothing about the stream or the store, so it measures package 3's work and not package 2's.
 
 ## The panel
 
-`scripts/panel.sh NAME TREE [EXTRA...]` runs every program but MW14 once, cold, so that a change made for one book is measured on all of them. `TREE` is a directory holding a release `abt` and its `corpus-v2`. Each run reads a fresh copy of its store through a data service of its own and holds the machine's lock for itself alone. One JSON line a run goes to `$BENCH/panel-NAME/cells.jsonl`: seconds, peak memory, decisions, fills and the SHA-256 of the returns, or why the run did not finish.
+`scripts/panel.sh NAME TREE [EXTRA...]` runs every program but MW14 once, cold, so that a change made for one book is measured on all of them. `TREE` is a directory holding a release `abt` and its `corpus-v2`. Each run reads its store through a data service of its own and holds the machine's lock for itself alone. One JSON line a run goes to `$BENCH/panel-NAME/cells.jsonl`: seconds, peak memory, decisions, fills and the SHA-256 of the returns, or why the run did not finish.
 
-The four stores, as staged on Nov 26 (`$B` is `abt`, `$ROOTS` the 26 roots of `corpus-v2/company/r8l.dsl`):
+Two groups, each on a real store over its whole history:
 
-```
-$B data ingest --store $BENCH/pstore-fut --adapter synthetic --class future --base 1m --days 3000 --start 2000-01-03 --symbols $ROOTS --seed 7
-$B data ingest --store $BENCH/pstore-eqm --adapter synthetic --class equity --base 1m --days 250 --start 2024-01-02 --symbols $(python3.12 -c "print(','.join('S%03d' % i for i in range(20)))") --seed 7
-$B data ingest --store $BENCH/pstore-eqs --adapter synthetic --class equity --base 1d --days 3500 --start 1990-01-02 --symbols AAA,XYZ,BBB,SPY,DDD --seed 7
-$B data ingest --store $BENCH/pstore-eq  --adapter norgate --from /data/ndlake --start 1990-01-01 --exceptions scripts/reviewed/norgate-spx-2014.parquet --attributes reviewed=complete
-```
+- `eq`: every daily strategy of the corpus on the S&P 500 lake staged from 1990 (`EQ`, by default `$BENCH/pstore-eq`):
 
-R8L runs with `--param "risk=65 USD"`: the synthetic futures market ruins the book at its own risk within two years, and a ruined book stops deciding. A strategy that halts (a risk policy, a margin call) measures nothing: the daily store holds the five names the small strategies were written for because on 100 names most of them halted.
+  ```
+  abt data ingest --store $BENCH/pstore-eq --adapter norgate --from /data/ndlake --start 1990-01-01 --exceptions scripts/reviewed/norgate-spx-2014.parquet --attributes reviewed=complete
+  ```
+
+- `fut`: R8L as the book is written, on its 26 roots (`FUT`). The store is on the pipeline machine, where the vendor's files are, so that group runs there: `PGROUPS=fut FUT=/srv/absolute/m8/store-futures-m8-20261125 INPLACE=1 LIMIT=10800 scripts/panel.sh NAME TREE`.
+
+A strategy that halts (a risk policy, a margin call) measures only the days before it halted; the cell says so (`halted`).
+
+## R8L's store
+
+`scripts/r8l-store.sh` stages the book's 26 roots from Databento's minute bars: per root, `scripts/r8l-views.py` makes one directory of links over every pull of the root (the pipeline's two generations and the newest pull, the newest winning a session both hold), then one ingest and the consolidation of the five bar relations. The options are those of absolute-pipeline's `scripts/store/point-values.sh` (sessions broken at 17:45 New York with a 20-minute gap, undefined instruments dropped, each root's point value stated) plus each root's commission per contract per side and `reviewed=complete`, which the book's `need` and `require` clauses ask for. A root is ingested once: its back-adjustment restates facts, so newer bars mean a new store.
+
+The history is the vendor's: 2010-06-07 for CME's roots and 2018-12-23 for ICE's (KC, SB). The book asks for bars from 2000-01-01; the parity record's TradeStation history from 2000 is not in the store.
 
 ## A wider universe
 
-The Mac's lake holds the three S&P lists, 1,500 names at a time. `scripts/widen-lake.py SRC DST K` writes a lake `K` times as wide: every asset once as it is and `K - 1` times as a clone with its own asset id, ticker and source symbol and prices moved by up to 0.1% a bar, a member of the lists its original is a member of. With `K = 2` the lists hold 3,000 names at a time, the Russell 3000's size, over the same calendar. It measures how a run's time and memory grow with the universe; its returns mean nothing. The lake in `s3://ndlake-094828274452` (the pipeline machine's, with its watermark in `_meta/manifest.json`) holds the Russell 3000's own membership, and is the lake to use where a machine can read that bucket.
+The lake in `s3://ndlake-094828274452` holds the Russell indexes' own memberships (the Mac's lake holds only the three S&P lists). The Russell 3000 is the Russell 1000 and the Russell 2000 together: 12,368 names since 1990-07-03, about 3,000 at a time. MW14 runs on it by naming those lists where the book's three are expected:
+
+```
+LISTS='Russell 1000=SP500;Russell Mid Cap=SP400;Russell 2000=SP600' END=2026-10-27 EXTRA="--evaluator block" scripts/bench-mw14.sh /data/ndlake-20261027 /data/fresh/spxtr_daily.parquet /data/fresh/vix_weekly.parquet /data/canon.npy 1
+```
+
+The book's rules are unchanged (its large-cap leg reads the Russell 1000, its mid-cap leg the Russell Mid Cap, a subset of the 1000, its small-cap leg the Russell 2000), so the run measures the engine at that width and is no book of the firm's. There is no canon for it.
 
 ## Traps met on Nov 6
 

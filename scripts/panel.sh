@@ -3,16 +3,18 @@
 #
 # Every program but MW14, one cold run each, so that a change made for one book is measured on all of them
 # (docs/handoff/benchmark.md, "The panel"). TREE is a directory holding a release `abt` and its `corpus-v2`
-# (a bare name is $BENCH/trees/NAME). Each run reads a fresh copy of its store through a data service of its
-# own, over the store's whole history, and holds the machine lock for itself alone so other jobs go between:
-#   fut  r8l                                              on FUT (a synthetic minute futures market of the book's 26 roots)
-#   eqm  opening_gap, resampled_momentum                  on EQM (a synthetic minute equity market)
-#   eqs  the daily strategies written for a small market  on EQS (a synthetic daily equity market from 1990)
-#   eq   the six strategies that need the list "SPX"      on EQ  (the S&P 500 lake staged from 1990, every member)
+# (a bare name is $BENCH/trees/NAME). Real history only (the owner's rule of Nov 26, 2026): each run reads a
+# real store through a data service of its own, over the store's whole history, and holds the machine lock
+# for itself alone so other jobs go between:
+#   fut  r8l                               on FUT (the book's 26 roots staged from Databento's minute bars)
+#   eq   every daily strategy of the corpus on EQ  (the S&P 500 lake staged from 1990, every member)
+# `opening_gap` and `resampled_momentum` read minute bars of equities and `pairs_trading` two tickers that no
+# market lists: there is no real history for them, so they are not run.
 # One JSON line a run in $BENCH/panel-NAME/cells.jsonl: the run's seconds, peak memory, bars, tuples, decisions,
 # fills and the SHA-256 of its returns (`--returns`), or why it did not finish. EXTRA goes to `abt run`.
 # Env: BENCH=/data/bench, LOCK=/data/m8/machine.lock, PY=python3.12, LIMIT=900 (seconds a run may take),
-# ONLY="a b" (these programs alone), PGROUPS="fut eqm eqs eq", EQ, EQS, EQM, FUT (the stores), R8L_RISK=65.
+# ONLY="a b" (these programs alone), PGROUPS="fut eq", EQ, FUT (the stores), INPLACE=1 (serve the store where
+# it is and not a copy of it: where the disk does not hold two, as R8L's store on the pipeline machine).
 set -u
 NAME=$1; TREE=$2; shift 2; EXTRA="$*"
 BENCH=${BENCH:-/data/bench}; LOCK=${LOCK:-/data/m8/machine.lock}; PY=${PY:-python3.12}
@@ -20,8 +22,8 @@ case $TREE in */*) T=$TREE ;; *) T=$BENCH/trees/$TREE ;; esac
 ABT=$T/abt; C=$T/corpus-v2
 OUT=$BENCH/panel-$NAME; rm -rf $OUT; mkdir -p $OUT
 LIMIT=${LIMIT:-900}; ONLY=${ONLY:-}
-EQ=${EQ:-$BENCH/pstore-eq}; EQS=${EQS:-$BENCH/pstore-eqs}; EQM=${EQM:-$BENCH/pstore-eqm}; FUT=${FUT:-$BENCH/pstore-fut}
-PGROUPS=${PGROUPS:-fut eqm eqs eq}
+EQ=${EQ:-$BENCH/pstore-eq}; FUT=${FUT:-$BENCH/store-futures}
+PGROUPS=${PGROUPS:-fut eq}; INPLACE=${INPLACE:-0}
 exec 9>>$LOCK
 say(){ echo "[$(date -u +%T)] $*" >> $OUT/job.log; }
 SRV=
@@ -32,16 +34,16 @@ cell(){ # group program socket files...
   local g=$1 s=$2 sock=$3; shift 3
   want $s || return 0
   flock 9
-  # The synthetic futures market ruins R8L's book at its own risk per leg within two years: the panel runs the
-  # book at a hundredth of it (the same legs, the same work), so that the run covers the whole history.
-  # The lake's strategies take the legs scripts/bench.sh gives them (n names a leg; 20 long-only).
+  # R8L runs as the book is written. The lake's list strategies take the legs scripts/bench.sh gives them
+  # (n names a leg; 20 long-only); the others run as written.
   local pargs=()
-  case $g:$s in
-    fut:r8l) pargs=(--param "risk=${R8L_RISK:-65} USD") ;;
-    eq:dividend_capture) ;;
-    eq:total_return_momentum) pargs=(--param n=20) ;;
-    eq:*) pargs=(--param n=50) ;;
-  esac
+  if [ "$g" = eq ] && grep -q 'need *lists' $C/strategies/$s.dsl; then
+    case $s in
+      dividend_capture) ;;
+      total_return_momentum) pargs=(--param n=20) ;;
+      *) pargs=(--param n=50) ;;
+    esac
+  fi
   timeout $LIMIT /usr/bin/time -v $ABT run --strategy $s --data $sock --timing $EXTRA "${pargs[@]}" --returns $OUT/$s.returns "$@" > $OUT/$s.log 2>&1; local rc=$?
   flock -u 9
   $PY - "$g" "$s" "$rc" "$OUT/$s.log" "$OUT/$s.returns" "$LIMIT" >> $OUT/cells.jsonl <<'PY'
@@ -81,15 +83,16 @@ group(){ # group store
   ST=$BENCH/pwork-$NAME-$g; SOCK=$OUT/$g.sock
   [ -d "$base" ] || { say "$g: no store at $base"; return 1; }
   flock 9
-  rm -rf $ST; cp -a --reflink=auto $base $ST; rm -f $SOCK
+  rm -f $SOCK
+  if [ "$INPLACE" = 1 ]; then ST=$base; else rm -rf $ST; cp -a --reflink=auto $base $ST; fi
   /usr/bin/time -v $ABT data serve --store $ST --socket $SOCK > $OUT/$g.serve.log 2>&1 &
   SRV=$!
   local up=1
   for _ in $(seq 1 1200); do [ -S $SOCK ] && grep -q '^serving ' $OUT/$g.serve.log 2>/dev/null && { up=0; break; }; kill -0 $SRV 2>/dev/null || break; sleep 0.5; done
   flock -u 9
-  [ $up = 0 ] || { say "$g: the data service did not start: $(tail -2 $OUT/$g.serve.log | tr '\n' ' ' | cut -c1-300)"; stop; rm -rf $ST; return 1; }
+  [ $up = 0 ] || { say "$g: the data service did not start: $(tail -2 $OUT/$g.serve.log | tr '\n' ' ' | cut -c1-300)"; endgroup; return 1; }
   }
-endgroup(){ stop; rm -rf $ST; }
+endgroup(){ stop; [ "$INPLACE" = 1 ] || rm -rf $ST; }
 say "panel $NAME: tree $TREE ($(tail -2 $T/snap.log 2>/dev/null | head -1 | cut -c1-90)), extra '$EXTRA', limit ${LIMIT}s, groups $PGROUPS"
 one(){ # group store program files...: a cold run, on a copy of the store and a service of its own
   local g=$1 base=$2 s=$3; shift 3
@@ -99,9 +102,7 @@ one(){ # group store program files...: a cold run, on a copy of the store and a 
 for g in $PGROUPS; do
   case $g in
   fut) one fut $FUT r8l $C/catalog $C/lib $C/company/r8l.dsl ;;
-  eqm) for s in opening_gap resampled_momentum; do one eqm $EQM $s $C/catalog $C/lib $C/strategies; done ;;
-  eqs) for f in $C/strategies/*.dsl; do s=$(basename $f .dsl); grep -q -e 'bars @1m' -e 'need *lists' $f && continue; one eqs $EQS $s $C/catalog $C/lib $C/strategies; done ;;
-  eq)  for f in $C/strategies/*.dsl; do s=$(basename $f .dsl); grep -q 'need *lists' $f || continue; one eq $EQ $s $C/catalog $C/lib $C/strategies; done ;;
+  eq)  for f in $C/strategies/*.dsl; do s=$(basename $f .dsl); grep -q 'bars @1m' $f && continue; [ $s = pairs_trading ] && continue; one eq $EQ $s $C/catalog $C/lib $C/strategies; done ;;
   esac
 done
 say PANEL-DONE

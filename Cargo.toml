@@ -22,7 +22,7 @@ abt-tests = { path = "crates/abt-tests" }
 abt-wire = { path = "crates/abt-wire" }
 # The bundle format (docs/data-bundle.md, section 2) and the tables every
 # layer exchanges (P-4): Arrow IPC and Parquet.
-arrow = { version = "60", default-features = false, features = ["ipc"] }
+arrow = { version = "60", default-features = false, features = ["ipc", "ipc_compression"] }
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
 # BLAKE3 without C or assembly (A-D4; docs/spec/ERRATA.md, E-19).
 blake3 = { version = "1.8", default-features = false, features = ["std", "pure"] }
