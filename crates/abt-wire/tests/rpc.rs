@@ -194,6 +194,33 @@ fn schema_request() -> Message {
     }))
 }
 
+/// A client dropped ends its connection over a socket as it does over a
+/// channel (ERRATA E-166): the service's loop returns and the service is
+/// released. Before, the client's reader held its half of the socket open
+/// for ever, and the service with it.
+#[test]
+fn a_dropped_client_ends_its_connection_over_a_socket() {
+    let dir = std::env::temp_dir().join(format!("abt-rpc-drop-{}", std::process::id()));
+    let path = dir.join("data.sock");
+    let listener = bind(&path).unwrap();
+    let held = Arc::new(Toy);
+    let service = held.clone();
+    let ended = Arc::new(AtomicBool::new(false));
+    let flag = ended.clone();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let _ = abt_wire::rpc::serve(Connection::socket(stream).unwrap(), service);
+        flag.store(true, Ordering::SeqCst);
+    });
+    let client = Client::connect(Connection::connect(&path).unwrap(), Layer::Kernel, "test").unwrap();
+    client.ping().unwrap();
+    assert!(!ended.load(Ordering::SeqCst));
+    drop(client);
+    eventually("the service's loop ends when its client is dropped", || ended.load(Ordering::SeqCst));
+    eventually("the service is released", || Arc::strong_count(&held) == 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Waits up to ten seconds for `what`.
 fn eventually(what: &str, f: impl Fn() -> bool) {
     let start = Instant::now();

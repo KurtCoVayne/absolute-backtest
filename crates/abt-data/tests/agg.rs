@@ -343,6 +343,36 @@ fn answers_are_cache_objects_keyed_by_request_and_versions() {
     assert!(got.iter().all(|r| r.1 >= T0 + 20 * DAY && r.1 <= T0 + 22 * DAY) && !got.is_empty());
 }
 
+/// The pass in its two halves (ERRATA E-168): `prepare` reads the store
+/// and computes, `finish` stores. Two requests that both missed give one
+/// object, the second finding what the first stored; and the two halves
+/// give `aggregate`'s answer.
+#[test]
+fn two_passes_of_one_request_that_both_missed_store_one_object() {
+    use abt_data::agg::{finish, prepare, Looked};
+    let mut s = store();
+    let mut req = request("mean", WindowKind::Rows);
+    req.n = 3;
+    let view = ResolvedView::default();
+    let pending = |s: &Store| match prepare(s, &view, &req).unwrap() {
+        Looked::Computed(p) => *p,
+        Looked::Hit(_) => panic!("nothing is cached yet"),
+    };
+    let (first, second) = (pending(&s), pending(&s));
+    let a1 = finish(&mut s, first).unwrap();
+    let versions = |s: &Store| s.registry.versions().filter(|v| v.relation == a1.relation).count();
+    let stored = versions(&s);
+    let a2 = finish(&mut s, second).unwrap();
+    assert_eq!(a1, a2, "the second pass is answered by the first's object");
+    assert_eq!(versions(&s), stored, "and writes none of its own");
+    assert!(matches!(prepare(&s, &view, &req).unwrap(), Looked::Hit(a) if a == a1));
+    // The same rows as the pass in one call, on a store of its own.
+    let mut whole = store();
+    let b = aggregate(&mut whole, &view, &req).unwrap();
+    assert_eq!((a1.key, a1.rows, a1.inexact_rows), (b.key, b.rows, b.inexact_rows));
+    assert_eq!(answer(&s, &a1.version).unwrap(), answer(&whole, &b.version).unwrap());
+}
+
 /// A request protocol 1.2 could write keeps the cache key a 1.2 tree gave
 /// it (pinned from one): the fields 1.3 added are left out of its canonical
 /// form while absent (ERRATA E-155), so every cached answer is found again.

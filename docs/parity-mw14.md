@@ -197,11 +197,14 @@ that are no `SPXTR_W` key, the last exempt: the equities end on Wednesday
 2026-06-24, inside a week the index runs through, so the last label reads the
 week before's gate and VIX and decides only the book's uncompared last week
 (E-147). Through this path the
-kernel is not at the canon: weekly
-correlation 0.9777, CAGR 18.5% against 20.9% (the result and the profile in
-`docs/assessment.md`). The old engine is at the canon through the v1 bundle
-(above); no full-size run of the three-layer engine on that bundle is
-recorded, so the kernel and the adapter's weekly views are not yet separated
-as causes (package 5 of `docs/handoff/roadmap.md`). SPY and QQQ are not index members
+kernel was not at the canon on Nov 6: weekly correlation 0.9777, CAGR 18.5%
+against 20.9% (the result and the profile in `docs/assessment.md`). With
+ERRATA E-144 to E-149 and E-160 to E-164 every one of the 1,851 compared
+weeks equals the canon to 8e-15 (m8-bench2, the parity store, `p5c-div-3`,
+Nov 26: correlation 0.9999999999999999, 258 s): the weekly total return
+compounds each dividend at its ex-date's close as the book's daily
+`(close + dividend) x split / previous close` does, a split day's dividend
+is the vendor's amount, every dividend of a week counts, and a delisted
+name leaves the book the week after its last row. SPY and QQQ are not index members
 and are not ingested, as the v1 universe had no ETF either.
 

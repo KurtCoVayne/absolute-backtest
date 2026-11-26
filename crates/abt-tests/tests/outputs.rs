@@ -357,6 +357,108 @@ fn plain(b: &RecordBatch) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// A relation observed on a calendar other than the decision calendar's (a
+/// week's close under daily decisions; R8L's median, on its markets'
+/// sessions under a minute clock) is read at the barriers like one on it
+/// (ERRATA E-167): a run that drops the rows behind its lookback writes the
+/// ledgers the run keeping its whole history writes after its last bar, on
+/// such a program and on both books, and it does drop rows.
+#[test]
+fn a_trimmed_run_writes_the_ledgers_of_the_whole_run_on_every_calendar() {
+    let weekly = StrategyParts {
+        name: "weekly_observed".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        rules: [
+            "    rel up(A: Equity, @T)",
+            "    up(A, T) :- universe(A, T), log_price_return(A, T, R), R > 0.",
+            "    rel week_close(A: Equity, @W: weekly, C: Price<USD>)",
+            "    week_close(A, W, C) :- close@weekly(A, W, C).",
+            "    observe up",
+            "    observe week_close",
+        ]
+        .join("\n"),
+        decides: "    decide(T, trade(A, qty)) :- up(A, T), flat(A, T).".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&weekly, "weekly_observed");
+    let ds = abt_kernel::data::synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 400, 5);
+    let mut cases = vec![(prog, ds, true)];
+    for book in ["mw14", "r8l"] {
+        let (p, ds) = golden_inputs(&common::corpus_dir().join("company").join(format!("{}.dsl", book))).unwrap();
+        cases.push((p, ds, false));
+    }
+    for (prog, ds, must_trim) in &cases {
+        let run = |trim: bool| {
+            let client = common::client(prog, ds);
+            let mut cfg = ExecConfig::from_program(prog);
+            cfg.trim_stores = trim;
+            let r = run_writing(prog, &client, cfg).unwrap();
+            let ledgers: Vec<(String, Vec<Vec<String>>)> = prog
+                .observes
+                .iter()
+                .map(|o| (o.rel.clone(), plain(&scan(&client, &format!("kernel.{}.ledger.{}", r.run_id, o.rel)))))
+                .collect();
+            (ledgers, r.stats.trimmed_rows, r.stats.observe_secs)
+        };
+        let (whole, _, _) = run(false);
+        let (trimmed, dropped, observing) = run(true);
+        assert!(observing > 0.0, "{}: the trimmed run did not observe at its barriers", prog.strategy);
+        for ((name, a), (_, b)) in whole.iter().zip(&trimmed) {
+            assert_eq!(a.len(), b.len(), "{}: `{}` has {} rows whole and {} trimmed", prog.strategy, name, a.len(), b.len());
+            if let Some(i) = (0..a.len()).find(|&i| a[i] != b[i]) {
+                panic!("{}: `{}` differs at row {}:\n  whole:   {:?}\n  trimmed: {:?}", prog.strategy, name, i, a[i], b[i]);
+            }
+        }
+        if *must_trim {
+            assert!(dropped > 0, "{}: nothing was behind the horizon", prog.strategy);
+            let weeks = whole.iter().find(|(n, _)| n == "week_close").map(|(_, rows)| rows.len()).unwrap_or(0);
+            assert!(weeks > 3 * 70, "{}: {} rows of the weekly ledger", prog.strategy, weeks);
+        }
+    }
+}
+
+/// Under a session-offset clock (R8L decides thirty minutes into each
+/// root's session, on a minute base) a relation observed on the decision
+/// calendar is listed at an instrument's decision bar, for that instrument,
+/// and at no other bar (ERRATA E-167; language-v2 9.2, "at every decision
+/// bar"): one row a root a session, every decision's bar among them, and
+/// not a row at every minute, whether the run keeps its history or drops
+/// what is behind its lookback.
+#[test]
+fn an_observation_under_a_session_clock_lists_an_instrument_at_its_decision_bar() {
+    const DAY: i64 = 86_400_000_000_000;
+    let (prog, ds) = golden_inputs(&common::corpus_dir().join("company").join("r8l.dsl")).unwrap();
+    for trim in [false, true] {
+        let client = common::client(&prog, &ds);
+        let mut cfg = ExecConfig::from_program(&prog);
+        cfg.trim_stores = trim;
+        let r = run_writing(&prog, &client, cfg).unwrap();
+        let signal = scan(&client, &format!("kernel.{}.ledger.signal", r.run_id));
+        let (bars, roots) = (times(&signal, "bar"), ids(&signal, "A"));
+        assert!(bars.len() > 26, "trim {}: {} rows of `signal`", trim, bars.len());
+        // One row a root a session: the market's sessions are a day's.
+        let mut seen = std::collections::BTreeSet::new();
+        for (bar, root) in bars.iter().zip(&roots) {
+            assert!(
+                seen.insert((root.unwrap(), bar.div_euclid(DAY))),
+                "trim {}: root {:?} is listed twice on the day of {}",
+                trim,
+                root,
+                bar
+            );
+        }
+        // Every decision was taken at a bar the ledger lists.
+        let listed: std::collections::BTreeSet<i64> = bars.iter().copied().collect();
+        let decided: Vec<i64> = r.events.iter().filter(|e| matches!(e.kind, EventKind::Decision { .. })).map(|e| e.t).collect();
+        assert!(!decided.is_empty(), "trim {}: the run decided nothing", trim);
+        assert!(decided.iter().all(|t| listed.contains(t)), "trim {}: a decision at a bar the ledger does not list", trim);
+        // And the ledger is not the relation at every minute.
+        assert!(20 * listed.len() < r.bars.len(), "trim {}: {} bars listed of the run's {}", trim, listed.len(), r.bars.len());
+    }
+}
+
 /// K-7.1: a run that takes checkpoints writes its outputs at each, before
 /// the checkpoint (the rows the run gained since the last write), and ends
 /// with the outputs of the run that takes none.

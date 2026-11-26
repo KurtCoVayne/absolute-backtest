@@ -3078,7 +3078,8 @@ batch driver agree on every corpus program. Each bless since:
   `outputs::observe_bar`, `ledgers_from`): the same rows in the same
   order, read while the bar's inputs are held. An observed relation off
   the decision calendar is still read after the run, and such a program
-  keeps its history whole. The served comparison on the real MW14 holds
+  keeps its history whole (withdrawn by E-167: it is read at the
+  barriers too). The served comparison on the real MW14 holds
   `ledger.scale` and `ledger.latched` equal between the two histories.
 
 - **E-127 (06-performance 3.3, the stream projection; E-77; the
@@ -3687,7 +3688,8 @@ batch driver agree on every corpus program. Each bless since:
   refused (`scripts/mutations/e-145-dividend-bucket.patch`,
   `e-145-call-test.patch`, `e-145-finer-window.patch`).
   `tests/golden/program_hashes.tsv` changes for the programs linking
-  `dividend_at`. **Open:** (1) on a coarser
+  `dividend_at`. **Open** (for dividends, (1) is E-162's and (2) E-163's
+  and E-164's): (1) on a coarser
   calendar `split` and `dividend` are read as the latest key of the name
   in each bucket, so a week with two splits applies the later, and two
   dividends announced in one week on different days (Norgate announces
@@ -4627,10 +4629,418 @@ batch driver agree on every corpus program. Each bless since:
   test with holes with three dividends of a name going ex on one day,
   announced over two weeks, and one announced after it goes ex.
   Falsified: `scripts/mutations/e-171-window-tests.patch` (the call's
-  tests are not applied) and `scripts/mutations/e-171-bars-solved.patch`
-  (the bars read are not counted as solved: the stats row differs).
+  tests are not applied). `scripts/mutations/e-171-bars-solved.patch`
+  (the bars read are not counted as solved: the stats row differed) is
+  withdrawn by E-165, which takes the counter out of the stored row.
   MEASURED-S14
 
+- **E-161 (02-kernel 5.3, README "The executor", `docs/handoff-data.md`
+  section 4 decision 3; a delisting on a calendar coarser than the
+  base).** The executor applied a delisting at the decision bar keyed at
+  a `delisted` row (`by_time.get(&t)`), once per name whether it was held
+  or not (`delisted_done`). The Norgate adapter writes the rows from the
+  first trading day after the last print on (decision 3, E-149 (b)), so on
+  MW14's weekly calendar the bar of the week that holds the delisting
+  session also holds the name's last print: the name was closed there at
+  no cost before the week's decisions and, still having a row that week
+  and in the target, bought back at the same close at 1/N; a name bought
+  that week was not held when the delisting came, was marked done and
+  was never closed. Either way it stayed in the book, marked at its last
+  price, its exit expiring every week. In wave 1's run (`p5res-1`, the
+  Nov 25 residual, the replica's switches 4 and 5): 105 such names, 95
+  closed and bought back at that bar and 10 bought there (257803: last
+  print Thursday 1995-10-12, delisted from Friday 1995-10-13, bought on
+  1995-10-13), 83,830 expired exits, 94% of the run's 88,874 decisions,
+  and 106 weeks moved, 2 of them by more than 1e-4. The book
+  (`engine_weighted.py`, `simulate_weighted`: "drop names with no row this
+  week (delist) at zero cost", `hold = {a: v for a, v in hold.items() if a
+  in idpos}` before the week's trades) trades a name normally at its last
+  row, where its forward return is NaN and it earns nothing, and drops it
+  at no cost the week after. [D] The executor remembers a delisting from
+  the first bar whose bucket holds a row of it (the rows since the
+  previous bar, so a single row on a day that is no decision bar, E-149
+  (b)'s span end, is no longer lost) and applies it at any bar where the
+  name is held: on the base calendar at the bar of its date, as before; on
+  a calendar coarser than the base at the first bar where the name has no
+  price (`Kernel::bar_price`: no print in the bar's bucket), at the last
+  price. The bar that holds the last print is the name's last bar; its
+  price there is that print, as for any name without a bar on the label
+  day, and it trades there like any other name; a name bought there
+  leaves at the next bar. This is the executor's rule, for every program,
+  and not MW14's: a delisting is a fact of the data the executor applies
+  (02-kernel 5.3; README: "a delisted name is force-closed at its last
+  trade"), and on a coarse calendar the bar holding the delisting date
+  also holds that last trade, so the name has not left the market there.
+  The book's rule also drops a name halted for a week that trades again;
+  that is no delisting and stays out of the executor (MW14's header
+  lists it; no held name halts in the run). Other programs: on the base
+  calendar the bar of the date is the first without a print under
+  decision 3, so nothing moves, and a delisting dated on a day with a
+  print (`executor_contracts.rs::a_delisting_at_the_last_price_has_no_haircut_and_no_cost`)
+  still closes there; the corpus programs deciding on a coarser calendar
+  (MW14, `resampled_momentum`) keep their golden runs (`tv_golden`); no
+  golden and no program hash moves. Tests:
+  `abt-tests/tests/actions.rs::on_a_weekly_calendar_a_delisting_applies_at_the_first_bar_without_a_print`
+  (a name held through its last week and one bought in it, its last print
+  a Wednesday: before, the first was closed that week and bought back,
+  the second never closed),
+  `mw14_parity.rs::a_name_trades_at_its_last_row_and_leaves_the_book_at_no_cost_at_the_next_week`
+  (MW14 on the corpus market: before, E17 was closed at its last week and
+  bought back at 1/13, and E20, bought in its last week, was never
+  delisted, each with an exit expiring every week after). Mutations:
+  `scripts/mutations/e-161-delisting-bar.patch` (the bar of the date
+  again) and `e-161-not-held.patch` (a delisting first seen while the name
+  is not held dropped for good) each fail both tests. Measured on
+  m8-bench2 against the parity store (`p5c-exec-1`, one run): 4,862
+  decisions where wave 2's tree made 88,874, 3 orders dropped (the last
+  bar's, no next bar) where it dropped or expired 83,938, 149 delistings
+  applied where it applied 155 (a name out of the target in its last
+  week is sold there by its exit, at cost, as the book sells it, before
+  the delisting comes); 1,827 weeks equal to the canon to 1e-4 (1,825), 494 to 8e-15 (479),
+  correlation 0.9997368427 (0.9997367319), fingerprint `5493f41f…`. These
+  are exactly the replica's with switches 1 to 3 and without 4 and 5
+  (`/data/parity2/waterfall.parquet`, its column "3": 494, 1,827,
+  0.9997368427): what the 106 weeks the two switches moved still differ
+  by is the dividend switches 1 to 3. 257.3 s against
+  251.6 s, within one run's spread (wave 2's tree took 258.5 s and
+  251.6 s); the fill phase 55.8 s against 61.0 s.
+  **Open:** a held name whose prints stop with no `delisted` row at all
+  (the bundle's delisting-coverage test and `pre.delistings` warn of it)
+  is still kept and marked at its last price, its exits expiring each
+  week, where the book drops it; the run holds none (all 105 names had a
+  row).
+- **E-162 (V-3.4, Definition V-3.5, E-145's open item (1); an action read
+  in a group on a calendar coarser than its own).** A catalog relation
+  held at a finer calendar than the rule's is read at a bar as its bar
+  view, the tuples of the bucket's latest key that has one
+  (`eval.rs::asof_matches` with `within_bucket`), and so it was inside an
+  aggregate too: at each weekly bar of `dividend_at`'s window one dividend
+  of a name counted, the later of two going ex in one week. The Norgate
+  registry books 127678's $0.12 on 1994-02-16 and again on 02-17, and 349
+  asset-weeks of the parity store hold two dividends; the book
+  (`data.py` `load_daily`, the bars' `div_cash` on every day) takes both.
+  The Nov 25 residual's switch 3: 7 weeks moved, 5 of them owned, between
+  8e-15 and 1e-4. [D] In a group, a corporate action (`split`, `dividend`,
+  `special_dividend`, `delisted`: the catalog's "corporate actions as
+  events", `Demand::need_for`) read on a calendar coarser than its own is
+  every distinct tuple of the bar's bucket, at a window's bar or at the
+  head's, as a bucket aggregate takes every base row of its bucket
+  (Definition V-3.5): `Literal::AsOf::every`, set by
+  `link.rs::lower_literal` on the group's written atoms, makes
+  `asof_matches` read every key of the bucket. Two tuples equal but for
+  the key (one dividend announced twice in its week) are one row: the key
+  is no term of the read. Outside a group the read is the bar view, as
+  before (`split_factor`'s split of the week, the latest); a status
+  constant over the bucket (`delisted`) gives the one row it gave. Other
+  programs: on the base calendar no read is a bucket read and nothing
+  moves; MW14 is the one corpus program aggregating an action on a coarser
+  calendar, and its golden run does not move (its corpus market pays one
+  dividend a quarter). Measured on m8-bench2 against the parity store
+  (`p5c-div-1`, one run, on E-161's tree): 258.97 s (257.30), `dividend_at`
+  17.83 s (17.40), 1,827 weeks equal to the canon to 1e-4 and 494 to 8e-15
+  (both unchanged), correlation 0.9997368479 (0.9997368427), fingerprint
+  `9dbd5812…`: the weeks the second dividends move still differ by the
+  one-period arithmetic E-163 replaces. Test:
+  `tests/dividend_week.rs::a_weekly_row_takes_every_dividend_of_one_name_going_ex_in_its_week`
+  (two dividends on a Wednesday and a Thursday, the Thursday's announced
+  again on the Tuesday: 0.24, where the bar view gave 0.12). Mutations:
+  `scripts/mutations/e-162-latest-action.patch` (the bar view again: 0.12)
+  and `e-162-key-twice.patch` (no merging by key: 0.36). **Open:** one
+  dividend announced in two buckets counts in both; two splits of one week
+  still apply the later (`split_factor` reads outside a group).
+- **E-163 (V-3.3, B-3, P-1.2, WF-6, E-145's open item (2); the total
+  return of a coarser bar compounds each dividend at its ex-date's close,
+  the `prod` aggregate, and a time bounded by a comparison).**
+  `total_return` was one period on the bucket's closes,
+  `(P F + D) / P0 − 1`: a dividend going ex before the bucket's last bar
+  was reinvested at the bucket's close. The book compounds the days
+  (`data.py`: `load_daily` `trf = (close + div_cash) * split /
+  close.shift(1)`, `to_weekly` `pl.col("trf").product()`, `add_features`
+  `tri` its running product). The Nov 25 residual's switch 1: 24 weeks
+  beyond 1e-4 and 1,235 between, 141857's special dividend of 2000-02-11
+  (93.8% of the week's opening price, the close not dropping on the
+  ex-day) giving the name +11.3% in the run and −66.0% in the book. [D]
+  `1 + R = (P + X) F / P0 × G`: G the product, over the bucket's
+  dividends announced in the bucket and going ex at a bar of the name
+  before L, its last bar at or before T, of `1 + D_i F_i / C_i`, C_i the
+  close of the ex-date and F_i that day's split factor (1 with none); X
+  the bucket's other dividends, `D − S` with S the compounded ones' sum,
+  reinvested at L's close and times L's split factor
+  (`dividend_reinvested`, read from the stored `close` and `split` at the
+  day, not from a relation of the base calendar, which would be derived at
+  every daily bar: 15.7 s in `p5c-div-2`). The closes telescope, so this is the book's
+  product of the days, equal to rounding and not to the bit (the week's
+  daily factors are not formed from the closes read). On the base
+  calendar L is the bar and G is 1: `(P + D F) F / P0 − 1`, the book's day
+  to the bit and, on a day with no split, the former formula's bits.
+  Three things the formulation needs. (a) A product aggregate: `prod` is
+  added to abt-agg's set (`Function::Prod`, distributive: the rows
+  multiplied in their order from 1 in every mode, tick columns through
+  their views, having no integer form at their scale), so the data
+  service and the kernel share it; the checker takes it of a Scalar alone
+  (`check/types.rs::agg_type`: a product's dimension would be its
+  argument's to the group's size). Every other reduction is unchanged
+  (abt-agg's tests). (b) A read at the ex-date: a time a comparison
+  bounds above by one derived from the head time is derived from it too
+  (`check/rule.rs::Analyzer::bound_time`; WF-6 refused `close` at a
+  dividend's `Ex`, a value of the action), so after `Ex < L` the ex-date's
+  close is a causal read; the bound comes before the read. (c) No
+  negation of what reads `close`: bars not declared complete make such a
+  relation open (WF-5), so the defaults are rules, not case forms: the
+  return with no dividend in the bucket (`not dividend_at`, closed) and a
+  count of the compounded dividends. The compounded set is the dividends
+  announced in the bucket, every Norgate dividend (keyed at its
+  ex-date): a window over the year's announcements is cached a bar at a
+  time when the bar enters it (E-75), and a dividend announced there may
+  go ex later, its close then not yet read. `dividend_reinvested` holds a
+  tuple only in a bucket with a dividend, and `total_return`'s two rules
+  test `dividend_at` second, so a bar without one reads what it read
+  before. Other programs: the four
+  daily programs reading `log_return` (`low_volatility`, `momentum_12_1`,
+  `short_term_reversal`, `total_return_momentum`) render their golden
+  runs as before, their synthetic dividends going ex on no split's day
+  (`tv_golden`: only the three Mac libm slippage lines), and their program
+  hashes move with the library; MW14's golden run does not move: its
+  corpus market announces each dividend ten bars before its ex-date, so
+  it is reinvested at the week's close as before (open item 1).
+  `tests/golden/program_hashes.tsv` changes for `low_volatility`,
+  `momentum_12_1`, `short_term_reversal`, `total_return_momentum` and
+  `mw14`. Measured on m8-bench2 against the parity store, one run each:
+  `p5c-div-2` (this arithmetic with the ex-date's close and split read
+  through a base-calendar relation) and `p5c-div-3` (read from the stored
+  relations, the tree of this entry) both have every one of the 1,851
+  compared weeks equal to the canon to 8e-15, correlation
+  0.9999999999999999, fingerprint `be605991…`, 4,862 decisions;
+  `p5c-div-3` 258.24 s against `p5c-div-1`'s 258.97 s, `total_return`
+  7.13 s and `dividend_reinvested` 2.79 s where `total_return` and
+  `dividend_or_zero` took 5.67 s and 3.56 s; `p5c-div-2` 275.09 s, its
+  base relation 15.69 s. The package 5 gate holds. Tests:
+  `tests/dividend_week.rs::a_weekly_return_compounds_each_dividend_at_the_close_of_its_ex_date`
+  (two dividends compounded, a split day's on a Wednesday and on the
+  label, each against the product of the book's daily factors to 1e-14),
+  `::a_weekly_row_takes_every_action_going_ex_in_its_week` (X's Tuesday
+  dividend reinvested at Tuesday's close: E-145's 0.0576923 is now the
+  book's 0.0579644), `::a_daily_return_is_the_books_daily_factor_to_the_bit`,
+  `abt-agg/tests/agg.rs::a_product_is_its_rows_multiplied_in_order`,
+  `abt-tests/tests/checker.rs::a_time_bounded_above_by_the_head_time_may_key_a_read`.
+  Mutations: `scripts/mutations/e-163-one-period.patch` (nothing
+  compounded), `e-163-prod-sum.patch` (`prod` sums),
+  `e-163-unbounded-time.patch` (no bound from a comparison: the library
+  does not check). **Open:** (1) a dividend announced in an earlier
+  bucket than its ex-date's (a vendor with declaration dates, the
+  synthetic market) is reinvested at the bucket's last close; (2) a
+  dividend going ex on a day the name has no bar is reinvested at L's
+  close, where the book, with no bar, has no dividend (the lake has none);
+  (3) two splits in a bucket (E-162).
+- **E-164 (the Norgate adapter's decision 6 against the book; a dividend
+  going ex on a split's day, the residual's D7).** The adapter stores a
+  dividend going ex on its split's day as the vendor's amount over the
+  factor (`norgate.rs`, `amount = c / factor`), the amount per share after
+  the split, and the library added it to `P F`: `P F + D / F`. The book
+  adds the lake's amount to the day's close, already after the split, and
+  multiplies by the factor: `(close + D) F` (`data.py` `load_daily`), the
+  amount per share after the split times the shares a share before it
+  became. On the 42 split days of the lake the bars' `div_cash` is the
+  registry amount (MSFT 2003-02-18: the book 3.685%, the engine 3.437%;
+  CSR 2018-12-28: 4.04% against 144%); the Nov 25 residual's switch 2: 3
+  weeks between 8e-15 and 1e-4. [D] The library follows the book: the
+  store's amount times the ex-date's split factor undoes the adapter's
+  division, and the day's close takes it before the split,
+  `(P + D F) F` at the bucket's last bar and `1 + D F / C` at an earlier
+  one (E-163). Why the two differ: the adapter reads Norgate's amount on a
+  split's day as per share before the split and expresses it in the
+  shares the day's close is in; the book reads it as per share after.
+  Which one Norgate means is the vendor's convention and the owner's call
+  (the adapter's report, Nov 25); the adapter is unchanged, so the
+  other reading is the library's one factor. Tests:
+  `tests/dividend_week.rs::a_daily_return_is_the_books_daily_factor_to_the_bit`
+  (W's Wednesday `(36 + 0.5) 2 / 71 − 1` and V's Friday `(47 + 1) 2 / 93
+  − 1`, the book's to the bit) and the weekly test of E-163. Mutation:
+  `scripts/mutations/e-164-store-amount.patch` (the store's amount: W's
+  day 0.0211 against the book's 0.0282).
+
+- **E-165 (06-performance 3.2, E-133, E-162, E-171; the calendar window
+  read for the whole frame, and the window cache's counters out of the
+  stored stats row).** E-171's operator did, entity by entity, what the
+  row path's call does: the group's cache taken by its key, the window's
+  bars it lacks read, every bar of the window walked for its rows. On the
+  full MW14 that is 2,200 names times a year of weekly bars at each of
+  1,904 weeks to find at most four dividends a name, 10.3 s; and under
+  E-162 the read takes every key of the bucket, which E-171 does not
+  read, so the rule went back to the row path, 15.4 s. [D]
+  `ColOp::WindowAgg` is first `Kernel::run_window_frame`
+  (`kernel/colops.rs`): the window's bars in order, each bar's bucket
+  read once from the store for every entity (the tuples of an entity's
+  latest key in the bucket that the pattern admits, as
+  `Kernel::asof_bucket` finds them; with `every` each tuple of the
+  bucket's keys in time order, two equal but for the key being one row,
+  as `asof_matches` reads them), each tuple given to its entity's row of
+  the frame by bisection, bound as the row path's solve binds it (the
+  call's binding, the window's bar, the read's variables), its arguments
+  computed, the rows of one entity at one bar put in the order of the
+  slots the call leaves unbound, tested on the call's binding and
+  appended to the entity's columns; then the minimum and the row path's
+  reduction (`eval::rows_reduce`). What a call costs is the tuples the
+  relation holds in the window, not the frame's entities times the
+  window's bars. It reads and writes no entity's cache. It declines
+  (`None`) where the walk cannot say what the rules would: a frame with
+  two rows of one entity, a worker kernel, a read with no floor or whose
+  first bucket starts behind the trimmed horizon
+  (`Kernel::horizon_floor`), a store not sorted by the read's entity, an
+  argument that is partial or not a number, a test without a value, a
+  reduction that halts. Where it declines, a read of the latest key goes
+  on to E-171's operator and a read of every key to the rules.
+  The counters of the per-group cache -- `window_bars_solved`,
+  `window_groups`, `window_rows_cached` -- say how a window was computed,
+  not what the run derived, and an operator that keeps no cache counts
+  none: stored, they would make the `stats` row of a run's `report`
+  depend on the evaluator, against A-4 (one run id, the same bytes) as
+  the clocks did (E-133). They are `#[serde(skip)]` like the clocks and
+  like `rows_walks`: `--timing` prints them from the result in process,
+  no stored row and no checkpoint carries them, and a resumed run counts
+  them from its checkpoint. `window_calls` stays stored: one per entity
+  of the frame, as the row path counts a call. E-171's sentence "the
+  caches, the checkpoints that carry them, `window_bars_solved`,
+  `window_groups` and `window_rows_cached` are the set evaluator's" holds
+  for its operator only, and its mutation
+  `scripts/mutations/e-171-bars-solved.patch` is withdrawn: no stored
+  row tells the two apart any more. Measured on m8-bench2, the full MW14
+  on the parity store with `--evaluator block`: `dividend_at` 15.4 s to
+  3.1 s, the run 90.8 s to 78.7 s, the weekly returns' fingerprint
+  unchanged (`be605991...`), 1,851 of 1,851 weeks equal to the canon at
+  8e-15. `tests/eval_set.rs` holds the set and the block evaluators equal
+  on the books with the window planned (the coverage, the literal counts
+  and the stored stats row); `tests/dividend_week.rs`. Falsified:
+  `scripts/mutations/e-165-frame-latest-key.patch` (a read of every key
+  takes the latest key only).
+- **E-166 (P-2.1, P-2.4, M-9, E-81; a connection over a socket ends with
+  its writing half).** `Connection::socket` splits a Unix socket into two
+  descriptors of the one socket, a writer and a reader, and
+  `rpc::Client::connect` gives the reader to a thread. Dropping the
+  client closed the writer's descriptor and nothing else: the reader's
+  thread, blocked in a read, held the other for ever, the service never
+  saw its client go, and its connection thread, the service and the
+  store the service holds (for a dataset held in memory, a temporary
+  store and its mappings) outlived every client. In process, dropping a
+  client drops the channel's sender and the service's loop ends. Under
+  `ABT_TRANSPORT=socket` a test binary therefore kept every service it
+  ever started: `tests/eval_set.rs` reached 546 threads and 58,308
+  mappings at `75c19f9` and, with the tests E-152 to E-171 add, the
+  kernel's limit of 65,530 (`vm.max_map_count`), where the next service
+  failed with `Cannot allocate memory (os error 12)` at 4.3 GB of 16 GB
+  resident. [D] `SocketTx` shuts the socket down in both directions when
+  it is dropped (`abt-wire/src/transport.rs`): the last writer of a
+  connection (the client and every reply it has open hold one) ends the
+  read at both ends, as the channel does. A service process whose client
+  process exits saw the end already, by the system closing the socket.
+  `abt-wire/tests/rpc.rs::a_dropped_client_ends_its_connection_over_a_socket`
+  (the service's loop returns and the service is released); falsified:
+  `scripts/mutations/e-166-socket-held.patch` (the writer does not shut
+  the socket down).
+- **E-167 (language-v2 Definition 8.3 and section 9.2, E-126, A-7.3; an
+  observed relation is read at the barriers whatever its calendar, and
+  under a session-offset clock at the clock's bars; the barrier's
+  latency printed).** Two things kept R8L from running in a time and a
+  memory a live run can live with. (1) E-126 read at the barriers only
+  the observed relations on the decision calendar. A program observing
+  one on another calendar (R8L's `observe m_median`, on its markets'
+  sessions under a minute clock) had every ledger read after the run and
+  kept its whole history. [D] `outputs::observe_bar` reads a relation of
+  another calendar at each bar of its own calendar after the previous
+  barrier and up to this one (`Kernel::bars_between`): its inputs at
+  such a bar are all received, and still held, at the first barrier at
+  or after it. A run trims whatever it observes; E-126's sentence "An
+  observed relation off the decision calendar is still read after the
+  run, and such a program keeps its history whole" is withdrawn. (2) The
+  ledgers of `observe signal`, `aligned` and `settled` listed the
+  relation at every minute bar of the run, for every root, where section
+  9.2 and the book's own comment say "at every decision bar". Definition
+  8.3 adds R(·, t, ·) to the goals of every bar t; under `clock { decide
+  on base at session + 30min }` the bars that have a goal are the
+  clock's, an instrument's own (3.5: the `decide` rules carry `clock(A,
+  T)`, `check/link.rs`), and 06-performance 3.3 gives the kernel those
+  barriers and no other. [D] Under a session-offset clock an observed
+  relation on the decision calendar is read at each bar some
+  instrument's clock strikes at, for those instruments
+  (`outputs::observed_at`, `Kernel::clock_syms_at`): `signal` has one row
+  a root a session, at the bar the decision reads it, and the
+  observation costs what Proposition 8.5 says, the instances the
+  decision did not ask for. A relation with no instrument among its
+  arguments is read at every bar some clock strikes at. The reading
+  after the run (`outputs::ledgers`, a run that keeps its history) lists
+  the same rows; `ledger R into NAME` is still R's whole extension at
+  every bar of its calendar (V-8.3). R8L's golden ledgers change and are
+  blessed again; nothing a run decides does (Proposition 8.4). A program
+  without a session offset is read as before.
+  The memo's eviction, which a trimmed run makes at every barrier,
+  walked each rows window's lookback at every one: the walk is kept per
+  bar of the window's calendar, and a cutoff that has not moved evicts
+  nothing (`Kernel::evict_memo`; what was memoised behind it since is
+  dropped when it moves).
+  `abt run --timing` prints two more lines on standard error, `barriers`
+  and `decision barriers`: the count, the mean, the median, the 99th
+  percentile and the greatest of the seconds a barrier took from its
+  arrival to its end (the fills, the decision, the invariants, the
+  observation, the eviction and the trim), over the run's barriers and
+  over those a decision was scheduled at (under a session-offset clock,
+  those some clock strikes at). They are `KernelStats::barrier_secs` and
+  `decision_barrier_secs`, kept out of the stored stats row: a clock is
+  no output of a run (E-133). This is the instrument of A-7.3's "barrier
+  to decision", measured in a replay: the transport of a live bar's
+  tuples is not in it.
+  Measured on the benchmark machine, R8L over 26 synthetic roots and
+  3,000 days of minute bars (180,000 barriers, 23.6M tuples; the real
+  futures history is not on this machine), `--evaluator block`, the same
+  4,618 decisions and 9,236 fills in each: at `3be3ba4` 393.8 s and
+  5.79 GB; with (1) alone 244.3 s and 2.61 GB, 204.1 s of it the
+  observation at every minute; with (2) and the eviction 32.9 s and
+  0.60 GB (the last two beside a one-core ingest, so not a clean clock).
+  A barrier takes 0.106 ms on average (median 0.017 ms, 99th percentile
+  3.3 ms, greatest 29.0 ms), a decision barrier 1.66 ms (median 1.68 ms,
+  99th percentile 2.2 ms, greatest 29.0 ms), against A-7.3's 50 ms. What
+  is left is in the open items of `docs/assessment.md`: the session view
+  of the universe counts the universe at every minute of the session
+  (7.6 s of the 32.9), the session windows walk their minutes in the
+  kernel (5.5 s), and the kernel still receives every minute as a
+  barrier, where 06-performance 3.3 gives it the clock's bars.
+  `tests/outputs.rs::a_trimmed_run_writes_the_ledgers_of_the_whole_run_on_every_calendar`
+  and `::an_observation_under_a_session_clock_lists_an_instrument_at_its_decision_bar`,
+  `abt/tests/cli_options.rs::timing_prints_one_stderr_line_with_every_field`;
+  falsified: `scripts/mutations/e-167-observed-bar.patch` (a bar of
+  another calendar that is the barrier's own is not read) and
+  `e-167-observed-off-clock.patch` (the relation is read at every bar of
+  the decision calendar).
+- **E-168 (06-performance 2 and 3.3, D-6.3, K-3.2; what a run asks of the
+  data layer before its stream, it asks together).** Before its stream
+  opened a run made its preconditions' reads and then asked its pushed
+  aggregates one after another, and the data service computed an
+  aggregate under the store's write lock, so that it served nothing else
+  meanwhile: on MW14 over the parity store 8.1 s of preconditions and
+  then 14.6 s of pushed aggregates, of a run of 78.7 s. [D] The pass is
+  two halves (`abt-data/src/agg.rs`): `prepare` reads the store and
+  computes, which the service does under its read lock; `finish` stores
+  the answer under the write lock, and a request whose key another
+  stored meanwhile is answered by that object and writes none (the key
+  names the versions the pass read, so the object is that request's
+  answer whatever was written since). `aggregate` is the two in turn.
+  [D] The kernel asks its distinct pushed requests together, on up to
+  four threads (`bind::push_down`, `PUSH_THREADS`), before the loop that
+  reads them in the order the answers decide, which then finds each in
+  the data layer's cache; a request that fails there fails again in the
+  loop, where it is told as before. [D] The preconditions run on a
+  thread of their own beside the kernel's build, the stream's
+  specification and the pushed aggregates (`kernel::replay`). Both end
+  before the stream opens, and a refusal is the run's error whatever the
+  other thread met, as when they ran in turn. The seconds of `check` and
+  of `build`, `spec` and `push` on the `phases` line therefore overlap:
+  they no longer add up to the clock before the stream. A data call
+  records its thread (`DataCall::thread`) and a stage's printed calls
+  (`ABT_TIMING_RELS`) are its thread's.
+  `abt-data/tests/agg.rs::two_passes_of_one_request_that_both_missed_store_one_object`;
+  falsified: `scripts/mutations/e-168-pass-stored-twice.patch` (the
+  second half stores without looking). The pushed answers and the
+  preconditions' statuses are held equal by the tests that held them
+  (`tests/pushdown.rs`, `tests/contracts.rs`, `tests/list_scope.rs`).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

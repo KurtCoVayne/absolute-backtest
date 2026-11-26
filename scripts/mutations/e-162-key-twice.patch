@@ -1,0 +1,16 @@
+# proposition: E-162 (two tuples of a bucket equal but for their key are one row of the group)
+# mutation: every tuple of the bucket is a row, so a dividend announced twice in its week counts twice
+# test: cargo test -p abt-tests --test dividend_week a_weekly_row_takes_every_dividend_of_one_name_going_ex_in_its_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
+--- a/crates/abt-kernel/src/kernel/eval.rs
++++ b/crates/abt-kernel/src/kernel/eval.rs
+@@ -1345,7 +1345,7 @@
+                         let seen = found
+                             .iter()
+                             .any(|(f, _)| f.len() == tu.len() && f.iter().zip(tu.iter()).enumerate().all(|(i, (a, b))| i == kp || a == b));
+-                        if !seen {
++                        if !seen || seen {
+                             found.push((smallvec::SmallVec::from(tu), usize::MAX));
+                         }
+                     }

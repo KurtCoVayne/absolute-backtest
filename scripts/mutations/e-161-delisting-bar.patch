@@ -1,0 +1,25 @@
+# proposition: E-161 (a delisting on a calendar coarser than the base applies at the first bar without a price for the name)
+# mutation: the delisting applies at the bar whose bucket holds its date, before the week's decisions, though the name printed in that bucket
+# test: cargo test -p abt-tests --test mw14_parity a_name_trades_at_its_last_row_and_leaves_the_book_at_no_cost_at_the_next_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/sim/equity.rs b/crates/abt-kernel/src/sim/equity.rs
+--- a/crates/abt-kernel/src/sim/equity.rs
++++ b/crates/abt-kernel/src/sim/equity.rs
+@@ -144,7 +144,6 @@
+                     self.delisted.insert(sym, (seen, reason));
+                 }
+             }
+-            let coarse = k.prog.decision_cal != Cal::Base;
+             let mut gone: Vec<(usize, Sym, String)> = self
+                 .book
+                 .positions
+@@ -153,9 +152,6 @@
+                 .collect();
+             gone.sort_unstable_by_key(|g| g.0);
+             for (_, sym, reason) in gone {
+-                if coarse && k.bar_price(sym, t).is_some() {
+-                    continue;
+-                }
+                 let Some(pos) = self.book.positions.get(&sym).copied() else { continue };
+                 let haircut = if self.cfg.delist_at_last_price {
+                     0.0

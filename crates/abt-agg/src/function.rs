@@ -9,6 +9,9 @@ use std::fmt;
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Function {
     Sum,
+    /// The product of the rows in their order, from 1 (a growth factor
+    /// compounded over a group, E-163).
+    Prod,
     Count,
     Mean,
     Var,
@@ -30,7 +33,7 @@ pub enum Function {
 /// How a function's window state works (P-1.2).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Class {
-    /// `sum`, `count`, `min`, `max`, `first`, `last`: O(1) amortised.
+    /// `sum`, `prod`, `count`, `min`, `max`, `first`, `last`: O(1) amortised.
     Distributive,
     /// The moments: O(w) two-pass, O(1) running.
     Algebraic,
@@ -78,6 +81,7 @@ impl Function {
     pub fn parse(name: &str, level: Option<f64>) -> Result<Function, AggError> {
         Ok(match name {
             "sum" => Function::Sum,
+            "prod" => Function::Prod,
             "count" => Function::Count,
             "mean" => Function::Mean,
             "var" => Function::Var,
@@ -100,6 +104,7 @@ impl Function {
     pub fn name(self) -> &'static str {
         match self {
             Function::Sum => "sum",
+            Function::Prod => "prod",
             Function::Count => "count",
             Function::Mean => "mean",
             Function::Var => "var",
@@ -120,7 +125,7 @@ impl Function {
 
     pub fn class(self) -> Class {
         match self {
-            Function::Sum | Function::Count | Function::Min | Function::Max | Function::First | Function::Last => Class::Distributive,
+            Function::Sum | Function::Prod | Function::Count | Function::Min | Function::Max | Function::First | Function::Last => Class::Distributive,
             Function::Median | Function::Quantile(_) => Class::Holistic,
             _ => Class::Algebraic,
         }

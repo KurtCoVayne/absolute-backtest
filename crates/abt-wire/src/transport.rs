@@ -81,6 +81,20 @@ impl FrameTx for SocketTx {
     }
 }
 
+/// A connection ends with its writing half (ERRATA E-166). The two halves
+/// are two descriptors of one socket, and closing one of them closes
+/// nothing while the other is held: a client's reader, blocked in a read,
+/// held its half for ever, so the service never saw the client go, and its
+/// threads, the service and the store it holds outlived every client.
+/// Shutting the socket down when the last writer is dropped ends the read
+/// at both ends, as dropping a channel's sender does in process.
+impl Drop for SocketTx {
+    fn drop(&mut self) {
+        let _ = self.0.flush();
+        let _ = self.0.get_ref().shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl FrameRx for SocketRx {
     fn recv(&mut self) -> Result<Option<Frame>, FrameError> {
         match Frame::read_from(&mut self.0) {

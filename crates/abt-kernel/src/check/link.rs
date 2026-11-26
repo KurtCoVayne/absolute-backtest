@@ -1093,6 +1093,7 @@ impl<'a> Checker<'a> {
                     Read::Bucket(c) => Some(c.clone()),
                     _ => None,
                 },
+                every: false,
                 span: sp,
             }],
             span: sp,
@@ -1276,6 +1277,7 @@ impl<'a> Checker<'a> {
                 },
                 at: Term::Var("T".into(), sp),
                 within_bucket: None,
+                every: false,
                 span: sp,
             });
             body
@@ -1942,6 +1944,7 @@ impl<'a> Checker<'a> {
                                 Read::Bucket(c) => Some(c),
                                 _ => None,
                             },
+                            every: false,
                             span: a.span,
                         }
                     }
@@ -2180,24 +2183,42 @@ impl<'a> Checker<'a> {
                 // minute window, E-145). Such a window is refused; on the
                 // relation's own calendar or a coarser one it is read in each
                 // bar's bucket, once.
-                let wvars: Vec<&str> = cj
+                let wvars: Vec<String> = cj
                     .iter()
                     .filter_map(|l| match l {
-                        Literal::Window { var: Term::Var(v, _), .. } => Some(v.as_str()),
+                        Literal::Window { var: Term::Var(v, _), .. } => Some(v.clone()),
                         _ => None,
                     })
                     .collect();
+                // A corporate action is an event: read in a group on a
+                // calendar coarser than its own, at a bar of a window or at
+                // the head's, every action of the bar's bucket is one of the
+                // group's rows, as a bucket aggregate takes every base row of
+                // the bucket (Definition 3.5). The bar view's latest tuple
+                // alone would count one of two dividends going ex in one
+                // week (E-162).
+                for &i in &written {
+                    if let Literal::AsOf {
+                        atom, within_bucket: Some(_), every, ..
+                    } = &mut cj[i]
+                    {
+                        if super::Demand::need_for(&atom.name) == "actions" {
+                            *every = true;
+                        }
+                    }
+                }
                 for &i in &written {
                     let Literal::AsOf {
                         atom,
                         at: Term::Var(v, _),
                         within_bucket: None,
                         span: asp,
+                        ..
                     } = &cj[i]
                     else {
                         continue;
                     };
-                    if atom.name == "value" || !wvars.contains(&v.as_str()) {
+                    if atom.name == "value" || !wvars.contains(v) {
                         continue;
                     }
                     let held = self
@@ -2281,6 +2302,7 @@ impl<'a> Checker<'a> {
                     atom,
                     at: self.lower_term(at, ctx, false)?,
                     within_bucket: None,
+                    every: false,
                     span: *span,
                 }
             }

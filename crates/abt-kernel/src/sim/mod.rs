@@ -149,7 +149,11 @@ pub struct SimExecutor {
     filled_total: f64,
     participations: Vec<f64>,
     margin_calls: usize,
-    delisted_done: HashSet<Sym>,
+    /// The delistings the bars so far held a row of, by instrument: the
+    /// order they were first seen in and the reason. One applies while its
+    /// name is held (`delistings`).
+    #[serde(default)]
+    delisted: BTreeMap<Sym, (usize, String)>,
     /// The bar whose corporate actions the book carries (applied once,
     /// before the bar's fills).
     #[serde(default)]
@@ -198,7 +202,7 @@ impl SimExecutor {
             filled_total: 0.0,
             participations: Vec::new(),
             margin_calls: 0,
-            delisted_done: HashSet::new(),
+            delisted: BTreeMap::new(),
             actions_done: None,
             zero_haircut_involuntary: 0,
             not_shortable: 0,
@@ -1543,14 +1547,7 @@ impl Kernel<'_> {
         let decided = self.rel_id("decided");
         // With a session-offset clock, decisions are taken at the clock
         // bars only; a bar at which no instrument's clock strikes decides nothing.
-        let clock_syms: Option<Vec<Sym>> = self.clock_rel.map(|cid| {
-            let epos = self.rels[cid].entity_positions.first().copied().unwrap_or(0);
-            self.store(cid)
-                .by_time
-                .get(&t)
-                .map(|tus| tus.iter().filter_map(|tu| tu[epos].as_equity()).collect())
-                .unwrap_or_default()
-        });
+        let clock_syms: Option<Vec<Sym>> = self.clock_syms_at(t);
         if clock_syms.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
             return Ok(BTreeMap::new());
         }

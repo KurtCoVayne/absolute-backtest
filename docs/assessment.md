@@ -694,6 +694,122 @@ package 3's first operators without the delivered answers: 180.2 s,
 167.1 (the as-of read), 159.2 (the previous row), 149.4 (the chains),
 141.5 (the case).
 
+**Package 5, third part (Nov 26): 1,851 of 1,851 weeks to 8e-15, and the
+calendar window read for the whole frame: 78.7 s.** E-161 to E-166. The
+five mechanisms the second part measured are in the engine (every action
+of a bar's bucket on a coarser calendar, E-162; the dividend compounded
+at its ex-date, `prod` and `dividend_reinvested`, E-163; a delisting's
+week, E-161; the split-day dividend as the adapter's decision, E-164):
+the weekly returns equal the canon in all 1,851 weeks to 8e-15
+(fingerprint `be605991…`, 4,862 decisions). Merged onto the remaining
+operators the run costs 90.8 s, not 81.4: `dividend_at` now reads every
+key of the bucket, which E-171's operator does not, so the rule went back
+to the row path (15.4 s). `Kernel::run_window_frame` (E-165) reads each
+bar's bucket once for every entity and scatters its tuples to the frame's
+rows: `dividend_at` 3.1 s, the run 78.7 s, the same fingerprint, the
+front's peak 1.14 GB. Its clock: `bind` 3.7 s, `check` 8.1, `push` 14.6,
+the stream 52.1 (`decide` 23.5, `fill` 10.6, `insert` 5.4, `decode` 3.3,
+`trim` 2.6, the invariants 2.4, `wait` 1.8, `warm` 1.2); `clenow` 8.2 s,
+`eligible` 3.8, `dividend_reinvested` 3.2, `dividend_at` 3.1, `ma` 3.0,
+the rest under 1.4 s each. The kernel's thread is the critical path (67 s
+of CPU at 90.8 s) and its profile is flat: no symbol above 7%, the
+allocator 15% together. The stream still carries 53M rows (`close` and
+`volume` 20.1M each, `member` 12.9M), which the data service's
+subscription thread spends 34 s of CPU producing.
+
+The socket pass of the gate failed on the remaining operators' tree:
+`eval_set` could not start a data service (`Cannot allocate memory`) at
+4.3 GB resident. Over a socket a dropped client never ended its
+connection (the reader's thread held the socket's other descriptor), so a
+test binary kept every service it started and the stores they map: 58,308
+mappings at the base tree, the limit of 65,530 with the new tests. E-166
+shuts the socket down with its last writer.
+
+**R8L read at its clock's bars (Nov 26): 393.8 s and 5.79 GB to 32.9 s and
+0.60 GB.** E-167. The market is synthetic, since the book's own history
+is on the pipeline machine alone: the book's 26 roots, 3,000 days of
+minute bars from 2000 (180,000 barriers, 23.6M tuples), `--evaluator
+block`, and `risk=65 USD`, a hundredth of the book's risk a leg, because
+the synthetic market ruins the book at its own risk within two years and
+a ruined book stops deciding. Every run below makes the same 4,618
+decisions and 9,236 fills.
+
+| Tree | Run | Kernel peak | Where the time is |
+| --- | --- | --- | --- |
+| `3be3ba4` (PR #80 merged) | 393.8 s | 5.79 GB | an observed relation off the base calendar switched the history's trim off |
+| observation at the barriers, the trim kept | 244.3 s | 2.61 GB | `observe` 204.1 s: the three observed relations queried at each of the 180,000 minutes |
+| observation at the clock's bars (E-167) | 32.9 s | 0.60 GB | the stream 23.6 s: `observe` 10.4, `decide` 4.8, `insert` 2.8, the invariants 2.0, `decode` 1.2 |
+
+The last row ran beside a staging job on the same machine, so it is not a
+clean clock; the first two ran alone. `--timing` now prints two latency
+lines. Over all 180,000 barriers: mean 0.106 ms, median 0.017, p99 3.32,
+max 29.0. Over the 3,000 barriers a decision is made at: mean 1.66 ms,
+median 1.68, p99 2.20, max 29.0, against A-7.3's 50 ms from a barrier to
+its decision. That is the kernel's share in a replay. A live feed's
+transport is not in it, and the live rehearsal feed (`abt data serve
+--record synthetic`) is equities only, so no live R8L run can be made from
+the command line.
+
+What is left on R8L, in the order of its cost:
+
+- **The session view counts the universe at every minute.**
+  `universe@session` is generated as a count over the session's bucket of
+  the base `universe`, so the base relation is evaluated at each of the
+  180,000 minutes: `universe@session` 3.5 s, `universe` 2.0, `instruments`
+  2.1 of the 23.6.
+- **The session's windows are walked in the kernel.**
+  `close_before[30min]@base` 2.3 s, `close_before[30min]@session` 2.0,
+  `close_before[20min]@base` 1.3. They are not pushed to the data service
+  as MW14's weekly aggregates are.
+- **Two block plans are declined at every bar** (`atr`, `m_median`).
+- **Every base minute is still a barrier.** The design of
+  `docs/spec/06-performance.md` section 3.3 (the kernel woken at the
+  178k decision bars, the session's features pushed down, a fill as a
+  point query) is not built. On the book's real history, minute bars of 26
+  roots from 2010, the run has not been made on this tree.
+- **A live run keeps its whole history** (`trim_stores` is off for a live
+  run, `cli.rs`). Whether a live run may trim is a decision of the owner's.
+
+**The work before the stream, together (E-168).** MW14's preconditions
+(8.1 s) and its pushed aggregates (14.6 s) ran one after the other, and
+the data service answered one aggregate at a time, since a pass held the
+store's write lock from its first read to its stored answer. A pass is
+now two halves: `agg::prepare` computes under the read lock, `agg::finish`
+stores under the write lock and takes an answer another pass stored
+first. The kernel asks its distinct pushed requests on four threads and
+checks the preconditions on a thread of their own while it builds and
+pushes.
+
+### The panel
+
+The owner's instruction of Nov 26: a change made for one book is measured
+on every program. `scripts/panel.sh NAME TREE` runs each program but MW14
+once, cold, on a fresh copy of its store with a data service of its own,
+over the store's whole history, and writes one line a run: seconds, peak
+memory, decisions, fills and the SHA-256 of the returns. The stores:
+`r8l` on the synthetic minute futures market above; `opening_gap` and
+`resampled_momentum` on a synthetic minute equity market (20 names, 250
+days); the daily strategies written for a small market on a synthetic
+daily market from 1990; the six strategies that need the list `SPX` on
+the S&P 500 lake staged from 1990, every member.
+
+The base tree (`3be3ba4`), the cells that finished:
+
+| Program | Store | Run | Peak | Returns |
+| --- | --- | --- | --- | --- |
+| `r8l` | futures, minute | 393.8 s | 5.65 GB | |
+| `opening_gap` | equity, minute | 1.3 s | | `806d34321af46911` |
+| `monthly_rebalance` | equity, daily | 1.8 s | | `e76d74745ff99a24` |
+| `pairs_trading` | equity, daily | 4.3 s | 0.07 GB | `de43af1eb64fb0f3` |
+| `dividend_capture` | S&P 500 lake | 72.9 s | 1.50 GB | |
+
+Most of the small daily strategies halt on the 100-name synthetic market
+(a risk policy refuses the book's first orders), and `resampled_momentum`
+halts on a margin call: a halted run measures nothing. The daily market is
+staged again with the five names those strategies were written for. The
+current tree's column and the rest of the base column are not measured
+yet.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

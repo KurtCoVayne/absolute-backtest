@@ -34,7 +34,7 @@ The aggregate kernels, one implementation (A-D8). Pure functions and window-stat
 
 | Class (F-8) | Functions | State | Per-row cost |
 | --- | --- | --- | --- |
-| distributive | `sum`, `count`, `min`, `max`, `first`, `last` | two-stacks deque (min/max); compensated running sum (Neumaier) for `sum`; counters | O(1) amortised |
+| distributive | `sum`, `prod`, `count`, `min`, `max`, `first`, `last` | two-stacks deque (min/max); compensated running sum (Neumaier) for `sum`; counters | O(1) amortised |
 | algebraic | `mean`, `var`, `std`, `cov`, `corr`, `ols_slope`, `ols_r`, `ols_beta` | `two_pass`: the window's rows, reduced in canonical order by the two-pass formulas (Chan, Golub and LeVeque); `running`: shifted compensated sliding sums rebuilt exactly every N rows (the present `RunningSums`) | O(w) / O(1) |
 | holistic | `median`, `quantile(q)` | an order-statistics tree over the window | O(log w) |
 

@@ -308,6 +308,16 @@ pub fn agg_type(name: &str, args: &[Ty]) -> Result<Ty, String> {
             Ok(Ty::Count)
         }
         "sum" | "max" | "min" | "first" | "last" => as_q(one(name)?),
+        // The product of n quantities has their dimension to the n-th power,
+        // n the group's size: a product is of Scalars alone (E-163).
+        "prod" => match as_q(one(name)?)? {
+            Ty::Count => Ok(Ty::scalar()),
+            Ty::Quantity(d) if d.is_scalar() => Ok(Ty::scalar()),
+            t => Err(format!(
+                "prod of a {} is not defined: the product's dimension would depend on the group's size; take the product of a Scalar (a ratio)",
+                t
+            )),
+        },
         "mean" | "std" | "median" => {
             let t = as_q(one(name)?)?;
             Ok(if t == Ty::Count { Ty::scalar() } else { t })

@@ -200,8 +200,26 @@ fn answered(store: &Store, key: &Hash, version: &str) -> Option<Answered> {
     })
 }
 
-/// Answers an aggregate request: the cache object, computed on a miss.
-pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequest) -> Result<Answered, DataError> {
+/// What a request finds under the store's read lock (`prepare`): its
+/// answer when the cache holds it, else the answer's rows, computed and not
+/// yet stored.
+pub enum Looked {
+    Hit(Answered),
+    Computed(Box<Pending>),
+}
+
+/// An answer computed and not yet stored: what `finish` writes.
+pub struct Pending {
+    key: Hash,
+    schema: RelationSchema,
+    batch: RecordBatch,
+    inexact: u64,
+}
+
+/// The first half of `aggregate`, reading the store only: the cached
+/// answer, or the pass. A service runs it under its read lock, so that a
+/// pass holds back neither another pass nor a query (ERRATA E-168).
+pub fn prepare(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Result<Looked, DataError> {
     // The instruments as a set: one object whatever order they are named in.
     let mut request = request.clone();
     if let Some(e) = request.entities.as_mut() {
@@ -222,14 +240,33 @@ pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequ
     }
     let key = cache_key(&request, &versions)?;
     if let Some(a) = store.cache_get(&key).and_then(|v| answered(store, &key, &v)) {
-        return Ok(a);
+        return Ok(Looked::Hit(a));
     }
     let (rows, names) = compute(store, view, &request)?;
     let inexact = rows.inexact;
     let schema = answer_schema(&request);
     let batch = to_batch(&schema, rows, &names)?;
-    let version = store.cache_put_with(&key, &schema, &[batch], BTreeMap::from([(INEXACT_ROWS.to_string(), inexact.to_string())]))?;
-    answered(store, &key, &version).ok_or(DataError::UnknownVersion(version))
+    Ok(Looked::Computed(Box::new(Pending { key, schema, batch, inexact })))
+}
+
+/// The second half of `aggregate`: the computed answer stored as its cache
+/// object. The key names the versions the pass read, so the object is that
+/// request's answer whatever was written since; a request that stored the
+/// same key meanwhile is answered by its object.
+pub fn finish(store: &mut Store, p: Pending) -> Result<Answered, DataError> {
+    if let Some(a) = store.cache_get(&p.key).and_then(|v| answered(store, &p.key, &v)) {
+        return Ok(a);
+    }
+    let version = store.cache_put_with(&p.key, &p.schema, &[p.batch], BTreeMap::from([(INEXACT_ROWS.to_string(), p.inexact.to_string())]))?;
+    answered(store, &p.key, &version).ok_or(DataError::UnknownVersion(version))
+}
+
+/// Answers an aggregate request: the cache object, computed on a miss.
+pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequest) -> Result<Answered, DataError> {
+    match prepare(store, view, request)? {
+        Looked::Hit(a) => Ok(a),
+        Looked::Computed(p) => finish(store, *p),
+    }
 }
 
 /// The answer's rows as a batch in the answer schema.

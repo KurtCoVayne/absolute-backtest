@@ -195,7 +195,7 @@ pub struct LiteralCost {
 /// Gray's class of an aggregate (section 5.4).
 pub fn aggregate_class(agg: &str) -> &'static str {
     match agg {
-        "sum" | "count" | "max" | "min" | "first" | "last" => "distributive",
+        "sum" | "prod" | "count" | "max" | "min" | "first" | "last" => "distributive",
         "mean" | "std" | "cov" | "corr" | "ols_slope" => "algebraic",
         "median" | "quantile" => "holistic",
         _ => "unknown",

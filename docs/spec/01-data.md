@@ -231,7 +231,7 @@ A subscription is a bounded channel (configuration, default 65,536 events) fed f
 Aggregate { input: relation column (by view), function, window, group, receipt_filter, numerics, output: relation name }
 window = rows(N, min K) | prior_rows(N, min K) | window(δ, min K) | prior_window(δ, min K) | bucket(calendar)
 group  = per entity (default) | per label column | whole
-function ∈ abt-agg's set (P-1.2): sum, count, mean, var, std, min, max, first, last, median, quantile(q), cov, corr, ols_slope, ols_r, ols_beta
+function ∈ abt-agg's set (P-1.2): sum, prod, count, mean, var, std, min, max, first, last, median, quantile(q), cov, corr, ols_slope, ols_r, ols_beta
 ```
 
 The answer is a relation keyed like the input (entity, `t`) with the aggregate as its value, or keyed by the bucket label for `bucket`. It is a cache object (3.5) keyed by the request's canonical form, which includes the input version, so a new version of the input is a new object.

@@ -10,6 +10,7 @@ use abt_kernel::data::synthetic_daily;
 use abt_kernel::kernel::time::format_timestamp;
 use abt_kernel::kernel::ExecConfig;
 use abt_tests::run;
+use abt_tests::StrategyParts;
 
 fn check(src: &str, name: &str) -> Vec<Diagnostic> {
     common::check(src, name).1
@@ -232,6 +233,41 @@ fn a_bound_timestamp_may_be_assigned_as_a_value() {
         format_timestamp(sells[0].t),
         format_timestamp(first_fill)
     );
+}
+
+// E-163: a time a comparison bounds above by one derived from the head time
+// is derived from it too (WF-6), so a later literal may read at it: the
+// close of a dividend's ex-date, in a body or in a group. With no bound, or
+// a bound from below, the read is refused.
+
+#[test]
+fn a_time_bounded_above_by_the_head_time_may_key_a_read() {
+    let src = |body: &str| {
+        StrategyParts {
+            name: "ex".into(),
+            needs: "need bars @1d   need actions, listing".into(),
+            rules: format!("    rel ex_close(A: Equity, @T)\n    ex_close(A, T) :- universe(A, T), {}.", body),
+            decides: "    decide(T, hold(A, 0)) :- ex_close(A, T), held(A, T, _).".into(),
+            ..Default::default()
+        }
+        .render()
+    };
+    for body in [
+        "dividend(A, T, Ex, _, _), Ex <= T, close(A, Ex, _)",
+        "prev(T, T1), dividend(A, T, Ex, _, _), Ex < T1, close(A, Ex, _)",
+        "N = count(Ex) over (dividend(A, T, Ex, _, _), Ex < T, close(A, Ex, _)), N > 0",
+    ] {
+        let d = check(&src(body), "ex");
+        assert!(errors(&d).is_empty(), "{}:\n{}", body, text(&d));
+    }
+    for body in [
+        "dividend(A, T, Ex, _, _), close(A, Ex, _)",
+        "dividend(A, T, Ex, _, _), Ex >= T, close(A, Ex, _)",
+        "N = count(Ex) over (dividend(A, T, Ex, _, _), close(A, Ex, _)), N > 0",
+    ] {
+        let d = check(&src(body), "ex");
+        assert!(errors(&d).iter().any(|e| e.code == Code::F && e.message.contains("`Ex`")), "{} should be refused:\n{}", body, text(&d));
+    }
 }
 
 // Review of #43: a calendar duration has no single length in days, so a

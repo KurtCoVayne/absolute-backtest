@@ -1,0 +1,15 @@
+# proposition: E-166 (a connection over a socket ends with its writing half: the last writer dropped shuts the socket down, so the reader's thread and the service's loop end)
+# mutation: the writer does not shut the socket down
+# test: cargo test -p abt-wire --test rpc a_dropped_client_ends_its_connection_over_a_socket
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-wire/src/transport.rs b/crates/abt-wire/src/transport.rs
+--- a/crates/abt-wire/src/transport.rs
++++ b/crates/abt-wire/src/transport.rs
+@@ -91,7 +91,6 @@
+ impl Drop for SocketTx {
+     fn drop(&mut self) {
+         let _ = self.0.flush();
+-        let _ = self.0.get_ref().shutdown(std::net::Shutdown::Both);
+     }
+ }
+ 

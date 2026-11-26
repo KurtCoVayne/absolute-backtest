@@ -1,0 +1,16 @@
+# proposition: E-165 (the frame's walk of a calendar window reads every key of a bar's bucket where the read does, E-162)
+# mutation: the walk takes the latest key of the bucket alone
+# test: cargo test -p abt-tests --test eval_set the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -749,7 +749,7 @@
+         let times: Vec<i64> = self.window_times(&cr, kind, base, dur, lo.as_ref(), &env).ok()?;
+         let counted = agg == "count";
+         let nargs = if counted { 0 } else { op.args.len() };
+-        let every = op.every && op.within.is_some();
++        let every = false && op.every;
+         let kp = self.rels[op.rel].key_pos;
+         let admits = |tu: &[Value]| op.pat.iter().zip(tu.iter()).enumerate().all(|(p, (q, v))| p == op.epos || q.as_ref().is_none_or(|q| q == v));
+         let mut counts: Vec<usize> = vec![0; ids.len()];

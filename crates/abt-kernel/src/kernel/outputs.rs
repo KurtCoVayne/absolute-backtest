@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 
 use super::bind::{Bound, DataClient};
 use super::events::EventKind;
-use super::{Action, ExecConfig, Kernel, RunError, RunResult, Sym, Value};
+use super::{Action, ExecConfig, Kernel, RunError, RunResult, Sym, Tuple, Value};
 use crate::check::Program;
 use crate::ir::Ty;
 
@@ -707,7 +707,7 @@ pub fn ledgers(run: &str, prog: &Program, k: &mut Kernel, ids: &Ids, result: &Ru
     let mut out = Vec::new();
     let mut notes = Vec::new();
     for o in &prog.observes {
-        match ledger(run, &format!("ledger.{}", o.rel), prog, k, ids, result, &o.rel, &o.wheres)? {
+        match ledger(run, &format!("ledger.{}", o.rel), prog, k, ids, result, &o.rel, &o.wheres, true)? {
             Ok(t) => out.push(t),
             Err(note) => notes.push(format!("`observe {}`: {}", o.rel, note)),
         }
@@ -722,7 +722,7 @@ pub fn ledger_into(run: &str, prog: &Program, k: &mut Kernel, client: &DataClien
         return Err(RunError::Request(format!("`{}` is not a relation of {}", rel, prog.strategy)));
     }
     let ids = k.data_ids.clone();
-    match ledger(run, into, prog, k, &ids, result, rel, &[])? {
+    match ledger(run, into, prog, k, &ids, result, rel, &[], false)? {
         Ok((schema, batch)) => {
             let n = batch.num_rows();
             write(client, vec![(schema, batch)])?;
@@ -754,18 +754,16 @@ impl LedgerAcc {
     }
 }
 
-/// Whether every observed relation is on the decision calendar: then the
-/// ledgers can be collected at the barriers.
-pub fn observes_at_barriers(prog: &Program) -> bool {
-    prog.observes.iter().all(|o| prog.relations.get(&o.rel).map(|s| s.cal == prog.decision_cal).unwrap_or(true))
-}
-
-/// The observed relations' rows at the bar `t`, appended to `acc`.
-pub fn observe_bar(prog: &Program, k: &mut Kernel, t: i64, acc: &mut LedgerAcc) -> Result<(), RunError> {
+/// The observed relations' rows at the barrier of the bar `t`, appended to
+/// `acc`; `prev` is the bar of the barrier before it. A relation on the
+/// decision calendar is read at `t`. A relation on another calendar is read
+/// at each bar of its own calendar after `prev` and up to `t` (ERRATA
+/// E-167): its inputs at such a bar are all received, and still held, at
+/// the first barrier at or after it. The first barrier reads its own bar
+/// alone: a ledger begins at the run's first bar.
+pub fn observe_bar(prog: &Program, k: &mut Kernel, prev: Option<i64>, t: i64, acc: &mut LedgerAcc) -> Result<(), RunError> {
     let mask = k.cfg.embargo_mask.clone();
-    if mask.iter().any(|&(a, z)| a <= t && t < z) {
-        return Ok(());
-    }
+    let masked = |b: i64| mask.iter().any(|&(a, z)| a <= b && b < z);
     for (i, o) in prog.observes.iter().enumerate() {
         let (Some(sig), Some(rel)) = (prog.relations.get(&o.rel), k.relation_id(&o.rel)) else { continue };
         let info = k.rels[rel].clone();
@@ -778,15 +776,60 @@ pub fn observe_bar(prog: &Program, k: &mut Kernel, t: i64, acc: &mut LedgerAcc) 
                 pattern[j] = Some(super::lit_value(lit, &mut k.symbols, &mut k.labels, &k.literal_equities));
             }
         }
-        pattern[info.key_pos] = Some(Value::Time(t));
-        let (mut live, mut stuck) = k.observe_at(rel, &pattern)?;
-        live.sort();
-        stuck.sort_by(|a, b| a.0.cmp(&b.0));
-        let rows = &mut acc.rows[i];
-        rows.extend(live.into_iter().map(|tu| (t, tu.into_iter().map(Some).collect(), None)));
-        rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e.to_string()))));
+        let bars: Vec<i64> = if sig.cal == prog.decision_cal { vec![t] } else { k.bars_between(&sig.cal, prev, t) };
+        for b in bars {
+            if masked(b) {
+                continue;
+            }
+            let (live, stuck) = observed_at(k, rel, &info, &mut pattern, b, sig.cal == prog.decision_cal)?;
+            let rows = &mut acc.rows[i];
+            rows.extend(live.into_iter().map(|tu| (b, tu.into_iter().map(Some).collect(), None)));
+            rows.extend(stuck.into_iter().map(|(p, e)| (b, p, Some(e))));
+        }
     }
     Ok(())
+}
+
+/// A relation's rows at the bar `b` as a ledger lists them: the tuples in
+/// their order, then the stuck instances in theirs, each with its halt.
+/// `at_clock`: under a session-offset clock an observed relation on the
+/// decision calendar is read at an instrument's decision bar, the one its
+/// clock strikes at, for that instrument and at no other bar (ERRATA
+/// E-167): `observe R` adds R(., t, .) to the goals of every bar that has
+/// a goal (language-v2 Definition 8.3 and section 9.2, "at every decision
+/// bar"), and under such a clock a base bar is one for the instruments of
+/// `Kernel::clock_syms_at` alone. A relation with no instrument among its
+/// arguments is read at every bar some clock strikes at.
+fn observed_at(k: &mut Kernel, rel: usize, info: &super::RelInfo, pattern: &mut [Option<Value>], b: i64, at_clock: bool) -> Result<(Vec<Tuple>, Vec<(Vec<Option<Value>>, String)>), RunError> {
+    pattern[info.key_pos] = Some(Value::Time(b));
+    let clock = if at_clock { k.clock_syms_at(b) } else { None };
+    let (mut live, stuck) = match (clock, info.entity_positions.first().copied()) {
+        (Some(syms), _) if syms.is_empty() => return Ok((Vec::new(), Vec::new())),
+        (Some(syms), Some(epos)) => {
+            let bound = pattern[epos].clone();
+            let (mut live, mut stuck) = (Vec::new(), Vec::new());
+            for sym in syms {
+                let v = Value::Equity(sym);
+                if bound.as_ref().is_some_and(|w| *w != v) {
+                    continue;
+                }
+                pattern[epos] = Some(v);
+                let (l, s) = k.observe_at(rel, pattern)?;
+                live.extend(l);
+                stuck.extend(s);
+            }
+            pattern[epos] = bound;
+            (live, stuck)
+        }
+        _ => k.observe_at(rel, pattern)?,
+    };
+    live.sort();
+    let mut stuck: Vec<(Vec<Option<Value>>, String)> = stuck.into_iter().map(|(p, e)| (p, e.to_string())).collect();
+    stuck.sort_by(|a, b| a.0.cmp(&b.0));
+    // An instance stuck before its instrument is bound is every clock
+    // instrument's: listed once.
+    stuck.dedup();
+    Ok((live, stuck))
 }
 
 /// The ledgers from rows collected at the barriers (`observe_bar`).
@@ -821,6 +864,7 @@ fn ledger(
     result: &RunResult,
     rel_name: &str,
     wheres: &[(String, crate::Lit)],
+    observed: bool,
 ) -> Result<Result<(RelationSchema, RecordBatch), String>, RunError> {
     let (Some(&first), Some(&last)) = (result.bars.first(), result.bars.last()) else {
         return Ok(Err("the run has no bar".into()));
@@ -850,13 +894,14 @@ fn ledger(
         .into_iter()
         .filter(|&b| b >= first && b <= last && !mask.iter().any(|&(a, z)| a <= b && b < z))
         .collect();
+    // An observation's ledger is read where the barriers read it
+    // (`observe_bar`); `ledger R into NAME` is R's whole extension, at
+    // every bar of its calendar (V-8.3).
+    let at_clock = observed && sig.cal == prog.decision_cal;
     for t in bars {
-        pattern[info.key_pos] = Some(Value::Time(t));
-        let (mut live, mut stuck) = k.observe_at(rel, &pattern)?;
-        live.sort();
-        stuck.sort_by(|a, b| a.0.cmp(&b.0));
+        let (live, stuck) = observed_at(k, rel, &info, &mut pattern, t, at_clock)?;
         rows.extend(live.into_iter().map(|tu| (t, tu.into_iter().map(Some).collect(), None)));
-        rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e.to_string()))));
+        rows.extend(stuck.into_iter().map(|(p, e)| (t, p, Some(e))));
     }
     // The row's place among its bar's rows.
     Ok(Ok(ledger_table(run, name, sig, k, ids, rows)?))

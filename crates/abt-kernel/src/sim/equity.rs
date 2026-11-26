@@ -2,7 +2,7 @@
 //! section 4): a split multiplies the position at its ex-date, a dividend's
 //! receivable is recorded at the ex-date and paid at the pay date, and a
 //! delisted name leaves the book at its last price, less the haircut for its
-//! reason.
+//! reason, at the first bar it has left the market at.
 
 use super::*;
 
@@ -112,31 +112,49 @@ impl SimExecutor {
     }
 
     /// Delistings at the bar, after its fills: a delisted name is
-    /// force-closed at its last trade less the haircut for the reason.
+    /// force-closed at its last trade less the haircut for the reason. A
+    /// delisting is remembered from the first bar whose bucket holds its
+    /// row and applied while the name is held, so a name bought after it
+    /// leaves too. On a calendar coarser than the base the bar whose bucket
+    /// holds the name's last print is its last bar, where it trades like any
+    /// other, and the delisting applies at the first bar without a price for
+    /// it, at the last one (E-161; the book drops a name with no row in the
+    /// week at no cost, engine_weighted.py). On the base calendar a bar is
+    /// its own bucket and the delisting applies at the bar of its date.
     pub(super) fn delistings(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> bool {
         let fill_rel = k.rel_id("fill");
         let mut book_changed = false;
         if let Some(id) = k.delisted_rel {
             let entity_pos = k.rels[id].entity_positions.first().copied().unwrap_or(0);
-            let gone: Vec<(Sym, String)> = k
-                .store(id)
-                .by_time
-                .get(&t)
-                .map(|tus| {
-                    tus.iter()
-                        .filter_map(|tu| {
-                            let sym = tu[entity_pos].as_equity()?;
-                            let reason = tu
-                                .iter()
-                                .find_map(|v| if let Value::Label(l) = v { Some(k.labels.name(*l).to_string()) } else { None })
-                                .unwrap_or_default();
-                            Some((sym, reason))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            for (sym, reason) in gone {
-                if !self.delisted_done.insert(sym) {
+            // The rows since the previous bar (`open_actions` pushed this one).
+            let from = match self.bars.len().checked_sub(2).map(|i| self.bars[i]) {
+                Some(prev) => std::ops::Bound::Excluded(prev),
+                None => std::ops::Bound::Unbounded,
+            };
+            for tus in k.store(id).by_time.range((from, std::ops::Bound::Included(t))).map(|(_, v)| v) {
+                for tu in tus {
+                    let Some(sym) = tu[entity_pos].as_equity() else { continue };
+                    if self.delisted.contains_key(&sym) {
+                        continue;
+                    }
+                    let reason = tu
+                        .iter()
+                        .find_map(|v| if let Value::Label(l) = v { Some(k.labels.name(*l).to_string()) } else { None })
+                        .unwrap_or_default();
+                    let seen = self.delisted.len();
+                    self.delisted.insert(sym, (seen, reason));
+                }
+            }
+            let coarse = k.prog.decision_cal != Cal::Base;
+            let mut gone: Vec<(usize, Sym, String)> = self
+                .book
+                .positions
+                .keys()
+                .filter_map(|s| self.delisted.get(s).map(|(seen, reason)| (*seen, *s, reason.clone())))
+                .collect();
+            gone.sort_unstable_by_key(|g| g.0);
+            for (_, sym, reason) in gone {
+                if coarse && k.bar_price(sym, t).is_some() {
                     continue;
                 }
                 let Some(pos) = self.book.positions.get(&sym).copied() else { continue };

@@ -216,6 +216,25 @@ abt run --strategy mw14 --synthetic --days 2520 --symbols "$syms" --timing --his
 
 It says nothing about the stream or the store, so it measures package 3's work and not package 2's.
 
+## The panel
+
+`scripts/panel.sh NAME TREE [EXTRA...]` runs every program but MW14 once, cold, so that a change made for one book is measured on all of them. `TREE` is a directory holding a release `abt` and its `corpus-v2`. Each run reads a fresh copy of its store through a data service of its own and holds the machine's lock for itself alone. One JSON line a run goes to `$BENCH/panel-NAME/cells.jsonl`: seconds, peak memory, decisions, fills and the SHA-256 of the returns, or why the run did not finish.
+
+The four stores, as staged on Nov 26 (`$B` is `abt`, `$ROOTS` the 26 roots of `corpus-v2/company/r8l.dsl`):
+
+```
+$B data ingest --store $BENCH/pstore-fut --adapter synthetic --class future --base 1m --days 3000 --start 2000-01-03 --symbols $ROOTS --seed 7
+$B data ingest --store $BENCH/pstore-eqm --adapter synthetic --class equity --base 1m --days 250 --start 2024-01-02 --symbols $(python3.12 -c "print(','.join('S%03d' % i for i in range(20)))") --seed 7
+$B data ingest --store $BENCH/pstore-eqs --adapter synthetic --class equity --base 1d --days 3500 --start 1990-01-02 --symbols AAA,XYZ,BBB,SPY,DDD --seed 7
+$B data ingest --store $BENCH/pstore-eq  --adapter norgate --from /data/ndlake --start 1990-01-01 --exceptions scripts/reviewed/norgate-spx-2014.parquet --attributes reviewed=complete
+```
+
+R8L runs with `--param "risk=65 USD"`: the synthetic futures market ruins the book at its own risk within two years, and a ruined book stops deciding. A strategy that halts (a risk policy, a margin call) measures nothing: the daily store holds the five names the small strategies were written for because on 100 names most of them halted.
+
+## A wider universe
+
+The Mac's lake holds the three S&P lists, 1,500 names at a time. `scripts/widen-lake.py SRC DST K` writes a lake `K` times as wide: every asset once as it is and `K - 1` times as a clone with its own asset id, ticker and source symbol and prices moved by up to 0.1% a bar, a member of the lists its original is a member of. With `K = 2` the lists hold 3,000 names at a time, the Russell 3000's size, over the same calendar. It measures how a run's time and memory grow with the universe; its returns mean nothing. The lake in `s3://ndlake-094828274452` (the pipeline machine's, with its watermark in `_meta/manifest.json`) holds the Russell 3000's own membership, and is the lake to use where a machine can read that bucket.
+
 ## Traps met on Nov 6
 
 - **AppleDouble files.** A lake copied from macOS carries `._*` files. Pack with `COPYFILE_DISABLE=1` and `--exclude='._*'`, and delete any that remain.

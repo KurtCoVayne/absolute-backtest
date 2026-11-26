@@ -5,12 +5,12 @@
 diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
 --- a/crates/abt-kernel/src/kernel/mod.rs
 +++ b/crates/abt-kernel/src/kernel/mod.rs
-@@ -5181,7 +5181,7 @@
-     // so a run with one keeps every relation, as a run that keeps every
-     // relation does.
-     let pushing = std::time::Instant::now();
--    let keep: Vec<String> = if opts.keep_unread || opts.read_after_any || !opts.read_after.is_empty() {
-+    let keep: Vec<String> = if opts.keep_unread || !opts.read_after.is_empty() {
-         prog.relations.keys().cloned().collect()
-     } else {
-         exec.reads_stores(&kernel)
+@@ -5349,7 +5349,7 @@
+             // so a run with one keeps every relation, as a run that keeps every
+             // relation does.
+             let pushing = std::time::Instant::now();
+-            let keep: Vec<String> = if opts.keep_unread || opts.read_after_any || !opts.read_after.is_empty() {
++            let keep: Vec<String> = if opts.keep_unread || !opts.read_after.is_empty() {
+                 prog.relations.keys().cloned().collect()
+             } else {
+                 exec.reads_stores(&kernel)

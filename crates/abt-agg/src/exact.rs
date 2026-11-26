@@ -498,6 +498,9 @@ pub fn reduce_ticks(f: Function, cols: &[Ticks]) -> Result<Option<f64>, AggError
         Function::Max => view(*x.units.iter().max().unwrap()),
         Function::First => view(x.units[0]),
         Function::Last => view(x.units[x.units.len() - 1]),
+        // A product's scale grows with each row, so it has no integer form at
+        // the column's: the views multiplied in order, as `two_pass` does.
+        Function::Prod => x.units.iter().map(|&u| view(u)).product(),
         Function::Median => {
             let mut s = x.units.to_vec();
             s.sort_unstable();

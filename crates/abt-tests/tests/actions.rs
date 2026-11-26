@@ -340,3 +340,73 @@ fn a_split_is_applied_before_the_bar_fills() {
     assert_eq!(r.final_positions.get(&x).copied(), Some(200.0));
     assert!(r.equity_curve.iter().all(|(_, e)| (e - 1000.0).abs() < 1e-9), "{:?}", r.equity_curve);
 }
+
+/// A weekly book at the signal close on the total-return index, as MW14's,
+/// buying every name of the week from `from` and selling what left the
+/// universe.
+fn weekly_book(from: &str) -> abt_kernel::check::Program {
+    let src = common::StrategyParts {
+        name: "weekly_book".into(),
+        needs: "need bars @1d   need actions, listing".into(),
+        uses: "calendar, catalog, book".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        clock: "decide on weekly".into(),
+        universe: "universe(A, T) :- traded@weekly(A, T).".into(),
+        params: format!("    w : Scalar = 0.25\n    from : Timestamp = {}", from),
+        orders: "moc".into(),
+        decides: "    decide(T, hold(A, w)) :- universe(A, T), T >= from, not held(A, T, _).\n    decide(T, hold(A, 0)) :- held(A, T, _), not universe(A, T).".into(),
+        execution: "book_fixed_base".into(),
+        report: "calendar weekly   periods 52 per year".into(),
+        ..Default::default()
+    }
+    .render();
+    common::program(&src, "weekly_book")
+}
+
+/// On a calendar coarser than the base, the bar whose bucket holds a name's
+/// last print is its last bar, and the delisting applies at the next, at the
+/// last price (ERRATA E-161). X prints from Monday 2024-01-08 to Wednesday
+/// 2024-01-17 and is delisted from Thursday on, a row a day as the Norgate
+/// adapter writes it; Y prints through Friday 2024-01-26. X's last bar is
+/// the week of 2024-01-19, at its Wednesday close of 107. The delisting
+/// applied at that week's bar: a name held there was closed before the
+/// week's decisions and bought back at the same close, and a name bought
+/// there was not held when the delisting came, so it was never applied;
+/// either way X stayed in the book for good, its exits expiring every week.
+#[test]
+fn on_a_weekly_calendar_a_delisting_applies_at_the_first_bar_without_a_print() {
+    let days = business_days((2024, 1, 8), 15);
+    let mut ds = Dataset::new();
+    let x = ds.add_security("X", "X", days[0], None);
+    let y = ds.add_security("Y", "Y", days[0], None);
+    let acquisition = ds.intern_label("acquisition");
+    for (i, &t) in days.iter().enumerate() {
+        if i <= 7 {
+            common::add_bar(&mut ds, x, t, 100.0 + i as f64, 1000.0);
+        } else {
+            ds.add("delisted", vec![Value::Equity(x), Value::Time(t), Value::Label(acquisition)]);
+        }
+        common::add_bar(&mut ds, y, t, 50.0 + i as f64, 1000.0);
+    }
+    ds.derive_tickers();
+    let day = |s: &str| common::day(s);
+    // Held from the first week, and bought in its last week.
+    for (from, bought) in [("2024-01-12", "2024-01-12"), ("2024-01-19", "2024-01-19")] {
+        let p = weekly_book(from);
+        let r = run(&p, &ds, ExecConfig::from_program(&p)).unwrap();
+        let is = |s: Sym, name: &str| r.symbols[s as usize] == name;
+        let on_x: Vec<(String, f64, f64, bool)> = r.fills.iter().filter(|f| is(f.equity, "X")).map(|f| (format_timestamp(f.t), f.quantity, f.price, f.forced)).collect();
+        let buys: Vec<String> = r.fills.iter().filter(|f| is(f.equity, "X") && f.quantity > 0.0).map(|f| format_timestamp(f.t)).collect();
+        assert_eq!(buys, vec![bought.to_string()], "from {}: X is bought once: {:?}", from, on_x);
+        let forced: Vec<_> = r.fills.iter().filter(|f| is(f.equity, "X") && f.forced).collect();
+        assert_eq!(forced.len(), 1, "from {}: {:?}", from, on_x);
+        assert_eq!(forced[0].t, day("2024-01-26"), "from {}: the delisting applies at the first bar without a print of X: {:?}", from, on_x);
+        assert!(close(forced[0].price, 107.0) && forced[0].commission == 0.0, "from {}: at the last price, at no cost: {:?}", from, on_x);
+        let delistings: Vec<i64> = r.actions.iter().filter(|a| is(a.equity, "X") && matches!(a.action, Action::Delisting { .. })).map(|a| a.t).collect();
+        assert_eq!(delistings, vec![day("2024-01-26")], "from {}", from);
+        let held: Vec<&str> = r.final_positions.keys().map(|s| r.symbols[*s as usize].as_str()).collect();
+        assert_eq!(held, vec!["Y"], "from {}: X left the book", from);
+        let expired = r.events.iter().filter(|e| matches!(e.kind, abt_kernel::kernel::EventKind::ExpiredOrder { .. })).count();
+        assert_eq!(expired, 0, "from {}: no order on X waits for a print that never comes", from);
+    }
+}

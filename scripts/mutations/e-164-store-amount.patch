@@ -1,0 +1,24 @@
+# proposition: E-164 (a dividend going ex on a split's day is the vendor's amount, the store's times the day's split factor, added to the day's close)
+# mutation: the store's amount, per share after the split, as before
+# test: cargo test -p abt-tests --test dividend_week a_daily_return_is_the_books_daily_factor_to_the_bit
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/lib/catalog.dsl b/corpus-v2/lib/catalog.dsl
+--- a/corpus-v2/lib/catalog.dsl
++++ b/corpus-v2/lib/catalog.dsl
+@@ -45,13 +45,13 @@
+     rel dividend_reinvested(A: Equity, @T, X: Price<USD>, G: Scalar)
+     dividend_reinvested(A, T, X, 1.0) :- dividend_at(A, T, D), prev(T, T1), close@base(A, L, _) asof T,
+         FL = case { split@base(A, L, F0) -> F0 ; else -> 1 },
+-        N = count(Ex) over (dividend(A, T, Ex, _, _), Ex > T1, Ex < L, close@base(A, Ex, _)), N = 0, X = D * FL.
++        N = count(Ex) over (dividend(A, T, Ex, _, _), Ex > T1, Ex < L, close@base(A, Ex, _)), N = 0, X = D.
+     dividend_reinvested(A, T, X, G) :- dividend_at(A, T, D), prev(T, T1), close@base(A, L, _) asof T,
+         FL = case { split@base(A, L, F0) -> F0 ; else -> 1 },
+         S = sum(Amt) over (dividend(A, T, Ex, _, Amt), Ex > T1, Ex < L, close@base(A, Ex, _)),
+-        G = prod(1 + Amt * F / C) over (dividend(A, T, Ex, _, Amt), Ex > T1, Ex < L, close@base(A, Ex, C),
++        G = prod(1 + Amt / C) over (dividend(A, T, Ex, _, Amt), Ex > T1, Ex < L, close@base(A, Ex, C),
+             F = case { split@base(A, Ex, F0) -> F0 ; else -> 1 }),
+-        X = (D - S) * FL.
++        X = D - S.
+ 
+     # Total return from the entity's previous row with each dividend
+     # reinvested at the close of its ex-date, as the book compounds the

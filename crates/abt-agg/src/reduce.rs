@@ -35,6 +35,8 @@ fn two_pass(f: Function, cols: &[&[f64]]) -> Result<Option<f64>, AggError> {
     let v = match f {
         Function::Count => xs.len() as f64,
         Function::Sum => xs.iter().sum(),
+        // From 1 in the rows' order, one rounding a row.
+        Function::Prod => xs.iter().product(),
         Function::Mean => mean(xs),
         Function::Std => {
             if xs.len() < 2 {
