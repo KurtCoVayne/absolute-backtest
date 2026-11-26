@@ -7,7 +7,10 @@
 //! literal a merge with another relation at the bar by entity (`Join`), a
 //! column computed (`Let`) or a filter (`Test`). Each operator does to the
 //! frame of bindings what the row path does to its block of rows, in the
-//! same order, with the same arithmetic (`cexpr.rs`). What an operator
+//! same order, with the same arithmetic (`cexpr.rs`). An aggregate the
+//! data layer answers, delivered in the stream or as a table, is read
+//! first (`Pushed`) or joined by entity (`PushedJoin`) through the reads
+//! the row path makes of it (ERRATA E-175). What an operator
 //! cannot do exactly as the row path would -- an input that is not one
 //! tuple per entity, a value of a kind a column does not hold, a partial
 //! operation on any row -- declines the whole (relation, bar), and
@@ -41,8 +44,18 @@ pub(crate) enum ColOp {
     /// An aggregate the data layer answers (K-4.5) as the first literal:
     /// its answer at the bar for every entity, the entity bound to `eslot`
     /// and the value to `vslot`, when every answer was received by the
-    /// barrier (`Kernel::pushed_answers`, the same test).
+    /// barrier (`Kernel::pushed_answers`, the same test); a delivered
+    /// literal's answers from its store (`Kernel::delivered_block`, ERRATA
+    /// E-157, E-175).
     Pushed { eslot: usize, vslot: usize },
+    /// An aggregate the data layer answers, after an atom bound the
+    /// entity to `eslot`: each row's answer for its entity bound to
+    /// `vslot`, a row without one dropped where the literal is delivered;
+    /// read as a table, every row's answer received by the barrier, else
+    /// the row path evaluates a window here and the operator declines, as
+    /// it does where the row path solves the window over the whole frame
+    /// before reading the answers (`Kernel::bucket_prefetch`; ERRATA E-175).
+    PushedJoin { eslot: usize, vslot: usize },
     /// A `rows[n]` aggregate over the entity's own rows (`colops.rs`).
     RowsAgg(Box<RowsAggOp>),
 }
@@ -232,6 +245,17 @@ impl<'p> Kernel<'p> {
                     lhs: self.compile_expr(cr, lhs, &bound, eslot.unwrap_or(usize::MAX))?,
                     rhs: self.compile_expr(cr, rhs, &bound, eslot.unwrap_or(usize::MAX))?,
                 },
+                // An aggregate the data layer can answer, grouped by the
+                // frame's entity at the rule's own bar; whether it does is
+                // known only once the run asked (`answered`).
+                Literal::Agg { var, .. } if self.cfg.pushdown && eslot.is_some_and(|e| self.pushable_at(ri, li, e, key_slot)) => {
+                    let vslot = *cr.slots.get(var)?;
+                    if bound[vslot] {
+                        return None;
+                    }
+                    bound[vslot] = true;
+                    ColOp::PushedJoin { eslot: eslot?, vslot }
+                }
                 Literal::Agg { .. } if eslot.is_some() => {
                     let op = self.compile_rows_agg(ri, li, &bound, eslot?, key_slot)?;
                     bound[op.out] = true;
@@ -420,6 +444,18 @@ impl<'p> Kernel<'p> {
         })
     }
 
+    /// Whether rule `ri`'s aggregate literal `li` is one the data layer can
+    /// answer (`pushdown::eligibility`) grouped by the frame's entity at the
+    /// rule's bar: its instrument variable in `eslot`, its window's base the
+    /// rule's key. A rows window stays the window operator's.
+    fn pushable_at(&self, ri: usize, li: usize, eslot: usize, key_slot: usize) -> bool {
+        let cr = &self.compiled[ri];
+        match super::pushdown::eligibility(self.prog, ri, li) {
+            Ok(s) => !matches!(s.window, WindowKind::Rows | WindowKind::PriorRows) && cr.slots.get(&s.entity_var) == Some(&eslot) && cr.slots.get(&s.base_var) == Some(&key_slot),
+            Err(_) => false,
+        }
+    }
+
     /// The identity plan (`ExecConfig::block_identity`, a test switch): the
     /// rules' result `d` of `rel` at `t` turned into columns and back into
     /// tuples, which the call then serves, with the block memoised beside
@@ -459,9 +495,11 @@ impl<'p> Kernel<'p> {
     /// asked for, or could not answer, is evaluated here at every bar, and
     /// the relation has no plan.
     fn answered(&self, plan: &ColPlan) -> bool {
-        plan.rules
-            .iter()
-            .all(|rp| rp.ops.iter().all(|(li, op)| !matches!(op, ColOp::Pushed { .. }) || self.pushed.contains_key(&(rp.ri, *li))))
+        plan.rules.iter().all(|rp| {
+            rp.ops
+                .iter()
+                .all(|(li, op)| !matches!(op, ColOp::Pushed { .. } | ColOp::PushedJoin { .. }) || self.pushed.contains_key(&(rp.ri, *li)))
+        })
     }
 
     /// Per relation with a plan or a count: its name, whether it has a
@@ -681,16 +719,95 @@ impl<'p> Kernel<'p> {
                     if p.base_slot != rp.key_slot || p.entity_slot != *eslot {
                         return None;
                     }
-                    let section = p.by_time.get(&t)?;
-                    if section.iter().any(|(_, a)| a.value.is_none() || a.error || a.r > self.now) || section.windows(2).any(|w| w[0].0 >= w[1].0) {
+                    let (ids, col) = match &p.delivered {
+                        // Every row of the label the store holds, as
+                        // `delivered_answers` reads them unbound.
+                        Some(d) => {
+                            let (ids, values) = self.delivered_block(d, t)?;
+                            (ids, Col::of_values(values))
+                        }
+                        // First in its rule, the literal is entered by the
+                        // one starting binding, under `PREFETCH_MIN_ROWS`:
+                        // the row path solves no window over a block here
+                        // (`bucket_prefetch`, E-175).
+                        None => {
+                            let section = p.by_time.get(&t)?;
+                            if section.iter().any(|(_, a)| a.value.is_none() || a.error || a.r > self.now) || section.windows(2).any(|w| w[0].0 >= w[1].0) {
+                                return None;
+                            }
+                            for (_, a) in section {
+                                self.pushed_read_r = self.pushed_read_r.max(a.r);
+                            }
+                            (section.iter().map(|(s, _)| *s).collect(), table_answers(&p, section.iter().map(|(_, a)| a)))
+                        }
+                    };
+                    f.ids = ids;
+                    f.cols[*vslot] = Some(FCol::Col(col));
+                    *pushed += 1;
+                }
+                ColOp::PushedJoin { eslot, vslot } => {
+                    let p = self.pushed.get(&(rp.ri, *li)).cloned()?;
+                    if p.base_slot != rp.key_slot || p.entity_slot != *eslot {
                         return None;
                     }
-                    f.ids = section.iter().map(|(s, _)| *s).collect();
-                    f.cols[*vslot] = Some(FCol::Col(Col::Num(section.iter().map(|(_, a)| a.value.unwrap_or(f64::NAN)).collect())));
-                    for (_, a) in section {
-                        self.pushed_read_r = self.pushed_read_r.max(a.r);
+                    // The row path reads one answer per row, each a pushed
+                    // answer it counts.
+                    *pushed += f.ids.len();
+                    match &p.delivered {
+                        // A row's answer is its entity's in the store, as
+                        // `delivered_answers` reads it bound; a row without
+                        // one leaves.
+                        Some(d) => {
+                            let (ids, values) = self.delivered_block(d, t)?;
+                            let (mut keep, mut found) = (Vec::with_capacity(f.ids.len()), Vec::with_capacity(f.ids.len()));
+                            let mut j = 0usize;
+                            for (i, &id) in f.ids.iter().enumerate() {
+                                while j < ids.len() && ids[j] < id {
+                                    j += 1;
+                                }
+                                if j < ids.len() && ids[j] == id {
+                                    keep.push(i as u32);
+                                    found.push(values[j].clone());
+                                }
+                            }
+                            f.keep(&keep);
+                            f.cols[*vslot] = Some(FCol::Col(Col::of_values(found)));
+                        }
+                        // Read as a table, a row without an answer received
+                        // by the barrier is evaluated here: the bar is the
+                        // rules'. So is a bar where the row path solves the
+                        // window over the rows entering the literal before
+                        // it reads their answers (`bucket_prefetch`, the one
+                        // test of both evaluators): what that solve derives
+                        // is counted (E-175).
+                        None => {
+                            let cr = self.compiled[rp.ri].clone();
+                            let prog = self.prog;
+                            if self.bucket_prefetch(&cr, &prog.rules[rp.ri].body[*li], f.ids.len()).is_some() {
+                                return None;
+                            }
+                            let section = p.by_time.get(&t)?;
+                            if section.windows(2).any(|w| w[0].0 >= w[1].0) {
+                                return None;
+                            }
+                            let mut answers = Vec::with_capacity(f.ids.len());
+                            let mut j = 0usize;
+                            for &id in &f.ids {
+                                while j < section.len() && section[j].0 < id {
+                                    j += 1;
+                                }
+                                let a = section.get(j).filter(|(s, _)| *s == id).map(|(_, a)| a)?;
+                                if a.value.is_none() || a.error || a.r > self.now {
+                                    return None;
+                                }
+                                answers.push(a);
+                            }
+                            for a in &answers {
+                                self.pushed_read_r = self.pushed_read_r.max(a.r);
+                            }
+                            f.cols[*vslot] = Some(FCol::Col(table_answers(&p, answers.into_iter())));
+                        }
                     }
-                    *pushed += 1;
                 }
             }
             scanned |= matches!(op, ColOp::Scan { .. } | ColOp::Pushed { .. });
@@ -779,6 +896,17 @@ fn assemble(plan: &ColPlan, t: i64, mut outs: Vec<RuleOut>) -> Option<Planned> {
         rows.push((tu, outs[k].ri));
     }
     Some(Planned::Rows(rows))
+}
+
+/// Answers read as a table as the row path binds them
+/// (`Kernel::pushed_answers`): a count's the window's row count, any
+/// other's the value.
+fn table_answers<'a>(p: &super::pushdown::Pushed, answers: impl Iterator<Item = &'a super::pushdown::Answer>) -> Col {
+    if p.count {
+        Col::Count(answers.map(|a| a.count).collect())
+    } else {
+        Col::Num(answers.map(|a| a.value.unwrap_or(f64::NAN)).collect())
+    }
 }
 
 /// A literal as a value without interning anything: a number, a time.

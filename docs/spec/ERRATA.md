@@ -1862,6 +1862,43 @@ batch driver agree on every corpus program. Each bless since:
     (the kernel reads the file). Falsified by
     `scripts/mutations/d-2.3-pipeline-schemas.patch` (the class is
     rendered but its schemas are not registered with a fresh store).
+- **E-155 (P-3.1, P-6, P-7; protocol 1.3: the fields the delivery of
+  aggregate answers needs).** 3.1 answers `aggregate` with a table and
+  `{ cache_key }`, and a stream names the relations it carries by version
+  only. Protocol 1.3, a minor version, appends to `schema/abt.fbs`:
+  `AggregateRequest.factor` (a `Factor { relation, column }`: the value
+  aggregated is the request's column times the factor's column over the
+  rows both relations hold at one entity and time) and
+  `AggregateRequest.entities` (the instruments the pass reads, E-99's
+  scope); `AggregateCall.answer` (true by default; false asks for the
+  response alone, without the table); `AggregateResponse.relation`,
+  `version`, `rows` and `inexact_rows` (the answer's cache object, which a
+  stream spec can name, and its inexact rows, E-156); a `runs` request
+  (`RunsCall { view, RunsRequest { relation, calendar, entities, t0, t1 } }`,
+  answered by an `AggregateResponse`), the last member of the message
+  union; and `StreamSpec.from` and `whole` (a stream bounded below in
+  event time, and the relations exempt from the bound). The data service
+  answers `factor`, `entities` and `answer`, and fills the response's new
+  fields (E-156); `runs`, `from` and `whole` are on the wire only: the
+  service refuses a `runs` call as a request it does not take and reads
+  no stream bound yet. `PROTOCOL` is `1.3`.
+  [D] An added field is left out of its table's canonical form while it is
+  absent or at its default (`abt_wire::canonical::ADDED`, read by the owned
+  type's name in the canonical serializer: the types planus generates
+  carry no serde attributes), so the canonical form of every message 1.2
+  could write is the bytes 1.2 rendered, and every cache key stands. A
+  stream's id is the hash of `stream::Resolved`, which the new spec fields
+  do not reach. `agg::cache_key` renders the request itself: through a
+  `serde_json::Value`, as it did, the type's name is lost and the new
+  fields would be written as `null`, moving every key.
+  `abt-wire/tests/rpc.rs::a_1_2_aggregate_request_and_stream_spec_keep_their_canonical_bytes`
+  pins the canonical bytes of a request, a call, a response and a stream
+  spec as a 1.2 tree rendered them, shows the new fields in the form when
+  set, and round trips every new message;
+  `abt-data/tests/agg.rs::a_1_2_request_keeps_its_cache_key` pins a cache
+  key a 1.2 tree computed. Falsified by
+  `scripts/mutations/e-155-canonical.patch` (an added field written while
+  absent: the pinned bytes move).
 
 ## Aggregates
 
@@ -1895,6 +1932,74 @@ batch driver agree on every corpus program. Each bless since:
   service and client speaks (`abt_wire::{transport, table, rpc}`). Each layer
   keeps its own dispatch, what a request does. Three copies of one exchange
   would be the duplication A-D2 rejects for types.
+- **E-156 (D-6.1, D-6.5, K-4.5, E-47 (a); the pass's `count`, a product
+  of two relations, the instrument filter and the inexact rows; protocol
+  1.3).** D-6.1 aggregates one relation's column, and E-47 (a) leaves
+  `count` in the kernel because the pass counted the rows with a value.
+  MW14's weekly `dvol` is the mean of the derived `dollar_volume(A, T, D)
+  :- close(A, T, P), volume(A, T, V), D = P * V`, and `traded@weekly` is a
+  `count`, so the kernel derives both from every daily row. The pass
+  (`abt-data/src/agg.rs`) now:
+  - counts, for `count`, every row of the window, with a value or not, as
+    the kernel's `count` counts the rows its window solves. A cache object
+    of the same key written before holds the other count; one whose
+    version records no inexact rows is computed again.
+  - with `factor`, reads the second relation through the same filter and
+    joins it per entity on `t`: a row of the product wherever both hold
+    one (the kernel's join), its value `P * V` formed as `eval_expr` forms
+    it (two `Count` columns as an `i64` product, anything else as the `f64`
+    product), its receipts both rows'. The products are reduced by abt-agg
+    as one column, in time order. A product is a derived series: under
+    `exact` it is reduced as `two_pass` (D-6.3), never as ticks. It is
+    grouped per entity, by a one-column function; the factor's version is
+    in the cache key.
+  - with `entities`, keeps those instruments in every read of the pass (a
+    relation keyed by one entity; one keyed otherwise is read whole, as the
+    stream reads it). They are sorted and deduplicated before the key: a
+    scoped answer is one object of its own.
+  - counts the answer's inexact rows: an input row (of either relation)
+    received after the barrier of the first label at or after its time on
+    the calendar the answer is read at (the bucket's for `bucket(C)`, else
+    the request's `calendar`; a request naming neither has no barrier, and
+    every row is inexact); a row with a null in a column the kernel decodes;
+    a second row of a group at one instant; an integer product past `i64`;
+    an answer row whose arithmetic failed. A label's barrier is its
+    earliest `at` in the clock, every revision read, where the stream
+    first emits it. A row after the calendar's last label is in no window
+    and in no answer's receipt, and is not counted. When none is inexact,
+    every answer row at a label is computed from rows received by that
+    label's barrier and is the kernel's window there; its receipt is at or
+    before the barrier, so in a stream it precedes the barrier. The count
+    is stored as the cache version's attribute `inexact_rows`
+    (`Store::cache_put_with`), so a hit returns it.
+  - answers an `AggregateCall` with the object's relation (`cache.<key16>`),
+    version, rows and inexact rows, and sends no table when `answer` is
+    false.
+  [D] Two readings are stricter than the plan of package 2. A null is
+  inexact for `count` too: the kernel's decoder reads a null as NaN only in
+  a quantity or an integer column and refuses it in any other
+  (`Decoder::value`), and the pass does not know the kernel's types; for
+  the same reason every decoded column of the relation is checked, not the
+  aggregated one alone. Two rows of a group at one instant are inexact: the
+  kernel orders a bar's rows by their bindings (E-46), the pass by the
+  store's key. `WindowState::with_scales` under `TwoPass` over floats
+  keeps its scales and never reads them (`impl Value for f64` ignores
+  them): the window holds its rows and reduces them with
+  `abt_agg::reduce(f, TwoPass, ..)` at each value, the function the
+  kernel's `aggregate` calls, so a product entered as its `f64` is reduced
+  as the kernel reduces its window of `dollar_volume` rows. Nothing reads
+  the new forms yet: the kernel's pushdown asks the 1.2 forms (package 2,
+  K1 to K3).
+  `abt-data/tests/agg.rs::{count_counts_the_windows_rows_with_or_without_a_value,
+  a_product_of_two_relations_is_the_joined_rows_reduced_by_abt_agg_bit_for_bit,
+  an_instrument_filter_answers_only_those_instruments_under_its_own_key,
+  inexact_rows_counts_rows_received_after_their_barrier_and_nulls}` (the
+  product over Parquet and over the hot store, against the values the
+  stream carries) and
+  `abt-data/tests/service.rs::an_answer_asked_without_its_table_names_a_version_a_stream_can_carry`.
+  Falsified by `scripts/mutations/e-156-late.patch` (a row received after
+  its barrier not counted) and `scripts/mutations/e-156-count.patch` (a
+  `count` skips the rows without a value again).
 
 ## Query layer
 
@@ -3853,7 +3958,8 @@ batch driver agree on every corpus program. Each bless since:
   rule's literals in the plan's order are a first atom at the bar
   (`Scan`), later atoms at the bar with the entity bound (`Join`),
   assignments (`Let`), comparisons (`Test`) or, first, an aggregate the
-  data layer answers (`Pushed`), is derived over the bar's columns
+  data layer answers (`Pushed`; after the entity's atom, `PushedJoin`,
+  E-175), is derived over the bar's columns
   (`kernel/colplan.rs`), its expressions compiled once
   (`kernel/cexpr.rs`) over the one arithmetic `eval_expr` applies
   (`bin_value`, `call1_value`, `least_greatest`, `compare_num`). An
@@ -3891,8 +3997,10 @@ batch driver agree on every corpus program. Each bless since:
   `the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes`
   (120 names over six years, four names missing bars and one absent 60
   weeks, written and optimised plans, whole and trimmed, 1 and 4
-  workers; `adj_close`, `close@weekly`, `dollar_volume@base`, `scored`,
-  `stay`, `latched`, `extension`, `in_book` planned);
+  workers; `adj_close`, `close@weekly`, `scored`, `stay`, `latched`,
+  `extension`, `in_book` planned and derived through their plans, and
+  since E-175 `traded@weekly` and `dvol`; `dollar_volume@base` has a
+  plan and, its weekly mean delivered since E-157, is not demanded);
   `compiled_expressions_give_the_row_paths_values_and_halts`;
   `tests/retention.rs` with block legs; unit tests in `col.rs` and
   `cexpr.rs`. Falsified: `scripts/mutations/e-150-partial-declines.patch`
@@ -3948,9 +4056,11 @@ batch driver agree on every corpus program. Each bless since:
   operator is not cut across worker kernels under the block evaluator,
   so that each entity has one state whether a bar is planned or not.
   Assignments and comparisons of constants before the plan's first atom
-  are operators too (`clenow` binds `P0` first). `ma`, `eligible` and
-  `clenow` are planned (`clenow`'s two regressions keep a state each,
-  as the row path keeps them: the plan shares none between them).
+  are operators too (`clenow` binds `P0` first). `ma` and `clenow` are
+  planned (`clenow`'s two regressions keep a state each, as the row path
+  keeps them: the plan shares none between them); `eligible` was until
+  E-160 gave it an as-of read of a stored relation, which no operator
+  plans, and derives by the rules.
   `tests/eval_set.rs`:
   `the_window_operator_feeds_what_the_row_path_feeds_under_every_asking_pattern`
   (windows asked at every bar, at some, first late; a mean, a count
@@ -3962,8 +4072,8 @@ batch driver agree on every corpus program. Each bless since:
   (a window over a windowed relation asked at month starts over 40
   names, the memo kept and evicted at every barrier, whole and trimmed:
   the stats row with its requests behind a group's last bar, and the
-  coverage), and the MW14 test with holes with `ma`, `eligible` and
-  `clenow` planned;
+  coverage), and the MW14 test with holes with `ma` and `clenow`
+  planned and `eligible` not;
   `tests/retention.rs` block legs; `kernel/eval.rs`
   `rows_state_tests` (the flat state against the deque it replaced).
   Falsified: `scripts/mutations/e-151-window-replay.patch` (a declined
@@ -3983,6 +4093,330 @@ batch driver agree on every corpus program. Each bless since:
   `eligible` 2.6 s each, `decide` 59.2 s); the three planned at every
   bar and none declined, the stats row's counters those of the set
   evaluator.
+- **E-157 (K-4.5, E-47, 06-performance 3.3; a delivered answer: a
+  relation of the stream read with no local window).** E-47 reads a
+  pushed answer only when its receipt is at or before the barrier, and
+  evaluates the window here otherwise, because the answer arrives as a
+  table at bind, outside receipt order; the fallback keeps the window's
+  inputs in the stream. 06-performance 3.3 has a pushed aggregate arrive
+  as a relation of its own. The kernel now delivers a pushed literal in
+  the stream when (`kernel::pushdown::deliverable`, `bind::push_down`):
+  - its window is a bucket. The pass answers a bucket at every label
+    whose bucket holds a row, and a bucket's minimum is 1, so the window
+    has a value exactly there; a `rows` or span window is answered only
+    at the group's own rows, and the rule reads it at any label.
+  - its function is `first`, `last`, `min`, `max`, `sum`, `mean`,
+    `count`, `median` or `quantile`, none of which fails where the rule
+    would halt.
+  - its rule is on the decision calendar, and its bucket is that
+    calendar's at the rule's own label (`Shape::base_at_head`). The fold
+    evaluates rules at decision barriers alone, so such a label is read
+    after its barrier, its bucket closed. A bucket of another calendar, or
+    at a label the body binds, is read while it is open: `bucket(session,
+    S)` with `session_of(A, T, S)` in a program decided at every minute
+    reads the session so far, where the pass answers the closed session
+    alone. The review of Nov 25 reported such a literal delivered (a minute
+    book's high of the session so far met at its session's last bar
+    alone, 2 decisions where the local run takes about 50); it is read as
+    a table where its receipt allows, and locally before.
+  - the run has no cut (`horizon`, `received_by`, `to_seq`: the cut is a
+    seq of the stream without the answers), is not live and replays no
+    recording, and `ExecConfig::deliver` is on (a test switch outside the
+    configuration's identity, as `pushdown` is).
+  - the pass reports no inexact row (E-156). Every answer row at a label
+    is then computed from rows received by that label's barrier, and its
+    receipt is at or before it.
+  The kernel asks the request with `answer` false and names the cache
+  object (`cache.<key16>`, its version) in the stream spec; two literals
+  asking one request read one object. The stream merges its rows by
+  receipt, before the barrier of their label. `Kernel::build` appends,
+  after the program's relations and outside its signatures, a stored
+  relation of the kernel's per deliverable literal (`pushed.<rule>.<lit>`:
+  instrument, label, value), whether or not a run delivers it, so the
+  program's hash, the run's id and the stores a checkpoint holds depend on
+  the program alone; it is read only once delivered, and is trimmed,
+  checkpointed and shared with the workers as any store. The decoder maps
+  the object's `entity`, label and `value` (a `count`'s `count`) to it,
+  and leaves out a row whose value is null. `pushed_answers` reads it with
+  no receipt test: the bound instrument's row at the label, or with the
+  instrument unbound every row of the label in instrument order; no row
+  is no answer, as an empty bucket has none. Under the block evaluator
+  its operators read the same rows (E-175). `solve_kleene_block` solves
+  no window for a delivered literal. A delivered tuple keyed at or before
+  the last decided label is the service's fault: the fold halts with an
+  internal error. A late record (K-4.4) is numbered in the stream without
+  the answers (`Fold::step_inner`: its seq less the rows the kernel's
+  stores of answers hold), the seq the run that reads its answers as
+  tables gives it, since the stream merges the answers' rows among the
+  others by receipt and moves none of them; the late table (`kernel.<run>
+  .late`, keyed by seq) is the run's without delivery. A checkpoint
+  records the objects its stream carried, and a run whose stream carries
+  others refuses it (its cursor is a seq of the stream with them). The
+  data service holds every version an open stream reads against the
+  pruning of derived writes (E-110: `Store::hold`, `release`,
+  `prune_derived`, held by `DataService::subscribe` until the stream
+  ends), as the stream opens an object's partitions as it goes; the
+  review of Nov 25 reported the answers pruned by a run's own checkpoints
+  past 576 cache objects (`--checkpoint-every 1` over MW14) while its
+  stream still read them.
+  [D] The plan of package 2 also delivered rows and span windows, and
+  had a `count` of minimum 0 count an empty bucket 0; the pass's answers
+  of those windows are keyed at the group's rows, and a bucket's minimum
+  is always 1, so neither is done. E-47 (a)'s `count` and E-47's one
+  stored atom are widened: `count` is pushed (the pass counts the rows,
+  E-156), its request naming the atom's first number column, and so is a
+  window over a product of two stored relations (`R(A, T, D) :- p(A, T,
+  P), q(A, T, V), D = P * V`, one rule, both at the base calendar), asked
+  with `factor`. Both are pushed as tables too where the stream does not
+  deliver them, `count`'s answer read as `Value::Count`, but a product the
+  pass finds inexact is evaluated here, as before: the pass leaves out a
+  pair holding a null, which the kernel reads as NaN (E-71), so its
+  answer is not the window's even where received (the review of Nov 25:
+  a null volume made a weekly mean dollar volume NaN here and a number
+  there). A pushed request carries the run's scope as `entities`. The
+  plans table's `pushdown` column, `pushed_answers`, `received_rows`,
+  `window_calls` and the coverage's calls and bars with tuples follow the
+  delivery, as they followed pushdown before (a window the pass answers
+  is not solved, and its atoms are not called): a product relation no
+  window reads any more has none (MW14's `dollar_volume@base`, never
+  demanded); decisions, fills, the book, the ledgers and the late
+  records do not. The single-relation answers have the null's gap since
+  E-47: a null last close makes the kernel's weekly last close NaN and
+  the pass's the last close with a value, so the table is read where the
+  local window is NaN (open; the pass entering a null as NaN closes it).
+  The inputs are dropped at the fold's door where no other reader reads
+  them (E-158).
+  `abt-tests/tests/pushdown.rs::{pushdown_and_local_evaluation_agree_on_every_corpus_program_and_book
+  (delivered, tables and local, every corpus program and both books),
+  a_delivered_aggregate_is_never_evaluated_locally_and_equals_the_local_run,
+  a_count_over_an_empty_bucket_is_absent_for_a_bound_instrument_and_an_unbound_one,
+  a_late_row_is_read_locally_until_it_is_received,
+  a_bucket_read_before_its_label_is_not_delivered_and_equals_the_local_run,
+  a_product_over_a_null_is_evaluated_locally_and_equals_the_local_run,
+  a_late_tuple_is_numbered_as_in_the_stream_without_the_delivered_answers}`
+  (each also under the block evaluator, whose operators read the answers
+  as `delivered_answers` does, E-175),
+  `abt-tests/tests/fold_checkpoint.rs::a_resumed_run_reads_the_answers_its_checkpoint_held`,
+  `abt-data/tests/service.rs::a_stream_holds_the_cache_object_it_carries_until_it_ends`.
+  Falsified by `scripts/mutations/e-157-inexact.patch` (an answer with
+  inexact rows delivered), `e-157-open-bucket.patch` (a bucket at a label
+  the body binds delivered), `e-157-product-null.patch` (an inexact
+  product read as a table), `e-157-late-seq.patch` (a late record numbered
+  in the stream with the answers) and `e-157-held.patch` (a stream holds
+  nothing).
+- **E-158 (06-performance 3.3, E-127, E-141, E-157; the inputs only
+  delivered answers read are not kept).** 06-performance 3.3 streams
+  what the program reads outside its pushed aggregates. Since E-157 a
+  delivered answer is read with no local window, so its inputs need not
+  be held when no other reader reads them. [D] `bind::push_down` asks
+  `Kernel::unread_after_delivery` last, and drops at the fold's door
+  (`read_rels`) a stored relation that:
+  - is the relation a delivered literal aggregates. Its pass read every
+    row of it in the run's scope and proved each received by the barrier
+    of the first label whose bucket holds it (E-156), so no row of it is
+    late. A product's second relation is read only at the instruments of
+    the first, and is kept.
+  - every rule reads only inside the window of a delivered literal,
+    directly or through the one rule of a product that only such windows
+    read (walked as `relations_read` walks the bodies).
+  - nothing reads by name: no observation names it; it is not the price
+    relation (the invariants mark the book at it) nor the clock of a
+    session-offset decision (`decide_at`); it is not one the executor
+    reads (`Executor::reads_stores`). The simulation names the price
+    relation when it is stored; the volume relation, as every fill records
+    its participation of the bar's volume, a column of the fills output,
+    whether or not a cap is set; the open, high and low when an order
+    fills at the open or on a limit or stop; `close` on a sub-daily base
+    decided at the base (a market-on-close order's last print); the
+    splits and dividends the book applies; the delistings; the published
+    margins. With options or futures it names every stored relation, the
+    trait's default (a broker's executor keeps it).
+  The relation stays in the stream's specification: leaving it out would
+  move the seq of every later event, which the late table keys its rows
+  by and a checkpoint's cursor holds, from the run's without delivery
+  (the review of Nov 25: a weekly book's late volumes numbered 661 where
+  the local run numbers them 919). With the answers' rows discounted
+  (E-157) a late record is the local run's, seq and all, and the stream's
+  id and `received_rows` are as they were. Nothing is dropped in a run
+  whose kernel a command reads after it, as such a read may name any
+  relation or derive one again from inputs only a delivered literal read
+  during the run (`Replay::read_after` naming any relation; or
+  `Replay::read_after_any`, set by the kernel service, whose queries name
+  their relation once the run has begun, by `abt query`'s `coverage`,
+  which reads every relation at every bar, by `--tables`, which writes
+  every derived relation's extension, and by the translation validation's
+  ledgers, `verify::tv::run_with_ledgers`). The review of Nov 25 reported
+  `abt query --text coverage` and a service query of the daily close
+  reading no row of a relation dropped (a debug build stopped at the
+  accessor). `Replay::keep_unread` keeps every relation. A run with a
+  cut, a live run and a replay of a recording deliver nothing (E-157), so
+  drop nothing. `Kernel::store` and `store_mut` are the accessor of the
+  evaluator's reads (`store_lookup`, `asof_matches`), of the executor's
+  (`bar_price_quiet`, `bar_volume`, `bar_field`, `has_price`, the
+  actions, the delistings, the margins) and of `decide_at`'s clock (the
+  options' and futures' reads, under which nothing is dropped, read the
+  stores as before); in a debug build they stop at a read of a relation
+  dropped, so that a reader the rule misses fails there instead of
+  reading nothing. A checkpoint records the relations dropped beside the
+  objects (`Checkpoint::delivered`), and a run that drops others refuses
+  it, its stores being another run's. [D] Package 2's plan had MW14
+  stream neither its daily close nor its daily volume. Neither is
+  dropped: the membership test reads the name's last daily close of the
+  week as of the label (`close@base(A, L, _) asof T` in `eligible`,
+  E-160, read by `Kernel::asof_matches`; since E-144 the catalog's total
+  return reads the weekly close at the previous row's label, and without
+  the as-of read the daily close is dropped), and the simulation reads
+  the daily volume at every fill (`Kernel::bar_volume`, the week's sum
+  for `FillRecord::participation` and the liquidity summary; the plan had
+  it read only under a cap, an impact or an ADV limit, and MW14's
+  `book_fixed_base` sets `participation none`). A weekly book that reads its bars only
+  through delivered answers holds none of them, and still streams them:
+  taking them out of the stream needs seqs numbered without them, which
+  the data layer does not give. Where a relation is dropped,
+  `trimmed_rows` in the stats row and the coverage's count of the
+  relation's tuples (0, as the listing's since E-141) change; decisions,
+  fills, the book, the ledgers and the late records do not.
+  `abt-tests/tests/fold.rs::a_stream_whose_aggregates_are_delivered_carries_their_answers_and_not_their_inputs`
+  (a weekly book's open and close dropped with market orders, its open
+  kept when it fills at the open, its volume kept; MW14's close and
+  volume kept; each run equal to the run that keeps every relation),
+  `abt-tests/tests/pushdown.rs::{pushdown_and_local_evaluation_agree_on_every_corpus_program_and_book,
+  a_count_over_an_empty_bucket_is_absent_for_a_bound_instrument_and_an_unbound_one,
+  a_late_tuple_is_numbered_as_in_the_stream_without_the_delivered_answers}`,
+  `abt-tests/tests/kernel_service.rs::a_held_run_answers_a_query_of_a_relation_only_delivered_answers_read`.
+  Falsified by `scripts/mutations/e-158-companions.patch` (the executor
+  does not name the companions an order at the open reads) and
+  `e-158-read-after.patch` (the kernel service's runs drop the relations
+  only delivered answers read).
+- **E-159 (K-4.5, E-157; a `count` reads the count a sibling's answer
+  carries).** E-157 asks every delivered literal its own request, and an
+  answer's rows carry the window's row count beside the value. [D] In
+  `bind::push_down` a deliverable `count` whose request is a deliverable
+  sibling's but for the function (the relation and its column, the
+  bucket, the calendars, the numerics, the instruments; neither of them a
+  product; the sibling's minimum no greater than the count's) is asked
+  after the other literals and, when the sibling's answer is delivered,
+  is not asked: `Pushed::delivered` names the sibling's store and object,
+  the argument 3 and the count's own minimum (`Delivered::column`,
+  `Delivered::min`), the decoder fills that store's rows with the count as
+  their fourth argument, and `delivered_answers` reads it as a count at
+  the count's minimum. With no inexact row the relation holds no null
+  (E-156), so the sibling's rows with a value are the window's rows and
+  its count is the count's; its rows are where the window has a value,
+  which with no null is where it has a row. A count whose sibling's
+  answer is not delivered is asked alone, as before; the run's notes of
+  its pushed literals keep the program's order. MW14's `traded@weekly`
+  reads `close@weekly`'s answer: one pass fewer at bind and one weekly
+  relation fewer in the stream. The stream's specification and
+  `received_rows` change; decisions, fills, the book, the plans table and
+  `pushed_answers` do not. A bucket's minimum is always 1, so the count's
+  own minimum filters no row today.
+  `abt-tests/tests/pushdown.rs::{a_count_that_shares_an_answer_equals_the_count_asked_alone,
+  a_delivered_aggregate_is_never_evaluated_locally_and_equals_the_local_run,
+  a_count_over_an_empty_bucket_is_absent_for_a_bound_instrument_and_an_unbound_one}`.
+  Falsified by `scripts/mutations/e-159-sibling.patch` (a count shares
+  the answer of a literal over another relation).
+- **E-175 (06-performance 3.2, 3.3, E-150, E-156, E-157, E-159; the
+  block evaluator reads the answers the pass gives).** E-150's `Pushed`
+  read a pushed literal's answers from the table bind receives. E-157
+  delivers them in the stream into a store of the kernel's instead, with
+  no table, and E-156 pushes a `count`, whose answer the row path binds
+  as the window's row count, a Count (`Kernel::pushed_answers`). Built
+  apart and merged, the two left a delivered literal's plan declining at
+  every bar (MW14's `close@weekly` and `traded@weekly`), and a `count`
+  read as a table bound under the block evaluator as its value, a
+  number: a ledger of such a count differed between the evaluators,
+  though no decision did. [D] Under `--evaluator block` an aggregate the
+  data layer answers is read by the operators as the row path reads it,
+  through the same store lookup and the same reading of a store's tuple
+  (`Delivered::answer`: the argument the literal reads, none below a
+  shared count's minimum, E-159):
+  - first in its rule (`ColOp::Pushed`): delivered, every row of the
+    label its store holds (`Kernel::delivered_block`), as
+    `delivered_answers` reads them with the instrument unbound; as a
+    table, the label's answers when every one was received by the
+    barrier, a count's as its Count (`table_answers`).
+  - after an atom bound the rule's entity (`ColOp::PushedJoin`), for a
+    literal `pushdown::eligibility` accepts that groups by that entity at
+    the rule's own bar, its window not a rows window (those stay
+    `ColOp::RowsAgg`'s): delivered, each row's entity's answer at the
+    label, a row without one leaving, as `delivered_answers` reads them
+    with the instrument bound; as a table, each row's answer when every
+    row's was received by the barrier, a count's as its Count, and the
+    bar declines to the rules otherwise, where the row path evaluates
+    that row's window here. Read as a table, it also declines where the
+    row path solves the window's conjunction over the whole block
+    entering the literal before it reads the answers
+    (`prefetch_bucket_window`): `PREFETCH_MIN_ROWS` (32) rows or more,
+    the window cache on, the literal not delivered, its window a bucket
+    or a span with no late test whose bars do not depend on the
+    instrument. That solve derives what the conjunction reads, a
+    product's relation (E-156) among them, though every row's answer is
+    then read from the table: the coverage, the memo (`memo_entries`,
+    E-133) and that relation's literal counts hold it. Both evaluators
+    make the one test, `Kernel::bucket_prefetch`; what
+    `prefetch_bucket_window` tests after it (each row's bindings, the
+    bars cached) only withholds the solve, so a bar that solves it is
+    never planned. Merged first without it, a span over a product read
+    as a table on 40 names (`liq`, seven days of `dollar_volume`) gave
+    the daily dollar volume 300 calls, 300 nonempty and 11,940 tuples
+    under the set evaluator and none under the block evaluator, and 66
+    memo entries against 55. MW14's `dvol` has that shape wherever it is
+    read as a table (a store the pass finds inexact rows in). `Pushed`
+    cannot meet the case: first in its rule, it is entered by the one
+    starting binding.
+  A label whose store holds two rows of one instrument, or a row with no
+  instrument, declines (bound, the row path reads the first row;
+  unbound, every row); the pass gives one row per instrument and label.
+  An operator counts the pushed answers the row path counts: one per
+  literal and bar first in the rule, one per row after an atom. A plan
+  with such an operator runs only where the run asked the data layer for
+  the literal (`Kernel::answered`), so with pushdown off or for a
+  product the pass finds inexact the relation has no plan. MW14's
+  `close@weekly` and `traded@weekly` (the count its rows carry) are
+  planned with `Pushed`, and `dvol` with a `Scan` of `universe` and a
+  `PushedJoin`; `dollar_volume@base` keeps its plan and is not demanded,
+  its weekly mean delivered. The stream, the stores, `received_rows`,
+  `pushed_answers`, the coverage, the literal counts and the stats row
+  on one thread are the set evaluator's. Workers derive by the rules, as
+  for every plan; on four workers the first barrier warms every
+  open-loop relation (`Kernel::warm_strata`), `dollar_volume@base`
+  among them, under either evaluator.
+  `abt-tests/tests/pushdown.rs` (every arm, delivered, tables and local,
+  under both evaluators on every corpus program and both books, the
+  answers read and the rows received equal to the set evaluator's;
+  MW14's three planned under the delivered and the tables arms; the
+  bound and the unbound count over an empty bucket, their ledgers equal
+  to the local run's under both evaluators and both arms; the late
+  rows, the shared count, the open bucket, the product over a null and
+  the late records under the block evaluator;
+  `a_product_read_as_a_table_over_many_names_counts_what_the_set_evaluator_counts`,
+  a product's span read as a table on 40 names and on 5, the coverage,
+  the literal counts and the stats row equal between the evaluators),
+  `abt-tests/tests/eval_set.rs::the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes`
+  (`close@weekly`, `traded@weekly` and `dvol` derived through their
+  plans; the daily dollar volume not derived on one thread),
+  `abt-tests/tests/fold_checkpoint.rs::{a_resumed_run_reads_the_answers_its_checkpoint_held,
+  a_checkpoint_records_the_relations_its_stream_left_out}` (resumed under
+  the block evaluator),
+  `abt-tests/tests/kernel_service.rs::a_held_run_answers_a_query_of_a_relation_only_delivered_answers_read`
+  (a run held as the service holds it, every relation read after it,
+  under the block evaluator in process: a service request names no
+  evaluator). Falsified by `scripts/mutations/e-175-table-count.patch`
+  (a count read as a table bound as its value),
+  `e-175-delivered-rows.patch` (a label's first delivered row left out)
+  and `e-175-table-prefetch.patch` (the table read's decline where the
+  row path solves the window over the block removed).
+  Measured on the full MW14 against the parity store under `--evaluator
+  block`, one cold run (`d4-1`), the weekly returns' fingerprint
+  unchanged (`6e72c9bb…`): 133.7 s where the block evaluator on the
+  parity stack took 180.2 s; `decide` 42.6 s, `fill` 44.3 s, `push`
+  15.7 s, `decode` 3.4 s, `insert` 5.5 s; `dvol` (39.7 s) and
+  `traded@weekly` (15.7 s) are not among the sixteen slowest relations
+  (the sixteenth 1.1 s), and `close@weekly`, `traded@weekly` and `dvol`
+  derive through their plans at all 1,904 bars, none declined; 63.4M
+  tuples, the daily close and volume 20.1M each, each delivered answer
+  4.2M.
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

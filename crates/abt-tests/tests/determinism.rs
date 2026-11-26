@@ -163,8 +163,10 @@ fn the_aggregate_pass_on_one_thread_and_on_eight_gives_the_same_bits() {
             t1: None,
             // A distinct output name per thread count: no cache hit.
             output: Some(format!("std_{}", threads)),
+            factor: None,
+            entities: None,
         };
-        let (version, _) = aggregate(&mut store, &ResolvedView::default(), &request).unwrap();
+        let version = aggregate(&mut store, &ResolvedView::default(), &request).unwrap().version;
         let b = answer(&store, &version).unwrap();
         let values: Vec<u64> = b.column(2).as_any().downcast_ref::<Float64Array>().unwrap().iter().map(|v| v.map(f64::to_bits).unwrap_or(0)).collect();
         answers.push((numerics, values));

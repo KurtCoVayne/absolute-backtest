@@ -1131,6 +1131,12 @@ pub struct ExecConfig {
     /// configuration's identity: both give the same bits (D-6.1).
     #[serde(skip, default = "pushdown_on")]
     pub pushdown: bool,
+    /// Deliver a pushed literal's answers in the stream where the pass
+    /// proves no input row late, read with no local window (ERRATA E-157);
+    /// off only to compare the two. Not part of the configuration's
+    /// identity: both give the same bits.
+    #[serde(skip, default = "pushdown_on")]
+    pub deliver: bool,
     /// Solve rule bodies over blocks of bindings (the set evaluator, M-8)
     /// rather than one environment at a time; off only to compare the two
     /// (`--evaluator tuple`, `tests/eval_set.rs`). Not part of the
@@ -1338,6 +1344,7 @@ impl Default for ExecConfig {
             as_of: None,
             window_cache: true,
             pushdown: true,
+            deliver: true,
             set_eval: true,
             block_eval: false,
             block_identity: false,
@@ -3069,6 +3076,23 @@ impl<'p> Kernel<'p> {
                     .collect(),
             }));
         }
+        // The kernel's own stored relations (ERRATA E-157): one for each
+        // aggregate literal the stream can deliver, holding its answers by
+        // label, after the program's relations and outside its signatures,
+        // so that the program's hash, the run's id and the stores a
+        // checkpoint holds depend on the program alone.
+        for ((ri, li), cal) in pushdown::deliverable_literals(prog) {
+            rels.push(Arc::new(RelInfo {
+                name: pushdown::delivered_name(prog, ri, li),
+                key_pos: 1,
+                inputs: vec![],
+                stored: true,
+                cal,
+                rules: vec![],
+                entity_positions: vec![0],
+                identity: vec![0],
+            }));
+        }
         // Stores and time domains.
         let mut stores: Vec<Store> = rels
             .iter()
@@ -3611,6 +3635,7 @@ impl<'p> Kernel<'p> {
     pub fn coverage(&self) -> Vec<RelationCoverage> {
         self.rels
             .iter()
+            .take(self.prog.relations.len())
             .enumerate()
             .zip(&self.coverage)
             .map(|((rel, info), &(calls, nonempty, tuples))| {
@@ -3878,7 +3903,8 @@ impl<'p> Kernel<'p> {
         // Contracts settle and exercise on prints the companions carry (an
         // index option at the AM print): a class with contracts keeps them.
         let companions = self.orders_read_companions() || self.has_options || !self.contracts.is_empty();
-        (0..self.rels.len())
+        // A delivery store is read once its literal is delivered (`bind::push_down`).
+        (0..self.prog.relations.len())
             .filter(|&id| {
                 let name = self.rels[id].name.as_str();
                 match name {
@@ -3893,10 +3919,104 @@ impl<'p> Kernel<'p> {
             .collect()
     }
 
+    /// The stored relations the kernel need not keep once the pushed
+    /// literals are delivered (ERRATA E-158), dropped at the fold's door: a delivered literal's own
+    /// relation, which its pass read whole and proved received in time (a
+    /// product's second relation is read only at the first's instruments),
+    /// that every rule reads only inside the window of a delivered literal,
+    /// directly or through the one rule of a product that only such windows
+    /// read, and that nothing reads by name: not an observation, not the
+    /// invariants (the price relation the book is marked at), not the clock
+    /// of a session-offset decision, and none of `keep`, the relations the
+    /// executor reads (`Executor::reads_stores`), or every relation when a
+    /// command reads the kernel after the run (`Replay::read_after`,
+    /// `Replay::read_after_any`).
+    pub(crate) fn unread_after_delivery(&self, keep: &[String]) -> Vec<usize> {
+        let delivered: FxHashSet<(usize, usize)> = self.pushed.iter().filter(|(_, p)| p.delivered.is_some()).map(|(&at, _)| at).collect();
+        if delivered.is_empty() {
+            return Vec::new();
+        }
+        // Every relation each rule reads, and whether inside a delivered
+        // literal's window (walked as `relations_read` walks them).
+        let mut reads: Vec<(usize, &str, bool)> = Vec::new();
+        for (ri, rule) in self.prog.rules.iter().enumerate() {
+            let mut stack: Vec<(&Literal, bool)> = rule.body.iter().enumerate().map(|(li, l)| (l, delivered.contains(&(ri, li)))).collect();
+            while let Some((lit, inside)) = stack.pop() {
+                let atom = match lit {
+                    Literal::Atom(a) | Literal::Neg(a) => Some(a),
+                    Literal::AsOf { atom, .. } | Literal::Top { atom, .. } => Some(atom),
+                    Literal::Agg { conj, .. } => {
+                        stack.extend(conj.iter().map(|c| (c, inside)));
+                        None
+                    }
+                    Literal::Case { branches, .. } => {
+                        stack.extend(branches.iter().flat_map(|b| b.guard.iter()).map(|c| (c, inside)));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(a) = atom {
+                    reads.push((ri, a.name.as_str(), inside));
+                }
+            }
+        }
+        // A product's reads are inside when every read of the product is.
+        let products: FxHashSet<&str> = self
+            .pushed
+            .values()
+            .filter(|p| p.delivered.is_some())
+            .filter_map(|p| p.shape.factor.as_ref().map(|f| f.product.as_str()))
+            .filter(|&q| reads.iter().all(|&(_, name, inside)| name != q || inside))
+            .collect();
+        let only_inside = |name: &str| reads.iter().all(|&(ri, n, inside)| n != name || inside || products.contains(self.prog.rules[ri].head.name.as_str()));
+        let mut left: Vec<usize> = self
+            .pushed
+            .values()
+            .filter(|p| p.delivered.is_some())
+            .filter_map(|p| self.rel_ids.get(&p.shape.relation).copied())
+            .filter(|&id| {
+                let name = self.rels[id].name.as_str();
+                self.read_rels[id]
+                    && only_inside(name)
+                    && !keep.iter().any(|n| n == name)
+                    && !self.prog.observes.iter().any(|o| o.rel == name)
+                    && self.price_rel != Some(id)
+                    && self.clock_rel != Some(id)
+            })
+            .collect();
+        left.sort_unstable();
+        left.dedup();
+        left
+    }
+
+    /// Whether a stored relation is dropped at the fold's door for the
+    /// delivered literals that read it (`unread_after_delivery`, ERRATA
+    /// E-158): the fold does not keep it, and it is a delivered literal's
+    /// relation.
+    pub(crate) fn left_for_delivery(&self, rel: usize) -> bool {
+        !self.read_rels.get(rel).copied().unwrap_or(true) && self.pushed.values().any(|p| p.delivered.is_some() && p.shape.relation == self.rels[rel].name)
+    }
+
+    /// A stored relation's rows, for a reader. A relation dropped for its
+    /// delivered literals holds no row, and nothing but
+    /// them was found to read it (ERRATA E-158): in a debug build a read of
+    /// it stops here, so that a reader the rule missed fails loudly
+    /// instead of reading nothing.
+    pub(crate) fn store(&self, rel: usize) -> &Store {
+        debug_assert!(!self.left_for_delivery(rel), "`{}` is dropped for its delivered literals and is read (E-158)", self.rels[rel].name);
+        &self.stores[rel]
+    }
+
+    /// `store`, for a read that sorts a block first.
+    pub(crate) fn store_mut(&mut self, rel: usize) -> &mut Store {
+        debug_assert!(!self.left_for_delivery(rel), "`{}` is dropped for its delivered literals and is read (E-158)", self.rels[rel].name);
+        &mut self.stores[rel]
+    }
+
     /// Whether a decision of this program can fill at the open or on a
     /// limit or stop: the default order kind, or an order named in a
     /// decide rule's head.
-    fn orders_read_companions(&self) -> bool {
+    pub(crate) fn orders_read_companions(&self) -> bool {
         fn names(t: &Term) -> bool {
             match t {
                 Term::Ctor(c, subs, _) => matches!(c.as_str(), "moo" | "moo_moc" | "limit" | "stop") || subs.iter().any(names),
@@ -3982,7 +4102,13 @@ impl<'p> Kernel<'p> {
     }
 
     pub fn is_primitive(&self, rel: usize) -> bool {
-        matches!(self.prog.relations[&self.rels[rel].name].kind, Kind::Primitive { .. })
+        matches!(self.prog.relations.get(&self.rels[rel].name).map(|s| &s.kind), Some(Kind::Primitive { .. }))
+    }
+
+    /// Whether a stored relation is the kernel's own, a delivered literal's
+    /// answers (ERRATA E-157), not one of the program's.
+    pub(crate) fn is_delivery_store(&self, rel: usize) -> bool {
+        rel >= self.prog.relations.len()
     }
 
     pub fn program(&self) -> &'p Program {
@@ -4092,7 +4218,8 @@ impl<'p> Kernel<'p> {
         let info = &self.rels[id];
         let entity_pos = *info.entity_positions.first()?;
         if info.cal == self.prog.decision_cal {
-            return self.stores[id]
+            return self
+                .store(id)
                 .by_time
                 .get(&t)
                 .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
@@ -4100,7 +4227,7 @@ impl<'p> Kernel<'p> {
         }
         let (lo, hi) = self.decision_bucket(t);
         let mut acc = None;
-        for (_, tus) in self.stores[id].by_time.range(lo..=hi) {
+        for (_, tus) in self.store(id).by_time.range(lo..=hi) {
             for tu in tus.iter().filter(|tu| tu[entity_pos] == Value::Equity(sym)) {
                 if let Some(v) = tu[col].as_f64() {
                     acc = Some(pick(acc, v));
@@ -4161,7 +4288,7 @@ impl<'p> Kernel<'p> {
         let stored = self.price_rel.filter(|&id| self.rels[id].stored).or_else(|| self.rel_ids.get("close").copied());
         let Some(id) = stored else { return false };
         let Some(&entity_pos) = self.rels[id].entity_positions.first() else { return false };
-        self.stores[id].by_time.get(&t).map(|tus| tus.iter().any(|tu| tu[entity_pos] == Value::Equity(sym))).unwrap_or(false)
+        self.store(id).by_time.get(&t).map(|tus| tus.iter().any(|tu| tu[entity_pos] == Value::Equity(sym))).unwrap_or(false)
     }
 
     /// Currency per point per unit held: a future's multiplier, 1 for a share.
@@ -4202,7 +4329,7 @@ impl<'p> Kernel<'p> {
         let entity_pos = *info.entity_positions.first()?;
         let col = self.volume_col;
         if info.cal == self.prog.decision_cal {
-            self.stores[id]
+            self.store(id)
                 .by_time
                 .get(&t)
                 .and_then(|tus| tus.iter().find(|tu| tu[entity_pos] == Value::Equity(sym)))
@@ -4210,7 +4337,7 @@ impl<'p> Kernel<'p> {
         } else {
             let (lo, hi) = self.decision_bucket(t);
             let mut sum = None;
-            for (_, tus) in self.stores[id].by_time.range(lo..=hi) {
+            for (_, tus) in self.store(id).by_time.range(lo..=hi) {
                 for tu in tus.iter().filter(|tu| tu[entity_pos] == Value::Equity(sym)) {
                     if let Some(v) = tu[col].as_f64() {
                         sum = Some(sum.unwrap_or(0.0) + v);
@@ -4331,10 +4458,10 @@ impl<'p> Kernel<'p> {
             }
         } else if info.cal == self.prog.decision_cal {
             let key = Value::Equity(sym);
-            self.stores[id].lookup(t, Some(&key)).iter().find(|tu| tu[entity_pos] == key).and_then(|tu| tu[col].as_f64())
+            self.store_mut(id).lookup(t, Some(&key)).iter().find(|tu| tu[entity_pos] == key).and_then(|tu| tu[col].as_f64())
         } else {
             let (lo, hi) = self.decision_bucket(t);
-            self.stores[id]
+            self.store(id)
                 .by_time
                 .range(lo..=hi)
                 .rev()
@@ -4903,6 +5030,12 @@ pub struct Replay {
     /// table --rel`): a listing among them is kept as every run kept it
     /// before E-141 (`Kernel::keep_read_after`).
     pub read_after: Vec<String>,
+    /// A command reads the kernel after the run by names it learns only
+    /// then: the kernel service's queries, `abt query`'s coverage (every
+    /// relation) and `--tables` (every derived relation's extension).
+    /// Delivery then leaves no stored relation out of the stream (ERRATA
+    /// E-158), as it leaves none when `read_after` names any.
+    pub read_after_any: bool,
     /// Write the run's outputs through the data layer at every checkpoint
     /// (the rows the run gained since the last) and when it ends or halts
     /// (K-7.1).
@@ -5029,12 +5162,14 @@ pub fn replay_observed<'p>(
         }
         bound.base_bars = bind::session_bars(client, session)?;
         cfg.pushdown = false;
+        cfg.deliver = false;
     }
     if let Some(run) = &opts.replay_of {
         let (clock, bars) = bind::recorded_clock(client, run)?;
         bound.base_bars = bars;
         recorded = Some(clock);
         cfg.pushdown = false;
+        cfg.deliver = false;
     }
     // The preconditions, before the first barrier (K-3.2).
     let checking = std::time::Instant::now();
@@ -5093,6 +5228,9 @@ pub fn replay_observed<'p>(
     let mut to_seq = opts.to_seq;
     let mut end_label: Option<i64> = None;
     if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() {
+        // The cut is a seq of this stream, which a delivered answer would
+        // move: a run with a cut reads every answer as a table (E-157).
+        cfg.deliver = false;
         let dcal = prog.decision_cal.to_string();
         let index = client.stream_index(spec.clone())?;
         let mut cut = |at: Option<&bind::IndexRow>| {
@@ -5132,9 +5270,19 @@ pub fn replay_observed<'p>(
     kernel.identity = identity;
     build_secs += building.elapsed().as_secs_f64();
     // A literal the data layer does not answer is evaluated here: the run
-    // says so (E-47).
+    // says so (E-47). What the executor reads by name stays in the stream
+    // when delivery leaves its other readers without it (E-158). A command
+    // that reads the kernel after the run may read a relation by name or
+    // derive one again from inputs only a delivered literal read during it,
+    // so a run with one keeps every relation, as a run that keeps every
+    // relation does.
     let pushing = std::time::Instant::now();
-    for message in bind::push_down(&mut kernel, &bound, client, &spec)? {
+    let keep: Vec<String> = if opts.keep_unread || opts.read_after_any || !opts.read_after.is_empty() {
+        prog.relations.keys().cloned().collect()
+    } else {
+        exec.reads_stores(&kernel)
+    };
+    for message in bind::push_down(&mut kernel, &bound, client, &mut spec, &keep)? {
         kernel.run_warnings.push(RunWarning { bias: "pushdown".into(), message });
     }
     kernel.stats.bind_secs += bind_secs;

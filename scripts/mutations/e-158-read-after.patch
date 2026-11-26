@@ -1,0 +1,16 @@
+# proposition: E-158 (a run whose kernel is read after it by names learnt then drops nothing at the fold's door)
+# mutation: the kernel service's runs drop the relations only delivered answers read
+# test: cargo test -p abt-tests --test kernel_service a_held_run_answers_a_query_of_a_relation_only_delivered_answers_read
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -5181,7 +5181,7 @@
+     // so a run with one keeps every relation, as a run that keeps every
+     // relation does.
+     let pushing = std::time::Instant::now();
+-    let keep: Vec<String> = if opts.keep_unread || opts.read_after_any || !opts.read_after.is_empty() {
++    let keep: Vec<String> = if opts.keep_unread || !opts.read_after.is_empty() {
+         prog.relations.keys().cloned().collect()
+     } else {
+         exec.reads_stores(&kernel)

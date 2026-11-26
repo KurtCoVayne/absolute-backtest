@@ -165,6 +165,8 @@ fn store_as(attributes: BTreeMap<String, String>) -> (Store, StreamSpec) {
         clock: abt_wire::generated::abt::wire::ClockSource::Replay,
         session: None,
         entities: None,
+        from: None,
+        whole: None,
     };
     (s, spec)
 }
@@ -334,6 +336,8 @@ fn the_merge_is_the_sort_of_every_event() {
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
             session: None,
             entities: None,
+            from: None,
+            whole: None,
         };
         // The naive order: every row by (r, entity, t, seq), every barrier by
         // its instant, tuples first.

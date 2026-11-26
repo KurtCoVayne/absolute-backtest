@@ -1,0 +1,16 @@
+# proposition: E-175 (the block evaluator binds a count the pass answers as a table as the Count the row path binds)
+# mutation: a count read as a table is bound as its value, a number
+# test: cargo test -p abt-tests --test pushdown a_count_over_an_empty_bucket_is_absent_for_a_bound_instrument_and_an_unbound_one
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colplan.rs b/crates/abt-kernel/src/kernel/colplan.rs
+--- a/crates/abt-kernel/src/kernel/colplan.rs
++++ b/crates/abt-kernel/src/kernel/colplan.rs
+@@ -888,7 +888,7 @@
+ /// (`Kernel::pushed_answers`): a count's the window's row count, any
+ /// other's the value.
+ fn table_answers<'a>(p: &super::pushdown::Pushed, answers: impl Iterator<Item = &'a super::pushdown::Answer>) -> Col {
+-    if p.count {
++    if p.count && false {
+         Col::Count(answers.map(|a| a.count).collect())
+     } else {
+         Col::Num(answers.map(|a| a.value.unwrap_or(f64::NAN)).collect())

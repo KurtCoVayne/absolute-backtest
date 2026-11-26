@@ -1,0 +1,16 @@
+# proposition: E-159 (a count reads the count of a sibling's answer only when the sibling asks of its relation and column)
+# mutation: a count shares the answer of a bucket over another relation
+# test: cargo test -p abt-tests --test pushdown a_count_that_shares_an_answer_equals_the_count_asked_alone
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1592,6 +1592,8 @@
+         return None;
+     }
+     let bare = |r: &AggregateRequest| AggregateRequest {
++        relation: String::new(),
++        column: String::new(),
+         function: String::new(),
+         level: None,
+         min: None,

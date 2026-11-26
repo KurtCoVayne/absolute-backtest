@@ -71,7 +71,7 @@ impl SimExecutor {
         let key_pos = k.rels[id].key_pos;
         let values: Vec<usize> = (0..k.prog.relations["margin"].args.len()).filter(|&i| i != entity_pos && i != key_pos).collect();
         let (lo, hi) = k.decision_bucket(t);
-        for (_, tus) in k.stores[id].by_time.range(lo..=hi) {
+        for (_, tus) in k.store(id).by_time.range(lo..=hi) {
             for tu in tus {
                 if let (Some(sym), Some(&i0), Some(&i1)) = (tu[entity_pos].as_equity(), values.first(), values.get(1)) {
                     if let (Some(initial), Some(maintenance)) = (tu[i0].as_f64(), tu[i1].as_f64()) {

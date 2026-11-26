@@ -64,9 +64,9 @@ impl<'p> Kernel<'p> {
     /// dirty block first; a worker reads blocks the main kernel sealed.
     pub(crate) fn store_lookup(&mut self, rel: usize, key: i64, entity: Option<&Value>) -> super::rows::RowSlice<'_> {
         if self.worker.is_some() {
-            self.stores[rel].lookup_sealed(key, entity)
+            self.store(rel).lookup_sealed(key, entity)
         } else {
-            self.stores[rel].lookup(key, entity)
+            self.store_mut(rel).lookup(key, entity)
         }
     }
 

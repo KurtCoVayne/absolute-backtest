@@ -115,6 +115,8 @@ fn live_spec(svc: &DataService, clock: VersionRef) -> StreamSpec {
         clock: ClockSource::Live,
         session: Some("s1".into()),
         entities: None,
+        from: None,
+        whole: None,
     }
 }
 
@@ -171,6 +173,8 @@ fn a_live_stream_emits_its_barriers_after_the_bars_accepted_within_grace_and_rep
             clock: ClockSource::Replay,
             session: None,
             entities: None,
+            from: None,
+            whole: None,
         }
     };
     // Proposition D-5.4: the replay is the live stream, seq for seq.

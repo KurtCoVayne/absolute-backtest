@@ -60,6 +60,11 @@ fn calendar_rows(labels: &[i64]) -> RecordBatch {
 /// Two names over ten days, the second renamed on day five, and a name the
 /// security table does not hold.
 fn service() -> Arc<DataService> {
+    DataService::new(market())
+}
+
+/// The store `service` serves.
+fn market() -> Store {
     let mut s = Store::temporary("service").unwrap();
     let secs = vec![
         Security {
@@ -91,7 +96,7 @@ fn service() -> Arc<DataService> {
     assert_eq!(got.ids.len(), 3);
     s.ingest("calendar_label", &[calendar_rows(&(0..10).map(|d| T0 + d * DAY).collect::<Vec<_>>())], "test", BTreeMap::new())
         .unwrap();
-    DataService::new(s)
+    s
 }
 
 #[test]
@@ -256,6 +261,8 @@ fn script(c: &Client) -> Vec<String> {
         clock: abt_wire::generated::abt::wire::ClockSource::Replay,
         session: None,
         entities: None,
+        from: None,
+        whole: None,
     };
     let mut reply = c
         .call(Message::SubscribeRequest(Box::new(SubscribeRequest {
@@ -360,11 +367,14 @@ fn script(c: &Client) -> Vec<String> {
         t0: None,
         t1: None,
         output: None,
+        factor: None,
+        entities: None,
     };
     let mut reply = c
         .call(Message::AggregateCall(Box::new(AggregateCall {
             view: Some(Box::new(view)),
             request: Box::new(req),
+            answer: true,
         })))
         .unwrap();
     let Message::AggregateResponse(a) = reply.message().unwrap() else { panic!() };
@@ -506,4 +516,233 @@ fn a_classless_schema_listing_leaves_derived_relations_out() {
     assert!(!all.iter().any(|n| n.starts_with("cache.") || n.starts_with("kernel.") || n.starts_with("query.")), "{:?}", all);
     assert_eq!(names(None, Some(&name)), vec![name.clone()]);
     assert_eq!(names(Some("cache"), None), vec![name]);
+}
+
+/// An aggregate asked without its table (protocol 1.3) is answered by the
+/// cache object alone: its relation and version, its rows and its inexact
+/// rows. A stream naming that version carries the answer's rows in receipt
+/// order, each before the barrier of its label, as none is inexact (ERRATA
+/// E-156).
+#[test]
+fn an_answer_asked_without_its_table_names_a_version_a_stream_can_carry() {
+    use arrow::array::AsArray;
+    let svc = service();
+    let c = client(inproc(&svc));
+    let request = AggregateRequest {
+        relation: "equity.close".into(),
+        column: "P".into(),
+        second_column: None,
+        function: "mean".into(),
+        level: None,
+        window: WindowKind::Rows,
+        n: 3,
+        min: None,
+        span: None,
+        bucket: None,
+        group: Grouping::PerEntity,
+        group_column: None,
+        receipt_filter: None,
+        numerics: Numerics::TwoPass,
+        calendar: Some("1d".into()),
+        t0: None,
+        t1: None,
+        output: None,
+        factor: None,
+        entities: None,
+    };
+    let call = |answer: bool| {
+        Message::AggregateCall(Box::new(AggregateCall {
+            view: None,
+            request: Box::new(request.clone()),
+            answer,
+        }))
+    };
+    let Message::AggregateResponse(meta) = c.request(call(false)).unwrap() else {
+        panic!("not an aggregate response")
+    };
+    let (relation, version) = (meta.relation.clone().unwrap(), meta.version.clone().unwrap());
+    assert_eq!(relation, format!("cache.{}", &meta.cache_key[..16]));
+    assert_eq!((meta.rows, meta.inexact_rows), (Some(24), Some(0)));
+    // The connection answers the next request: no table was left unread.
+    let mut reply = c.call(call(true)).unwrap();
+    let Message::AggregateResponse(full) = reply.message().unwrap() else { panic!() };
+    assert_eq!(full, meta);
+    let Message::TableFollows(_) = reply.message().unwrap() else { panic!() };
+    let (_, table) = reply.table().unwrap();
+    let mut want: Vec<(u64, i64, i64, u64)> = Vec::new();
+    for b in &table {
+        let col = |n: &str| b.column(b.schema().index_of(n).unwrap()).clone();
+        let (e, t, r, v) = (col("entity"), col("t"), col("r"), col("value"));
+        for i in 0..b.num_rows() {
+            want.push((
+                e.as_primitive::<arrow::datatypes::UInt64Type>().value(i),
+                t.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i),
+                r.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i),
+                v.as_primitive::<arrow::datatypes::Float64Type>().value(i).to_bits(),
+            ));
+        }
+    }
+    // The stream of the object with the daily barriers.
+    let spec = StreamSpec {
+        relations: Some(vec![VersionRef { relation: relation.clone(), version }]),
+        binding: None,
+        calendars: Some(vec!["1d".into()]),
+        receipt_filter: None,
+        clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+        session: None,
+        entities: None,
+        from: None,
+        whole: None,
+    };
+    let mut reply = c
+        .call(Message::SubscribeRequest(Box::new(SubscribeRequest {
+            spec: Box::new(spec),
+            from_seq: 0,
+            paced: false,
+            to_seq: None,
+            with_index: false,
+        })))
+        .unwrap();
+    let Message::SubscribeResponse(_) = reply.message().unwrap() else { panic!() };
+    let Message::TableFollows(_) = reply.message().unwrap() else { panic!() };
+    let (_, events) = reply.table().unwrap();
+    let mut tuples: Vec<(u64, u64, i64, i64, u64)> = Vec::new();
+    let mut barriers: BTreeMap<i64, u64> = BTreeMap::new();
+    for b in &events {
+        let col = |n: &str| b.column(b.schema().index_of(n).unwrap()).clone();
+        let (seq, kind, e, t, r, label) = (col("seq"), col("kind"), col("entity"), col("t"), col("r"), col("label"));
+        let v = col(&format!("{}.value", relation));
+        let kind = kind.as_dictionary::<arrow::datatypes::UInt8Type>();
+        let kinds = kind.values().as_string::<i32>();
+        for i in 0..b.num_rows() {
+            let s = seq.as_primitive::<arrow::datatypes::UInt64Type>().value(i);
+            match kinds.value(kind.keys().value(i) as usize) {
+                "tuple" => tuples.push((
+                    s,
+                    e.as_primitive::<arrow::datatypes::UInt64Type>().value(i),
+                    t.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i),
+                    r.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i),
+                    v.as_primitive::<arrow::datatypes::Float64Type>().value(i).to_bits(),
+                )),
+                _ => {
+                    barriers.insert(label.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i), s);
+                }
+            }
+        }
+    }
+    assert!(tuples.windows(2).all(|w| w[0].3 <= w[1].3), "receipt order");
+    for &(s, _, t, _, _) in &tuples {
+        assert!(s < barriers[&t], "the answer at {} precedes its barrier", t);
+    }
+    let mut got: Vec<(u64, i64, i64, u64)> = tuples.iter().map(|&(_, e, t, r, v)| (e, t, r, v)).collect();
+    got.sort_unstable();
+    want.sort_unstable();
+    assert_eq!(got, want);
+}
+
+/// A stream holds the versions it reads against the pruning of derived
+/// writes (E-110) until it ends, as it opens their partitions as it goes: a
+/// cache object it carries (a delivered aggregate answer, ERRATA E-157)
+/// outlives more cache objects written while the stream is open than the
+/// store keeps, and the stream carries every row of it. Once the stream has
+/// ended, the next derived write prunes it.
+#[test]
+fn a_stream_holds_the_cache_object_it_carries_until_it_ends() {
+    // One event a batch, each sent once the one before is taken.
+    let svc = DataService::with_window(market(), 1);
+    svc.store_mut().set_derived_kept(2, 2);
+    let c = client(inproc(&svc));
+    let request = AggregateRequest {
+        relation: "equity.close".into(),
+        column: "P".into(),
+        second_column: None,
+        function: "mean".into(),
+        level: None,
+        window: WindowKind::Rows,
+        n: 3,
+        min: None,
+        span: None,
+        bucket: None,
+        group: Grouping::PerEntity,
+        group_column: None,
+        receipt_filter: None,
+        numerics: Numerics::TwoPass,
+        calendar: Some("1d".into()),
+        t0: None,
+        t1: None,
+        output: None,
+        factor: None,
+        entities: None,
+    };
+    let meta = || {
+        let Message::AggregateResponse(m) = c
+            .request(Message::AggregateCall(Box::new(AggregateCall {
+                view: None,
+                request: Box::new(request.clone()),
+                answer: false,
+            })))
+            .unwrap()
+        else {
+            panic!("not an aggregate response")
+        };
+        m
+    };
+    let m = meta();
+    let (relation, version, rows) = (m.relation.clone().unwrap(), m.version.clone().unwrap(), m.rows.unwrap());
+    let spec = StreamSpec {
+        relations: Some(vec![VersionRef { relation, version: version.clone() }]),
+        binding: None,
+        calendars: Some(vec!["1d".into()]),
+        receipt_filter: None,
+        clock: abt_wire::generated::abt::wire::ClockSource::Replay,
+        session: None,
+        entities: None,
+        from: None,
+        whole: None,
+    };
+    let other = client(inproc(&svc));
+    let mut reply = other
+        .call(Message::SubscribeRequest(Box::new(SubscribeRequest {
+            spec: Box::new(spec),
+            from_seq: 0,
+            paced: false,
+            to_seq: None,
+            with_index: false,
+        })))
+        .unwrap();
+    let Message::SubscribeResponse(_) = reply.message().unwrap() else { panic!() };
+    let Message::TableFollows(_) = reply.message().unwrap() else { panic!() };
+    let tuples = |b: &RecordBatch| {
+        use arrow::array::AsArray;
+        let kind = b.column(b.schema().index_of("kind").unwrap()).as_dictionary::<arrow::datatypes::UInt8Type>().clone();
+        let kinds = kind.values().as_string::<i32>().clone();
+        (0..b.num_rows()).filter(|&i| kinds.value(kind.keys().value(i) as usize) == "tuple").count() as u64
+    };
+    let mut carried = tuples(&reply.next_batch().unwrap().expect("a first batch"));
+    // More cache objects than the store keeps, while the stream is open.
+    let held = |svc: &DataService| svc.store().registry.versions().any(|v| v.version == version);
+    let schema = svc.store().schema("calendar_label").unwrap();
+    for k in 0..8u64 {
+        svc.store_mut()
+            .cache_put(&abt_wire::Hash::of(format!("another {}", k).as_bytes()), &schema, &[calendar_rows(&[T0])])
+            .unwrap();
+    }
+    assert!(held(&svc), "the object an open stream carries is kept");
+    while let Some(b) = reply.next_batch().unwrap() {
+        carried += tuples(&b);
+    }
+    assert_eq!(carried, rows);
+    // The stream's thread releases the object as it returns, after its last
+    // frame: a derived write after that prunes it.
+    let pruned = (0..200u64).any(|k| {
+        svc.store_mut()
+            .cache_put(&abt_wire::Hash::of(format!("after {}", k).as_bytes()), &schema, &[calendar_rows(&[T0])])
+            .unwrap();
+        let gone = !held(&svc);
+        if !gone {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        gone
+    });
+    assert!(pruned, "a stream that ended holds nothing");
 }

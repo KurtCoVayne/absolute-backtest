@@ -57,6 +57,13 @@ pub trait Executor {
     fn retention_floor(&self, _k: &Kernel) -> Option<i64> {
         None
     }
+    /// The program's stored relations whose stores this executor reads by
+    /// name, outside the rules: what stays in the stream when delivered
+    /// literals leave the rules no other reader of a relation (ERRATA
+    /// E-158). Every stored relation unless the executor can say less.
+    fn reads_stores(&self, k: &Kernel) -> Vec<String> {
+        k.rels.iter().take(k.prog.relations.len()).filter(|r| r.stored).map(|r| r.name.clone()).collect()
+    }
 }
 
 /// An order that does not execute at the next bar's close (section 6, order
@@ -1257,6 +1264,40 @@ impl Executor for SimExecutor {
         }
         Some(self.bars.len().checked_sub(n).and_then(|i| self.bars.get(i).copied()).unwrap_or(i64::MIN))
     }
+    /// The stores the simulation reads by name (ERRATA E-158). Options and
+    /// futures read their quotes, settlements, contracts, chains' spots and
+    /// margins so: every stored relation, as the trait says. Otherwise:
+    /// - the price relation when it is stored (a fill's and a mark's
+    ///   price), and `session_last_bar`'s print, the price relation's or
+    ///   else `close`'s, which a market-on-close order waits for on a
+    ///   sub-daily base decided at the base;
+    /// - the volume relation: every fill records its participation of the
+    ///   bar's volume, a stored output whether or not a cap is set, and the
+    ///   cap, the impact, the ADV of the borrow and the limits read it;
+    /// - the bar's open, high and low when an order fills at the open or on
+    ///   a limit or stop (`bar_open`, `bar_high`, `bar_low`);
+    /// - the splits and dividends the book applies (unless the price
+    ///   carries them), the delistings, and the published margins.
+    fn reads_stores(&self, k: &Kernel) -> Vec<String> {
+        if k.has_options || !k.contracts.is_empty() {
+            return k.rels.iter().take(k.prog.relations.len()).filter(|r| r.stored).map(|r| r.name.clone()).collect();
+        }
+        let mut ids: Vec<Option<usize>> = vec![k.price_rel.filter(|&id| k.rels[id].stored), k.volume_rel, k.delisted_rel];
+        if k.prog.base.is_sub_daily() && k.prog.decision_cal == Cal::Base {
+            ids.push(k.price_rel.filter(|&id| k.rels[id].stored).or_else(|| k.rel_ids.get("close").copied()));
+        }
+        if k.orders_read_companions() {
+            ids.extend([k.open_rel, k.high_rel, k.low_rel].map(|c| c.map(|(id, _)| id)));
+        }
+        if !self.cfg.actions_in_prices {
+            ids.extend([k.split_rel, k.dividend_rel]);
+        }
+        ids.push(k.rel_ids.get("margin").copied());
+        let mut names: Vec<String> = ids.into_iter().flatten().map(|id| k.rels[id].name.clone()).collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
     fn open_bar(&mut self, k: &mut Kernel, t: i64, result: &mut RunResult) -> Result<(), RunError> {
         let changed = self.open_actions(k, t, result);
         self.open_marks(k, t, result, changed)
@@ -1504,7 +1545,7 @@ impl Kernel<'_> {
         // bars only; a bar at which no instrument's clock strikes decides nothing.
         let clock_syms: Option<Vec<Sym>> = self.clock_rel.map(|cid| {
             let epos = self.rels[cid].entity_positions.first().copied().unwrap_or(0);
-            self.stores[cid]
+            self.store(cid)
                 .by_time
                 .get(&t)
                 .map(|tus| tus.iter().filter_map(|tu| tu[epos].as_equity()).collect())

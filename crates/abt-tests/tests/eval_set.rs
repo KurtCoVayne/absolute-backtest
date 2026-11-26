@@ -181,18 +181,19 @@ fn the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes() 
                 match run_planned(&p, lowered, &ds, cfg) {
                     Ok((r, mut k)) => {
                         let counted = (r.coverage.clone(), k.literal_counts().to_vec(), serde_json::to_string(&r.stats).unwrap());
+                        let called: Vec<String> = r.coverage.iter().filter(|c| c.calls > 0).map(|c| c.name.clone()).collect();
                         // A trimmed kernel no longer holds what the ledgers read.
                         let ledgers = if trim { Default::default() } else { tv::ledgers(&mut k, &p, &r.bars) };
                         let counts = k.plan_counts();
-                        (Ok((tv::digest(&r), ledgers)), counts, Some(counted), r.bars.len())
+                        (Ok((tv::digest(&r), ledgers)), counts, Some(counted), r.bars.len(), called)
                     }
-                    Err(e) => (Err(e.to_string()), Vec::new(), None, 0),
+                    Err(e) => (Err(e.to_string()), Vec::new(), None, 0, Vec::new()),
                 }
             };
-            let (set, _, set_counted, bars) = run(false, 1);
+            let (set, _, set_counted, bars, _) = run(false, 1);
             assert!(bars > 200, "{} bars", bars);
             for threads in [1, 4] {
-                let (block, counts, counted, _) = run(true, threads);
+                let (block, counts, counted, _, called) = run(true, threads);
                 let label = format!(
                     "mw14 with holes ({}, {}, block evaluator, {} thread(s))",
                     if lowered.is_some() { "optimised" } else { "written" },
@@ -203,21 +204,43 @@ fn the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes() 
                 if threads == 1 {
                     assert!(set_counted == counted, "{}: the coverage, the literal counts or the stats row differ", label);
                 }
+                // A relation with a plan the run demands derives through it.
+                // The daily dollar volume has one and is not demanded: only
+                // the weekly mean reads it, which is delivered (E-157). On
+                // four workers the first barrier warms every open-loop
+                // relation, it among them.
                 for (name, planned, bars, _, _) in counts {
-                    if planned {
+                    if planned && called.contains(&name) {
                         assert!(bars > 0, "{}: `{}` has a plan and derived no bar through it", label, name);
                         if !planned_rels.contains(&name) {
                             planned_rels.push(name);
                         }
                     }
                 }
+                if threads == 1 {
+                    assert!(!called.iter().any(|n| n.starts_with("dollar_volume")), "{}: the daily dollar volume is derived: {:?}", label, called);
+                }
             }
         }
     }
     // `eligible` reads the name's last bar of the week through an as-of read
     // of a stored relation (E-160), which no operator plans yet: it derives
-    // on the row path, and the run above holds it equal there.
-    for name in ["adj_close", "scored", "in_book", "latched", "extension", "stay", "ma", "clenow"] {
+    // on the row path, and the run above holds it equal there. The weekly
+    // last close, the weekly count of bars and the weekly mean dollar volume
+    // read the answers the stream delivers (E-175).
+    for name in [
+        "adj_close",
+        "scored",
+        "in_book",
+        "latched",
+        "extension",
+        "stay",
+        "ma",
+        "clenow",
+        "close@weekly",
+        "traded@weekly",
+        "dvol",
+    ] {
         assert!(planned_rels.iter().any(|r| r == name), "`{}` has no plan; the plans: {:?}", name, planned_rels);
     }
     assert!(!planned_rels.iter().any(|r| r == "eligible"), "`eligible` is planned: lift its row-path note above");

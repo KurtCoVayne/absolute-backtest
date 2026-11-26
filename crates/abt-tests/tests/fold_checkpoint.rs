@@ -137,3 +137,134 @@ fn a_checkpoint_of_another_program_or_configuration_is_refused() {
     let err = replayed(&sma, &client, &cfg, &from(&cp)).err().unwrap();
     assert!(err.to_string().contains("another program"), "{}", err);
 }
+
+#[test]
+fn a_resumed_run_reads_the_answers_its_checkpoint_held() {
+    // The weekly book delivers its weekly last close, weekly bar count and
+    // weekly mean dollar volume in the stream (ERRATA E-157), the count in
+    // the last close's answer (E-159), two objects: a checkpoint
+    // holds the answers received so far in the kernel's stores, and a run
+    // resumed from it reads the weeks before its cut from there (the
+    // four-row mean of the weekly dollar volume reads three of them), and
+    // is the unbroken run.
+    let (p, ds) = abt_tests::golden_inputs(&abt_tests::corpus_dir().join("company").join("mw14.dsl")).unwrap();
+    abt_kernel::kernel::on_kernel_thread(|| {
+        let cfg = ExecConfig::from_program(&p);
+        let client = common::client(&p, &ds);
+        let every = Replay {
+            checkpoint_every: Some(CheckpointEvery::Bars(13)),
+            ..Replay::default()
+        };
+        let (unbroken, checkpoints) = replayed(&p, &client, &cfg, &every)?;
+        assert!(checkpoints.len() >= 3, "{}", checkpoints.len());
+        // The block evaluator's operators read the answers the restored
+        // stores hold as the row path does (E-175): its runs, resumed or
+        // not, are the set evaluator's.
+        let block = ExecConfig { block_eval: true, ..cfg.clone() };
+        let (unbroken_block, _) = replayed(&p, &client, &block, &every)?;
+        assert_eq!(digest(&unbroken), digest(&unbroken_block), "the block evaluator's unbroken run");
+        for cp in &checkpoints {
+            assert_eq!(cp.delivered.len(), 2, "{:?}", cp.delivered);
+            // The kernel's stores of the delivered answers follow the program's relations.
+            let held: usize = cp.stores[p.relations.len()..].iter().map(|s| s.len()).sum();
+            assert!(held > 0, "the checkpoint after {} holds no answer", format_timestamp(cp.last_bar));
+            let cp: Checkpoint = serde_json::from_str(&serde_json::to_string(cp).unwrap()).unwrap();
+            let last = cp.last_bar;
+            for c in [&cfg, &block] {
+                let (resumed, _) = replayed(
+                    &p,
+                    &client,
+                    c,
+                    &Replay {
+                        from: Some(cp.clone()),
+                        ..Replay::default()
+                    },
+                )?;
+                assert_eq!(digest(&unbroken), digest(&resumed), "resumed after {} (block {})", format_timestamp(last), c.block_eval);
+            }
+        }
+        // A run whose stream carries no answer counts other seqs: it
+        // refuses the checkpoint.
+        let tables = ExecConfig { deliver: false, ..cfg.clone() };
+        let err = replayed(
+            &p,
+            &client,
+            &tables,
+            &Replay {
+                from: Some(checkpoints[0].clone()),
+                ..Replay::default()
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("other aggregate answers"), "{}", err);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_checkpoint_records_the_relations_its_stream_left_out() {
+    // A weekly book reading the daily open and close only through the
+    // weekly answers the stream delivers: its stream leaves both out
+    // (ERRATA E-158), and its checkpoints say so. A run resumed from one is
+    // the unbroken run; a run that keeps every relation streams them, so
+    // counts other seqs, and refuses it.
+    let src = common::StrategyParts {
+        name: "week_open".into(),
+        needs: "need bars @1d   need listing".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        clock: "decide on weekly".into(),
+        universe: "universe(A, T) :- listed@weekly(A, T).".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        rules: "    rel week_open(A: Equity, @T, O: Price<USD>)\n    week_open(A, T, O) :- universe(A, T), O = first(X) over (T1 in bucket(weekly, T), open(A, T1, X)).".into(),
+        decides: "    decide(T, trade(A, qty)) :- week_open(A, T, O), close@weekly(A, T, P), P > O, flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), week_open(A, T, O), close@weekly(A, T, P), P < O, Q = -Q0.".into(),
+        report: "calendar weekly   periods 52 per year".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "week_open");
+    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 160, 3);
+    abt_kernel::kernel::on_kernel_thread(|| {
+        let cfg = ExecConfig::from_program(&p);
+        let client = common::client(&p, &ds);
+        let every = Replay {
+            checkpoint_every: Some(CheckpointEvery::Bars(8)),
+            ..Replay::default()
+        };
+        let (unbroken, checkpoints) = replayed(&p, &client, &cfg, &every)?;
+        assert!(checkpoints.len() >= 2 && unbroken.fills.len() > 5, "{} checkpoints, {} fills", checkpoints.len(), unbroken.fills.len());
+        let block = ExecConfig { block_eval: true, ..cfg.clone() };
+        for cp in &checkpoints {
+            assert!(["open", "close"].iter().all(|r| cp.delivered.iter().any(|d| d == r)), "{:?}", cp.delivered);
+            // Under either evaluator (E-175).
+            for c in [&cfg, &block] {
+                let (resumed, _) = replayed(
+                    &p,
+                    &client,
+                    c,
+                    &Replay {
+                        from: Some(cp.clone()),
+                        ..Replay::default()
+                    },
+                )?;
+                assert_eq!(digest(&unbroken), digest(&resumed), "resumed after {} (block {})", format_timestamp(cp.last_bar), c.block_eval);
+            }
+        }
+        let err = replayed(
+            &p,
+            &client,
+            &cfg,
+            &Replay {
+                from: Some(checkpoints[0].clone()),
+                keep_unread: true,
+                ..Replay::default()
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("left out other relations"), "{}", err);
+        Ok(())
+    })
+    .unwrap();
+}

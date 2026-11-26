@@ -18,8 +18,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use abt_wire::generated::abt::wire::{
-    AggregateCall, AggregateRequest, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, ParamValue, PlanStep, Preference,
-    PreferenceKind, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec, SubscribeRequest, VersionRef, View,
+    AggregateCall, AggregateRequest, AggregateResponse, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, ParamValue,
+    PlanStep, Preference, PreferenceKind, PutRequest, QueryForm, QueryRequest, RelationSchema, ResolveRequest, Role, Scan, SchemaRequest, StatsRequest, StreamIndexRequest, StreamSpec,
+    SubscribeRequest, VersionRef, View,
 };
 use abt_wire::generated::abt::wire::{Constant, ConstantKind, Identity, Series};
 use abt_wire::rpc::{Client, Reply, WireError};
@@ -360,12 +361,34 @@ impl DataClient {
         )
     }
 
+    /// An aggregate's answer as the cache object holding it, without its
+    /// rows (protocol 1.3, `answer` false): the object a stream can name,
+    /// its rows and its inexact rows (ERRATA E-156).
+    pub fn aggregate_meta(&self, view: &View, request: AggregateRequest) -> Result<AggregateResponse, RunError> {
+        let (relation, detail) = (request.relation.clone(), aggregate_detail(&request));
+        self.timed(
+            "aggregate",
+            &relation,
+            format!("{}_meta", detail),
+            |r: &AggregateResponse| r.rows.unwrap_or(0),
+            || match self.request(Message::AggregateCall(Box::new(AggregateCall {
+                view: Some(Box::new(view.clone())),
+                request: Box::new(request),
+                answer: false,
+            })))? {
+                Message::AggregateResponse(r) => Ok(*r),
+                _ => Err(RunError::Config("the data service answered an aggregate with another message".into())),
+            },
+        )
+    }
+
     fn aggregate_untimed(&self, view: &View, request: AggregateRequest) -> Result<(String, Vec<RecordBatch>), RunError> {
         let mut reply = self
             .client
             .call(Message::AggregateCall(Box::new(AggregateCall {
                 view: Some(Box::new(view.clone())),
                 request: Box::new(request),
+                answer: true,
             })))
             .map_err(wire)?;
         let key = match reply.message().map_err(wire)? {
@@ -1542,7 +1565,58 @@ fn named_instruments(prog: &Program) -> Option<Vec<&str>> {
     (!names.is_empty()).then_some(names)
 }
 
-pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &StreamSpec) -> Result<Vec<String>, RunError> {
+/// One pushed literal as `push_down` asks it: its shape and slots, its
+/// request, its window's minimum, and the kernel's store for its answers
+/// when the stream can deliver them.
+struct Ask {
+    at: (usize, usize),
+    shape: super::pushdown::Shape,
+    entity_slot: usize,
+    base_slot: usize,
+    request: AggregateRequest,
+    min: Option<u64>,
+    store: Option<usize>,
+}
+
+/// The sibling whose answer a deliverable `count` shares (ERRATA E-159):
+/// a deliverable literal of another function asking what the count asks
+/// but for the function (the relation, its column, the window, the
+/// calendars, the instruments), of one relation, not a product, at a
+/// minimum no greater than the count's. Its answer has a row at every
+/// label where its window has a value and carries the window's row count
+/// there; with no inexact row there is no null, so the rows with a value
+/// are the rows, and the count's answer is that count at the count's own
+/// minimum.
+fn shared_answer(asks: &[Ask], a: &Ask) -> Option<usize> {
+    if a.shape.function != "count" || a.store.is_none() || a.request.factor.is_some() {
+        return None;
+    }
+    let bare = |r: &AggregateRequest| AggregateRequest {
+        function: String::new(),
+        level: None,
+        min: None,
+        ..r.clone()
+    };
+    asks.iter()
+        .position(|b| b.store.is_some() && b.shape.function != "count" && b.request.factor.is_none() && b.min <= a.min && bare(&b.request) == bare(&a.request))
+}
+
+/// The pushed aggregate literals (K-4.5) asked of the data layer's pass. A
+/// literal the stream can deliver (`pushdown::deliverable`) is asked for
+/// its cache object first: when the pass proves no input row late, the
+/// object joins the stream (`spec`) and the literal reads its rows from the
+/// kernel's store the stream fills, with no receipt test and no local
+/// window (ERRATA E-157); a `count` that asks a delivered sibling's request
+/// but for the function reads the sibling's rows' count instead of an
+/// answer of its own (E-159). Any other answer arrives as a table, read
+/// where its rows were received by the barrier (E-47), but for a product
+/// the pass found inexact, which is evaluated here (a pair holding a null
+/// is not in its answer). `k.cfg.deliver` is off for a run with a cut, a
+/// live run and a replay of a recording. Last,
+/// the stored relations only delivered literals read are dropped at the
+/// fold's door (`Kernel::unread_after_delivery`, E-158); `keep` names those
+/// read by name outside the rules.
+pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &mut StreamSpec, keep: &[String]) -> Result<Vec<String>, RunError> {
     let mut notes = Vec::new();
     // A scoped run keeps the answers of its instruments only, as its stream
     // carries their tuples only (E-99).
@@ -1565,15 +1639,25 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
     } else {
         abt_wire::generated::abt::wire::Numerics::TwoPass
     };
+    // Every pushed literal's request, in the program's order.
+    let mut asks: Vec<Ask> = Vec::new();
     for ((ri, li), e) in super::pushdown::eligibilities(k.prog) {
         let Ok(shape) = e else { continue };
-        let label = k.prog.rule_label(ri);
         let Some((stored_rel, schema)) = bound.stored.get(&shape.relation) else { continue };
-        let values: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role != Role::ReceiptTime).collect();
-        let cols: Vec<String> = shape.columns.iter().filter_map(|&p| values.get(p).map(|c| c.name.clone())).collect();
+        // A stored relation's column at an argument position.
+        let column_at = |schema: &RelationSchema, p: usize| schema.columns.iter().filter(|c| c.role != Role::ReceiptTime).nth(p).map(|c| c.name.clone());
+        let cols: Vec<String> = shape.columns.iter().filter_map(|&p| column_at(schema, p)).collect();
         if cols.len() != shape.columns.len() {
             continue;
         }
+        // A product's second factor, read at the same instruments and times.
+        let factor = match &shape.factor {
+            Some(f) => match bound.stored.get(&f.relation).and_then(|(rel, schema)| column_at(schema, f.column).map(|c| (rel.clone(), c))) {
+                Some((relation, column)) => Some(Box::new(abt_wire::generated::abt::wire::Factor { relation, column })),
+                None => continue,
+            },
+            None => None,
+        };
         let cr = k.compiled[ri].clone();
         let (Some(&entity_slot), Some(&base_slot)) = (cr.slots.get(&shape.entity_var), cr.slots.get(&shape.base_var)) else {
             continue;
@@ -1625,11 +1709,117 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
             t0: None,
             t1: None,
             output: None,
+            factor,
+            entities: spec.entities.clone(),
         };
-        let batches = match client.aggregate(&view, request) {
+        // Delivered: the pass proved every answer row at a label computed
+        // from rows received by that label's barrier, so the stream merges
+        // it before that barrier. The kernel's store for it exists for
+        // every deliverable literal (`Kernel::build`). An empty window has
+        // no value, the pass's no row, only when the minimum is at least 1
+        // (a bucket's always is).
+        let hidden = super::pushdown::delivered_name(k.prog, ri, li);
+        let store = (k.cfg.deliver && min.is_some_and(|m| m >= 1) && super::pushdown::deliverable(&shape, k.prog).is_ok())
+            .then(|| (k.prog.relations.len()..k.rels.len()).find(|&r| k.rels[r].name == hidden))
+            .flatten();
+        asks.push(Ask {
+            at: (ri, li),
+            shape,
+            entity_slot,
+            base_slot,
+            request,
+            min,
+            store,
+        });
+    }
+    // A count that shares a sibling's answer is asked after the others,
+    // and only if the sibling's answer is not delivered.
+    let sibling: Vec<Option<usize>> = asks.iter().map(|a| shared_answer(&asks, a)).collect();
+    let order: Vec<usize> = (0..asks.len()).filter(|&i| sibling[i].is_none()).chain((0..asks.len()).filter(|&i| sibling[i].is_some())).collect();
+    // What the run is told, by literal, so that the order of the program
+    // stands whatever the order asked.
+    let mut noted: Vec<((usize, usize), String)> = Vec::new();
+    // The cache objects the stream carries, each with the kernel's store
+    // its rows go to: two literals asking one request read one object.
+    let mut carried: BTreeMap<String, usize> = BTreeMap::new();
+    // The delivered answers, by ask: their store and object.
+    let mut delivered: BTreeMap<usize, (usize, String)> = BTreeMap::new();
+    for ix in order {
+        let a = &asks[ix];
+        let label = k.prog.rule_label(a.at.0);
+        let count = a.shape.function == "count";
+        let at_least = a.min.unwrap_or(0) as i64;
+        let entry = |by_time, delivered| {
+            Arc::new(super::pushdown::Pushed {
+                shape: a.shape.clone(),
+                entity_slot: a.entity_slot,
+                base_slot: a.base_slot,
+                count,
+                by_time,
+                delivered,
+            })
+        };
+        // The sibling's rows carry the count as their fourth argument.
+        if let Some((rel, relation)) = sibling[ix].and_then(|s| delivered.get(&s)).cloned() {
+            k.pushed.insert(
+                a.at,
+                entry(
+                    Default::default(),
+                    Some(super::pushdown::Delivered {
+                        rel,
+                        relation,
+                        column: 3,
+                        min: at_least,
+                    }),
+                ),
+            );
+            continue;
+        }
+        if let Some(rel) = a.store {
+            let meta = match client.aggregate_meta(&view, a.request.clone()) {
+                Ok(m) => m,
+                Err(e) => {
+                    noted.push((a.at, format!("rule {}: the aggregate is evaluated here: {}", label, e)));
+                    continue;
+                }
+            };
+            if let (Some(0), Some(relation), Some(version)) = (meta.inexact_rows, meta.relation, meta.version) {
+                let rel = match carried.get(&relation) {
+                    Some(&first) => first,
+                    None => {
+                        spec.relations.get_or_insert_with(Vec::new).push(VersionRef { relation: relation.clone(), version });
+                        carried.insert(relation.clone(), rel);
+                        k.read_rels[rel] = true;
+                        rel
+                    }
+                };
+                delivered.insert(ix, (rel, relation.clone()));
+                k.pushed.insert(
+                    a.at,
+                    entry(
+                        Default::default(),
+                        Some(super::pushdown::Delivered {
+                            rel,
+                            relation,
+                            column: 2,
+                            min: at_least,
+                        }),
+                    ),
+                );
+                continue;
+            }
+        }
+        // A product the pass found inexact is evaluated here, as before
+        // E-156: the pass leaves out a pair holding a null, which the kernel
+        // reads as NaN (E-71), so its answer is not the window's even where
+        // its rows were received by the barrier.
+        if a.request.factor.is_some() && !matches!(client.aggregate_meta(&view, a.request.clone()), Ok(m) if m.inexact_rows == Some(0)) {
+            continue;
+        }
+        let batches = match client.aggregate(&view, a.request.clone()) {
             Ok((_, b)) => b,
             Err(e) => {
-                notes.push(format!("rule {}: the aggregate is evaluated here: {}", label, e));
+                noted.push((a.at, format!("rule {}: the aggregate is evaluated here: {}", label, e)));
                 continue;
             }
         };
@@ -1669,21 +1859,23 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &Stre
         // An instrument of the answer the binding does not name would be
         // missing from a section: the window is evaluated here.
         if unmapped {
-            notes.push(format!("rule {}: the aggregate is evaluated here: its answer names an instrument the binding does not", label));
+            noted.push((a.at, format!("rule {}: the aggregate is evaluated here: its answer names an instrument the binding does not", label)));
             continue;
         }
         for section in by_time.values_mut() {
             section.sort_by_key(|(s, _)| *s);
         }
-        k.pushed.insert(
-            (ri, li),
-            Arc::new(super::pushdown::Pushed {
-                shape,
-                entity_slot,
-                base_slot,
-                by_time,
-            }),
-        );
+        k.pushed.insert(a.at, entry(by_time, None));
+    }
+    noted.sort_by_key(|(at, _)| *at);
+    notes.extend(noted.into_iter().map(|(_, m)| m));
+    // The stored relations only the delivered literals read are dropped at
+    // the fold's door (ERRATA E-158). They stay in the stream's
+    // specification: a seq of the stream, which a late record and a
+    // checkpoint's cursor hold, is then the one the run without delivery
+    // gives the same event but for the answers' rows.
+    for r in k.unread_after_delivery(keep) {
+        k.read_rels[r] = false;
     }
     Ok(notes)
 }
@@ -2038,6 +2230,8 @@ pub fn stream_spec(k: &Kernel, bound: &Bound, client: &DataClient, run: &str) ->
             clock: abt_wire::generated::abt::wire::ClockSource::Replay,
             session: None,
             entities: scope_entities(k.prog, bound),
+            from: None,
+            whole: None,
         },
         cal_of,
     ))
@@ -2132,6 +2326,9 @@ struct Converter {
     rel: usize,
     /// Per argument: the key, or a column of the batch with its kind.
     args: Vec<Option<(usize, Ty)>>,
+    /// A column whose null leaves the row out: a delivered answer's value,
+    /// null where the window has no value (ERRATA E-157).
+    required: Option<usize>,
 }
 
 /// An event of the stream, as the fold takes it: a barrier with the instant
@@ -2211,10 +2408,11 @@ impl<'a> Cell<'a> {
 }
 
 /// What one batch's rows of a relation become: the kernel's relation and
-/// its arguments' cells.
+/// its arguments' cells, and the column whose null leaves a row out.
 struct Tuples<'a> {
     rel: usize,
     cells: Vec<Cell<'a>>,
+    required: Option<&'a ArrayRef>,
 }
 
 impl Decoder {
@@ -2234,6 +2432,35 @@ impl Decoder {
 
     fn converter(&mut self, k: &Kernel, bound: &Bound, batch: &RecordBatch, stored_rel: &str) -> Option<&Converter> {
         if !self.converters.contains_key(stored_rel) {
+            // A delivered answer (ERRATA E-157): its instrument, its label
+            // as the key, and its value, a count's as the count it is; then,
+            // when a count shares the answer (E-159), the window's row count.
+            let readers: Vec<&super::pushdown::Pushed> = k
+                .pushed
+                .values()
+                .filter(|p| p.delivered.as_ref().is_some_and(|d| d.relation == stored_rel))
+                .map(|p| p.as_ref())
+                .collect();
+            if let Some(d) = readers.first().and_then(|p| p.delivered.as_ref()) {
+                let reads = |column: usize, count: bool| readers.iter().any(|p| p.count == count && p.delivered.as_ref().is_some_and(|d| d.column == column));
+                let schema = batch.schema();
+                let index = |column: &str| schema.index_of(&format!("{}.{}", stored_rel, column)).ok();
+                let entity = index("entity")?;
+                let (value, ty) = if reads(2, true) { (index("count")?, Ty::Count) } else { (index("value")?, Ty::scalar()) };
+                let mut args = vec![Some((entity, Ty::Entity)), None, Some((value, ty))];
+                if reads(3, true) {
+                    args.push(Some((index("count")?, Ty::Count)));
+                }
+                self.converters.insert(
+                    stored_rel.to_string(),
+                    Converter {
+                        rel: d.rel,
+                        args,
+                        required: Some(value),
+                    },
+                );
+                return self.converters.get(stored_rel);
+            }
             let name = bound.stored.iter().find(|(_, (s, _))| s == stored_rel).map(|(n, _)| n.clone())?;
             let rel = k.relation_id(&name)?;
             let sig = &k.prog.relations[&name];
@@ -2251,7 +2478,7 @@ impl Decoder {
                     }
                 })
                 .collect();
-            self.converters.insert(stored_rel.to_string(), Converter { rel, args });
+            self.converters.insert(stored_rel.to_string(), Converter { rel, args, required: None });
         }
         self.converters.get(stored_rel)
     }
@@ -2303,9 +2530,13 @@ impl Decoder {
                         unmet => unmet.insert(self.converter(k, bound, b, stored_rel).map(|conv| Tuples {
                             rel: conv.rel,
                             cells: conv.args.iter().map(|a| a.as_ref().map_or(Cell::Key, |(c, ty)| Cell::of(b.column(*c), ty))).collect(),
+                            required: conv.required.map(|c| b.column(c)),
                         })),
                     };
                     let Some(plan) = plan else { continue };
+                    if plan.required.is_some_and(|c| c.is_null(i)) {
+                        continue;
+                    }
                     let mut tuple: Tuple = smallvec::SmallVec::with_capacity(plan.cells.len());
                     for cell in &mut plan.cells {
                         tuple.push(self.cell(k, cell, i, key)?);
@@ -2432,6 +2663,9 @@ impl Decoder {
                     };
                     let (key, rt) = (t[i].ok_or_else(|| bad("tuple without t"))?, r[i].unwrap_or(i64::MIN));
                     let Some(conv) = self.converter(k, bound, b, &stored_rel) else { continue };
+                    if conv.required.is_some_and(|c| b.column(c).is_null(i)) {
+                        continue;
+                    }
                     let rel = conv.rel;
                     let args = conv.args.clone();
                     let mut tuple: Tuple = smallvec::SmallVec::with_capacity(args.len());

@@ -185,6 +185,10 @@ pub struct Store {
     /// The runs' outputs and the cache objects kept (`KERNEL_RUNS_KEPT`,
     /// `CACHE_OBJECTS_KEPT`).
     derived_kept: (usize, usize),
+    /// The versions open streams read, each with how many streams hold it:
+    /// `prune_derived` keeps them, as a stream opens their partitions as it
+    /// goes (a delivered aggregate answer, ERRATA E-157).
+    held: Mutex<BTreeMap<String, usize>>,
 }
 
 /// A partition file's row groups (their rows, in order) and its entity
@@ -281,6 +285,7 @@ impl Store {
             residency: Residency::off(),
             consolidate_bytes: CONSOLIDATE_BYTES,
             derived_kept: (KERNEL_RUNS_KEPT, CACHE_OBJECTS_KEPT),
+            held: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -312,10 +317,33 @@ impl Store {
         self.derived_kept = (runs, cache_objects);
     }
 
+    /// Holds versions an open stream reads against `prune_derived`, until
+    /// `release`.
+    pub fn hold(&self, versions: &[String]) {
+        let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+        for v in versions {
+            *held.entry(v.clone()).or_default() += 1;
+        }
+    }
+
+    /// Releases versions `hold` held.
+    pub fn release(&self, versions: &[String]) {
+        let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+        for v in versions {
+            if let Some(n) = held.get_mut(v) {
+                *n -= 1;
+                if *n == 0 {
+                    held.remove(v);
+                }
+            }
+        }
+    }
+
     /// Drops the oldest runs' outputs and cache objects past what the store
     /// keeps (E-110): their schemas, versions, currents and cache records,
     /// and their manifests, partitions and logs. A relation with a pinned
-    /// version stays. The relations dropped.
+    /// version, or a version an open stream reads (`hold`), stays. The
+    /// relations dropped.
     pub fn prune_derived(&mut self) -> Result<Vec<String>, DataError> {
         let ordinal = |v: &VersionRecord| v.attributes.get("_ordinal").and_then(|o| o.parse::<u64>().ok()).unwrap_or(0);
         // A run's outputs (`kernel.<run>.<name>`) go together; each cache
@@ -332,6 +360,7 @@ impl Store {
             g.0 = g.0.max(ordinal(v));
             g.1.insert(v.relation.clone());
         }
+        let held: BTreeSet<String> = self.held.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
         let mut dropped = Vec::new();
         for (groups, kept) in [(runs, self.derived_kept.0), (caches, self.derived_kept.1)] {
             if groups.len() <= kept + kept / 8 {
@@ -342,7 +371,7 @@ impl Store {
             let n = by_age.len() - kept;
             for (_, relations) in by_age.into_iter().take(n) {
                 for rel in relations {
-                    if self.registry.versions().any(|v| v.relation == rel && self.registry.pinned(&v.version)) {
+                    if self.registry.versions().any(|v| v.relation == rel && (self.registry.pinned(&v.version) || held.contains(&v.version))) {
                         continue;
                     }
                     self.registry.drop_relation(&rel);
@@ -920,10 +949,17 @@ impl Store {
 
     /// Stores a cache object under its key.
     pub fn cache_put(&mut self, key: &Hash, schema: &RelationSchema, rows: &[RecordBatch]) -> Result<String, DataError> {
+        self.cache_put_with(key, schema, rows, BTreeMap::new())
+    }
+
+    /// `cache_put` with attributes its version carries, which a hit reads
+    /// back from the registry (an aggregate answer's inexact rows).
+    pub fn cache_put_with(&mut self, key: &Hash, schema: &RelationSchema, rows: &[RecordBatch], attributes: BTreeMap<String, String>) -> Result<String, DataError> {
         let mut schema = schema.clone();
         schema.name = format!("cache.{}", &key.hex()[..16]);
         schema.class = "cache".to_string();
-        let (version, _) = self.replace(&schema, rows, "cache")?;
+        self.registry.register_schema(&schema)?;
+        let (version, _) = self.write_rows(&schema, Rows::Input(rows), "cache", attributes, true)?;
         self.registry.cache_record(&key.hex(), &schema.name, &version);
         self.registry.save()?;
         Ok(version)

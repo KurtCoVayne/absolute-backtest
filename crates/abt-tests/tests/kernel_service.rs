@@ -419,3 +419,67 @@ fn the_live_modes_refuse_what_they_cannot_do() {
     let e = live_sim(None, "deployment { account SIM0001 broker mock recording stream s9 }");
     assert!(!e.contains("names the live session"), "the recording stream names the session: {}", e);
 }
+
+/// A run the service holds keeps every relation its queries may read, as
+/// they name their relation once the run has begun: delivery leaves none
+/// out of the stream (ERRATA E-158). A weekly book that reads its daily
+/// open and close only through answers the stream delivers answers a query
+/// of the daily close after the run, a row per name.
+#[test]
+fn a_held_run_answers_a_query_of_a_relation_only_delivered_answers_read() {
+    let src = common::StrategyParts {
+        name: "week_open".into(),
+        needs: "need bars @1d   need listing".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        clock: "decide on weekly".into(),
+        universe: "universe(A, T) :- listed@weekly(A, T).".into(),
+        params: "    qty : Quantity<Shares> = 10 shares".into(),
+        rules: "    rel week_open(A: Equity, @T, O: Price<USD>)\n    week_open(A, T, O) :- universe(A, T), O = first(X) over (T1 in bucket(weekly, T), open(A, T1, X)).".into(),
+        decides: "    decide(T, trade(A, qty)) :- week_open(A, T, O), close@weekly(A, T, P), P > O, flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), week_open(A, T, O), close@weekly(A, T, P), P < O, Q = -Q0.".into(),
+        report: "calendar weekly   periods 52 per year".into(),
+        ..Default::default()
+    }
+    .render();
+    let prog = common::program(&src, "week_open");
+    let ds = abt_kernel::data::synthetic_daily(&["AAA", "BBB", "CCC"], (2022, 1, 3), 160, 3);
+    let local = common::run(&prog, &ds, ExecConfig::from_program(&prog)).unwrap();
+    let c = services(&prog, &ds);
+    let mut files: Vec<SourceFile> = common::dsl_files("catalog")
+        .into_iter()
+        .chain(common::dsl_files("lib"))
+        .map(|p| SourceFile {
+            text: std::fs::read_to_string(&p).unwrap(),
+            path: Some(p.to_string_lossy().into_owned()),
+        })
+        .collect();
+    files.push(SourceFile { text: src, path: None });
+    let mut r = request(KernelOp::Run);
+    r.strategy = Some("week_open".into());
+    r.sources = Some(files);
+    let frames = run(&c, r);
+    assert_eq!(frames.last().unwrap().status.as_deref(), Some("completed"));
+    let last = ds.facts["close"].iter().filter_map(|tu| tu[1].as_time()).max().unwrap();
+    let closes = ds.facts["close"].iter().filter(|tu| tu[1].as_time() == Some(last)).count();
+    assert!(closes > 0);
+    let day = abt_kernel::kernel::time::format_timestamp(last);
+    let (m, rows) = query(&c, &local.run_id, &format!("? close(A, T, P) at T = {}", day)).unwrap();
+    assert_eq!(rows, Some(closes), "{:?}", m.text);
+    // The service's runs take the set evaluator (a request names no other).
+    // A run held as the service holds it (every relation read after it),
+    // under the block evaluator, whose operators read the delivered weekly
+    // last close and first open (E-175): the same run, and the daily close
+    // after it.
+    let held = abt_kernel::kernel::Replay {
+        read_after_any: true,
+        ..Default::default()
+    };
+    for block_eval in [false, true] {
+        let cfg = ExecConfig {
+            block_eval,
+            ..ExecConfig::from_program(&prog)
+        };
+        let (r, found) = common::run_keeping(&prog, None, &ds, cfg, &held, |_, k| k.query("close", last, &[])).unwrap();
+        assert_eq!(abt_kernel::verify::tv::digest(&r), abt_kernel::verify::tv::digest(&local), "block {}", block_eval);
+        assert_eq!(found.len(), closes, "block {}", block_eval);
+    }
+}

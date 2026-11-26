@@ -1,0 +1,16 @@
+# proposition: E-157 (a product the pass found inexact is evaluated in the kernel)
+# mutation: an inexact product is read as a table
+# test: cargo test -p abt-tests --test pushdown a_product_over_a_null_is_evaluated_locally_and_equals_the_local_run
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1813,7 +1813,7 @@
+         // E-156: the pass leaves out a pair holding a null, which the kernel
+         // reads as NaN (E-71), so its answer is not the window's even where
+         // its rows were received by the barrier.
+-        if a.request.factor.is_some() && !matches!(client.aggregate_meta(&view, a.request.clone()), Ok(m) if m.inexact_rows == Some(0)) {
++        if a.request.factor.is_some() && false && !matches!(client.aggregate_meta(&view, a.request.clone()), Ok(m) if m.inexact_rows == Some(0)) {
+             continue;
+         }
+         let batches = match client.aggregate(&view, a.request.clone()) {

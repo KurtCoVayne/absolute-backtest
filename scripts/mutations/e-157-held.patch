@@ -1,0 +1,15 @@
+# proposition: E-157 (a stream holds the cache objects it carries against the pruning of derived writes)
+# mutation: a stream holds nothing
+# test: cargo test -p abt-data --test service a_stream_holds_the_cache_object_it_carries_until_it_ends
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/service.rs b/crates/abt-data/src/service.rs
+--- a/crates/abt-data/src/service.rs
++++ b/crates/abt-data/src/service.rs
+@@ -398,7 +398,6 @@
+             // derived one (a cache object, ERRATA E-157) is kept from the
+             // pruning of later derived writes until the stream ends.
+             let versions: Vec<String> = res.relations.iter().map(|(_, v)| v.clone()).chain(res.clocks.iter().cloned()).collect();
+-            st.hold(&versions);
+             (res, s, Held { service: self, versions })
+         };
+         out.respond(Message::SubscribeResponse(Box::new(SubscribeResponse { stream: s.id.clone() }))).map_err(wire)?;

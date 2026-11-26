@@ -188,6 +188,8 @@ fn measure_the_budgets() {
             t0: None,
             t1: None,
             output: Some(format!("bench_{}_{:?}", threads, numerics)),
+            factor: None,
+            entities: None,
         };
         let t = Instant::now();
         aggregate(&mut s, &view, &request).unwrap();

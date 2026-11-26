@@ -59,6 +59,21 @@ pub struct Checkpoint {
     pub decided_once: bool,
     pub result: RunResult,
     pub executor: serde_json::Value,
+    /// The answers the stream carried (ERRATA E-157), their cache objects,
+    /// which the stream's seqs, and so the cursor, count; and the relations
+    /// the fold dropped for them (E-158), which the stores do not hold.
+    #[serde(default)]
+    pub delivered: Vec<String>,
+}
+
+/// What delivery made of a kernel's stream, in order: the cache objects it
+/// carries as delivered answers and the relations the fold drops for them.
+fn delivered_objects(k: &Kernel) -> Vec<String> {
+    let mut v: Vec<String> = k.pushed.values().filter_map(|p| p.delivered.as_ref().map(|d| d.relation.clone())).collect();
+    v.extend((0..k.prog.relations.len()).filter(|&r| k.left_for_delivery(r)).map(|r| k.rels[r].name.clone()));
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// One event of the stream, as the fold takes it (D-5.1).
@@ -314,6 +329,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             decided_once: self.decided_once,
             result: self.result.clone(),
             executor: self.exec.checkpoint().map_err(RunError::Internal)?,
+            delivered: delivered_objects(k),
         })
     }
 
@@ -360,6 +376,13 @@ impl<'p, 'e> Fold<'p, 'e> {
         }
         if cp.stores.len() != kernel.stores.len() {
             return Err(RunError::Config("the checkpoint's relations do not match the program's".into()));
+        }
+        // Its cursor is a seq of a stream that carried these answers, and
+        // its stores hold none of these relations.
+        if cp.delivered != delivered_objects(&kernel) {
+            return Err(RunError::Config(
+                "the checkpoint was taken of a stream that carried other aggregate answers or left out other relations (pushdown, delivery or the relations kept set otherwise, E-157, E-158)".into(),
+            ));
         }
         kernel.stores = super::Shared::new(cp.stores);
         // A checkpoint's blocks may predate the index: re-sort on first use.
@@ -469,6 +492,17 @@ impl<'p, 'e> Fold<'p, 'e> {
                     }
                     None => false,
                 };
+                // A delivered answer is merged before its label's barrier,
+                // the pass having proved its rows received by then: one
+                // after it is the service's fault (ERRATA E-157).
+                if late && self.kernel.is_delivery_store(rel) {
+                    return Err(RunError::Internal(format!(
+                        "a delivered aggregate answer at {} arrived after its bar was decided (`{}`, seq {})",
+                        time::format_timestamp(key),
+                        self.kernel.rels[rel].name,
+                        seq
+                    )));
+                }
                 let entity = if late {
                     self.kernel.rels[rel].entity_positions.first().and_then(|&p| tuple[p].as_equity())
                 } else {
@@ -477,8 +511,13 @@ impl<'p, 'e> Fold<'p, 'e> {
                 self.kernel.insert_fact(rel, tuple, r)?;
                 if late {
                     self.kernel.invalidate_from(key);
+                    // Its place in the stream without the delivered answers,
+                    // as a run that reads its answers as tables numbers it:
+                    // their rows are merged among the others by receipt, and
+                    // each is held in its store (ERRATA E-157).
+                    let delivered: u64 = self.kernel.stores.iter().skip(self.kernel.prog.relations.len()).map(|s| s.inserted).sum();
                     self.result.late.push(super::LateRecord {
-                        seq,
+                        seq: seq - delivered,
                         relation: self.kernel.rels[rel].name.clone(),
                         entity,
                         t: key,

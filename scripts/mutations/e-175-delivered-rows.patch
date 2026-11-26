@@ -1,0 +1,16 @@
+# proposition: E-175 (the block evaluator reads a delivered literal's rows at a label as the row path reads them)
+# mutation: the first instrument's row of the label is left out
+# test: cargo test -p abt-tests --test pushdown a_count_over_an_empty_bucket_is_absent_for_a_bound_instrument_and_an_unbound_one
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
+--- a/crates/abt-kernel/src/kernel/eval.rs
++++ b/crates/abt-kernel/src/kernel/eval.rs
+@@ -2412,7 +2412,7 @@
+         let mut ids: Vec<Sym> = Vec::with_capacity(rows.len());
+         let mut values = Vec::with_capacity(rows.len());
+         let mut last: Option<Sym> = None;
+-        for tu in rows.iter() {
++        for tu in rows.iter().skip(1) {
+             let Value::Equity(s) = tu[0] else { return None };
+             if last.is_some_and(|l| l >= s) {
+                 return None;

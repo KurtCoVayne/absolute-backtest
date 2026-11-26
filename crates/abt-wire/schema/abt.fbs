@@ -187,9 +187,20 @@ enum Grouping : ubyte { PerEntity = 0, PerLabel = 1, Whole = 2 }
 // exponent (ST-3, Proposition 3.3), one correctly rounded division at the end.
 enum Numerics : ubyte { TwoPass = 0, Running = 1, Exact = 2 }
 
+// The second factor of a product: the value aggregated is the request's
+// column times this relation's column, over the rows both relations hold
+// at one entity and time (protocol 1.3).
+table Factor {
+  relation: string (required);
+  column: string (required);
+}
+
 // D-6.1. `calendar` names the calendar whose labels index the window's
 // checkpoints and the answer's rows (E-27); `bucket` the calendar of a
-// bucket window.
+// bucket window. Protocol 1.3 appends `factor` (the value aggregated is a
+// product of two relations) and `entities` (the instruments the pass
+// reads, ERRATA E-99); a request without them has the canonical form, and
+// so the cache key, it had under 1.2.
 table AggregateRequest {
   relation: string (required);
   column: string (required);
@@ -209,6 +220,8 @@ table AggregateRequest {
   t0: long = null;
   t1: long = null;
   output: string;
+  factor: Factor;
+  entities: [ulong];
 }
 
 // ---------------------------------------------------------------- streams
@@ -233,6 +246,11 @@ table StreamSpec {
   // instruments where root = "…"`); absent: every instrument of the bound
   // versions. Barriers are unaffected (ERRATA E-99; protocol 1.2).
   entities: [ulong];
+  // Protocol 1.3: the tuples of a relation start at this event time,
+  // except for the relations `whole` names, which stream from their first
+  // row; barriers are unaffected. Absent: every tuple.
+  from: long = null;
+  whole: [string];
 }
 
 // ---------------------------------------------------------- demands, bindings
@@ -377,8 +395,36 @@ table ExplainResponse {
   unresolved: bool;
 }
 
-table AggregateCall { view: View; request: AggregateRequest (required); }
-table AggregateResponse { cache_key: string (required); }
+// With `answer` false (protocol 1.3) the response alone is sent and no
+// table follows: the caller reads the answer as the version it names.
+table AggregateCall { view: View; request: AggregateRequest (required); answer: bool = true; }
+
+// The answer's cache key and, from protocol 1.3, the cache object a stream
+// can name (its relation and version), its rows, and its inexact rows: the
+// input rows received after the barrier of the first label whose window
+// holds them, the rows with a null the pass reads, and the answer rows
+// whose arithmetic failed. With none, every answer row at a label is
+// computed from rows received by that label's barrier.
+table AggregateResponse {
+  cache_key: string (required);
+  relation: string;
+  version: string;
+  rows: ulong = null;
+  inexact_rows: ulong = null;
+}
+
+// Protocol 1.3: the runs of a relation over a calendar's labels, the
+// maximal spans of consecutive labels on which an identity holds equal
+// values, answered as a cache object (`AggregateResponse`).
+table RunsRequest {
+  relation: string (required);
+  calendar: string (required);
+  entities: [ulong];
+  t0: long = null;
+  t1: long = null;
+}
+
+table RunsCall { view: View; request: RunsRequest (required); }
 
 table SubscribeRequest {
   spec: StreamSpec (required);
@@ -563,7 +609,8 @@ union Message {
   KernelRequest,
   KernelResponse,
   QueryLayerRequest,
-  QueryLayerResponse
+  QueryLayerResponse,
+  RunsCall
 }
 
 table Envelope {

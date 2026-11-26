@@ -310,3 +310,161 @@ fn a_subscription_waits_for_its_acks_and_a_dropped_one_ends() {
     eventually("the stream ended", || ended.load(Ordering::SeqCst));
     assert!(sent.load(Ordering::SeqCst) < 500);
 }
+
+/// An aggregate request as protocol 1.2 wrote it: every field 1.2 knew.
+fn request_1_2() -> abt_wire::generated::abt::wire::AggregateRequest {
+    use abt_wire::generated::abt::wire::{AggregateRequest, Duration as CalendarDuration, Grouping, Numerics, ReceiptFilter, WindowKind};
+    AggregateRequest {
+        relation: "equity.close".into(),
+        column: "P".into(),
+        second_column: None,
+        function: "quantile".into(),
+        level: Some(0.25),
+        window: WindowKind::Bucket,
+        n: 0,
+        min: Some(1),
+        span: Some(Box::new(CalendarDuration { months: 1, days: -2, nanos: 3 })),
+        bucket: Some("weekly".into()),
+        group: Grouping::PerEntity,
+        group_column: None,
+        receipt_filter: Some(Box::new(ReceiptFilter { r_max: Some(-7) })),
+        numerics: Numerics::TwoPass,
+        calendar: Some("base".into()),
+        t0: None,
+        t1: Some(1_700_000_000_000_000_000),
+        output: None,
+        ..Default::default()
+    }
+}
+
+/// A stream spec as protocol 1.2 wrote it.
+fn spec_1_2() -> StreamSpec {
+    use abt_wire::generated::abt::wire::{ClockSource, VersionRef};
+    StreamSpec {
+        relations: Some(vec![
+            VersionRef {
+                relation: "equity.close".into(),
+                version: "ab12".into(),
+            },
+            VersionRef {
+                relation: "kernel.r.calendar_label".into(),
+                version: "cd34".into(),
+            },
+        ]),
+        binding: None,
+        calendars: Some(vec!["base".into(), "weekly".into()]),
+        receipt_filter: None,
+        clock: ClockSource::Replay,
+        session: None,
+        entities: Some(vec![3, 1]),
+        ..Default::default()
+    }
+}
+
+/// Protocol 1.3 adds optional fields (P-7, ERRATA E-155). The canonical
+/// forms of a request, a call, a response and a stream spec that do not set
+/// them are the bytes 1.2 rendered (pinned here from a 1.2 tree), so every
+/// cache key and stream id stands; set, the new fields are in the canonical
+/// form and round trip through a control payload.
+#[test]
+fn a_1_2_aggregate_request_and_stream_spec_keep_their_canonical_bytes() {
+    use abt_wire::canonical::Canonical;
+    use abt_wire::convert::{decode, encode};
+    use abt_wire::generated::abt::wire::{AggregateCall, AggregateResponse, Factor, RunsCall, RunsRequest};
+    const REQUEST: &str = r#"{"bucket":"weekly","calendar":"base","column":"P","function":"quantile","group":"PerEntity","group_column":null,"level":0.25,"min":1,"n":0,"numerics":"TwoPass","output":null,"receipt_filter":{"r_max":-7},"relation":"equity.close","second_column":null,"span":{"days":-2,"months":1,"nanos":3},"t0":null,"t1":1700000000000000000,"window":"Bucket"}"#;
+    let request = request_1_2();
+    assert_eq!(request.canonical().unwrap(), REQUEST);
+    let call = AggregateCall {
+        view: None,
+        request: Box::new(request.clone()),
+        answer: true,
+    };
+    assert_eq!(call.canonical().unwrap(), format!(r#"{{"request":{},"view":null}}"#, REQUEST));
+    let response = AggregateResponse {
+        cache_key: "00ff".into(),
+        ..Default::default()
+    };
+    assert_eq!(response.canonical().unwrap(), r#"{"cache_key":"00ff"}"#);
+    let spec = spec_1_2();
+    assert_eq!(
+        spec.canonical().unwrap(),
+        r#"{"binding":null,"calendars":["base","weekly"],"clock":"Replay","entities":[3,1],"receipt_filter":null,"relations":[{"relation":"equity.close","version":"ab12"},{"relation":"kernel.r.calendar_label","version":"cd34"}],"session":null}"#
+    );
+    // A hash over a request renders the request itself: a map holding it
+    // keeps the omission (the cache key's form, D-3.5).
+    let versions = vec![("equity.close".to_string(), "ab12".to_string())];
+    let keyed = KeyForm {
+        aggregate: &request,
+        versions: &versions,
+    };
+    assert_eq!(keyed.canonical().unwrap(), format!(r#"{{"aggregate":{},"versions":[["equity.close","ab12"]]}}"#, REQUEST));
+
+    // The new fields, set: in the canonical form, and through the wire.
+    let mut scoped = request.clone();
+    scoped.factor = Some(Box::new(Factor {
+        relation: "equity.volume".into(),
+        column: "V".into(),
+    }));
+    scoped.entities = Some(vec![7, 2]);
+    let text = scoped.canonical().unwrap();
+    assert!(
+        text.contains(r#""entities":[7,2]"#) && text.contains(r#""factor":{"column":"V","relation":"equity.volume"}"#),
+        "{}",
+        text
+    );
+    assert_ne!(scoped.canonical_hash().unwrap(), request.canonical_hash().unwrap());
+    let meta = AggregateCall {
+        view: None,
+        request: Box::new(scoped.clone()),
+        answer: false,
+    };
+    assert!(meta.canonical().unwrap().contains(r#""answer":false"#));
+    let answered = AggregateResponse {
+        cache_key: "00ff".into(),
+        relation: Some("cache.00ff".into()),
+        version: Some("v".into()),
+        rows: Some(12),
+        inexact_rows: Some(0),
+    };
+    assert_eq!(
+        answered.canonical().unwrap(),
+        r#"{"cache_key":"00ff","inexact_rows":0,"relation":"cache.00ff","rows":12,"version":"v"}"#
+    );
+    let mut bounded = spec.clone();
+    bounded.from = Some(-1);
+    bounded.whole = Some(vec!["equity.member".into()]);
+    assert!(bounded.canonical().unwrap().ends_with(r#""from":-1,"receipt_filter":null,"relations":[{"relation":"equity.close","version":"ab12"},{"relation":"kernel.r.calendar_label","version":"cd34"}],"session":null,"whole":["equity.member"]}"#));
+    let runs = RunsCall {
+        view: None,
+        request: Box::new(RunsRequest {
+            relation: "equity.member".into(),
+            calendar: "base".into(),
+            entities: Some(vec![1]),
+            t0: None,
+            t1: Some(5),
+        }),
+    };
+    for m in [
+        Message::AggregateCall(Box::new(meta)),
+        Message::AggregateCall(Box::new(call)),
+        Message::AggregateResponse(Box::new(answered)),
+        Message::AggregateResponse(Box::new(response)),
+        Message::SubscribeRequest(Box::new(SubscribeRequest {
+            spec: Box::new(bounded),
+            from_seq: 0,
+            paced: false,
+            to_seq: None,
+            with_index: false,
+        })),
+        Message::RunsCall(Box::new(runs)),
+    ] {
+        assert_eq!(decode(&encode(m.clone())).unwrap(), m);
+    }
+}
+
+/// The cache key's form: the request and the versions it reads.
+#[derive(serde::Serialize)]
+struct KeyForm<'a> {
+    aggregate: &'a abt_wire::generated::abt::wire::AggregateRequest,
+    versions: &'a [(String, String)],
+}
