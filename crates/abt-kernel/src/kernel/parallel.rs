@@ -32,7 +32,7 @@ const WORKER_STACK: usize = 256 << 20;
 
 impl<'p> Kernel<'p> {
     /// The thread count the run asked for: `0` is the machine's cores up to
-    /// four, as a study's `--threads`.
+    /// four.
     pub(crate) fn threads(&self) -> usize {
         match self.cfg.threads {
             0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4),

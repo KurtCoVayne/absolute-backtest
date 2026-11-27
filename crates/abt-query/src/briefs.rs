@@ -190,7 +190,13 @@ fn attempt(data: &Data, kernels: &[Kernel], library: &[SourceFile], brief: &str,
         Ok(p) => p,
         Err(e) => return (record, Some(failed(format!("failed: {}", e)))),
     };
-    let verdict = match exec::execute(&p, &prog, &exec::Endpoints { data, kernels }, &exec::Options::default()) {
+    // As many runs at once as the harness has kernels, as `abt plan run`
+    // (E-179); the template is one run.
+    let opts = exec::Options {
+        threads: kernels.len(),
+        ..exec::Options::default()
+    };
+    let verdict = match exec::execute(&p, &prog, &exec::Endpoints { data, kernels }, &opts) {
         Err(e) => failed(format!("failed: {}", e)),
         Ok(ex) => match ex.outcomes.first() {
             None => failed("failed: the plan made no run".into()),

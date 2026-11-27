@@ -10,16 +10,29 @@
 //! trailing reveal reports the tail; every run is a trial row, counted once
 //! however often the plan runs over the same binding; π is in the run's id,
 //! so another plan's run of the same point is another run, and a plan
-//! renamed is the same plan; one kernel or four give the same outcomes.
+//! renamed is the same plan; one kernel or four give the same outcomes;
+//! `abt plan run` holds as many runs at once as it has kernels unless
+//! `--threads` says otherwise (ERRATA E-179).
 
 #![allow(clippy::result_large_err)]
 
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use abt_data::service::DataService;
 use abt_kernel::data::synthetic_daily;
+use abt_kernel::kernel::service::KernelService;
+use abt_kernel::kernel::{DataClient, RunError};
+use abt_query::cli::Captured;
 use abt_query::data::Data;
 use abt_query::kernel::{Kernel, Program};
 use abt_query::plan::exec::{execute, Endpoints, Execution, Kind, Options};
 use abt_query::plan::{self, Plan};
 use abt_tests as common;
+use abt_wire::generated::abt::wire::KernelOp;
+use abt_wire::rpc::{serve, Request, Responder, Service};
+use abt_wire::transport::{channel_pair, Connection};
+use abt_wire::{ErrorMessage, Layer, Message};
 
 use abt_tests::{momentum as momentum_with, plan_program as program, plan_services as services, FRICTIONLESS};
 
@@ -266,4 +279,179 @@ fn one_kernel_or_four_give_the_same_outcomes() {
         assert_eq!(json(&a.trading), json(&b.trading));
     }
     assert_eq!(json(&one.grids), json(&four.grids));
+}
+
+// ---- how many runs a plan holds at once (ERRATA E-179) ----
+
+/// How long a run nothing joins waits before it goes on alone: the bound of
+/// a failing case, which no passing case reaches.
+const ALONE: Duration = Duration::from_secs(20);
+
+/// The runs a pool's kernels hold, counted across the pool.
+#[derive(Default)]
+struct Count {
+    now: usize,
+    most: usize,
+    /// Whether `meet` runs were once held together.
+    met: bool,
+}
+
+/// What a pool's kernels hold: the runs asked of them and not yet released.
+struct Held {
+    count: Mutex<Count>,
+    together: Condvar,
+    /// The first runs wait for each other until this many are held, so that
+    /// runs asked for together are counted together whatever the scheduler
+    /// does.
+    meet: usize,
+}
+
+impl Held {
+    fn asked(&self) {
+        let mut c = self.count.lock().unwrap();
+        c.now += 1;
+        c.most = c.most.max(c.now);
+        if c.now >= self.meet {
+            c.met = true;
+            self.together.notify_all();
+        }
+        drop(self.together.wait_timeout_while(c, ALONE, |c| !c.met).unwrap());
+    }
+
+    fn released(&self) {
+        self.count.lock().unwrap().now -= 1;
+    }
+
+    /// The most runs held at once and whether `meet` were held together,
+    /// once the plan has ended and released every run.
+    fn most(&self, what: &str) -> (usize, bool) {
+        let c = self.count.lock().unwrap();
+        assert_eq!(c.now, 0, "{}: every run is released when the plan ends", what);
+        (c.most, c.met)
+    }
+}
+
+/// A kernel service of the pool, counted: it holds a run, with the history
+/// the run reads, from the request for it to the request that releases it.
+/// Both are counted as they arrive, before the kernel answers: the plan's
+/// worker asks for its next run only after the release is answered, so a
+/// count taken after the answer would run behind it.
+struct Counted {
+    kernel: Arc<KernelService>,
+    held: Arc<Held>,
+}
+
+impl Service for Counted {
+    fn layer(&self) -> Layer {
+        self.kernel.layer()
+    }
+
+    fn handle(&self, request: Request, out: &Responder) -> Result<(), ErrorMessage> {
+        let (run, release) = match &request.message {
+            Message::KernelRequest(r) => (matches!(r.op, KernelOp::Run), matches!(r.op, KernelOp::Control) && r.what.as_deref() == Some("release")),
+            _ => (false, false),
+        };
+        if run {
+            self.held.asked();
+        }
+        if release {
+            self.held.released();
+        }
+        self.kernel.handle(request, out)
+    }
+}
+
+/// A grid of four points, so that a pool of three can be asked for more
+/// runs than it has kernels.
+const PACED: &str = "study paced { program paced\n grid { n = 1, 2, 3, 4 } }";
+
+/// The momentum book `paced` and a data service holding its market.
+fn paced_market() -> (String, Arc<DataService>) {
+    let src = momentum_with("paced", FRICTIONLESS);
+    let ds = synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "SPY"], (2022, 1, 3), 300, 2);
+    let svc = abt::serve_dataset(&ds, &common::program(&src, "paced")).unwrap();
+    (src, svc)
+}
+
+/// A pool of `kernels` counted kernel services reaching `svc`, each served
+/// in this process: a connection to each, and what the pool holds.
+fn counted_pool(svc: &Arc<DataService>, kernels: usize, meet: usize) -> (Vec<Connection>, Arc<Held>) {
+    let held = Arc::new(Held {
+        count: Mutex::default(),
+        together: Condvar::new(),
+        meet,
+    });
+    let pool = (0..kernels)
+        .map(|_| {
+            let s = svc.clone();
+            let kernel = KernelService::new(Arc::new(move || abt::connect_data(&s).map_err(RunError::Config).and_then(DataClient::connect)));
+            let counted: Arc<dyn Service> = Arc::new(Counted { kernel, held: held.clone() });
+            let (client, server) = channel_pair(1024);
+            std::thread::spawn(move || {
+                let _ = serve(server, counted);
+            });
+            client
+        })
+        .collect();
+    (pool, held)
+}
+
+/// `abt plan run --json WORDS` of the grid over a pool of `kernels` counted
+/// kernel services, as the command line and the query service run it
+/// (`cli::plan_served`: the words parsed, the executor's options made of
+/// them): the most runs the pool held at once, whether `meet` were held
+/// together, and every outcome's run and returns as printed.
+fn held_by_a_plan_run(kernels: usize, words: &[&str], meet: usize) -> (usize, bool, Vec<String>) {
+    let (src, svc) = paced_market();
+    let (pool, held) = counted_pool(&svc, kernels, meet);
+    let mut raw = vec!["run".to_string(), "--json".to_string()];
+    raw.extend(words.iter().map(|w| w.to_string()));
+    let mut io = Captured::default();
+    let status = abt_query::cli::plan_served(&raw, PACED, program(&src, "paced"), abt::connect_data(&svc).unwrap(), pool, &mut io);
+    assert_eq!(status, 0, "{:?}: {}", words, io.err);
+    let ex: serde_json::Value = serde_json::from_str(&io.out).unwrap_or_else(|e| panic!("{}: {}", e, io.out));
+    let outcomes: Vec<String> = ex["outcomes"].as_array().expect("outcomes").iter().map(|o| format!("{} {}", o["run_id"], o["returns"])).collect();
+    assert_eq!(outcomes.len(), 4, "{}", io.out);
+    let (most, met) = held.most(&format!("{} kernels, {:?}", kernels, words));
+    (most, met, outcomes)
+}
+
+/// E-179: `abt plan run` asks for as many runs at once as it has kernels.
+/// One kernel (the pipeline's `--kernels 1`, and the front's default) holds
+/// one run, with its history, at a time; a pool of three holds three, and no
+/// more though the grid has four points. The outcomes are the same.
+#[test]
+fn a_plan_run_holds_as_many_runs_at_once_as_it_has_kernels() {
+    let (most, _, one) = held_by_a_plan_run(1, &[], 1);
+    assert_eq!(most, 1, "one kernel holds one run at a time");
+    let (most, together, three) = held_by_a_plan_run(3, &[], 3);
+    assert!(together, "a pool of three kernels was never asked for three runs at once");
+    assert_eq!(most, 3, "a pool of three kernels holds three runs at once");
+    assert_eq!(one, three);
+}
+
+/// `--threads N` still says how many runs are asked for at once, whatever
+/// the kernels: three at once of one kernel, one at a time of three.
+#[test]
+fn threads_on_a_plan_run_says_how_many_runs_are_held_at_once_whatever_the_kernels() {
+    let (most, together, wide) = held_by_a_plan_run(1, &["--threads", "3"], 3);
+    assert!(together, "--threads 3 never asked one kernel for three runs at once");
+    assert_eq!(most, 3, "--threads 3 on one kernel");
+    let (most, _, narrow) = held_by_a_plan_run(3, &["--threads", "1"], 1);
+    assert_eq!(most, 1, "--threads 1 on three kernels");
+    assert_eq!(wide, narrow);
+}
+
+/// A caller of the executor that does not say how many runs it asks for at
+/// once (`Options::default()`) asks for one, on a pool of any size: the
+/// default knows no pool, and one history is what any pool can hold.
+#[test]
+fn the_executors_default_asks_for_one_run_at_a_time_on_any_pool() {
+    let (src, svc) = paced_market();
+    let (pool, held) = counted_pool(&svc, 3, 1);
+    let kernels: Vec<Kernel> = pool.into_iter().map(|c| Kernel::connect(c).unwrap()).collect();
+    let data = Data::connect(abt::connect_data(&svc).unwrap()).unwrap();
+    let ex = execute(&study(PACED, "paced"), &program(&src, "paced"), &Endpoints { data: &data, kernels: &kernels }, &Options::default()).unwrap();
+    assert_eq!(ex.outcomes.len(), 4);
+    assert_eq!(held.most("the default on three kernels").0, 1);
 }

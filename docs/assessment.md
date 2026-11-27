@@ -1073,7 +1073,9 @@ executor runs `threads` steps at a time on them (4 by default,
 history. With `--threads 1` the same plan peaks at 4.1 GB and takes
 2:44 where it took about 1:45. The pipeline's tool passes `--kernels 1`
 alone (`agents-harness/agents_harness/local.py`), so a grid on a minute
-store needs `--threads 1` beside it there, or package 7 (a). A third
+store needs `--threads 1` beside it there, or package 7 (a). (Since
+E-179, Nov 27, a plan asks for as many runs at once as it has kernels,
+so `--kernels 1` alone holds one history.) A third
 post on the build with E-177, with that flag added to its `plan run`
 by a wrapper beside the unmodified runner ($0.27), did not reach its
 plan: the agent wrote `commission per_contract 3.75`, the store states
