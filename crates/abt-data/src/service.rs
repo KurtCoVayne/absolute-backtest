@@ -57,6 +57,20 @@ pub struct DataService {
     restart_millis: std::sync::atomic::AtomicU64,
 }
 
+/// The versions an open stream reads, held against the pruning of derived
+/// writes (`Store::hold`) and released when the stream ends, however it
+/// ends.
+struct Held<'a> {
+    service: &'a DataService,
+    versions: Vec<String>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.service.store().release(&self.versions);
+    }
+}
+
 /// A subscription's channel (D-5.6): the batches sent and not yet
 /// acknowledged, with their last seq and size.
 struct Window {
@@ -376,11 +390,16 @@ impl DataService {
         if r.spec.clock == ClockSource::Live {
             return self.subscribe_live(r, out);
         }
-        let (res, mut s) = {
+        let (res, mut s, _held) = {
             let st = self.store();
             let res = stream::resolve(&st, &r.spec).map_err(data)?;
             let s = Stream::open(&st, res.clone()).map_err(data)?;
-            (res, s)
+            // The stream opens its versions' partitions as it goes: a
+            // derived one (a cache object, ERRATA E-157) is kept from the
+            // pruning of later derived writes until the stream ends.
+            let versions: Vec<String> = res.relations.iter().map(|(_, v)| v.clone()).chain(res.clocks.iter().cloned()).collect();
+            st.hold(&versions);
+            (res, s, Held { service: self, versions })
         };
         out.respond(Message::SubscribeResponse(Box::new(SubscribeResponse { stream: s.id.clone() }))).map_err(wire)?;
         if r.with_index {
@@ -627,15 +646,29 @@ impl DataService {
                 drop(st);
                 out.table(&schema, batches).map_err(wire)
             }
+            // The answer's cache object, and its rows unless the call asks
+            // for the response alone (protocol 1.3: a stream names the
+            // object instead, ERRATA E-156).
             Message::AggregateCall(r) => {
-                let (key, batch) = {
+                let (a, batch) = {
                     let mut st = self.store_mut();
                     let view = ResolvedView::of(&st, r.view.as_deref()).map_err(data)?;
-                    let (version, key) = agg::aggregate(&mut st, &view, &r.request).map_err(data)?;
-                    (key, agg::answer(&st, &version).map_err(data)?)
+                    let a = agg::aggregate(&mut st, &view, &r.request).map_err(data)?;
+                    let batch = if r.answer { Some(agg::answer(&st, &a.version).map_err(data)?) } else { None };
+                    (a, batch)
                 };
-                out.respond(Message::AggregateResponse(Box::new(AggregateResponse { cache_key: key.hex() }))).map_err(wire)?;
-                out.table(&batch.schema(), [batch]).map_err(wire)
+                out.respond(Message::AggregateResponse(Box::new(AggregateResponse {
+                    cache_key: a.key.hex(),
+                    relation: Some(a.relation),
+                    version: Some(a.version),
+                    rows: Some(a.rows),
+                    inexact_rows: Some(a.inexact_rows),
+                })))
+                .map_err(wire)?;
+                match batch {
+                    Some(b) => out.table(&b.schema(), [b]).map_err(wire),
+                    None => Ok(()),
+                }
             }
             Message::SubscribeRequest(r) => self.subscribe(&r, out),
             Message::StreamIndexRequest(r) => {

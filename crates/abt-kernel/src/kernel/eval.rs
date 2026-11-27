@@ -1340,9 +1340,13 @@ impl<'p> Kernel<'p> {
             let saved = self.prefetch.take();
             let saved_bucket = self.prefetch_bucket.take();
             if let Literal::Agg { args, conj, within, .. } = lit {
-                self.prefetch = self.prefetch_rows_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                // A delivered literal reads the stream's answers and solves
+                // no window (ERRATA E-157; `bucket_prefetch` tests it too).
+                if !self.is_delivered(cr, lit) {
+                    self.prefetch = self.prefetch_rows_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                }
                 if self.prefetch.is_none() {
-                    self.prefetch_bucket = self.prefetch_bucket_window(cr, lit, conj, args, within.as_deref(), &live)?;
+                    self.prefetch_bucket = self.prefetch_bucket_window(cr, lit, conj, &live)?;
                 }
             }
             for i in 0..live.len() {
@@ -1599,7 +1603,7 @@ impl<'p> Kernel<'p> {
             let mut found: Vec<(Tuple, usize)> = Vec::new();
             let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
             let mut cur = t;
-            while let Some(k) = self.stores[rel].by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
+            while let Some(k) = self.store(rel).by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
                 found.extend(
                     self.store_lookup(rel, k, entity.as_ref())
                         .iter()
@@ -1616,7 +1620,7 @@ impl<'p> Kernel<'p> {
             if found.is_empty() && floor == i64::MIN {
                 let e = info.entity_positions.first().copied();
                 found.extend(
-                    self.stores[rel]
+                    self.store(rel)
                         .kept
                         .iter()
                         .filter(|tu| entity.as_ref().map(|v| e.map(|e| tu[e] == *v).unwrap_or(true)).unwrap_or(true) && matches(tu))
@@ -2329,15 +2333,22 @@ impl<'p> Kernel<'p> {
         let Some(pos) = pos else { return false };
         let Some(p) = self.pushed.get(&(cr.idx, pos)).cloned() else { return false };
         let Some(Some(Value::Time(t))) = env.get(p.base_slot) else { return false };
-        let Some(section) = p.by_time.get(t) else { return false };
         let vslot = cr.slots[var];
+        if let Some(d) = &p.delivered {
+            self.delivered_answers(&p, d, *t, vslot, env, out);
+            self.stats.pushed_answers += 1;
+            return true;
+        }
+        let Some(section) = p.by_time.get(t) else { return false };
+        // A count's answer is the window's row count, as the window gives it.
+        let value = |a: &super::pushdown::Answer| if p.count { Value::Count(a.count) } else { Value::Num(a.value.unwrap_or(f64::NAN)) };
         match env.get(p.entity_slot) {
             Some(Some(Value::Equity(a))) => {
                 let Ok(i) = section.binary_search_by_key(a, |(s, _)| *s) else { return false };
                 let ans = &section[i].1;
-                let (Some(x), false, true) = (ans.value, ans.error, ans.r <= self.now) else { return false };
+                let (Some(_), false, true) = (ans.value, ans.error, ans.r <= self.now) else { return false };
                 self.pushed_read_r = self.pushed_read_r.max(ans.r);
-                out.push_with(env, vslot, Some(Value::Num(x)));
+                out.push_with(env, vslot, Some(value(ans)));
             }
             Some(None) => {
                 if section.iter().any(|(_, a)| a.value.is_none() || a.error || a.r > self.now) {
@@ -2348,13 +2359,76 @@ impl<'p> Kernel<'p> {
                     out.push_env(env);
                     let e = out.last_row().expect("a row was pushed");
                     e[p.entity_slot] = Some(Value::Equity(*s));
-                    e[vslot] = a.value.map(Value::Num);
+                    e[vslot] = Some(value(a));
                 }
             }
             _ => return false,
         }
         self.stats.pushed_answers += 1;
         true
+    }
+
+    /// A delivered literal's answers at label `t` (ERRATA E-157), from the
+    /// kernel's store the stream fills: the bound instrument's row, or with
+    /// the instrument unbound every row of the label in instrument order,
+    /// as the window's grouping gives them. No row is no answer, as an
+    /// empty bucket gives none (its minimum is 1). Every row was received
+    /// by the barrier of its label, which precedes any read of it: no
+    /// receipt is tested. A count that shares a sibling's answer reads its
+    /// rows' count, at its own minimum (E-159).
+    fn delivered_answers<S: Sink>(&mut self, p: &super::pushdown::Pushed, d: &super::pushdown::Delivered, t: i64, vslot: usize, env: &[Option<Value>], out: &mut S) {
+        match env.get(p.entity_slot) {
+            Some(Some(a @ Value::Equity(_))) => {
+                let a = a.clone();
+                let found = self.store_lookup(d.rel, t, Some(&a)).iter().find(|tu| tu[0] == a).and_then(|tu| d.answer(tu));
+                if let Some(v) = found {
+                    out.push_with(env, vslot, Some(v));
+                }
+            }
+            Some(None) => {
+                let rows: Vec<(Value, Value)> = self.store_lookup(d.rel, t, None).iter().filter_map(|tu| d.answer(tu).map(|v| (tu[0].clone(), v))).collect();
+                for (a, v) in rows {
+                    out.push_env(env);
+                    let e = out.last_row().expect("a row was pushed");
+                    e[p.entity_slot] = Some(a);
+                    e[vslot] = Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A delivered literal's answers at label `t` as the block evaluator
+    /// reads them (`ColOp::Pushed`, `ColOp::PushedJoin`; ERRATA E-157,
+    /// E-175): the instruments of the rows its store holds there, each
+    /// with its answer, in the store's order, read through the same lookup
+    /// and the same `Delivered::answer` as `delivered_answers`. `None`
+    /// where two rows hold one instrument or a row holds no instrument:
+    /// there the answers bound to an instrument (the first row's) and those
+    /// the aggregation binds (every row's) may differ, and the operator
+    /// declines.
+    pub(crate) fn delivered_block(&mut self, d: &super::pushdown::Delivered, t: i64) -> Option<(Vec<Sym>, Vec<Value>)> {
+        let rows = self.store_lookup(d.rel, t, None);
+        let mut ids: Vec<Sym> = Vec::with_capacity(rows.len());
+        let mut values = Vec::with_capacity(rows.len());
+        let mut last: Option<Sym> = None;
+        for tu in rows.iter() {
+            let Value::Equity(s) = tu[0] else { return None };
+            if last.is_some_and(|l| l >= s) {
+                return None;
+            }
+            last = Some(s);
+            if let Some(v) = d.answer(tu) {
+                ids.push(s);
+                values.push(v);
+            }
+        }
+        Some((ids, values))
+    }
+
+    /// Whether an aggregate literal of a rule is delivered (ERRATA E-157).
+    fn is_delivered(&self, cr: &CompiledRule, lit: &Literal) -> bool {
+        !self.pushed.is_empty() && self.body_position(cr, lit).and_then(|pos| self.pushed.get(&(cr.idx, pos))).is_some_and(|p| p.delivered.is_some())
     }
 
     /// A window's length or minimum, which only parameters and literals
@@ -2582,6 +2656,39 @@ impl<'p> Kernel<'p> {
         })
     }
 
+    /// Whether the row path may solve aggregate `lit`'s window over the
+    /// whole block of the `rows` bindings entering it
+    /// (`prefetch_bucket_window`), and its plan where so: at least
+    /// `PREFETCH_MIN_ROWS` rows, the window cache on, the literal not
+    /// delivered (a delivered one solves no window, ERRATA E-157), its
+    /// window a bucket or a span served from the per-bar cache with no late
+    /// test, not a rows window and not one whose bars depend on the
+    /// instrument. The solve runs before the literal's pushed answers are
+    /// read (`pushed_answers`, which may then answer every row) and derives
+    /// what the window's conjunction reads, a product's relation among them
+    /// (E-156): the coverage, the memo and that relation's literal counts
+    /// hold it. The one test of both evaluators: the block evaluator's
+    /// table read of such a literal declines where it holds, and the bar is
+    /// the rules' (`ColOp::PushedJoin`, E-175). What follows it in
+    /// `prefetch_bucket_window` (each row's bindings, the bars cached) only
+    /// withholds the solve, so no bar that solves it is planned.
+    pub(crate) fn bucket_prefetch(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, rows: usize) -> Option<Arc<AggPlan>> {
+        if rows < PREFETCH_MIN_ROWS || !self.cfg.window_cache || self.is_delivered(cr, lit) {
+            return None;
+        }
+        let Literal::Agg { args, conj, within, .. } = lit else { return None };
+        let aplan = self.agg_plan(cr, lit, conj, args, within.as_deref());
+        let wp = aplan.window.as_ref()?;
+        if !wp.late.is_empty() {
+            return None;
+        }
+        let Literal::Window { kind, .. } = &conj[wp.window] else { return None };
+        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) || self.per_entity_window(kind) {
+            return None;
+        }
+        Some(aplan)
+    }
+
     /// The rows of a windowed group from the per-bar cache (data-bundle doc,
     /// section 2, "State"): the group is the rule, the aggregation literal
     /// and the outer bindings its conjunction reads apart from the window's
@@ -2592,21 +2699,12 @@ impl<'p> Kernel<'p> {
     /// A bucket or span window's conjunction solved for every row of the
     /// block at once (`PrefetchBucket`): the bars the first row's group
     /// misses, each solved over the whole block, each row then holding its
-    /// own solutions in its own solve's order.
-    fn prefetch_bucket_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>, live: &Block) -> Result<Option<PrefetchBucket>, RunError> {
-        const MIN_ROWS: usize = 32;
-        if live.len() < MIN_ROWS || !self.cfg.window_cache {
-            return Ok(None);
-        }
-        let aplan = self.agg_plan(cr, lit, conj, args, within);
+    /// own solutions in its own solve's order. Only where `bucket_prefetch`
+    /// holds.
+    fn prefetch_bucket_window(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, conj: &[Literal], live: &Block) -> Result<Option<PrefetchBucket>, RunError> {
+        let Some(aplan) = self.bucket_prefetch(cr, lit, live.len()) else { return Ok(None) };
         let Some(wp) = aplan.window.as_ref() else { return Ok(None) };
-        if !wp.late.is_empty() {
-            return Ok(None);
-        }
         let Literal::Window { kind, base, dur, lo: lo_off, .. } = &conj[wp.window] else { return Ok(None) };
-        if matches!(kind, WindowKind::Rows | WindowKind::PriorRows) || self.per_entity_window(kind) {
-            return Ok(None);
-        }
         let first = live.row(0);
         if first[wp.wslot].is_some() || aplan.group.iter().any(|&s| first[s].is_none()) {
             return Ok(None);

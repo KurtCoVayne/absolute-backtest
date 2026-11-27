@@ -1,0 +1,16 @@
+# proposition: E-175 (the block evaluator's table read of a pushed aggregate declines where the row path solves its window over the block before reading the answers)
+# mutation: the decline removed: the operator reads the table where the row path derives the window's conjunction
+# test: cargo test -p abt-tests --test pushdown a_product_read_as_a_table_over_many_names_counts_what_the_set_evaluator_counts
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colplan.rs b/crates/abt-kernel/src/kernel/colplan.rs
+--- a/crates/abt-kernel/src/kernel/colplan.rs
++++ b/crates/abt-kernel/src/kernel/colplan.rs
+@@ -783,7 +783,7 @@
+                         None => {
+                             let cr = self.compiled[rp.ri].clone();
+                             let prog = self.prog;
+-                            if self.bucket_prefetch(&cr, &prog.rules[rp.ri].body[*li], f.ids.len()).is_some() {
++                            if self.bucket_prefetch(&cr, &prog.rules[rp.ri].body[*li], f.ids.len()).is_some() && false {
+                                 return None;
+                             }
+                             let section = p.by_time.get(&t)?;

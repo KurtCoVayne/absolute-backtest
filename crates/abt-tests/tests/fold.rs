@@ -4,7 +4,10 @@
 //! barrier decides as the whole run did up to that bar (Proposition K-4.1,
 //! G5, the causality theorem operationally); and the stream carries every
 //! tuple of the primitives the program reads, in receipt order, with the
-//! barriers of its calendars.
+//! barriers of its calendars, and not the relations only its delivered
+//! answers read.
+
+#![allow(clippy::result_large_err)]
 
 use abt_tests as common;
 
@@ -445,4 +448,74 @@ fn a_listing_no_rule_names_is_not_streamed_and_one_a_rule_names_is() {
     assert_eq!((held(&projected, "listed"), held(&whole, "listed")), (Some(0), Some(listing)));
     assert_eq!(held(&projected, "close"), held(&whole, "close"));
     assert!(whole.stats.received_rows >= projected.stats.received_rows + listing);
+}
+
+/// A run's result and the relations its stream brought a tuple of to the
+/// kernel's stores (one dropped at the fold's door, E-158, is not one), the
+/// relations of the binding nothing reads kept or not.
+fn carried(p: &Program, ds: &Dataset, keep_unread: bool) -> (RunResult, std::collections::BTreeSet<String>) {
+    let opts = Replay { keep_unread, ..Replay::default() };
+    common::run_keeping(p, None, ds, ExecConfig::from_program(p), &opts, |_, k| {
+        let kept: Vec<String> = k.read_relations().into_iter().map(|r| k.relation_name(r).to_string()).collect();
+        Ok(k.store_counts().into_iter().map(|(name, _, _)| name).filter(|n| kept.contains(n)).collect())
+    })
+    .unwrap_or_else(|e| panic!("{}: {}", p.strategy, e))
+}
+
+#[test]
+fn a_stream_whose_aggregates_are_delivered_carries_their_answers_and_not_their_inputs() {
+    // A weekly book that reads the daily bars only through weekly answers
+    // the stream delivers (E-157): its weekly first open and the weekly last
+    // close it is priced at. With market orders nothing else reads the
+    // daily open and close, and the fold drops both (E-158); when an
+    // order fills at the open the executor reads the open there, and it
+    // stays (`Executor::reads_stores`). The daily volume stays in both, as
+    // every fill records its participation of the bar's volume. Each run is
+    // the run that keeps every relation.
+    let book = |orders: &str| {
+        let src = common::StrategyParts {
+            name: format!("open_{}", orders),
+            needs: "need bars @1d   need listing".into(),
+            calendars: Some("weekly = weeks(1)".into()),
+            clock: "decide on weekly".into(),
+            universe: "universe(A, T) :- listed@weekly(A, T).".into(),
+            params: "    qty : Quantity<Shares> = 10 shares".into(),
+            rules: "    rel week_open(A: Equity, @T, O: Price<USD>)\n    week_open(A, T, O) :- universe(A, T), O = first(X) over (T1 in bucket(weekly, T), open(A, T1, X)).".into(),
+            orders: orders.into(),
+            decides: "    decide(T, trade(A, qty)) :- week_open(A, T, O), close@weekly(A, T, P), P > O, flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), week_open(A, T, O), close@weekly(A, T, P), P < O, Q = -Q0.".into(),
+            report: "calendar weekly   periods 52 per year".into(),
+            ..Default::default()
+        }
+        .render();
+        common::program(&src, &format!("open_{}", orders))
+    };
+    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 160, 3);
+    for (orders, open_kept) in [("market", false), ("moo", true)] {
+        let p = book(orders);
+        let (projected, rels) = carried(&p, &ds, false);
+        let (whole, all) = carried(&p, &ds, true);
+        assert!(rels.iter().filter(|n| n.starts_with("pushed.")).count() == 2, "{}: {:?}", orders, rels);
+        assert!(all.contains("open") && all.contains("close"), "{}: {:?}", orders, all);
+        assert_eq!(
+            (rels.contains("open"), rels.contains("close"), rels.contains("volume")),
+            (open_kept, false, true),
+            "{}: {:?}",
+            orders,
+            rels
+        );
+        assert!(projected.fills.len() > 5, "{}: {} fills", orders, projected.fills.len());
+        assert_eq!(digest(&projected), digest(&whole), "{}", orders);
+    }
+    // The weekly book: its weekly last close, its weekly count of bars and
+    // its weekly mean dollar volume are delivered, the count in the last
+    // close's answer (E-159); its daily close and volume stay, the
+    // membership test reading the name's last daily close of the week as
+    // of the label (E-160).
+    let (p, ds) = common::golden_inputs(&common::corpus_dir().join("company").join("mw14.dsl")).unwrap();
+    let (projected, rels) = carried(&p, &ds, false);
+    let (whole, _) = carried(&p, &ds, true);
+    assert_eq!(rels.iter().filter(|n| n.starts_with("pushed.")).count(), 2, "{:?}", rels);
+    assert!(rels.contains("close") && rels.contains("volume"), "{:?}", rels);
+    assert!(projected.fills.len() > 10, "the book trades: {} fills", projected.fills.len());
+    assert_eq!(digest(&projected), digest(&whole));
 }

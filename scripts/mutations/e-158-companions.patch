@@ -1,0 +1,17 @@
+# proposition: E-158 (a relation the executor reads by name stays in the stream when the delivered answers are its only rule readers)
+# mutation: the simulation does not name the open, high and low an order at the open or on a limit or stop reads
+# test: cargo test -p abt-tests --test fold a_stream_whose_aggregates_are_delivered_carries_their_answers_and_not_their_inputs
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/sim/mod.rs b/crates/abt-kernel/src/sim/mod.rs
+--- a/crates/abt-kernel/src/sim/mod.rs
++++ b/crates/abt-kernel/src/sim/mod.rs
+@@ -1286,9 +1286,6 @@
+         if k.prog.base.is_sub_daily() && k.prog.decision_cal == Cal::Base {
+             ids.push(k.price_rel.filter(|&id| k.rels[id].stored).or_else(|| k.rel_ids.get("close").copied()));
+         }
+-        if k.orders_read_companions() {
+-            ids.extend([k.open_rel, k.high_rel, k.low_rel].map(|c| c.map(|(id, _)| id)));
+-        }
+         if !self.cfg.actions_in_prices {
+             ids.extend([k.split_rel, k.dividend_rel]);
+         }

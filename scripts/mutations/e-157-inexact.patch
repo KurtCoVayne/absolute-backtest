@@ -1,0 +1,16 @@
+# proposition: E-157 (a pushed answer is delivered in the stream only when the pass reports no inexact row)
+# mutation: an answer with inexact rows is delivered
+# test: cargo test -p abt-tests --test pushdown a_bucket_whose_rows_arrive_late_is_read_as_a_table_and_locally
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1690,7 +1690,7 @@
+                     continue;
+                 }
+             };
+-            if let (Some(0), Some(relation), Some(version)) = (meta.inexact_rows, meta.relation, meta.version) {
++            if let (Some(_), Some(relation), Some(version)) = (meta.inexact_rows, meta.relation, meta.version) {
+                 let rel = match carried.get(&relation) {
+                     Some(&first) => first,
+                     None => {

@@ -13,7 +13,7 @@ use abt_agg::{reduce, reduce_ticks, Function, Mode, RowsWindow};
 use abt_data::agg::{aggregate, answer};
 use abt_data::query::ResolvedView;
 use abt_data::Store;
-use abt_wire::generated::abt::wire::{AggregateRequest, Duration, Grouping, Numerics, ReceiptFilter, WindowKind};
+use abt_wire::generated::abt::wire::{AggregateRequest, Duration, Factor, Grouping, Numerics, ReceiptFilter, WindowKind};
 use arrow::array::{Array, AsArray, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
@@ -105,6 +105,8 @@ fn request(function: &str, window: WindowKind) -> AggregateRequest {
         t0: None,
         t1: None,
         output: None,
+        factor: None,
+        entities: None,
     }
 }
 
@@ -112,7 +114,7 @@ fn request(function: &str, window: WindowKind) -> AggregateRequest {
 type Row = (u64, i64, Option<f64>, i64, Option<String>);
 
 fn rows(s: &mut Store, req: &AggregateRequest) -> Vec<Row> {
-    let (version, _) = aggregate(s, &ResolvedView::default(), req).unwrap();
+    let version = aggregate(s, &ResolvedView::default(), req).unwrap().version;
     let b = answer(s, &version).unwrap();
     let schema = b.schema();
     let tcol = if schema.index_of("t").is_ok() { "t" } else { "label" };
@@ -315,16 +317,18 @@ fn answers_are_cache_objects_keyed_by_request_and_versions() {
     let mut s = store();
     let mut req = request("mean", WindowKind::Rows);
     req.n = 3;
-    let (v1, k1) = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
-    let (v2, k2) = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
-    assert_eq!((v1.clone(), k1), (v2, k2), "a hit");
+    let a1 = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    let a2 = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    assert_eq!(a1, a2, "a hit");
+    let (v1, k1) = (a1.version, a1.key);
     req.numerics = Numerics::Running;
-    let (_, k3) = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    let k3 = aggregate(&mut s, &ResolvedView::default(), &req).unwrap().key;
     assert_ne!(k1, k3, "the numerics are part of the key (D-6.3)");
     // New input rows: a new version of the input, a new object.
     s.ingest("equity.close", &[close_rows(&[(1, T0 + 50 * DAY, 1.0)])], "test", BTreeMap::new()).unwrap();
     req.numerics = Numerics::TwoPass;
-    let (v4, k4) = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    let a4 = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    let (v4, k4) = (a4.version, a4.key);
     assert_ne!(k1, k4);
     assert_ne!(v1, v4);
     // A receipt filter is part of the request.
@@ -337,6 +341,21 @@ fn answers_are_cache_objects_keyed_by_request_and_versions() {
     req.t1 = Some(T0 + 22 * DAY);
     let got = rows(&mut s, &req);
     assert!(got.iter().all(|r| r.1 >= T0 + 20 * DAY && r.1 <= T0 + 22 * DAY) && !got.is_empty());
+}
+
+/// A request protocol 1.2 could write keeps the cache key a 1.2 tree gave
+/// it (pinned from one): the fields 1.3 added are left out of its canonical
+/// form while absent (ERRATA E-155), so every cached answer is found again.
+#[test]
+fn a_1_2_request_keeps_its_cache_key() {
+    let mut req = request("mean", WindowKind::Bucket);
+    req.bucket = Some("1w".into());
+    req.min = Some(2);
+    let versions = vec![("equity.close".to_string(), "ab12".to_string()), ("calendar_label".to_string(), "cd34".to_string())];
+    let key = abt_data::agg::cache_key(&req, &versions).unwrap();
+    assert_eq!(key.hex(), "e031b5180917ad66d4a6784cdc2df42ab4b4ac7b437f5a8c5ec36712e8fda317");
+    req.entities = Some(vec![1]);
+    assert_ne!(abt_data::agg::cache_key(&req, &versions).unwrap(), key, "a scoped request is its own object");
 }
 
 // ---------------------------------------------------------------- exact
@@ -485,4 +504,300 @@ fn exact_is_refused_over_values_off_any_grid_and_two_pass_still_answers() {
     assert!(err.to_string().contains("off any decimal grid"), "{}", err);
     req.numerics = Numerics::TwoPass;
     assert!(!rows_of(&mut s, &req).is_empty());
+}
+
+// ------------------------------------------------- protocol 1.3 (E-156)
+
+/// A row of a relation keyed by an instrument and a time: (instrument, t,
+/// receipt, value), the value none where null.
+type Fact = (u64, i64, i64, Option<f64>);
+
+/// Rows of a relation whose value column is `column`, with their receipts.
+fn fact_rows(column: &str, rows: &[Fact]) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("A", DataType::UInt64, false),
+        Field::new("T", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+        Field::new(column, DataType::Float64, true),
+        Field::new("r", DataType::Timestamp(TimeUnit::Nanosecond, None), false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(UInt64Array::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())),
+            Arc::new(TimestampNanosecondArray::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(rows.iter().map(|r| r.3).collect::<Vec<_>>())),
+            Arc::new(TimestampNanosecondArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+        ],
+    )
+    .unwrap()
+}
+
+/// A store of the relations given, (name, value column, rows), held hot or
+/// not, with `store`'s calendars.
+fn store_of(relations: &[(&str, &str, &[Fact])], hot: bool) -> Store {
+    let mut s = Store::temporary("agg-of").unwrap();
+    let attributes = if hot { BTreeMap::from([("storage".to_string(), "hot".to_string())]) } else { BTreeMap::new() };
+    for (name, column, rows) in relations {
+        s.ingest(name, &[fact_rows(column, rows)], "test", attributes.clone()).unwrap();
+    }
+    let mut cal: Vec<(&str, i64)> = (0..DAYS).map(|d| ("1d", T0 + d * DAY)).collect();
+    cal.extend((0..DAYS).filter(|d| d % 5 == 4).map(|d| ("1w", T0 + d * DAY)));
+    s.ingest("calendar_label", &[calendar_rows(&cal)], "test", BTreeMap::new()).unwrap();
+    s
+}
+
+/// The labels of the weekly calendar of `store`.
+fn weeks() -> Vec<i64> {
+    (0..DAYS).filter(|d| d % 5 == 4).map(|d| T0 + d * DAY).collect()
+}
+
+/// Whether a time is a label of the daily calendar.
+fn daily(t: i64) -> bool {
+    (t - T0) % DAY == 0 && t < T0 + DAYS * DAY
+}
+
+/// A relation's column as a stream carries it: (instrument, t) to value.
+fn streamed(s: &Store, relation: &str, column: &str) -> BTreeMap<(u64, i64), f64> {
+    use abt_wire::generated::abt::wire::{ClockSource, StreamSpec, VersionRef};
+    let spec = StreamSpec {
+        relations: Some(vec![VersionRef {
+            relation: relation.into(),
+            version: s.registry.current(relation, Some("test")).unwrap().to_string(),
+        }]),
+        binding: None,
+        calendars: None,
+        receipt_filter: None,
+        clock: ClockSource::Replay,
+        session: None,
+        entities: None,
+        from: None,
+        whole: None,
+    };
+    let mut stream = abt_data::stream::Stream::open(s, abt_data::stream::resolve(s, &spec).unwrap()).unwrap();
+    let mut out = BTreeMap::new();
+    while let Some(b) = stream.next_batch(s, 0, None, 1_000).unwrap() {
+        let col = |n: &str| b.column(b.schema().index_of(n).unwrap()).clone();
+        let (entity, t, v) = (col("entity"), col("t"), col(&format!("{}.{}", relation, column)));
+        for i in 0..b.num_rows() {
+            out.insert(
+                (
+                    entity.as_primitive::<arrow::datatypes::UInt64Type>().value(i),
+                    t.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i),
+                ),
+                v.as_primitive::<arrow::datatypes::Float64Type>().value(i),
+            );
+        }
+    }
+    out
+}
+
+/// `count` counts the window's rows, with a value or not, as the kernel's
+/// `count` counts the rows its window solves; a null is still an inexact
+/// row, since the kernel reads it as NaN or refuses it.
+#[test]
+fn count_counts_the_windows_rows_with_or_without_a_value() {
+    let nulls = [(2u64, T0 + 3 * DAY), (1u64, T0 + 11 * DAY)];
+    let rows: Vec<Fact> = data().into_iter().map(|(a, t, p)| (a, t, t, (!nulls.contains(&(a, t))).then_some(p))).collect();
+    let mut s = store_of(&[("equity.close", "P", &rows)], false);
+    let mut req = request("count", WindowKind::Bucket);
+    req.bucket = Some("1w".into());
+    let answered = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    assert_eq!(answered.inexact_rows, nulls.len() as u64);
+    let got = rows_of(&mut s, &req);
+    let mut want: Vec<Row> = Vec::new();
+    for a in 1..=3u64 {
+        let mut prev = i64::MIN;
+        for l in weeks() {
+            let n = rows.iter().filter(|r| r.0 == a && r.1 > prev && r.1 <= l && daily(r.1)).count() as i64;
+            if n > 0 {
+                want.push((a, l, Some(n as f64), n, None));
+            }
+            prev = l;
+        }
+    }
+    want.sort_by_key(|r| (r.1, r.0));
+    assert_eq!(got, want);
+    // A rows window: three rows at every row from the third, a null one too.
+    req.window = WindowKind::Rows;
+    req.bucket = None;
+    req.n = 3;
+    let got = rows_of(&mut s, &req);
+    for a in 1..=3u64 {
+        let ts: Vec<i64> = rows.iter().filter(|r| r.0 == a && daily(r.1)).map(|r| r.1).collect();
+        for t in &ts[2..] {
+            let g = got.iter().find(|r| r.0 == a && r.1 == *t).unwrap_or_else(|| panic!("no count for {} at {}", a, t));
+            assert_eq!((g.2, g.3), (Some(3.0), 3));
+        }
+    }
+    // A mean leaves the nulls out, as before.
+    let mut req = request("mean", WindowKind::Bucket);
+    req.bucket = Some("1w".into());
+    let got = rows_of(&mut s, &req);
+    let g = got.iter().find(|r| r.0 == 2 && r.1 == T0 + 4 * DAY).unwrap();
+    assert_eq!(g.3, 4, "five rows in the week, one null");
+}
+
+/// A product of two relations: its value is abt-agg's reduction, in time
+/// order, of the products `P * V` of the rows both relations hold at one
+/// instrument and day, as the stream carries their values (a close
+/// without its volume, and a volume without its close, join nothing); bit
+/// for bit over Parquet and over the hot store.
+#[test]
+fn a_product_of_two_relations_is_the_joined_rows_reduced_by_abt_agg_bit_for_bit() {
+    let close: Vec<Fact> = data_cents().into_iter().map(|(a, t, p)| (a, t, t, Some(p))).collect();
+    let mut volume: Vec<Fact> = close
+        .iter()
+        .filter(|r| (r.0, r.1) != (2, T0 + 7 * DAY))
+        .map(|&(a, t, r, _)| (a, t, r, Some((1_000 + (t / DAY + a as i64 * 37) % 5_000) as f64)))
+        .collect();
+    // The third instrument trades on even days only.
+    volume.push((3, T0 + DAY, T0 + DAY, Some(5.0)));
+    volume.sort_by_key(|r| (r.1, r.0));
+    for hot in [false, true] {
+        let mut s = store_of(&[("equity.close", "P", &close), ("equity.volume", "V", &volume)], hot);
+        for r in ["equity.close", "equity.volume"] {
+            assert_eq!(s.is_hot(s.registry.current(r, Some("test")).unwrap()), hot, "{}", r);
+        }
+        let (p, v) = (streamed(&s, "equity.close", "P"), streamed(&s, "equity.volume", "V"));
+        let products = |a: u64, lo: i64, hi: i64| -> Vec<f64> {
+            p.iter()
+                .filter(|((e, t), _)| *e == a && *t > lo && *t <= hi && daily(*t))
+                .filter_map(|(k, x)| v.get(k).map(|y| x * y))
+                .collect()
+        };
+        let mut req = request("mean", WindowKind::Bucket);
+        req.bucket = Some("1w".into());
+        req.factor = Some(Box::new(Factor {
+            relation: "equity.volume".into(),
+            column: "V".into(),
+        }));
+        let answered = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+        assert_eq!(answered.inexact_rows, 0, "hot {}", hot);
+        let got = rows_of(&mut s, &req);
+        let mut want = Vec::new();
+        for a in 1..=3u64 {
+            let mut prev = i64::MIN;
+            for l in weeks() {
+                let xs = products(a, prev, l);
+                if !xs.is_empty() {
+                    want.push((a, l, reduce(Function::Mean, Mode::TwoPass, &[&xs]).unwrap().map(f64::to_bits), xs.len() as i64));
+                }
+                prev = l;
+            }
+        }
+        want.sort_by_key(|r| (r.1, r.0));
+        let mine: Vec<(u64, i64, Option<u64>, i64)> = got.iter().map(|r| (r.0, r.1, r.2.map(f64::to_bits), r.3)).collect();
+        assert_eq!(mine, want, "hot {}", hot);
+        let missing = got.iter().find(|r| r.0 == 2 && r.1 == T0 + 9 * DAY).unwrap();
+        assert_eq!(missing.3, 4, "the day without a volume joins nothing");
+        // A rows window over the joined rows: the product relation's last
+        // three rows.
+        req.window = WindowKind::Rows;
+        req.bucket = None;
+        req.n = 3;
+        let got = rows_of(&mut s, &req);
+        for a in 1..=3u64 {
+            let xs = products(a, i64::MIN, i64::MAX);
+            let ts: Vec<i64> = p.keys().filter(|(e, t)| *e == a && daily(*t) && v.contains_key(&(a, *t))).map(|k| k.1).collect();
+            for (window, t) in xs.windows(3).zip(&ts[2..]) {
+                let g = got.iter().find(|r| r.0 == a && r.1 == *t).unwrap();
+                assert_eq!(g.2.map(f64::to_bits), reduce(Function::Mean, Mode::TwoPass, &[window]).unwrap().map(f64::to_bits));
+            }
+        }
+    }
+}
+
+/// `entities` restricts every read of the pass to those instruments: the
+/// answer is the unscoped one's rows of them, under a key of its own, and
+/// the instruments are a set.
+#[test]
+fn an_instrument_filter_answers_only_those_instruments_under_its_own_key() {
+    let mut s = store();
+    let mut req = request("mean", WindowKind::Rows);
+    req.n = 3;
+    let whole = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    let all = rows_of(&mut s, &req);
+    req.entities = Some(vec![3, 1]);
+    let scoped = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+    assert_ne!(scoped.key, whole.key);
+    assert_ne!(scoped.relation, whole.relation);
+    let got = rows_of(&mut s, &req);
+    assert!(got.iter().any(|r| r.0 == 3));
+    assert_eq!(got, all.iter().filter(|r| r.0 != 2).cloned().collect::<Vec<_>>());
+    req.entities = Some(vec![1, 3, 3]);
+    assert_eq!(aggregate(&mut s, &ResolvedView::default(), &req).unwrap(), scoped);
+    // A product reads the second relation's rows of those instruments only.
+    let close: Vec<Fact> = data().into_iter().map(|(a, t, p)| (a, t, t, Some(p))).collect();
+    let volume: Vec<Fact> = close.iter().map(|&(a, t, r, _)| (a, t, r, Some(a as f64))).collect();
+    let mut s = store_of(&[("equity.close", "P", &close), ("equity.volume", "V", &volume)], false);
+    let mut req = request("sum", WindowKind::Bucket);
+    req.bucket = Some("1w".into());
+    req.factor = Some(Box::new(Factor {
+        relation: "equity.volume".into(),
+        column: "V".into(),
+    }));
+    let all = rows_of(&mut s, &req);
+    req.entities = Some(vec![2]);
+    let got = rows_of(&mut s, &req);
+    assert!(!got.is_empty());
+    assert_eq!(got, all.into_iter().filter(|r| r.0 == 2).collect::<Vec<_>>());
+}
+
+/// An answer's inexact rows: a row received after the barrier of the first
+/// label whose window holds it, a null, and an answer row whose arithmetic
+/// failed; a row received at the barrier's instant is on time, and a
+/// request naming no calendar has no barrier to prove any row by.
+#[test]
+fn inexact_rows_counts_rows_received_after_their_barrier_and_nulls() {
+    let on_time: Vec<Fact> = (0..10)
+        .flat_map(|d| (1..=2u64).map(move |a| (a, T0 + d * DAY, T0 + d * DAY, Some(10.0 * a as f64 + d as f64))))
+        .collect();
+    let mut bucket = request("mean", WindowKind::Bucket);
+    bucket.bucket = Some("1w".into());
+    let mut daily_rows = request("mean", WindowKind::Rows);
+    daily_rows.n = 2;
+    let mut s = store_of(&[("equity.close", "P", &on_time)], false);
+    for req in [&bucket, &daily_rows] {
+        assert_eq!(aggregate(&mut s, &ResolvedView::default(), req).unwrap().inexact_rows, 0);
+    }
+    // The barriers are at a label's last instant: day 2's row received on
+    // day 6 is after its week's (day 4's) and its day's; day 7's received on
+    // day 10 after day 9's; day 9's received at day 9's barrier is on time;
+    // day 8's value is null.
+    let late: Vec<Fact> = on_time
+        .iter()
+        .map(|&(a, t, r, x)| match (a, (t - T0) / DAY) {
+            (1, 2) => (a, t, T0 + 6 * DAY, x),
+            (2, 7) => (a, t, T0 + 10 * DAY, x),
+            (2, 9) => (a, t, T0 + 10 * DAY - 1, x),
+            (1, 8) => (a, t, r, None),
+            _ => (a, t, r, x),
+        })
+        .collect();
+    let mut s = store_of(&[("equity.close", "P", &late)], false);
+    for req in [&bucket, &daily_rows] {
+        assert_eq!(aggregate(&mut s, &ResolvedView::default(), req).unwrap().inexact_rows, 3, "{:?}", req.window);
+    }
+    // The late row's week waits on it: the answer's receipt is day 6.
+    let a = aggregate(&mut s, &ResolvedView::default(), &bucket).unwrap();
+    let b = answer(&s, &a.version).unwrap();
+    let (e, l, r) = (b.column_by_name("entity").unwrap(), b.column_by_name("label").unwrap(), b.column_by_name("r").unwrap());
+    let at = (0..b.num_rows())
+        .find(|&i| e.as_primitive::<arrow::datatypes::UInt64Type>().value(i) == 1 && l.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(i) == T0 + 4 * DAY)
+        .unwrap();
+    assert_eq!(r.as_primitive::<arrow::datatypes::TimestampNanosecondType>().value(at), T0 + 6 * DAY);
+    // No calendar: every row inexact.
+    let mut bare = daily_rows.clone();
+    bare.calendar = None;
+    let s_rows = on_time.len() as u64;
+    let mut s = store_of(&[("equity.close", "P", &on_time)], false);
+    assert_eq!(aggregate(&mut s, &ResolvedView::default(), &bare).unwrap().inexact_rows, s_rows);
+    // The correlation of a constant series fails at every answer row.
+    let flat: Vec<Fact> = (0..6).map(|d| (1, T0 + d * DAY, T0 + d * DAY, Some(5.0))).collect();
+    let mut s = store_of(&[("equity.close", "P", &flat)], false);
+    let mut corr = request("corr", WindowKind::Rows);
+    corr.second_column = Some("P".into());
+    corr.n = 3;
+    let a = aggregate(&mut s, &ResolvedView::default(), &corr).unwrap();
+    assert_eq!((a.rows, a.inexact_rows), (4, 4));
 }

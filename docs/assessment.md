@@ -638,6 +638,35 @@ What the parity run still derives row by row: `dvol` 39.7 and
 `dividend_or_zero` 3.6, and `fill` 59.7 s (the executor's reads of
 `tr_index@weekly`): S11 to S14.
 
+**Package 2, second part (Nov 26): weekly answers computed by the data
+service and delivered in the stream; the parity run from 180 s to 134 s,
+the same returns.** E-155 to E-159, E-175. Protocol 1.3 (W1) carries the
+fields: a factor relation, an instrument filter, an answer asked without
+its table, and the answer's version, row count and count of inexact rows.
+The service's pass (D1) computes a count as rows, a mean of a product of
+two relations (`dvol`'s close times volume) and an instrument-filtered
+answer, bit for bit the kernel's arithmetic, and counts the rows received
+after their barrier. Where that count is 0 and the literal's bucket is the
+decision calendar's at the rule's own label, the kernel names the answer's
+cache object in the stream and reads it with no local fallback (K1,
+`Kernel::delivered_answers`), `traded@weekly` shares `close@weekly`'s
+answer (K3), and the column-block evaluator reads delivered answers
+through the same path (`Kernel::delivered_block`, `ColOp::PushedJoin`).
+A streamed cache object is held against pruning while its stream is open.
+`dvol` 39.7 s, `traded@weekly` 15.7 s and `close@weekly` leave the clock
+(each derived through its plan at every bar); `push` grows from 6.2 s to
+15.8 s, the service's two new passes.
+
+On `m8-bench2`, the parity store, `--evaluator block`: 134.5 and 133.1 s
+against 180.2 s, the fingerprint `6e72c9bb…` unchanged, the front's peak
+1.13 GB. Close and volume still stream: `eligible`'s as-of read of
+`close@base` (E-160) and the executor's `bar_volume` read them (K2, E-158,
+drops a relation only delivered answers read; none in MW14). What the
+run spends now (a profile of this tree): `decide` 42.5 s and `fill` 44.2 s,
+a fifth of the CPU in `case_value` and a seventh in `window_columns`
+(`dividend_at`, `split_factor`, `dividend_or_zero`: S13, S14), `push` 15.8
+s, `check` 8.3 s, the data service 92 s of CPU beside the front's 110 s.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

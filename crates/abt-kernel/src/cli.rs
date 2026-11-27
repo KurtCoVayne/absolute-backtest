@@ -165,11 +165,13 @@ fn run_keeping(
 ) -> Result<(RunResult, Vec<String>), RunError> {
     // A run writes its outputs to the data service it reads (K-7.1), what
     // its metrics are computed from (E-66). The ledger reads its relations
-    // after the run (E-141).
+    // after the run (E-141), the tables every derived relation's extension
+    // (E-158).
     let opts = crate::kernel::Replay {
         record_summaries: tables.is_some(),
         write_outputs: true,
         read_after: ledger.to_vec(),
+        read_after_any: tables.is_some(),
         ..Default::default()
     };
     crate::kernel::run_keeping(prog, lowered, client, cfg, &opts, |result, k| {
@@ -288,7 +290,9 @@ fn checked_program(args: &Args) -> (crate::check::Program, Vec<crate::check::Dia
 
 /// A run under the plan whose kernel, at the end of the stream, `f` reads
 /// with the run (the state tables and the provenance commands);
-/// `read_after` names the relations `f` reads (`Replay::read_after`).
+/// `read_after` names the relations `f` reads (`Replay::read_after`), and
+/// `read_after_any` says it reads every relation (`Replay::read_after_any`).
+#[allow(clippy::too_many_arguments)]
 fn with_kernel<T: Send>(
     prog: &crate::check::Program,
     client: &crate::kernel::DataClient,
@@ -296,11 +300,13 @@ fn with_kernel<T: Send>(
     cfg: ExecConfig,
     record_summaries: bool,
     read_after: &[String],
+    read_after_any: bool,
     f: impl for<'k> FnOnce(&RunResult, &mut Kernel<'k>) -> Result<T, RunError> + Send,
 ) -> Result<T, RunError> {
     let opts = crate::kernel::Replay {
         record_summaries,
         read_after: read_after.to_vec(),
+        read_after_any,
         ..Default::default()
     };
     crate::kernel::run_keeping(prog, Some(lowered), client, cfg, &opts, f).map(|(_, t)| t)
@@ -1100,7 +1106,7 @@ pub fn main_with(raw: Vec<String>) {
                 eprintln!("{}", e);
                 exit(2)
             });
-            let text = with_kernel(&prog, &client, &compiled.lowered, cfg, record, rel.as_slice(), |result, k| {
+            let text = with_kernel(&prog, &client, &compiled.lowered, cfg, record, rel.as_slice(), false, |result, k| {
                 use crate::state::tables;
                 let result = result.clone();
                 let bars = result.bars.clone();
@@ -1220,7 +1226,9 @@ pub fn main_with(raw: Vec<String>) {
                     _ => None,
                 })
                 .collect();
-            let answers = with_kernel(prog, &client, &compiled.lowered, cfg, false, &read_after, |result, k| {
+            // The coverage reads every relation at every bar.
+            let read_after_any = queries.iter().any(|q| matches!(q, crate::query::Query::Coverage { .. }));
+            let answers = with_kernel(prog, &client, &compiled.lowered, cfg, false, &read_after, read_after_any, |result, k| {
                 // `ledger ... into` writes through the data service the run
                 // read, when its store lasts.
                 let cx = crate::query::Context {

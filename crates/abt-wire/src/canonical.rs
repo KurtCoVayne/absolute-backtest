@@ -4,6 +4,13 @@
 //! shortest round-trip form (`Number.prototype.toString`), and an integer
 //! (`i64`, `u64`) as its exact decimal digits. A NaN or an infinity is an
 //! error at construction, never `null`. The wire bytes are never hashed.
+//!
+//! A field a minor version added (P-7) is left out of its table's canonical
+//! form while it is absent or at its default ([`ADDED`]), so a message
+//! written without it has the canonical form, and every hash over it (a
+//! cache key, D-3.5), it had before. The rule reads the owned type's name:
+//! a message rendered through a `serde_json::Value` first has lost it, and
+//! a hash over a message renders the message itself.
 
 use std::fmt;
 
@@ -56,6 +63,41 @@ pub fn to_canonical_json<T: Serialize + ?Sized>(v: &T) -> Result<String, Canonic
 pub fn canonicalize_json_text(text: &str) -> Result<String, CanonicalError> {
     let v: serde_json::Value = serde_json::from_str(text).map_err(|e| CanonicalError(e.to_string()))?;
     to_canonical_json(&v)
+}
+
+/// The value at which an added field is left out of the canonical form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Omitted {
+    /// The field is absent (`null`).
+    Absent,
+    /// The field holds its default, `true`.
+    True,
+}
+
+/// The fields protocol 1.3 added, by table, and the value at which each is
+/// left out of the canonical form (ERRATA E-155).
+pub const ADDED: [(&str, &str, Omitted); 9] = [
+    ("AggregateRequest", "factor", Omitted::Absent),
+    ("AggregateRequest", "entities", Omitted::Absent),
+    ("AggregateCall", "answer", Omitted::True),
+    ("AggregateResponse", "relation", Omitted::Absent),
+    ("AggregateResponse", "version", Omitted::Absent),
+    ("AggregateResponse", "rows", Omitted::Absent),
+    ("AggregateResponse", "inexact_rows", Omitted::Absent),
+    ("StreamSpec", "from", Omitted::Absent),
+    ("StreamSpec", "whole", Omitted::Absent),
+];
+
+/// Whether member `field` of table `table` holding `v` is left out.
+fn omitted(table: &str, field: &str, v: &Node) -> bool {
+    ADDED.iter().any(|&(t, f, o)| {
+        t == table
+            && f == field
+            && match o {
+                Omitted::Absent => *v == Node::Null,
+                Omitted::True => *v == Node::Bool(true),
+            }
+    })
 }
 
 /// A JSON value with its integers kept exact.
@@ -267,10 +309,10 @@ impl ser::Serializer for Tree {
         Ok(VariantSeqBuilder(variant, Vec::with_capacity(len)))
     }
     fn serialize_map(self, len: Option<usize>) -> Result<MapBuilder, CanonicalError> {
-        Ok(MapBuilder(Vec::with_capacity(len.unwrap_or(0)), None))
+        Ok(MapBuilder(Vec::with_capacity(len.unwrap_or(0)), None, ""))
     }
-    fn serialize_struct(self, _: &'static str, len: usize) -> Result<MapBuilder, CanonicalError> {
-        Ok(MapBuilder(Vec::with_capacity(len), None))
+    fn serialize_struct(self, name: &'static str, len: usize) -> Result<MapBuilder, CanonicalError> {
+        Ok(MapBuilder(Vec::with_capacity(len), None, name))
     }
     fn serialize_struct_variant(self, _: &'static str, _: u32, variant: &'static str, len: usize) -> Result<VariantMapBuilder, CanonicalError> {
         Ok(VariantMapBuilder(variant, Vec::with_capacity(len)))
@@ -279,7 +321,9 @@ impl ser::Serializer for Tree {
 
 struct SeqBuilder(Vec<Node>);
 struct VariantSeqBuilder(&'static str, Vec<Node>);
-struct MapBuilder(Vec<(String, Node)>, Option<String>);
+/// A map's or a struct's members, the key awaiting its value, and the
+/// struct's name (empty for a map).
+struct MapBuilder(Vec<(String, Node)>, Option<String>, &'static str);
 struct VariantMapBuilder(&'static str, Vec<(String, Node)>);
 
 impl ser::SerializeSeq for SeqBuilder {
@@ -362,7 +406,10 @@ impl ser::SerializeStruct for MapBuilder {
     type Ok = Node;
     type Error = CanonicalError;
     fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, v: &T) -> Result<(), CanonicalError> {
-        self.0.push((key.to_string(), v.serialize(Tree)?));
+        let v = v.serialize(Tree)?;
+        if !omitted(self.2, key, &v) {
+            self.0.push((key.to_string(), v));
+        }
         Ok(())
     }
     fn end(self) -> Result<Node, CanonicalError> {

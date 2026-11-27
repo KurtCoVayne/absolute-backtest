@@ -21,7 +21,8 @@ impl SimExecutor {
         let dividend_rel = if self.cfg.actions_in_prices { None } else { k.dividend_rel };
         if let Some(id) = split_rel {
             let entity_pos = k.rels[id].entity_positions.first().copied().unwrap_or(0);
-            let splits: Vec<(Sym, f64)> = k.stores[id]
+            let splits: Vec<(Sym, f64)> = k
+                .store(id)
                 .by_time
                 .get(&t)
                 .map(|tus| tus.iter().filter_map(|tu| Some((tu[entity_pos].as_equity()?, tu.iter().rev().find_map(|v| v.as_f64())?))).collect())
@@ -59,7 +60,7 @@ impl SimExecutor {
             let times: Vec<usize> = sig.args.iter().enumerate().filter(|(i, a)| a.ty == Ty::Timestamp && *i != info.key_pos).map(|(i, _)| i).collect();
             let amount_col = sig.args.iter().position(|a| a.mode == Mode::Out && matches!(&a.ty, Ty::Quantity(d) if d.c2 == 2 && d.s2 == -2));
             if let (Some(&ex_col), Some(&pay_col), Some(amount_col)) = (times.first(), times.get(1), amount_col) {
-                for tus in k.stores[id].by_time.range(..=t).map(|(_, v)| v) {
+                for tus in k.store(id).by_time.range(..=t).map(|(_, v)| v) {
                     for tu in tus {
                         if let (Some(sym), Some(ex), Some(pay), Some(amount)) = (tu[entity_pos].as_equity(), tu[ex_col].as_time(), tu[pay_col].as_time(), tu[amount_col].as_f64()) {
                             if ex == t {
@@ -117,7 +118,8 @@ impl SimExecutor {
         let mut book_changed = false;
         if let Some(id) = k.delisted_rel {
             let entity_pos = k.rels[id].entity_positions.first().copied().unwrap_or(0);
-            let gone: Vec<(Sym, String)> = k.stores[id]
+            let gone: Vec<(Sym, String)> = k
+                .store(id)
                 .by_time
                 .get(&t)
                 .map(|tus| {

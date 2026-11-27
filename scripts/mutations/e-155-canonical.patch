@@ -1,0 +1,16 @@
+# proposition: E-155 (a field protocol 1.3 added is left out of the canonical form while absent)
+# mutation: the added fields are written while absent, as `null`
+# test: cargo test -p abt-wire --test rpc a_1_2_aggregate_request_and_stream_spec_keep_their_canonical_bytes
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-wire/src/canonical.rs b/crates/abt-wire/src/canonical.rs
+--- a/crates/abt-wire/src/canonical.rs
++++ b/crates/abt-wire/src/canonical.rs
+@@ -407,7 +407,7 @@
+     type Error = CanonicalError;
+     fn serialize_field<T: Serialize + ?Sized>(&mut self, key: &'static str, v: &T) -> Result<(), CanonicalError> {
+         let v = v.serialize(Tree)?;
+-        if !omitted(self.2, key, &v) {
++        if !omitted("", key, &v) {
+             self.0.push((key.to_string(), v));
+         }
+         Ok(())

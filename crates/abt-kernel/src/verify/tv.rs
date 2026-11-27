@@ -132,7 +132,13 @@ pub struct Run {
 /// after the run), or the halt.
 pub fn run_with_ledgers(p: &Program, lowered: &Lowered, ds: &Dataset, cfg: ExecConfig) -> Result<Run, String> {
     let client = crate::kernel::connect_dataset(ds, p).map_err(|e| e.to_string())?;
-    let (r, l) = crate::kernel::run_keeping(p, Some(lowered), &client, cfg, &crate::kernel::Replay::default(), |r, k| Ok(ledgers(k, p, &r.bars))).map_err(|e| e.to_string())?;
+    // The ledgers derive every derived relation again after the run, from
+    // inputs a delivered literal may have read alone (ERRATA E-158).
+    let opts = crate::kernel::Replay {
+        read_after_any: true,
+        ..Default::default()
+    };
+    let (r, l) = crate::kernel::run_keeping(p, Some(lowered), &client, cfg, &opts, |r, k| Ok(ledgers(k, p, &r.bars))).map_err(|e| e.to_string())?;
     Ok(Run {
         digest: digest(&r),
         ledgers: l,

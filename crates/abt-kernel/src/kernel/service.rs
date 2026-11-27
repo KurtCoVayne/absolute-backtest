@@ -201,6 +201,8 @@ impl KernelService {
                 Some(k) => Some(super::checkpoints::read(&client, k).map_err(run_error)?),
                 None => None,
             },
+            // The run's queries come after it begins, naming any relation.
+            read_after_any: true,
             ..Default::default()
         };
         // The executor the mode takes: a broker this build has no adapter

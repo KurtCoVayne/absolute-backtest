@@ -1,0 +1,16 @@
+# proposition: E-156 (a row received after the barrier of the first label holding it is an inexact row)
+# mutation: a row is late only against the calendar's last barrier
+# test: cargo test -p abt-data --test agg inexact_rows_counts_rows_received_after_their_barrier_and_nulls
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/agg.rs b/crates/abt-data/src/agg.rs
+--- a/crates/abt-data/src/agg.rs
++++ b/crates/abt-data/src/agg.rs
+@@ -874,7 +874,7 @@
+     fn late(&self, all: &Series) -> u64 {
+         let Some(barriers) = self.barriers else { return all.recv.len() as u64 };
+         let late = all.recv.iter().filter(|&&(t, r)| {
+-            let first = barriers.partition_point(|b| b.0 < t);
++            let first = barriers.len() - 1;
+             barriers.get(first).is_some_and(|b| r > b.1)
+         });
+         late.count() as u64

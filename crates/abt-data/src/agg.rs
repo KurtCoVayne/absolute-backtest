@@ -16,15 +16,30 @@
 //! `rows(N)` without `min`, V-7.2); an aggregate whose arithmetic fails there
 //! (the correlation of a constant series) carries the message instead of a
 //! value, which the kernel reports as it reports its own (ERRATA E-31).
+//!
+//! Protocol 1.3 (ERRATA E-156): `count` counts the window's rows, with a
+//! value or not, as the kernel's `count` does; a `factor` makes the value
+//! aggregated the product of the column and the factor's column over the
+//! rows both relations hold at one entity and `t` (the kernel's join
+//! `p(A, T, P), q(A, T, V), D = P * V`), formed as the kernel's `*` forms
+//! it; `entities` restricts every read of the pass to those instruments.
+//! The answer counts its inexact rows: the input rows received after the
+//! barrier of the first label whose window holds them, the rows holding a
+//! null the kernel would read, a second row of a group at one instant (the
+//! kernel orders those by their values, the pass by the store's key), and
+//! the answer rows whose arithmetic failed. With none, every answer row at
+//! a label is computed from rows received by that label's barrier, and is
+//! the kernel's window there.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 use abt_agg::{AggError, Function, Mode, RowsWindow, WindowState};
 use abt_wire::canonical::Canonical;
-use abt_wire::generated::abt::wire::{AggregateRequest, ColumnSpec, ColumnType, Grouping, Numerics, RelationSchema, Role, WindowKind};
+use abt_wire::generated::abt::wire::{AggregateRequest, ColumnSpec, ColumnType, Factor, Grouping, Numerics, RelationSchema, Role, WindowKind};
 use abt_wire::hash::Hash;
-use arrow::array::{ArrayRef, AsArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array};
+use arrow::array::{Array, ArrayRef, AsArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array};
 
 use crate::error::DataError;
 use crate::query::ResolvedView;
@@ -39,7 +54,7 @@ type GroupKey = u64;
 /// group, the value (none where the aggregate failed), the rows counted,
 /// the failure's message, and the latest receipt of the group's rows at or
 /// before `t`, from which instant the answer is what a reader of the
-/// received rows computes (ERRATA E-47).
+/// received rows computes (ERRATA E-47); and the inexact rows counted.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Out {
     t: Vec<i64>,
@@ -48,6 +63,7 @@ struct Out {
     count: Vec<i64>,
     error: Vec<Option<String>>,
     r: Vec<i64>,
+    inexact: u64,
 }
 
 impl Out {
@@ -65,8 +81,11 @@ impl Out {
     }
 }
 
-/// The labels of a calendar in the view: its `calendar_label` rows.
-pub fn calendar_labels(store: &Store, view: &ResolvedView, calendar: &str) -> Result<Vec<i64>, DataError> {
+/// The labels of a calendar in the view, in order, each with the instant of
+/// its barrier: its `calendar_label` rows. A label the clock holds more than
+/// once has its earliest instant, and a row without one is at its label, as
+/// the stream emits its barriers (D-5.1).
+pub fn calendar_labels(store: &Store, view: &ResolvedView, calendar: &str) -> Result<Vec<(i64, i64)>, DataError> {
     let version = match view.versions.iter().find(|(r, _)| crate::stream::is_clock(r)) {
         Some((_, v)) => v.clone(),
         None => view.version(store, CLOCK)?,
@@ -78,37 +97,45 @@ pub fn calendar_labels(store: &Store, view: &ResolvedView, calendar: &str) -> Re
         .iter()
         .position(|c| c.name == "calendar")
         .ok_or_else(|| DataError::Schema("a clock without a `calendar` column".into()))?;
+    let ac = s.columns.iter().position(|c| c.name == "at");
     let lc = layout(s).t;
-    let rows = store.read(
-        &version,
-        &RowFilter {
-            latest_only: true,
-            ..RowFilter::default()
-        },
-    )?;
+    // Every revision: the stream emits a barrier for each row of a label,
+    // and a row is read at the first.
+    let rows = store.read(&version, &RowFilter::default())?;
     let code = store.registry.label_code(calendar);
     let mut out = Vec::new();
     for b in &rows {
         let cals = b.column(cc).as_primitive::<arrow::datatypes::UInt32Type>();
         let ts = rows::times(b, lc);
+        let ats = ac.map(|c| rows::times(b, c));
         for i in 0..b.num_rows() {
             if Some(cals.value(i)) == code {
-                out.push(ts.value(i));
+                let at = ats.filter(|a| !a.is_null(i)).map_or(ts.value(i), |a| a.value(i));
+                out.push((ts.value(i), at));
             }
         }
     }
     out.sort_unstable();
-    out.dedup();
+    out.dedup_by_key(|(label, _)| *label);
     if out.is_empty() {
         return Err(DataError::NotFound(format!("the view has no labels of the calendar `{}`", calendar)));
     }
     Ok(out)
 }
 
+/// What a cache key hashes: the request and the versions it reads.
+#[derive(serde::Serialize)]
+struct KeyForm<'a> {
+    aggregate: &'a AggregateRequest,
+    versions: &'a [(String, String)],
+}
+
 /// The cache key of a request over the versions it reads (D-3.5, D-6.3).
+/// The request is rendered as itself, not through a JSON value, so that a
+/// field protocol 1.3 added is left out while it is absent and a 1.2
+/// request keeps its key (ERRATA E-155).
 pub fn cache_key(request: &AggregateRequest, versions: &[(String, String)]) -> Result<Hash, DataError> {
-    let canon = serde_json::json!({ "aggregate": request, "versions": versions });
-    canon.canonical_hash().map_err(|e| DataError::Malformed(e.to_string()))
+    KeyForm { aggregate: request, versions }.canonical_hash().map_err(|e| DataError::Malformed(e.to_string()))
 }
 
 /// The answer's schema: the group, the time (or the bucket's label), the
@@ -143,9 +170,44 @@ pub fn answer_schema(request: &AggregateRequest) -> RelationSchema {
     }
 }
 
-/// Answers an aggregate request: the cache object's version and its rows,
-/// computed on a miss.
-pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequest) -> Result<(String, Hash), DataError> {
+/// The attribute of an answer's version that holds its inexact rows.
+pub const INEXACT_ROWS: &str = "inexact_rows";
+
+/// An answered request (protocol 1.3, ERRATA E-156): its cache key, the
+/// cache object holding the answer, which a stream spec can name by its
+/// relation and version, the answer's rows, and its inexact rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answered {
+    pub key: Hash,
+    pub relation: String,
+    pub version: String,
+    pub rows: u64,
+    pub inexact_rows: u64,
+}
+
+/// A cache object as an answer, when its version records its inexact rows.
+/// An object written before protocol 1.3 does not, and counted the rows of
+/// a `count` that hold a value: it is computed again.
+fn answered(store: &Store, key: &Hash, version: &str) -> Option<Answered> {
+    let rec = store.registry.version(version)?;
+    let inexact_rows = rec.attributes.get(INEXACT_ROWS)?.parse().ok()?;
+    Some(Answered {
+        key: *key,
+        relation: rec.relation.clone(),
+        version: version.to_string(),
+        rows: rec.rows,
+        inexact_rows,
+    })
+}
+
+/// Answers an aggregate request: the cache object, computed on a miss.
+pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequest) -> Result<Answered, DataError> {
+    // The instruments as a set: one object whatever order they are named in.
+    let mut request = request.clone();
+    if let Some(e) = request.entities.as_mut() {
+        e.sort_unstable();
+        e.dedup();
+    }
     let relation_version = view.version(store, &request.relation)?;
     let mut versions = vec![(request.relation.clone(), relation_version.clone())];
     if request.calendar.is_some() || request.window == WindowKind::Bucket {
@@ -155,15 +217,19 @@ pub fn aggregate(store: &mut Store, view: &ResolvedView, request: &AggregateRequ
         };
         versions.push((CLOCK.to_string(), clock));
     }
-    let key = cache_key(request, &versions)?;
-    if let Some(v) = store.cache_get(&key) {
-        return Ok((v, key));
+    if let Some(f) = &request.factor {
+        versions.push((f.relation.clone(), view.version(store, &f.relation)?));
     }
-    let (rows, names) = compute(store, view, request)?;
-    let schema = answer_schema(request);
+    let key = cache_key(&request, &versions)?;
+    if let Some(a) = store.cache_get(&key).and_then(|v| answered(store, &key, &v)) {
+        return Ok(a);
+    }
+    let (rows, names) = compute(store, view, &request)?;
+    let inexact = rows.inexact;
+    let schema = answer_schema(&request);
     let batch = to_batch(&schema, rows, &names)?;
-    let version = store.cache_put(&key, &schema, &[batch])?;
-    Ok((version, key))
+    let version = store.cache_put_with(&key, &schema, &[batch], BTreeMap::from([(INEXACT_ROWS.to_string(), inexact.to_string())]))?;
+    answered(store, &key, &version).ok_or(DataError::UnknownVersion(version))
 }
 
 /// The answer's rows as a batch in the answer schema.
@@ -175,7 +241,7 @@ fn to_batch(schema: &RelationSchema, rows: Out, names: &BTreeMap<u64, String>) -
         ColumnType::Time => arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
         other => rows::stored_type(other),
     };
-    let Out { t, group, value, count, error, r } = rows;
+    let Out { t, group, value, count, error, r, .. } = rows;
     for c in &schema.columns {
         fields.push(arrow::datatypes::Field::new(&c.name, ty(c), true));
         let col: ArrayRef = match c.name.as_str() {
@@ -192,15 +258,161 @@ fn to_batch(schema: &RelationSchema, rows: Out, names: &BTreeMap<u64, String>) -
     Ok(RecordBatch::try_new(Arc::new(arrow::datatypes::Schema::new(fields)), cols)?)
 }
 
-/// The input's rows of one group in time order: (t, values) of the rows
-/// with values, and (t, r) of every row, the receipts an answer waits on.
+/// A number as a column holds it: a `Num` column's float, a `Count`
+/// column's integer.
+#[derive(Clone, Copy, Debug)]
+enum Num {
+    F(f64),
+    I(i64),
+}
+
+impl Num {
+    /// Row `i` of column `c` of type `ty`, none where null.
+    fn of(b: &RecordBatch, c: usize, ty: ColumnType, i: usize) -> Option<Num> {
+        let col = b.column(c);
+        if col.is_null(i) {
+            return None;
+        }
+        Some(match ty {
+            ColumnType::Count => Num::I(col.as_primitive::<arrow::datatypes::Int64Type>().value(i)),
+            _ => Num::F(col.as_primitive::<arrow::datatypes::Float64Type>().value(i)),
+        })
+    }
+
+    fn f64(self) -> f64 {
+        match self {
+            Num::F(x) => x,
+            Num::I(i) => i as f64,
+        }
+    }
+
+    /// The product as the kernel's `*` forms it (`eval_expr`): two counts
+    /// multiply as integers, anything else as floats; none where the
+    /// integers overflow.
+    fn times(self, other: Num) -> Option<f64> {
+        match (self, other) {
+            (Num::I(a), Num::I(b)) => a.checked_mul(b).map(|p| p as f64),
+            (a, b) => Some(a.f64() * b.f64()),
+        }
+    }
+}
+
+/// A row of a product's second relation: its time, its receipt and its
+/// value, none where null.
+#[derive(Clone, Copy, Debug)]
+struct FactorRow {
+    t: i64,
+    r: i64,
+    x: Option<Num>,
+}
+
+type IdMap<V> = HashMap<GroupKey, V, BuildHasherDefault<IdHasher>>;
+
+/// A product's second relation: each entity's rows in time order, and the
+/// rows of it that make the answer inexact.
 #[derive(Default)]
+struct FactorRows {
+    by_group: IdMap<Vec<FactorRow>>,
+    inexact: u64,
+}
+
+/// The columns of a relation the kernel decodes from a tuple besides its
+/// times and entities: where it reads a null as NaN or refuses it.
+fn decoded_columns(s: &RelationSchema) -> Vec<usize> {
+    (0..s.columns.len()).filter(|&c| matches!(s.columns[c].role, Role::Value | Role::Label)).collect()
+}
+
+/// The decoded columns of a batch that hold a null.
+fn nullable(b: &RecordBatch, decoded: &[usize]) -> Vec<usize> {
+    decoded.iter().copied().filter(|&c| b.column(c).null_count() > 0).collect()
+}
+
+/// The identities a read of a relation keeps: the request's instruments
+/// when the relation is keyed by one entity; one keyed otherwise is read
+/// whole, as the stream reads it (ERRATA E-99).
+fn identity_filter(s: &RelationSchema, entities: Option<&Vec<u64>>) -> Option<Vec<u64>> {
+    let lay = layout(s);
+    let by_entity = matches!(lay.identity.as_slice(), [c] if s.columns[*c].ty == ColumnType::Entity);
+    entities.filter(|_| by_entity).cloned()
+}
+
+/// The rows of a product's second relation the filter admits, by entity.
+fn read_factor(store: &Store, view: &ResolvedView, factor: &Factor, filter: &RowFilter, entities: Option<&Vec<u64>>) -> Result<FactorRows, DataError> {
+    let version = view.version(store, &factor.relation)?;
+    let m = store.manifest(&version)?;
+    let s = &m.schema;
+    let lay = layout(s);
+    let c = s
+        .columns
+        .iter()
+        .position(|c| c.name == factor.column)
+        .ok_or_else(|| DataError::Malformed(format!("`{}` has no column `{}`", s.name, factor.column)))?;
+    let ty = s.columns[c].ty;
+    if !matches!(ty, ColumnType::Num | ColumnType::Count) {
+        return Err(DataError::Malformed(format!("`{}` is not numeric", factor.column)));
+    }
+    let ec = match lay.identity.first() {
+        Some(&e) if s.columns[e].ty == ColumnType::Entity => e,
+        _ => return Err(DataError::Malformed(format!("`{}` has no entity to join on", s.name))),
+    };
+    let filter = RowFilter {
+        identity: identity_filter(s, entities),
+        ..filter.clone()
+    };
+    let decoded = decoded_columns(s);
+    let mut out = FactorRows::default();
+    for b in &store.read(&version, &filter)? {
+        let ts = rows::times(b, lay.t);
+        let rs = lay.r.map(|r| rows::times(b, r));
+        let ids = b.column(ec).as_primitive::<arrow::datatypes::UInt64Type>();
+        let nulls = nullable(b, &decoded);
+        for i in 0..b.num_rows() {
+            let t = ts.value(i);
+            let rows = out.by_group.entry(ids.value(i)).or_default();
+            if rows.last().is_some_and(|x| x.t == t) || nulls.iter().any(|&n| b.column(n).is_null(i)) {
+                out.inexact += 1;
+            }
+            rows.push(FactorRow {
+                t,
+                r: rs.map_or(t, |r| r.value(i)),
+                x: Num::of(b, c, ty, i),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The input's rows of one group in time order: (t, values) of the rows
+/// with values (every row for `count`), and (t, r) of every row, the
+/// receipts an answer waits on; and the rows found inexact as they were
+/// read.
 struct Series {
     rows: Vec<(i64, [f64; 2])>,
     /// The rows as integer ticks when the pass runs `exact` over a hot
     /// relation (ST-10.4): units at `Ctx::scales`.
     ticks: Vec<(i64, [i128; 2])>,
     recv: Vec<(i64, i64)>,
+    /// The time of the group's last row read.
+    last: i64,
+    /// A product's cursor in the second relation's rows of the group, and
+    /// the span of them at `last`.
+    next: usize,
+    at_last: (usize, usize),
+    inexact: u64,
+}
+
+impl Default for Series {
+    fn default() -> Series {
+        Series {
+            rows: Vec::new(),
+            ticks: Vec::new(),
+            recv: Vec::new(),
+            last: i64::MIN,
+            next: 0,
+            at_last: (0, 0),
+            inexact: 0,
+        }
+    }
 }
 
 impl Series {
@@ -213,6 +425,52 @@ impl Series {
                 Some(*m)
             })
             .collect()
+    }
+
+    /// A row of a product's first relation, at `t` with value `x`, joined
+    /// with `theirs`, the second relation's rows of the group: every row of
+    /// either enters the receipts in time order, and each pair of rows at
+    /// `t` enters the rows as its product (a pair with a null only for
+    /// `count`, which counts the joined rows). The rows entered.
+    fn join(&mut self, t: i64, r: i64, x: Option<Num>, theirs: &[FactorRow], counted: bool) -> usize {
+        if t != self.last {
+            while self.next < theirs.len() && theirs[self.next].t < t {
+                self.recv.push((theirs[self.next].t, theirs[self.next].r));
+                self.next += 1;
+            }
+            let from = self.next;
+            while self.next < theirs.len() && theirs[self.next].t == t {
+                self.recv.push((t, theirs[self.next].r));
+                self.next += 1;
+            }
+            self.at_last = (from, self.next);
+        }
+        self.recv.push((t, r));
+        let mut entered = 0;
+        for y in &theirs[self.at_last.0..self.at_last.1] {
+            let product = match (x, y.x) {
+                (Some(x), Some(y)) => x.times(y),
+                _ => None,
+            };
+            if product.is_none() && x.is_some() && y.x.is_some() {
+                // An integer product past i64: the kernel's would not be this.
+                self.inexact += 1;
+            }
+            if let Some(p) = product.or(counted.then_some(f64::NAN)) {
+                self.rows.push((t, [p, 0.0]));
+                entered += 1;
+            }
+        }
+        entered
+    }
+
+    /// The second relation's rows after the first relation's last row of
+    /// the group enter the receipts.
+    fn flush(&mut self, theirs: &[FactorRow]) {
+        for y in &theirs[self.next.min(theirs.len())..] {
+            self.recv.push((y.t, y.r));
+        }
+        self.next = theirs.len();
     }
 }
 
@@ -255,17 +513,33 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     if rows_window && request.group != Grouping::PerEntity {
         return Err(DataError::Malformed("`rows(N)` counts one entity's rows: group per entity".into()));
     }
-    // The rows admitted by the receipt filter, latest revision of each fact.
+    if request.factor.is_some() && (request.group != Grouping::PerEntity || f.arity() == 2) {
+        return Err(DataError::Malformed("a product of two relations is joined per entity and aggregated by a one-column function".into()));
+    }
+    // `count` counts the window's rows, with a value or not, as the
+    // kernel's `count` does.
+    let counted = f == Function::Count;
+    // The rows admitted by the receipt filter, latest revision of each fact,
+    // of the request's instruments.
     let filter = RowFilter {
         r_max: request.receipt_filter.as_ref().and_then(|r| r.r_max),
         as_of_seq: view.as_of_seq,
         latest_only: true,
         ..RowFilter::default()
     };
+    let factor = match &request.factor {
+        Some(fr) => Some(read_factor(store, view, fr, &filter, request.entities.as_ref())?),
+        None => None,
+    };
+    let filter = RowFilter {
+        identity: identity_filter(s, request.entities.as_ref()),
+        ..filter
+    };
     // `exact` over a hot relation reads the ticks themselves (ST-10.4):
     // every Num column at the version's finest scale, counts at scale 0.
-    // A column with a value off any grid has no exact form.
-    let exact_ticks = request.numerics == Numerics::Exact && store.is_hot(&version);
+    // A column with a value off any grid has no exact form. A product is a
+    // derived series, reduced in `exact` as in `two_pass` (D-6.3).
+    let exact_ticks = request.numerics == Numerics::Exact && store.is_hot(&version) && factor.is_none();
     let mut scales = [0u32; 2];
     let batches = if exact_ticks {
         let hv = store.hot(&version)?;
@@ -310,15 +584,17 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
             }
         }
     };
-    use arrow::array::Array;
+    let decoded = decoded_columns(s);
     // Each group a dense slot on first sight (06-performance 2.2), the slots
     // put in the groups' order after.
-    let mut slot_of: std::collections::HashMap<GroupKey, usize, std::hash::BuildHasherDefault<IdHasher>> = Default::default();
+    let mut slot_of: IdMap<usize> = Default::default();
     let mut slots: Vec<(GroupKey, Series)> = Vec::new();
     let mut times: Vec<i64> = Vec::new();
+    let none: &[FactorRow] = &[];
     for b in &batches {
         let ts = rows::times(b, lay.t);
         let rs = lay.r.map(|r| rows::times(b, r));
+        let nulls = nullable(b, &decoded);
         for i in 0..b.num_rows() {
             let g = match gc {
                 Some(c) if s.columns[c].ty == ColumnType::Entity => b.column(c).as_primitive::<arrow::datatypes::UInt64Type>().value(i),
@@ -326,13 +602,28 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
                 None => 0,
             };
             let t = ts.value(i);
+            let r = rs.map_or(t, |r| r.value(i));
             let at = *slot_of.entry(g).or_insert_with(|| {
                 slots.push((g, Series::default()));
                 slots.len() - 1
             });
             let series = &mut slots[at].1;
-            series.recv.push((t, rs.map_or(t, |r| r.value(i))));
-            if b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i)) {
+            // A second row of the group at one instant: the kernel orders
+            // the rows of a bar by their values, the pass by the store's key.
+            // A null: the kernel reads it as NaN or refuses it.
+            if t == series.last || nulls.iter().any(|&c| b.column(c).is_null(i)) {
+                series.inexact += 1;
+            }
+            if let Some(fx) = &factor {
+                let theirs = fx.by_group.get(&g).map_or(none, |v| v.as_slice());
+                let entered = series.join(t, r, Num::of(b, vc, s.columns[vc].ty, i), theirs, counted);
+                series.last = t;
+                times.extend(std::iter::repeat_n(t, entered));
+                continue;
+            }
+            series.last = t;
+            series.recv.push((t, r));
+            if !counted && (b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i))) {
                 continue;
             }
             if exact_ticks {
@@ -344,27 +635,42 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
             times.push(t);
         }
     }
+    let mut inexact = 0;
+    if let Some(fx) = &factor {
+        for (g, series) in slots.iter_mut() {
+            series.flush(fx.by_group.get(g).map_or(none, |v| v.as_slice()));
+        }
+        inexact += fx.inexact;
+    }
     slots.sort_unstable_by_key(|(g, _)| *g);
     let names: BTreeMap<u64, String> = if request.group == Grouping::PerLabel {
-        slots.iter().map(|&(c, _)| (c, store.registry.label_text(c as u32).unwrap_or("").to_string())).collect()
+        slots.iter().map(|(c, _)| (*c, store.registry.label_text(*c as u32).unwrap_or("").to_string())).collect()
     } else {
         BTreeMap::new()
     };
-    // The labels the windows walk.
-    let labels: Vec<i64> = match &request.calendar {
-        Some(c) => calendar_labels(store, view, c)?,
+    // The labels the windows walk, with their barriers' instants.
+    let calendar = match &request.calendar {
+        Some(c) => Some(calendar_labels(store, view, c)?),
+        None => None,
+    };
+    let labels: Vec<i64> = match &calendar {
+        Some(c) => c.iter().map(|&(l, _)| l).collect(),
         None => {
             times.sort_unstable();
             times.dedup();
             times
         }
     };
-    let buckets = if request.window == WindowKind::Bucket {
+    let bucket_labels = if request.window == WindowKind::Bucket {
         let c = request.bucket.as_deref().ok_or_else(|| DataError::Malformed("a bucket window names its calendar".into()))?;
-        calendar_labels(store, view, c)?
+        Some(calendar_labels(store, view, c)?)
     } else {
-        Vec::new()
+        None
     };
+    let buckets: Vec<i64> = bucket_labels.iter().flatten().map(|&(l, _)| l).collect();
+    // The barriers an answer is read at: a bucket's, else the labels' when
+    // the request names their calendar.
+    let barriers = bucket_labels.as_deref().or(calendar.as_deref());
     let mode = match request.numerics {
         Numerics::Running => Mode::Running,
         Numerics::TwoPass => Mode::TwoPass,
@@ -387,6 +693,7 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
         request,
         labels: &labels,
         buckets: &buckets,
+        barriers,
         t0,
         t1,
     };
@@ -406,7 +713,9 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
             .collect();
         handles.into_iter().map(|h| h.join().expect("an aggregate thread")).collect()
     });
-    Ok((time_major(out), names))
+    let mut out = time_major(out);
+    out.inexact += inexact;
+    Ok((out, names))
 }
 
 /// The pass's rows in (t, group) order. Each part holds whole groups, the
@@ -469,6 +778,7 @@ fn time_major(parts: Vec<Out>) -> Out {
     let mut count = Vec::new();
     let mut error = Vec::new();
     let mut r = Vec::new();
+    let inexact = parts.iter().map(|p| p.inexact).sum();
     for p in parts {
         t.push(p.t);
         group.push(p.group);
@@ -484,6 +794,7 @@ fn time_major(parts: Vec<Out>) -> Out {
         count: scatter(&places, count.into_iter(), n),
         error: scatter(&places, error.into_iter(), n),
         r: scatter(&places, r.into_iter(), n),
+        inexact,
     }
 }
 
@@ -531,6 +842,9 @@ struct Ctx<'a> {
     request: &'a AggregateRequest,
     labels: &'a [i64],
     buckets: &'a [i64],
+    /// The labels an answer is read at and their barriers' instants: the
+    /// buckets', else the labels' when the request names their calendar.
+    barriers: Option<&'a [(i64, i64)]>,
     t0: i64,
     t1: i64,
 }
@@ -546,12 +860,29 @@ impl Ctx<'_> {
         match v {
             Ok(Some(x)) => out.push(t, group, Some(x), count as i64, None, r),
             Ok(None) => {}
-            Err(e) => out.push(t, group, None, count as i64, Some(e.to_string()), r),
+            Err(e) => {
+                // The kernel evaluates the window to fail as the rule does.
+                out.inexact += 1;
+                out.push(t, group, None, count as i64, Some(e.to_string()), r)
+            }
         }
+    }
+
+    /// The rows of a group received after the barrier of the first label
+    /// at or after their time, the first an answer that waits on them is
+    /// read at; every row when the request names no barrier calendar.
+    fn late(&self, all: &Series) -> u64 {
+        let Some(barriers) = self.barriers else { return all.recv.len() as u64 };
+        let late = all.recv.iter().filter(|&&(t, r)| {
+            let first = barriers.partition_point(|b| b.0 < t);
+            barriers.get(first).is_some_and(|b| r > b.1)
+        });
+        late.count() as u64
     }
 
     /// One group's answer rows, in time order, after `out`'s.
     fn group(&self, out: &mut Out, g: GroupKey, all: &Series) {
+        out.inexact += all.inexact + self.late(all);
         if self.exact {
             self.walk(out, g, all, &all.ticks)
         } else {

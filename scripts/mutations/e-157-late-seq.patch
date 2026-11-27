@@ -1,0 +1,16 @@
+# proposition: E-157 (a late record is numbered in the stream without the delivered answers)
+# mutation: a late record carries the seq of the stream with the answers
+# test: cargo test -p abt-tests --test pushdown a_late_tuple_is_numbered_as_in_the_stream_without_the_delivered_answers
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/fold.rs b/crates/abt-kernel/src/kernel/fold.rs
+--- a/crates/abt-kernel/src/kernel/fold.rs
++++ b/crates/abt-kernel/src/kernel/fold.rs
+@@ -514,7 +514,7 @@
+                     // as a run that reads its answers as tables numbers it:
+                     // their rows are merged among the others by receipt, and
+                     // each is held in its store (ERRATA E-157).
+-                    let delivered: u64 = self.kernel.stores.iter().skip(self.kernel.prog.relations.len()).map(|s| s.inserted).sum();
++                    let delivered: u64 = self.kernel.stores.iter().skip(self.kernel.prog.relations.len()).map(|_| 0).sum();
+                     self.result.late.push(super::LateRecord {
+                         seq: seq - delivered,
+                         relation: self.kernel.rels[rel].name.clone(),

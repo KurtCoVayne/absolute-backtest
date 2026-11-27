@@ -1,0 +1,16 @@
+# proposition: E-156 (the pass's `count` counts the window's rows, with a value or not)
+# mutation: `count` skips the rows without a value again
+# test: cargo test -p abt-data --test agg count_counts_the_windows_rows_with_or_without_a_value
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/agg.rs b/crates/abt-data/src/agg.rs
+--- a/crates/abt-data/src/agg.rs
++++ b/crates/abt-data/src/agg.rs
+@@ -518,7 +518,7 @@
+     }
+     // `count` counts the window's rows, with a value or not, as the
+     // kernel's `count` does.
+-    let counted = f == Function::Count;
++    let counted = false && f == Function::Count;
+     // The rows admitted by the receipt filter, latest revision of each fact,
+     // of the request's instruments.
+     let filter = RowFilter {
