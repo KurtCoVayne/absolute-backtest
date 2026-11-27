@@ -7,8 +7,10 @@
 # (scripts/r8l-views.py), one ingest with the options of absolute-pipeline's scripts/store/point-values.sh
 # (sessions broken at 17:45 New York with a 20-minute gap, undefined instruments dropped, every root's
 # point value stated, reviewed=complete), each root's commission per contract per side, and the five bar
-# relations consolidated. A root cannot be ingested twice (its back-adjustment restates facts), so newer
-# bars are a new store. A root done is skipped: run it again as it is after a stop.
+# relations consolidated with their tails (ERRATA E-173): every row is then in the base segments, and a
+# service or a query opens the store without replaying its log. A root cannot be ingested twice (its
+# back-adjustment restates facts), so newer bars are a new store. A root done is skipped: run it again as
+# it is after a stop.
 #
 # One heavy step at a time under the machine's ingest lock, in a memory scope (systemd-run), with two of
 # abt-slot's four slots withheld while a step runs. A root is staged once its newest pull is whole
@@ -80,7 +82,7 @@ while :; do
   run "dbn-$r" "$B" ingest --store "$STORE" --adapter databento --from "$VIEWS/$r" --class future --undefined drop \
     --session-break 17:45 --session-gap 20 --point-values "$PV" --commission "${COMM[$r]}" --attributes reviewed=complete \
     --report "$LOGS/dbn-$r-report.json" || stop "ingest $r"
-  for rel in $BARS; do run "cons-$r-$rel" "$B" consolidate --store "$STORE" "$rel" || stop "consolidate $rel after $r"; done
+  for rel in $BARS; do run "cons-$r-$rel" "$B" consolidate --store "$STORE" "$rel" --tails || stop "consolidate $rel after $r"; done
   say "root $r ok: $(grep -aoE '[0-9]+ bars kept' "$LOGS/dbn-$r.time" "$LOGS/dbn-$r.log" 2>/dev/null | tail -1 | cut -d: -f2), store $(du -sBM "$STORE" | cut -f1) ($(du -sBM "$STORE"/log "$STORE"/part "$STORE"/hot 2>/dev/null | awk '{printf "%s %s ", $1, $2}' | sed "s#$STORE/##g")), disk $(avail)G"
 done
 say "== stage done: $(echo $ROOTS | wc -w) roots, $(du -sh "$STORE" | cut -f1)"

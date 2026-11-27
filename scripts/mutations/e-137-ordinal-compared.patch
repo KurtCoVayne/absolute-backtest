@@ -1,0 +1,26 @@
+# proposition: E-137 (a seal record names its instrument by its id; the ordinal it carries is not compared)
+# mutation: the record is refused where the restart's numbering differs from the write's, as before the erratum
+# test: cargo test -p abt-data --test appends a_seal_record_of_an_instrument_that_arrived_later_survives_a_restart
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/append.rs b/crates/abt-data/src/hot/append.rs
+--- a/crates/abt-data/src/hot/append.rs
++++ b/crates/abt-data/src/hot/append.rs
+@@ -788,7 +788,7 @@ impl Overlay {
+         };
+         // The overlay's ordinal of the instrument at the write: read past,
+         // not compared (below).
+-        take(4)?;
++        let recorded = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+         let id = u64::from_le_bytes(take(8)?.try_into().unwrap());
+         let ne = take(1)?[0] as usize;
+         let exponents = take(ne)?.to_vec();
+@@ -837,6 +837,9 @@ impl Overlay {
+         // as tails held in memory (ERRATA E-137). An ordinal names an
+         // instrument within one process and nothing on disk is read by it.
+         let o = self.instrument(id, exponents.clone());
++        if o != recorded {
++            return Err(DataError::Schema(format!("journal: instrument {} at ordinal {} was {}", id, recorded, o)));
++        }
+         let ncols = self.value_columns();
+         let inst = &mut self.instruments[o];
+         if exponents.len() == ncols && exponents != inst.exponents {

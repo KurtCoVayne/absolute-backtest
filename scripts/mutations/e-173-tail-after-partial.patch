@@ -1,0 +1,16 @@
+# proposition: E-173 (a folded tail's rows are re-encoded with the partial block they follow: every block but an instrument's last is full)
+# mutation: a partial published block is re-encoded only where sealed blocks follow it, so a tail folded after it starts a second partial block
+# test: cargo test -p abt-data --test appends a_consolidation_with_the_tails_leaves_nothing_to_replay
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/consolidate.rs b/crates/abt-data/src/hot/consolidate.rs
+--- a/crates/abt-data/src/hot/consolidate.rs
++++ b/crates/abt-data/src/hot/consolidate.rs
+@@ -222,7 +222,7 @@ pub fn consolidate(root: &Path, v: &HotVersion, tails: bool) -> Result<Option<Co
+                             *x = x.wrapping_mul(up);
+                         }
+                     }
+-                    if ints.len() < BLOCK && (!sealed.is_empty() || tail_rows > 0) {
++                    if ints.len() < BLOCK && !sealed.is_empty() {
+                         tail_ints.extend_from_slice(&ints);
+                         tail_floats.extend_from_slice(&block.floats);
+                     } else {

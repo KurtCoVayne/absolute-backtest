@@ -3327,16 +3327,46 @@ batch driver agree on every corpus program. Each bless since:
   tail then holds the label: the store answers the superseded value
   after a restart. E-128 did not change this (its cut drops whole
   labels). Such a batch should be a revision, as `admits` says.
-- **E-137 (ST-8.4; a seal record's ordinal after a restart) -- open,
-  found by reading (Nov 25), not reproduced.** A seal record stores its
-  instrument's overlay ordinal; a restart numbers the unpublished
-  instruments in the order of their first seal record. When an
-  unpublished instrument sealed before one that arrived earlier,
-  `apply_record` reports the mismatch and `replay_journal` cuts the
-  journal there: the blocks recorded after stop being sealed, their
-  rows come back from the log as tails held in memory, and E-128's cut
-  has no sealed label to drop them by. Answers hold; the memory E-128
-  bounds does not. No test has two unpublished instruments.
+- **E-137 (ST-8.4, ST-8.8; a seal record names its instrument by its
+  id).** A seal record stores its instrument's overlay ordinal, and
+  `apply_record` refused a record whose ordinal was not the restart's
+  own. The write numbers an unpublished instrument at its first row; a
+  restart numbers it at its first seal record, and the ones without a
+  record afterwards, as the log's replay meets them. The two differ as
+  soon as an instrument that arrived later seals first, or one that
+  arrived first seals nothing: `replay_journal` cut the journal at the
+  first such record, at every open. The blocks recorded after it stopped
+  being sealed, their rows came back from the log as tails held in
+  memory, and each later process sealed some of them again and lost them
+  at the next open. Found by reading on Nov 25 and written here as open;
+  met on Nov 26 on the store the pipeline's agents read (the Norgate lake
+  of Oct 27 staged in seven spans: 15,823 instruments, five bar relations
+  of 30,048,448 rows each). 23,325,046 rows of each relation were tail
+  rows, 746 MB a relation in memory, where 4,751 blocks stood sealed; the
+  service took 53 to 57 s to serve and held 6.2 GB before its first
+  query, and was killed at its 8 GB cap in the first agent run; the last
+  span took 601 s and 10.5 GB to ingest. A store whose appends bring one
+  new instrument at a time (a futures root) is not touched: its numbering
+  cannot differ. [D] The record's instrument is the one its id names. The
+  ordinal is written as before (the record's layout stands) and read
+  past: an ordinal names an instrument within one process, and nothing on
+  disk is read by it. [D] A consolidation first seals every tail that
+  holds a block's rows. An append seals only the instruments it fills, so
+  a store the defect left would keep, for good, the tail of every
+  instrument that receives no more rows; consolidating its relations with
+  an engine after the erratum heals it. Measured on the real S&P 100 (the
+  same lake and spans): 438 blocks sealed and 484,785 tail rows before,
+  779 and 135,601 after, under a block an instrument. The equity store
+  consolidated by the engine after the erratum: 21,120,000 rows of each
+  relation sealed and folded, 7,070,070 left in tails (447 an
+  instrument); the service 21.5 s to serve, 2.5 GB. That consolidation
+  took six minutes and up to 7.3 GB a relation: the replay of the store
+  as the defect left it, and five `fsync`s for every block sealed (open:
+  a batch of seals could sync each file once).
+  `abt-data/tests/appends.rs::a_seal_record_of_an_instrument_that_arrived_later_survives_a_restart`,
+  `::a_consolidation_seals_the_tails_a_cut_journal_left`; falsified:
+  `scripts/mutations/e-137-ordinal-compared.patch`,
+  `e-137-consolidate-without-sealing.patch`.
 - **E-138 (D-4.1, D-3.2, P-3.1, E-120; what a binding asks is read from
   the columns that answer it, and every call it makes is clocked).**
   MW14's binding took 55.6 s of a 381 s run on the 1990 to 2026 store
@@ -5075,6 +5105,115 @@ batch driver agree on every corpus program. Each bless since:
   `abt-data/tests/store.rs::a_log_segment_is_compressed_and_an_uncompressed_one_still_reads`;
   falsified: `scripts/mutations/e-169-plain-log.patch` (the segment
   written without the codec).
+- **E-172 (ST-8.7; the presences of earlier generations are removed).**
+  A consolidation writes the base level's presence under its generation
+  (`presence-g<n>.bin`) and renames a manifest that names it. The file it
+  replaced stayed: `Overlay::remove_earlier_generations` removed the
+  journals and the append directories of earlier generations at the next
+  open, not the presences. A one-minute relation's presence is 45 to 58
+  MB (its labels), and a futures staging consolidates after every root:
+  at 15 roots, 3,775 MB of the store's 4,537 MB hot directory were
+  presences nothing read, on a disk the staging then stopped for (its 8
+  GB guard, at 23 roots). [D] The same sweep removes `presence.bin` (the
+  build's: generation 0) and `presence-g<n>.bin` of a generation before
+  the manifest's, and never a file a level of the manifest names. It runs
+  where it ran, when a version opens, after its manifest is read: a
+  presence written by a consolidation that did not reach its rename is of
+  a later generation and stays for the next attempt to overwrite. On the
+  futures store at 23 roots: the hot directory 6,641 MB to 920 MB.
+  `abt-data/tests/appends.rs::consolidation_keeps_every_answer_and_the_version_id`
+  (one presence of the base level stands after two consolidations);
+  falsified: `scripts/mutations/e-172-presence-kept.patch`.
+- **E-173 (ST-8.7, ST-8.8, ST-8.5, E-121, E-122; a consolidation folds
+  the tails when asked, and a version build rebuilds the instruments a
+  consolidation extended).** ST-8.7 folds the sealed blocks and leaves
+  the tails, "a function of the log", replayed from the least sequence
+  number a tail holds. An instrument that receives no more rows keeps its
+  tail for good: a delisted name, an expired contract, a futures root
+  staged before the others. The least sequence number then stays where
+  that instrument stopped, and every open reads the log from there, most
+  of it, to rebuild tails that never change (E-128 cuts the rows as they
+  are read; the read remains). After E-137 the equity store held
+  7,070,070 tail rows a relation and took 21.5 s and 2.5 GB to serve; the
+  futures store at 23 roots (91,007,007 rows a relation) took 33.3 s to
+  serve and 6.9 s to answer a query of two weeks, and each consolidation
+  of its staging read the log whole: 12 s at the second root, 57 s at the
+  22nd. [D] `Store::consolidate_with_tails` (`abt data consolidate
+  RELATION --tails`): the tails' rows follow the sealed ones into the
+  base, re-encoded with the partial block they follow where there is one,
+  each instrument's last block the partial one ST-4.1 allows, checked by
+  decoding as a folded block is (Proposition 3.2); the manifest's
+  `replay_from` is past the last row folded, so an open replays nothing
+  and holds no tail. Nothing is journaled for it: a tail's partial block
+  recorded in the journal, and followed by full ones after a crash, would
+  break ST-4.1 in the overlay; as it is, a crash before the manifest's
+  rename leaves the version as it was. [D] Asked for, not the rule. A row
+  that arrives inside a folded span is a revision (a version build) where
+  ST-8.5 inserts it while the span is a tail, so an append's own
+  consolidation leaves the tails, and a staging asks
+  (`scripts/bench-mw14.sh`, `scripts/r8l-store.sh`). [D] The manifest
+  records the instruments a consolidation gave base rows (`folded`, in id
+  order, absent when empty: a manifest without one is the bytes it was).
+  Their ladder is the build's, over the rows they had then, and a later
+  version build takes them as appended (E-121, E-122) and rebuilds them
+  from their rows. Before, such an instrument with no row in its overlay
+  (its tail folded, or an append that ended on a block's last row, with
+  or without this erratum) was kept and its ladder copied, and the build
+  was refused by its own S4 check ("instrument 5 has 34 bars, its rows
+  give 46"). The ladder of a version is not extended by an append or by
+  a consolidation, with or without this erratum: `Store::read_level`
+  answers the build's bars. Nothing but the tests calls it; open.
+  Measured: the equity store folded in 10 to 28 s a relation (1.7 to 2.9
+  GB); its service then 0.23 s to serve and 1.03 GB resident, 771 MB of
+  it the mapped segments. The futures store at 23 roots folded in 20 to
+  47 s a relation; its service 0.68 s to serve, the query of two weeks
+  0.23 s and 302 MB where it took 553, and six reads (every bar relation
+  over the last 17 days, the close over a week of 2019) equal before and
+  after, row for row. The three roots left were then staged by
+  `scripts/r8l-store.sh` as it is in the repository, in 3.3 minutes a
+  root where the last one before took 7.5.
+  `abt-data/tests/appends.rs::a_consolidation_with_the_tails_leaves_nothing_to_replay`;
+  falsified: `scripts/mutations/e-173-tail-after-partial.patch`,
+  `e-173-folded-kept.patch`, `e-173-replay-from-tail.patch`.
+- **E-174 (06-performance 2.2, D-6.4; the pass over a hot relation reads
+  a batch of instruments at a time).** 2.2 scans the relation once,
+  time-major, each thread finding its entities in every block. The pass
+  as built (`agg::compute`) read the relation whole and grouped its rows
+  by entity before it reduced them, so it held every row several times:
+  the read's rows, their record batch, each group's series and its
+  receipts. A run asks up to four passes together (E-168). On the real
+  MW14 (the lake of Oct 27, 20,462,982 daily closes) the data service
+  peaked at 8.2 GB beside a kernel front of 1.15 GB, on a machine of 16;
+  on the pipeline machine a service over the same store was killed at a
+  cap of 8 GB in the middle of an agent's study. [D] A pass grouped per
+  entity whose request names its calendar, over a hot relation (its
+  product's second relation hot too, when it has one), takes the
+  instruments in id order in batches of about 2^20 rows (`batches`;
+  `Store::hot_instrument_rows` counts them from the base presence and the
+  overlay; an instrument with more rows is a batch of its own). Each
+  batch is read by identity, reduced, and dropped before the next is
+  read. The answer is the bytes it was: a group is whole in one batch,
+  the batches ascend by id, their outputs are joined in that order and
+  `time_major` orders them as it ordered the whole. A hot relation holds
+  no null and one row a key (`can_hold_hot`), so a second relation's rows of
+  instruments the first lacks join nothing and make nothing inexact, and
+  are not read. A pass with no calendar named (its labels are its rows'
+  own times), a pass grouped otherwise, and a pass over a relation that
+  is not hot read whole, as before. This is not 2.2's scan: the read is
+  instrument-major, as the hot store lays its rows (ST-4), and inside a
+  batch the rows are held as the whole read held them. Measured on the
+  same machine and store: the service's peak 8.227 GB to 4.739 GB, its
+  CPU 42.4 s to 37.5 s, the run 69.0 s to 65.0 s, the weekly returns the
+  same bytes. Open: one instrument with millions of rows is one batch. A
+  futures root holds 5.6 million minute bars a relation, and a service
+  over the 26 roots held 8 to 14.5 GB while two agents each studied one
+  root. What is left there is the form the rows take inside a batch (a
+  columnar read with no structure per row, the reducers fed as the blocks
+  decode) and a bound on the rows in flight across concurrent passes.
+  `abt-data/tests/agg.rs::a_pass_in_batches_of_instruments_is_the_pass_of_the_relation_read_whole`
+  (batches of 1 row, 45 rows and 2^20 against the relation read whole);
+  falsified: `scripts/mutations/agg-batch-last.patch` (the last batch
+  left out).
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

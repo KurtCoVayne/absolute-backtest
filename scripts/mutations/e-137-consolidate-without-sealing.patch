@@ -1,0 +1,16 @@
+# proposition: E-137 (a consolidation first seals every tail that holds a block's rows)
+# mutation: the consolidation folds what is sealed and seals nothing
+# test: cargo test -p abt-data --test appends a_consolidation_seals_the_tails_a_cut_journal_left
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store_hot.rs b/crates/abt-data/src/store_hot.rs
+--- a/crates/abt-data/src/store_hot.rs
++++ b/crates/abt-data/src/store_hot.rs
+@@ -355,7 +355,7 @@ impl Store {
+         {
+             let mut ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
+             for o in 0..ov.instruments.len() {
+-                while ov.due(o) {
++                while ov.due(o) && ov.instruments[o].sealed.len() > usize::MAX / 2 {
+                     ov.seal(o)?;
+                 }
+             }

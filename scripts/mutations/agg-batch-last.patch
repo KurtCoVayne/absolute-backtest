@@ -1,0 +1,17 @@
+# proposition: a pass read in batches of instruments is the pass of the relation read whole (every instrument is in one batch)
+# mutation: the instruments after the last full batch are in none
+# test: cargo test -p abt-data --test agg a_pass_in_batches_of_instruments_is_the_pass_of_the_relation_read_whole
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/agg.rs b/crates/abt-data/src/agg.rs
+--- a/crates/abt-data/src/agg.rs
++++ b/crates/abt-data/src/agg.rs
+@@ -565,9 +565,6 @@ fn batches(store: &Store, view: &ResolvedView, request: &AggregateRequest, s: &R
+             held = 0;
+         }
+     }
+-    if !batch.is_empty() {
+-        ids.push(batch);
+-    }
+     Ok(Some(ids))
+ }
+ 

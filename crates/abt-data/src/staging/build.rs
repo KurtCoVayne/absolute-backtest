@@ -389,6 +389,7 @@ pub fn build(
         seq_high,
         replay_from: None,
         generation: 0,
+        folded: Vec::new(),
         buckets,
         revisions,
         attributes: attributes.clone(),

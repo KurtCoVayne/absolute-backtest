@@ -347,6 +347,227 @@ fn a_restart_answers_what_it_answered_before() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Daily rows of `id` over `days` days from day `d0` of the calendar
+/// starting at `start`.
+fn daily(id: u64, start: i64, d0: i64, days: i64) -> Vec<Row> {
+    (d0..d0 + days)
+        .map(|d| (id, (start + d) * NANOS_PER_DAY, (start + d) * NANOS_PER_DAY, 10.0 + id as f64 + ((d * 7) % 13) as f64 * 0.25))
+        .collect()
+}
+
+/// The blocks sealed, the journal's records and each instrument's tail
+/// rows, by id.
+fn sealed_and_tails(s: &Store, v: &str) -> (usize, u64, BTreeMap<u64, usize>) {
+    let h = s.hot(v).unwrap();
+    let ov = h.overlay.lock().unwrap();
+    (
+        ov.instruments.iter().map(|i| i.sealed.len()).sum(),
+        ov.journal_records,
+        ov.instruments.iter().map(|i| (i.id, i.tail.len())).collect(),
+    )
+}
+
+/// ERRATA E-137: a seal record names its instrument by its id. Two
+/// instruments arrive after the publication; the one that arrived second
+/// seals first. A restart numbers them in the order of their seal records,
+/// the write numbered them in the order of their rows: the record is the
+/// instrument's all the same, the block stays sealed, and the tails hold
+/// under a block each, restart after restart.
+#[test]
+fn a_seal_record_of_an_instrument_that_arrived_later_survives_a_restart() {
+    let mut rng = Rng(137);
+    let ids = [3u64, 5, 8];
+    let start = 18_000i64;
+    let dir = persistent("e137");
+    let mut b = Store::temporary("e137-twin").unwrap();
+    // The published history: instrument 3 alone.
+    let base = daily(3, start, 0, 600);
+    // 5 arrives first with 300 rows and seals nothing; 8 arrives with it,
+    // after it in the batch, and seals a block.
+    let first: Vec<Row> = [daily(5, start, 600, 300), daily(8, start, 600, 1_300)].concat();
+    let va = {
+        let mut a = Store::open(&dir).unwrap();
+        let va = a.ingest(REL, &[close_rows(&base)], "test", hot()).unwrap();
+        assert_eq!(a.ingest(REL, &[close_rows(&first)], "test", hot()).unwrap(), va);
+        assert_eq!(sealed_and_tails(&a, &va), (1, 1, BTreeMap::from([(3, 0), (5, 300), (8, 276)])));
+        va
+    };
+    b.ingest(REL, &[close_rows(&base)], "test", BTreeMap::new()).unwrap();
+    let mut vb = b.ingest(REL, &[close_rows(&first)], "test", BTreeMap::new()).unwrap();
+    // The restart: the block is sealed still, its rows in no tail.
+    {
+        let a = Store::open(&dir).unwrap();
+        assert_eq!(sealed_and_tails(&a, &va), (1, 1, BTreeMap::from([(3, 0), (5, 300), (8, 276)])), "after a restart");
+        same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 1_900);
+    }
+    // The store goes on, a process a span as a staging runs: each
+    // instrument seals as its tail fills, and every seal is kept.
+    let second: Vec<Row> = [daily(5, start, 1_900, 1_000), daily(8, start, 1_900, 1_000)].concat();
+    {
+        let mut a = Store::open(&dir).unwrap();
+        assert_eq!(a.ingest(REL, &[close_rows(&second)], "test", hot()).unwrap(), va);
+    }
+    vb = b.ingest(REL, &[close_rows(&second)], "test", BTreeMap::new()).unwrap();
+    let a = Store::open(&dir).unwrap();
+    assert_eq!(sealed_and_tails(&a, &va), (3, 3, BTreeMap::from([(3, 0), (5, 276), (8, 252)])), "after the second span and a restart");
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 2_900);
+    drop(a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ERRATA E-137, the store it left: a journal cut at a restart leaves
+/// tails of several blocks, and an instrument that receives no more rows
+/// is never sealed by an append. A consolidation seals every tail that is
+/// due before it folds: the tails hold under a block each again, and every
+/// read answers as before.
+#[test]
+fn a_consolidation_seals_the_tails_a_cut_journal_left() {
+    let mut rng = Rng(138);
+    let ids = [3u64, 5, 8];
+    let start = 18_000i64;
+    let dir = persistent("e137-heal");
+    let mut b = Store::temporary("e137-heal-twin").unwrap();
+    let base = daily(3, start, 0, 600);
+    let appended: Vec<Row> = [daily(3, start, 600, 2_500), daily(5, start, 600, 300), daily(8, start, 600, 2_300)].concat();
+    let va = {
+        let mut a = Store::open(&dir).unwrap();
+        let va = a.ingest(REL, &[close_rows(&base)], "test", hot()).unwrap();
+        a.ingest(REL, &[close_rows(&appended)], "test", hot()).unwrap();
+        assert_eq!(sealed_and_tails(&a, &va), (4, 4, BTreeMap::from([(3, 452), (5, 300), (8, 252)])));
+        va
+    };
+    b.ingest(REL, &[close_rows(&base)], "test", BTreeMap::new()).unwrap();
+    let vb = b.ingest(REL, &[close_rows(&appended)], "test", BTreeMap::new()).unwrap();
+    // The journal as the defect left it: cut at its first record.
+    let vdir = dir.join(format!("hot/{}/{}", REL, va));
+    std::fs::write(Overlay::journal_file(&vdir, 0), b"").unwrap();
+    let mut a = Store::open(&dir).unwrap();
+    assert_eq!(
+        sealed_and_tails(&a, &va),
+        (0, 0, BTreeMap::from([(3, 2_500), (5, 300), (8, 2_300)])),
+        "every appended row is back in a tail"
+    );
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 3_100);
+    let (v, done) = a.consolidate(REL).unwrap().expect("the due tails sealed, there is something to fold");
+    assert_eq!(v, va, "a consolidation keeps the version (ST-8.7)");
+    assert_eq!(done.folded_rows, 4 * 1_024);
+    assert_eq!(sealed_and_tails(&a, &va), (0, 0, BTreeMap::from([(3, 452), (5, 300), (8, 252)])), "after the consolidation");
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 3_100);
+    drop(a);
+    let a = Store::open(&dir).unwrap();
+    assert_eq!(
+        sealed_and_tails(&a, &va),
+        (0, 0, BTreeMap::from([(3, 452), (5, 300), (8, 252)])),
+        "after the consolidation and a restart"
+    );
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 3_100);
+    drop(a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ERRATA E-173: a consolidation asked to folds the tails too. Every row
+/// is then in the base, an instrument's last block the partial one
+/// ST-4.1 allows; nothing is sealed, no tail is held, and the replay
+/// starts past the last row, so a restart reads nothing of the log. Every
+/// read answers as before, at every sequence; the appends go on under the
+/// version; a second fold re-encodes each partial block with the rows
+/// that followed it; a row that arrives inside a folded span is a
+/// revision.
+#[test]
+fn a_consolidation_with_the_tails_leaves_nothing_to_replay() {
+    let mut rng = Rng(173);
+    let ids = [3u64, 5, 8, 9];
+    let start = 18_000i64;
+    let dir = persistent("e173");
+    let mut b = Store::temporary("e173-twin").unwrap();
+    // Published: 3 ends in a partial block, 5 in a full one. Appended: 3
+    // seals two blocks and keeps a tail, 5 a tail alone after its full
+    // block, 8 (new) two blocks and a tail, 9 (new) ten rows.
+    let base: Vec<Row> = [daily(3, start, 0, 600), daily(5, start, 0, 1_024)].concat();
+    let appended: Vec<Row> = [daily(3, start, 600, 2_500), daily(5, start, 1_024, 300), daily(8, start, 600, 2_300), daily(9, start, 600, 10)].concat();
+    let mut a = Store::open(&dir).unwrap();
+    let va = a.ingest(REL, &[close_rows(&base)], "test", hot()).unwrap();
+    assert_eq!(a.ingest(REL, &[close_rows(&appended)], "test", hot()).unwrap(), va);
+    b.ingest(REL, &[close_rows(&base)], "test", BTreeMap::new()).unwrap();
+    let mut vb = b.ingest(REL, &[close_rows(&appended)], "test", BTreeMap::new()).unwrap();
+    assert_eq!(sealed_and_tails(&a, &va), (4, 4, BTreeMap::from([(3, 452), (5, 300), (8, 252), (9, 10)])));
+    let high = seq_high(&a, &va);
+    let filters: Vec<RowFilter> = vec![
+        RowFilter::default(),
+        RowFilter {
+            identity: Some(vec![5, 9]),
+            ..RowFilter::default()
+        },
+        RowFilter {
+            latest_only: true,
+            ..RowFilter::default()
+        },
+    ];
+    let answers = |s: &Store| -> Vec<String> {
+        let mut out = Vec::new();
+        for f in &filters {
+            for seq in [None, Some(high), Some(high - 5), Some(high - 2_000), Some(high / 2)] {
+                out.push(read_text(s, &va, f, seq));
+            }
+        }
+        out
+    };
+    let before = answers(&a);
+    let full_but_the_last = |s: &Store, what: &str| {
+        let h = s.hot(&va).unwrap();
+        for (o, inst) in h.presence().instruments.iter().enumerate() {
+            let n = h.column(0, o).blocks_len();
+            assert_eq!(n as u64, inst.rows.div_ceil(abt_codec::BLOCK as u64), "{}: instrument {}'s blocks", what, inst.id);
+            for k in 0..n.saturating_sub(1) {
+                assert_eq!(h.block(0, o, k).ints.len(), abt_codec::BLOCK, "{}: instrument {} block {}", what, inst.id, k);
+            }
+        }
+    };
+    let (v, done) = a.consolidate_with_tails(REL).unwrap().expect("blocks and tails to fold");
+    assert_eq!(v, va, "the version id survives (Proposition 7.1)");
+    assert_eq!(done.folded_rows, appended.len() as u64, "every appended row is folded");
+    assert_eq!(sealed_and_tails(&a, &va), (0, 0, BTreeMap::from([(3, 0), (5, 0), (8, 0), (9, 0)])), "nothing sealed, no tail");
+    assert_eq!(a.hot(&va).unwrap().manifest.replay_from, Some(high + 1), "the replay starts past the last row");
+    assert_eq!(a.hot(&va).unwrap().presence().rows(), (base.len() + appended.len()) as u64);
+    full_but_the_last(&a, "after the fold");
+    for (i, (x, y)) in answers(&a).iter().zip(&before).enumerate() {
+        assert_same(&format!("answer {} after the fold", i), x, y);
+    }
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 3_100);
+    assert!(a.consolidate_with_tails(REL).unwrap().is_none(), "nothing more to fold");
+    // A restart: no tail comes back from the log.
+    drop(a);
+    let mut a = Store::open(&dir).unwrap();
+    assert_eq!(sealed_and_tails(&a, &va), (0, 0, BTreeMap::from([(3, 0), (5, 0), (8, 0), (9, 0)])), "after a restart");
+    for (i, (x, y)) in answers(&a).iter().zip(&before).enumerate() {
+        assert_same(&format!("answer {} after the fold and a restart", i), x, y);
+    }
+    // The appends go on under the version, after partial blocks now.
+    let more: Vec<Row> = [daily(3, start, 3_100, 700), daily(5, start, 1_324, 40), daily(8, start, 2_900, 1_100), daily(9, start, 610, 5)].concat();
+    assert_eq!(a.ingest(REL, &[close_rows(&more)], "test", hot()).unwrap(), va, "an append after the fold keeps the version");
+    vb = b.ingest(REL, &[close_rows(&more)], "test", BTreeMap::new()).unwrap();
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 4_000);
+    // A second fold: each partial block re-encoded with what followed it.
+    let (v, done) = a.consolidate_with_tails(REL).unwrap().expect("the later rows to fold");
+    assert_eq!(v, va);
+    assert_eq!(done.folded_rows, more.len() as u64);
+    assert_eq!(sealed_and_tails(&a, &va), (0, 0, BTreeMap::from([(3, 0), (5, 0), (8, 0), (9, 0)])));
+    full_but_the_last(&a, "after the second fold");
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 4_000);
+    drop(a);
+    let mut a = Store::open(&dir).unwrap();
+    same_reads(&a, &va, &b, &vb, &mut rng, &ids, start, 4_000);
+    // A row inside a folded span is a revision: a version (ST-8.5 inserts
+    // it only while its span is a tail).
+    let late = (9u64, (start + 612) * NANOS_PER_DAY + NANOS_PER_HOUR, (start + 4_100) * NANOS_PER_DAY, 77.25);
+    let va2 = a.ingest(REL, &[close_rows(&[late])], "test", hot()).unwrap();
+    assert_ne!(va2, va, "a row inside a folded span builds a version");
+    let vb2 = b.ingest(REL, &[close_rows(&[late])], "test", BTreeMap::new()).unwrap();
+    same_reads(&a, &va2, &b, &vb2, &mut rng, &ids, start, 4_000);
+    drop(a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The length of the well-formed records at the start of a journal.
 fn journaled_len(bytes: &[u8]) -> u64 {
     let mut at = 0usize;
@@ -487,6 +708,7 @@ fn consolidation_keeps_every_answer_and_the_version_id() {
     assert!(!Overlay::journal_file(&vdir, 0).exists());
     assert!(!Overlay::append_dir(&vdir, 0).exists());
     assert!(vdir.join("presence-g1.bin").exists());
+    assert!(!vdir.join("presence.bin").exists(), "the presence the consolidation replaced is gone (E-172)");
     drop(h);
     // Nothing more to fold now; appends go on, a second consolidation
     // folds them, a revision afterwards builds on the folded base.
@@ -502,6 +724,17 @@ fn consolidation_keeps_every_answer_and_the_version_id() {
     assert_eq!(v2, va);
     assert_eq!(done2.manifest.generation, 2);
     same_reads(&a, &va, &b, &vb, &mut rng, &all_ids, start, days + 1_200);
+    // One presence of the base level stands: the last consolidation's.
+    let presences = |dir: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n == "presence.bin" || n.starts_with("presence-g"))
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(presences(&vdir), ["presence-g2.bin"], "the presences of earlier generations are gone (E-172)");
     let revised = (ids[0], rows[50].1, rows[50].2 + 9 * NANOS_PER_DAY, 9.99);
     let va3 = a.ingest(REL, &[close_rows(&[revised])], "test", hot()).unwrap();
     assert_ne!(va3, va);

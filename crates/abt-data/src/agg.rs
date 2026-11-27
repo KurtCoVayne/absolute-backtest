@@ -511,6 +511,66 @@ impl Series {
     }
 }
 
+/// What a read of a pass gives: the groups in their order with their rows,
+/// the rows' times (kept when the request names no calendar), the rows
+/// found inexact and the tick scales of the two columns.
+type Gathered = (Vec<(GroupKey, Series)>, Vec<i64>, u64, [u32; 2]);
+
+/// The rows a pass reads and reduces together; 0 reads the relation whole.
+static BATCH_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 20);
+
+/// Sets the rows of a batch of the pass (a test compares batches of one
+/// instrument with the relation read whole); 0 reads the relation whole.
+pub fn set_batch_rows(n: u64) {
+    BATCH_ROWS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The instruments of a pass that can be read a batch of them at a time, in
+/// id order, each batch holding about `BATCH_ROWS` rows (an instrument with
+/// more is a batch of its own): a pass grouped per entity over a hot
+/// relation (its rows are stored by instrument, ST-2) whose request names
+/// its calendar, so that the labels its windows walk do not come from the
+/// rows. A product's second relation must be hot as well: it then holds no
+/// null and one row a key (`can_hold_hot`, ST-9), so its rows of the
+/// instruments the first relation has none of join nothing and make
+/// nothing inexact, and are not read. `None` for any other pass, which
+/// reads its relation whole. A whole read of the real equity store's close
+/// is 30 million rows held four times over (the hot read's rows, their
+/// batch, each group's series and its receipts), and three such passes run
+/// together in a run's first seconds: the data service's 8.2 GB in MW14
+/// (Nov 26, 2026).
+fn batches(store: &Store, view: &ResolvedView, request: &AggregateRequest, s: &RelationSchema, version: &str) -> Result<Option<Vec<Vec<u64>>>, DataError> {
+    let limit = BATCH_ROWS.load(std::sync::atomic::Ordering::Relaxed);
+    let keyed = |s: &RelationSchema| identity_filter(s, Some(&Vec::new())).is_some();
+    if limit == 0 || request.group != Grouping::PerEntity || request.calendar.is_none() || !store.is_hot(version) || !keyed(s) {
+        return Ok(None);
+    }
+    let wanted: Option<std::collections::HashSet<u64>> = request.entities.as_ref().map(|e| e.iter().copied().collect());
+    let asked = |id: &u64| wanted.as_ref().is_none_or(|w| w.contains(id));
+    if let Some(fr) = &request.factor {
+        let theirs = view.version(store, &fr.relation)?;
+        if !store.is_hot(&theirs) || !keyed(&store.manifest(&theirs)?.schema) {
+            return Ok(None);
+        }
+    }
+    let rows = store.hot_instrument_rows(version)?;
+    let mut ids = Vec::new();
+    let mut batch = Vec::new();
+    let mut held = 0u64;
+    for (id, n) in rows.into_iter().filter(|(id, _)| asked(id)) {
+        batch.push(id);
+        held += n;
+        if held >= limit {
+            ids.push(std::mem::take(&mut batch));
+            held = 0;
+        }
+    }
+    if !batch.is_empty() {
+        ids.push(batch);
+    }
+    Ok(Some(ids))
+}
+
 /// The pass: the request's rows, in (t, group) order, and the texts of the
 /// labels that key a per-label grouping.
 fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Result<(Out, BTreeMap<u64, String>), DataError> {
@@ -564,139 +624,139 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
         latest_only: true,
         ..RowFilter::default()
     };
-    let factor = match &request.factor {
-        Some(fr) => Some(read_factor(store, view, fr, &filter, request.entities.as_ref())?),
-        None => None,
-    };
-    let filter = RowFilter {
-        identity: identity_filter(s, request.entities.as_ref()),
-        ..filter
-    };
-    // `exact` over a hot relation reads the ticks themselves (ST-10.4):
-    // every Num column at the version's finest scale, counts at scale 0.
-    // A column with a value off any grid has no exact form. A product is a
-    // derived series, reduced in `exact` as in `two_pass` (D-6.3).
-    let exact_ticks = request.numerics == Numerics::Exact && store.is_hot(&version) && factor.is_none();
-    let mut scales = [0u32; 2];
-    let batches = if exact_ticks {
-        let hv = store.hot(&version)?;
-        for (k, c) in std::iter::once(vc).chain(wc).enumerate() {
-            let entry = hv.manifest.columns.iter().find(|e| e.name == s.columns[c].name);
-            if entry.is_some_and(|e| e.raw) {
-                return Err(DataError::Malformed(format!(
-                    "`{}`.`{}` holds values off any decimal grid: `exact` has no integer form for it (ST-3.2); ask `two_pass`",
-                    s.name, s.columns[c].name
-                )));
+    let exact_ticks = request.numerics == Numerics::Exact && store.is_hot(&version) && request.factor.is_none();
+    // A request that names its calendar walks that calendar's labels; one
+    // that names none walks the times of its rows, which are then kept.
+    let named = request.calendar.is_some();
+    // The rows of the instruments given (every one when none), each group's
+    // in time order: the groups in their order, the rows' times when the
+    // request names no calendar, the rows found inexact, the tick scales.
+    let gather = |entities: Option<&Vec<u64>>| -> Result<Gathered, DataError> {
+        let factor = match &request.factor {
+            Some(fr) => Some(read_factor(store, view, fr, &filter, entities)?),
+            None => None,
+        };
+        let filter = RowFilter {
+            identity: identity_filter(s, entities),
+            ..filter.clone()
+        };
+        // `exact` over a hot relation reads the ticks themselves (ST-10.4):
+        // every Num column at the version's finest scale, counts at scale 0.
+        // A column with a value off any grid has no exact form. A product is a
+        // derived series, reduced in `exact` as in `two_pass` (D-6.3).
+        let mut scales = [0u32; 2];
+        let batches = if exact_ticks {
+            let hv = store.hot(&version)?;
+            for (k, c) in std::iter::once(vc).chain(wc).enumerate() {
+                let entry = hv.manifest.columns.iter().find(|e| e.name == s.columns[c].name);
+                if entry.is_some_and(|e| e.raw) {
+                    return Err(DataError::Malformed(format!(
+                        "`{}`.`{}` holds values off any decimal grid: `exact` has no integer form for it (ST-3.2); ask `two_pass`",
+                        s.name, s.columns[c].name
+                    )));
+                }
+                if s.columns[c].ty == ColumnType::Num {
+                    scales[k] = u32::MAX;
+                }
             }
-            if s.columns[c].ty == ColumnType::Num {
-                scales[k] = u32::MAX;
+            let (scale, batches) = store.read_ticks(&version, &filter)?;
+            for sc in scales.iter_mut() {
+                if *sc == u32::MAX {
+                    *sc = scale;
+                }
             }
-        }
-        let (scale, batches) = store.read_ticks(&version, &filter)?;
-        for sc in scales.iter_mut() {
-            if *sc == u32::MAX {
-                *sc = scale;
+            batches
+        } else {
+            store.read(&version, &filter)?
+        };
+        let units = |b: &RecordBatch, c: usize, i: usize| -> i128 {
+            match b.column(c).data_type() {
+                arrow::datatypes::DataType::Decimal128(_, _) => b.column(c).as_primitive::<arrow::datatypes::Decimal128Type>().value(i),
+                _ => b.column(c).as_primitive::<arrow::datatypes::Int64Type>().value(i) as i128,
             }
-        }
-        batches
-    } else {
-        store.read(&version, &filter)?
-    };
-    let units = |b: &RecordBatch, c: usize, i: usize| -> i128 {
-        match b.column(c).data_type() {
-            arrow::datatypes::DataType::Decimal128(_, _) => b.column(c).as_primitive::<arrow::datatypes::Decimal128Type>().value(i),
-            _ => b.column(c).as_primitive::<arrow::datatypes::Int64Type>().value(i) as i128,
-        }
-    };
-    let value = |b: &RecordBatch, c: usize, i: usize| -> f64 {
-        match s.columns[c].ty {
-            ColumnType::Count => b.column(c).as_primitive::<arrow::datatypes::Int64Type>().value(i) as f64,
-            _ => {
-                let a = b.column(c).as_primitive::<arrow::datatypes::Float64Type>();
-                if a.is_null(i) {
-                    f64::NAN
+        };
+        let value = |b: &RecordBatch, c: usize, i: usize| -> f64 {
+            match s.columns[c].ty {
+                ColumnType::Count => b.column(c).as_primitive::<arrow::datatypes::Int64Type>().value(i) as f64,
+                _ => {
+                    let a = b.column(c).as_primitive::<arrow::datatypes::Float64Type>();
+                    if a.is_null(i) {
+                        f64::NAN
+                    } else {
+                        a.value(i)
+                    }
+                }
+            }
+        };
+        let decoded = decoded_columns(s);
+        // Each group a dense slot on first sight (06-performance 2.2), the slots
+        // put in the groups' order after.
+        let mut slot_of: IdMap<usize> = Default::default();
+        let mut slots: Vec<(GroupKey, Series)> = Vec::new();
+        let mut times: Vec<i64> = Vec::new();
+        let none: &[FactorRow] = &[];
+        for b in &batches {
+            let ts = rows::times(b, lay.t);
+            let rs = lay.r.map(|r| rows::times(b, r));
+            let nulls = nullable(b, &decoded);
+            for i in 0..b.num_rows() {
+                let g = match gc {
+                    Some(c) if s.columns[c].ty == ColumnType::Entity => b.column(c).as_primitive::<arrow::datatypes::UInt64Type>().value(i),
+                    Some(c) => b.column(c).as_primitive::<arrow::datatypes::UInt32Type>().value(i) as u64,
+                    None => 0,
+                };
+                let t = ts.value(i);
+                let r = rs.map_or(t, |r| r.value(i));
+                let at = *slot_of.entry(g).or_insert_with(|| {
+                    slots.push((g, Series::default()));
+                    slots.len() - 1
+                });
+                let series = &mut slots[at].1;
+                // A second row of the group at one instant: the kernel orders
+                // the rows of a bar by their values, the pass by the store's key.
+                // A null: the kernel reads it as NaN or refuses it.
+                if t == series.last || nulls.iter().any(|&c| b.column(c).is_null(i)) {
+                    series.inexact += 1;
+                }
+                if let Some(fx) = &factor {
+                    let theirs = fx.by_group.get(&g).map_or(none, |v| v.as_slice());
+                    let entered = series.join(t, r, Num::of(b, vc, s.columns[vc].ty, i), theirs, counted);
+                    series.last = t;
+                    if !named {
+                        times.extend(std::iter::repeat_n(t, entered));
+                    }
+                    continue;
+                }
+                series.last = t;
+                series.recv.push((t, r));
+                if !counted && (b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i))) {
+                    continue;
+                }
+                if exact_ticks {
+                    series.ticks.push((t, [units(b, vc, i), wc.map(|w| units(b, w, i)).unwrap_or(0)]));
                 } else {
-                    a.value(i)
+                    let x = [value(b, vc, i), wc.map(|w| value(b, w, i)).unwrap_or(0.0)];
+                    series.rows.push((t, x));
+                }
+                if !named {
+                    times.push(t);
                 }
             }
         }
-    };
-    let decoded = decoded_columns(s);
-    // Each group a dense slot on first sight (06-performance 2.2), the slots
-    // put in the groups' order after.
-    let mut slot_of: IdMap<usize> = Default::default();
-    let mut slots: Vec<(GroupKey, Series)> = Vec::new();
-    let mut times: Vec<i64> = Vec::new();
-    let none: &[FactorRow] = &[];
-    for b in &batches {
-        let ts = rows::times(b, lay.t);
-        let rs = lay.r.map(|r| rows::times(b, r));
-        let nulls = nullable(b, &decoded);
-        for i in 0..b.num_rows() {
-            let g = match gc {
-                Some(c) if s.columns[c].ty == ColumnType::Entity => b.column(c).as_primitive::<arrow::datatypes::UInt64Type>().value(i),
-                Some(c) => b.column(c).as_primitive::<arrow::datatypes::UInt32Type>().value(i) as u64,
-                None => 0,
-            };
-            let t = ts.value(i);
-            let r = rs.map_or(t, |r| r.value(i));
-            let at = *slot_of.entry(g).or_insert_with(|| {
-                slots.push((g, Series::default()));
-                slots.len() - 1
-            });
-            let series = &mut slots[at].1;
-            // A second row of the group at one instant: the kernel orders
-            // the rows of a bar by their values, the pass by the store's key.
-            // A null: the kernel reads it as NaN or refuses it.
-            if t == series.last || nulls.iter().any(|&c| b.column(c).is_null(i)) {
-                series.inexact += 1;
+        let mut inexact = 0;
+        if let Some(fx) = &factor {
+            for (g, series) in slots.iter_mut() {
+                series.flush(fx.by_group.get(g).map_or(none, |v| v.as_slice()));
             }
-            if let Some(fx) = &factor {
-                let theirs = fx.by_group.get(&g).map_or(none, |v| v.as_slice());
-                let entered = series.join(t, r, Num::of(b, vc, s.columns[vc].ty, i), theirs, counted);
-                series.last = t;
-                times.extend(std::iter::repeat_n(t, entered));
-                continue;
-            }
-            series.last = t;
-            series.recv.push((t, r));
-            if !counted && (b.column(vc).is_null(i) || wc.is_some_and(|w| b.column(w).is_null(i))) {
-                continue;
-            }
-            if exact_ticks {
-                series.ticks.push((t, [units(b, vc, i), wc.map(|w| units(b, w, i)).unwrap_or(0)]));
-            } else {
-                let x = [value(b, vc, i), wc.map(|w| value(b, w, i)).unwrap_or(0.0)];
-                series.rows.push((t, x));
-            }
-            times.push(t);
+            inexact += fx.inexact;
         }
-    }
-    let mut inexact = 0;
-    if let Some(fx) = &factor {
-        for (g, series) in slots.iter_mut() {
-            series.flush(fx.by_group.get(g).map_or(none, |v| v.as_slice()));
-        }
-        inexact += fx.inexact;
-    }
-    slots.sort_unstable_by_key(|(g, _)| *g);
-    let names: BTreeMap<u64, String> = if request.group == Grouping::PerLabel {
-        slots.iter().map(|(c, _)| (*c, store.registry.label_text(*c as u32).unwrap_or("").to_string())).collect()
-    } else {
-        BTreeMap::new()
+        slots.sort_unstable_by_key(|(g, _)| *g);
+        Ok((slots, times, inexact, scales))
     };
     // The labels the windows walk, with their barriers' instants.
     let calendar = match &request.calendar {
         Some(c) => Some(calendar_labels(store, view, c)?),
         None => None,
-    };
-    let labels: Vec<i64> = match &calendar {
-        Some(c) => c.iter().map(|&(l, _)| l).collect(),
-        None => {
-            times.sort_unstable();
-            times.dedup();
-            times
-        }
     };
     let bucket_labels = if request.window == WindowKind::Bucket {
         let c = request.bucket.as_deref().ok_or_else(|| DataError::Malformed("a bucket window names its calendar".into()))?;
@@ -720,36 +780,71 @@ fn compute(store: &Store, view: &ResolvedView, request: &AggregateRequest) -> Re
     // Per group, in parallel over disjoint ranges of groups; each group's
     // sequence is computed in time order by one thread, and the output is
     // put in (t, group) order after (A-D11).
-    let groups = slots;
-    let chunk = groups.len().div_ceil(threads()).max(if THREADS.load(std::sync::atomic::Ordering::Relaxed) == 0 { 64 } else { 1 });
-    let ctx = Ctx {
-        f,
-        mode,
-        scales,
-        exact: exact_ticks,
-        request,
-        labels: &labels,
-        buckets: &buckets,
-        barriers,
-        t0,
-        t1,
-    };
-    let out: Vec<Out> = std::thread::scope(|sc| {
-        let handles: Vec<_> = groups
-            .chunks(chunk)
-            .map(|part| {
-                let ctx = &ctx;
-                sc.spawn(move || {
-                    let mut out = Out::default();
-                    for (g, series) in part {
-                        ctx.group(&mut out, *g, series);
-                    }
-                    out
+    let reduce = |groups: &[(GroupKey, Series)], labels: &[i64], scales: [u32; 2]| -> Vec<Out> {
+        let chunk = groups.len().div_ceil(threads()).max(if THREADS.load(std::sync::atomic::Ordering::Relaxed) == 0 { 64 } else { 1 });
+        let ctx = Ctx {
+            f,
+            mode,
+            scales,
+            exact: exact_ticks,
+            request,
+            labels,
+            buckets: &buckets,
+            barriers,
+            t0,
+            t1,
+        };
+        std::thread::scope(|sc| {
+            let handles: Vec<_> = groups
+                .chunks(chunk)
+                .map(|part| {
+                    let ctx = &ctx;
+                    sc.spawn(move || {
+                        let mut out = Out::default();
+                        for (g, series) in part {
+                            ctx.group(&mut out, *g, series);
+                        }
+                        out
+                    })
                 })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("an aggregate thread")).collect()
-    });
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("an aggregate thread")).collect()
+        })
+    };
+    let (out, inexact, names) = match (batches(store, view, request, s, &version)?, &calendar) {
+        // A batch of instruments at a time: its rows read, its groups
+        // reduced and its rows let go before the next batch is read. The
+        // batches are in id order and each holds whole groups, so the
+        // parts are what the whole pass's are, cut elsewhere.
+        (Some(plan), Some(c)) => {
+            let labels: Vec<i64> = c.iter().map(|&(l, _)| l).collect();
+            let mut out = Vec::new();
+            let mut inexact = 0;
+            for ids in &plan {
+                let (slots, _, n, scales) = gather(Some(ids))?;
+                inexact += n;
+                out.extend(reduce(&slots, &labels, scales));
+            }
+            (out, inexact, BTreeMap::new())
+        }
+        _ => {
+            let (slots, mut times, inexact, scales) = gather(request.entities.as_ref())?;
+            let names: BTreeMap<u64, String> = if request.group == Grouping::PerLabel {
+                slots.iter().map(|(c, _)| (*c, store.registry.label_text(*c as u32).unwrap_or("").to_string())).collect()
+            } else {
+                BTreeMap::new()
+            };
+            let labels: Vec<i64> = match &calendar {
+                Some(c) => c.iter().map(|&(l, _)| l).collect(),
+                None => {
+                    times.sort_unstable();
+                    times.dedup();
+                    times
+                }
+            };
+            (reduce(&slots, &labels, scales), inexact, names)
+        }
+    };
     let mut out = time_major(out);
     out.inexact += inexact;
     Ok((out, names))

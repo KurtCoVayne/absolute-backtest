@@ -817,10 +817,10 @@ book's file on each of the 9,717 days they share; the weekly VIX from
 CBOE's history (the week's last close and its 4-week mean), equal to the
 book's file in each of its 1,906 whole weeks. The lake's own `$VIX` is
 not used: its weekly last close differs from CBOE's in 11 of those weeks.
-The run: 71.8 s, 1,869 weeks from 1991-01-04 to 2026-10-23, 17 past the
-canon's last (timed before the series script existed, with the lake's
-`$VIX` in the 16 weeks after the book's file, which the canon's weeks do
-not read). Against the canon over the 1,852 weeks they share:
+The run: 65.0 s on those series (71.8 s before the store's fold and the
+batched pass below, the same returns to the byte), 1,869 weeks from
+1991-01-04 to 2026-10-23, 17 past the canon's last. Against the canon
+over the 1,852 weeks they share:
 correlation 0.9983, CAGR 21.16% where the canon has 20.90%, Sharpe 1.030
 against 1.020, the same drawdown (26.19% and 26.18%), 417 weeks equal to
 8e-15 and 1,469 to 1e-4, the largest difference 3.3% (the week of
@@ -852,6 +852,99 @@ a partition and the archive ends on 1989-12-29, so nothing a stage reads
 IPC format's zstd body compression. On the real 6J the log goes from
 1,350 MB to 374 MB and the store from 1,865 MB to 890 MB, with the same
 versions, an ingest of 73 s where it took 80 and the same 5.0 GB peak.
+
+*The hot store after a restart (E-137, E-172, E-173).* The two stores
+staged this day were the first real ones opened again after their
+appends, and three faults of the append path showed, none of which the
+fixtures reach. A seal record named its instrument by an ordinal that a
+later instrument moves (E-137): a service restarted on the futures store
+refused its own journal. The presences of earlier generations were never
+removed (E-172): 3.8 GB of 4.5 in the futures store's hot directory at
+15 roots, and the staging stopped on its disk guard at 23. And an
+instrument that receives no more rows keeps its tail, so every open
+replays the log from where that instrument stopped (E-173): the equity
+store took 21.5 s and 2.5 GB to serve. A staging now ends by folding the
+tails (`abt data consolidate RELATION --tails`). The equity service on
+the pipeline machine: 55 s and 6.2 GB to serve before the three, 0.2 to
+0.5 s and 1.03 GB after. MW14 on the benchmark machine, the same store
+before and after its fold: the service ready in 32.6 s, then 9.0 s; its
+CPU over the run 92.0 s, then 42.4 s; the run 71.9 s, then 69.0 s.
+
+*The data service's memory in a run (E-174).* After the fold the service
+still peaked at 8.2 GB in a MW14 run whose kernel holds 1.15 GB. It was
+the aggregate pass: it read a relation whole and held its rows several
+times while it reduced them, and a run asks four passes at once. The
+pass over a hot relation now reads a batch of instruments at a time: the
+peak is 4.74 GB, the service's CPU 37.5 s, the run 65.0 s, the returns
+the same bytes. What it does not reach: one instrument with millions of
+rows (a futures root's minute bars), and the answers that are not passes.
+A run's checks ask for whole relations (`equity.close`, 30 million rows,
+6.6 s), and a stream of the whole equity store held the service at 6 to
+10.6 GB on the pipeline machine with the batched pass in. That is the
+roadmap's package 7 (c).
+
+*R8L's store, and R8L on it.* The 26 roots from Databento's minute bars
+(`scripts/r8l-store.sh`): 96,308,743 bars a relation from 2010-06-07 to
+the session of 2026-11-25 (KC and SB from 2018-12-23), 19 GB, opened in
+0.9 s. **The book does not run on it, and no number of this run is the
+book's.** The store's sessions are the pipeline's, the electronic day
+ended at the 17:45 New York break. The book's are each root's primary
+session (`d20-research`, `d20research/data/sessions.py`: 08:30 to 15:00
+Chicago for the equity indices, 07:20 to 14:00 for the treasuries and
+the yen, 08:30 to 13:20 for the grains since April 2012), which is what
+the parity bundle was built from (`docs/parity-r8l.md`). `r8l.dsl`
+decides at `session + 30min`: on this store that is half an hour after
+the evening open, held to the next afternoon's close. The run halted on
+2014-06-24, its $1M base lost, after 470 s, with the kernel at 15.2 GB
+and the service at 11.3 GB. A halted run prints no clock, so the 15.2 GB
+is not attributed; the synthetic record above (32.9 s, 0.60 GB) did not
+predict it. What R8L needs before it is measured on real history: the
+Databento adapter told each root's session window (bars outside it are
+not the book's), a store staged with them, and room for it (the pipeline
+machine has 9 GB free beside this store). The same run cut at
+`--end 2014-06-01` was killed at 22.3 GB: a run reads its stream to the
+store's last row whatever its window, and nothing after the window is
+trimmed.
+
+*The pipeline's agents on this engine.* The pipeline's own runner
+(`agents-harness/direct/run_direct.py`, unmodified, its side-run mode:
+nothing posted to the team) with the real quant agent, on the two stores
+above served by this tree's binaries beside production's, four posts:
+
+| Post | Result | Time | Spend |
+| --- | --- | --- | --- |
+| NQ, an IBS rule | done, a full backtest: the check, the plan (sanity, base, grid, reveal), the report, the submission | 1,269 s | $0.41 |
+| ES, Double Seven | failed its translation check: the program states $7.50 a round turn and the fills pay $4.594 | 672 s | $0.28 |
+| S&P 500 mean reversion (twice) | the first time the check passed and two trades reconciled to the cent, then the study died with a test service I had capped at 8 GB; the second time both check runs were killed at `abt-slot`'s 14 GB | 730 s, 633 s | $0.28 each |
+
+Three things they met, none of them new with this tree:
+
+- *Every agent's first plan is refused.* The skill's example writes two
+  steps on one line with nothing between them
+  (`abt-plans-and-claims/SKILL.md:94`), the parser reads one step that
+  observes `size report main`, and each agent spent a call finding out.
+  The deployed engine parses the same. The refusal now says where a step
+  ends; the skill's line is the pipeline's to change.
+- *The commission.* The catalog's rate is charged before the program's
+  (E-71), and this store states each root's (R8L reads `per_contract from
+  catalog`), so a `futures_house` program that writes 3.75 a side pays
+  2.297. E-96 left the precedence to the owner. One store cannot serve
+  both until it is settled.
+- *A check run holds the store's whole history.* The second equity
+  failure, repeated by hand: the agent's program over its six-month
+  window, one ticker, took 121.6 s and 11.6 GB in the kernel (23.5 GB
+  with every name), of which the decisions were 1.9 s. The stream carried
+  256.8 million tuples from 1990 to the store's last day. A plan's kernel
+  trims nothing (the roadmap's package 7 (a)), a stream has no lower
+  bound (7 (b)), and before a run's window opens nothing is trimmed even
+  by `abt run`. The deployed engine trims nowhere: 23 of the 134 jobs in
+  production's own job directory met the same kill. The skill teaches a
+  parameter for a one-instrument check (`only`), which scopes nothing.
+  The same program with `need instruments where ticker = "AAPL"` in its
+  data block (E-99 scopes the stream by it) took 9.2 s and 0.09 GB: the
+  same 5 decisions, 5 fills and $9,568.33, over 132 bars where the
+  unscoped run counts 135 (three days on which only other instruments
+  have a bar), so its per-period metrics differ in the third digit.
 
 ### The panel
 

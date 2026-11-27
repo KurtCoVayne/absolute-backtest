@@ -436,19 +436,34 @@ impl Overlay {
     }
 
     /// Removes the journals and append directories of earlier generations
-    /// (folded by a consolidation whose manifest is in place, ST-8.7).
-    pub fn remove_earlier_generations(dir: &Path, generation: u64) -> Result<(), DataError> {
+    /// (folded by a consolidation whose manifest is in place, ST-8.7), and
+    /// the base level's presence files of earlier generations: a
+    /// consolidation writes the presence it extends under its generation
+    /// (`presence-g<n>.bin`) and the manifest names that one, so the file
+    /// it replaced (`presence.bin` of the publication, generation 0) is
+    /// read by nothing (ERRATA E-172). `named` is the presence files the
+    /// manifest's levels name: none of them is removed, whatever its name.
+    pub fn remove_earlier_generations(dir: &Path, generation: u64, named: &[&str]) -> Result<(), DataError> {
         if !dir.exists() {
             return Ok(());
         }
         for e in fs::read_dir(dir)? {
             let p = e?.path();
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let presence = if name == "presence.bin" {
+                Some(0)
+            } else {
+                name.strip_prefix("presence-g").and_then(|r| r.strip_suffix(".bin")).and_then(|g| g.parse::<u64>().ok())
+            };
+            if presence.is_some() && named.contains(&name.as_str()) {
+                continue;
+            }
             let gen = name
                 .strip_prefix("journal-")
                 .and_then(|r| r.strip_suffix(".bin"))
                 .or_else(|| name.strip_prefix("append-"))
-                .and_then(|g| g.parse::<u64>().ok());
+                .and_then(|g| g.parse::<u64>().ok())
+                .or(presence);
             if gen.is_some_and(|g| g < generation) {
                 if p.is_dir() {
                     fs::remove_dir_all(&p)?;
@@ -507,7 +522,7 @@ impl Overlay {
     }
 
     /// The first `n` rows of an instrument's tail as they travel.
-    fn tail_rows(&self, o: usize, n: usize) -> Vec<TailRow> {
+    pub fn tail_rows(&self, o: usize, n: usize) -> Vec<TailRow> {
         let inst = &self.instruments[o];
         (0..n).map(|k| inst.tail.row(k, &self.kinds, &inst.exponents)).collect()
     }
@@ -771,7 +786,9 @@ impl Overlay {
             at += n;
             Ok(s)
         };
-        let o = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+        // The overlay's ordinal of the instrument at the write: read past,
+        // not compared (below).
+        take(4)?;
         let id = u64::from_le_bytes(take(8)?.try_into().unwrap());
         let ne = take(1)?[0] as usize;
         let exponents = take(ne)?.to_vec();
@@ -810,11 +827,16 @@ impl Overlay {
             let e = file_ends.entry(file as usize).or_insert(0);
             *e = (*e).max(offset + len as u64);
         }
-        // The instrument, new or known; exponents as recorded.
-        let o2 = self.instrument(id, exponents.clone());
-        if o2 != o {
-            return Err(DataError::Schema(format!("journal: instrument {} at ordinal {} was {}", id, o, o2)));
-        }
+        // The instrument, new or known, by the record's id; exponents as
+        // recorded. The ordinal the record carries is the overlay's at the
+        // write, where an unpublished instrument is numbered at its first
+        // row; a restart numbers it at its first seal record. The two
+        // differ as soon as an instrument that arrived later sealed first,
+        // and a record refused for it cut the journal there: every block
+        // sealed after it was dropped at each open and its rows came back
+        // as tails held in memory (ERRATA E-137). An ordinal names an
+        // instrument within one process and nothing on disk is read by it.
+        let o = self.instrument(id, exponents.clone());
         let ncols = self.value_columns();
         let inst = &mut self.instruments[o];
         if exponents.len() == ncols && exponents != inst.exponents {

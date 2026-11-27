@@ -153,6 +153,12 @@ else
       "$ABT" data ingest --store "$BASE" --adapter norgate --from "$LAKE" --lists "$LISTS" --tickers "$TICKERS" --start "$a" --end "$b" $NORGATE_OPTS --attributes reviewed=complete >"$OUT/ingest_$a.log" 2>&1
       say "  $a staged: $(grep '^norgate:' "$OUT/ingest_$a.log" | cut -c1-100)"
     done
+    # Every hot relation consolidated with its tails (ERRATA E-173): the store is staged once and then
+    # served, so the service opens it without replaying the log and holds no tail in memory.
+    for rel in $(ls "$BASE/hot" | grep -v '^segments$'); do
+      "$ABT" data consolidate --store "$BASE" "$rel" --tails >"$OUT/fold_$rel.log" 2>&1 || { say "the fold of $rel failed: $(tail -1 "$OUT/fold_$rel.log")"; exit 1; }
+    done
+    say "  folded: $(cat "$OUT"/fold_*.log 2>/dev/null | wc -l) hot relations with their tails"
     date -u +%Y-%m-%dT%H:%M:%SZ >"$BASE/.staged"
   fi
 fi
