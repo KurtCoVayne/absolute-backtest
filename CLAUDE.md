@@ -1,6 +1,6 @@
 # absolute-backtest: the three-layer engine
 
-This tree is the newest code of `absolute-backtest` (`abt`), a backtesting engine in Rust. Pull request #80 (`perf/m8-parallel`) was merged into `spec/three-layer-split` on Nov 25; each later package is a branch off it with a pull request of its own.
+This tree is the newest code of `absolute-backtest` (`abt`), a backtesting engine in Rust. Pull request #80 (`perf/m8-parallel`) was merged into `spec/three-layer-split` on Nov 25, and packages 1 to 6 (pull requests #81 to #90) on Nov 27; a later package is a branch off it with a pull request of its own.
 
 **Read `docs/handoff/README.md` before anything else.** It gives the state of the project on Nov 24, 2026, the goal and the first steps. The rest of `docs/handoff/` holds the approach, the ledger of what is and is not built, the roadmap and the benchmark recipe.
 

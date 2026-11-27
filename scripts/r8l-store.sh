@@ -25,14 +25,16 @@
 # (its last session's file on disk, nothing written for two minutes), in whatever order the pulls end.
 #
 # Env: M (the work directory: $M/target/release/abt-data, $M/logs), STORE, VIEWS, LOGS, REFRESH (the newest
-# pull, under VENDOR), LAST (its last whole session), ROOTS, CAP and GATE (GB: the scope and the memory a
-# step waits for), MIN_DISK_GB, PY (a Python with pyarrow), LOCK, RESERVE, SESSIONS (primary or day), GC (0 keeps
+# pull, under VENDOR), LAST (the last whole session the views take), PULLED (the last session the newest pull's
+# jobs wrote for every root: Nov 26, 2026 was added for the roots that traded on it), ROOTS, CAP and GATE (GB:
+# the scope and the memory a step waits for), MIN_DISK_GB, PY (a Python with pyarrow), LOCK, RESERVE, SESSIONS (primary or day), GC (0 keeps
 # the superseded versions).
 set -uo pipefail
 M=${M:-/srv/absolute/m8}; B=${B:-$M/target/release/abt-data}
 STORE=${STORE:-$M/store-futures}; VIEWS=${VIEWS:-$M/views}; LOGS=${LOGS:-$M/logs/stage}; mkdir -p "$LOGS" "$VIEWS"
 SUM=$LOGS/summary.log; touch "$SUM"
-export VENDOR=${VENDOR:-/srv/absolute/data/vendor} REFRESH=${REFRESH:-dbn-refresh-20261126} LAST=${LAST:-2026-11-25}
+export VENDOR=${VENDOR:-/srv/absolute/data/vendor} REFRESH=${REFRESH:-dbn-refresh-20261126} LAST=${LAST:-2026-11-26}
+PULLED=${PULLED:-2026-11-25}
 C=$VENDOR/$REFRESH
 PY=${PY:-/srv/absolute/dbn-pull/venv/bin/python}
 LOCK=${LOCK:-/srv/absolute/full/ingest.lock}; RESERVE=${RESERVE:-/srv/absolute/locks/reserve}
@@ -66,7 +68,7 @@ memwait() { while [ "$(free -g | awk '/Mem/{print $7}')" -lt "$1" ]; do sleep 20
 refreshed() { # a root's newest pull is whole: its last session and its definitions on disk, nothing written for two minutes
   local r=$1 d
   for d in GLBX.MDP3 IFUS.IMPACT; do
-    [ -f "$C/$d/ohlcv-1m/$r.FUT/$LAST.parquet" ] && [ -f "$C/$d/definition/$r.parquet" ] || continue
+    [ -f "$C/$d/ohlcv-1m/$r.FUT/$PULLED.parquet" ] && [ -f "$C/$d/definition/$r.parquet" ] || continue
     [ -z "$(find "$C/$d/ohlcv-1m/$r.FUT" "$C/$d/definition/$r.parquet" -mmin -2 | head -1)" ] && return 0
   done
   return 1

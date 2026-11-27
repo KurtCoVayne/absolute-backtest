@@ -961,13 +961,15 @@ it.
 *R8L on each root's primary session (Nov 26; E-176, E-177).* The
 Databento adapter takes a root's session windows (E-176) and
 `scripts/r8l-store.sh` stages the 26 roots with the book's: 33.2
-million minute bars to the session of 2026-11-25, 3.1 GB where the
+million minute bars to the session of 2026-11-26, 3.1 GB where the
 whole-day store is 19 GB (120.2 of the 252.8 million bars read lie
 outside the windows; `gc` after each root evicts the versions its
-ingest superseded, which were 10 GB of the 19), in 29 minutes on disk
-and 22.5 in memory. `r8l.dsl` runs on it to the end: 441.7 s, 16,348
-legs, the kernel at 8.1 GB and the service at 5.3 GB, a barrier 0.13 ms
-on average and a decision barrier 5.0 ms (p99 12.7 ms, max 19.7 ms).
+ingest superseded, which were 10 GB of the 19), in 25 minutes on disk.
+`r8l.dsl` runs on it to the end: 462.5 s, 16,353 legs, the kernel at
+8.1 GB and the service at 5.5 GB, a barrier 0.14 ms on average and a
+decision barrier 5.2 ms (p99 13.3 ms, max 21.4 ms). These and the
+numbers below are of Nov 27, on the store staged from the pulls as
+repaired (two paragraphs down).
 
 The first run on that store was wrong, and found the engine fault of
 E-177. Its legs were 87.6% of the book's with 5,001 the book does not
@@ -987,23 +989,24 @@ given a list of labels per instrument.
 
 With it R8L on Databento's history stands beside the Python book on
 TradeStation's (`scripts/parity/r8l_legs.py`), over 2011-05-25 to
-2026-08-14: 15,555 legs in the book and 15,490 in abt, 14,746 the same
+2026-08-14: 15,555 legs in the book and 15,493 in abt, 14,749 the same
 market and day (94.8% of the book's), 99.92% of those in the same
 direction, leg P&L correlation 0.973. On ES's 3,910 session days at the
 book's fixed base the book returns 22.35% a year at a Sharpe of 1.365
-with a 19.2% drawdown, and abt 21.22% at 1.321 with 17.7%; the daily
-series correlate 0.964. KC and SB (80% of the book's legs), HE (84%), LE
-and PL (87%) are the roots where the two vendors' sessions differ most.
+with a 19.2% drawdown, and abt 21.31% at 1.326 with 17.7%; the daily
+series correlate 0.964. SB and KC (79% and 80% of the book's legs), HE
+(84%), LE and PL (87%) are the roots where the two vendors' sessions
+differ most.
 The run's own report had no periods at first: `sessions of "ES"` looked
 for a symbol named `ES`, and a vendor store's series is `ES.v.0`
 (E-178, which names it by its ticker as an instruments table does). On
-ES's 4,233 sessions from 2010-06-07 it gives an additive annual return
-of 20.85%, a Sharpe of 1.301 and a drawdown of 22.22%. Its total P&L,
-$3,501,808, is under the sum of the fills' cash flows ($3,531,956): a
-report on a calendar counts that calendar's days, and $30,148 falls on
-12 days with no ES session (Good Fridays on which the treasuries trade,
-two days of Oct 2012, four of 2014 the vendor has no ES bar of, a
-Sunday on which ETH trades).
+ES's 4,234 sessions from 2010-06-07 it gives an additive annual return
+of 20.88%, a Sharpe of 1.302 and a drawdown of 22.90%. Its total P&L,
+$3,507,482, is under the sum of the fills' cash flows ($3,537,607): a
+report on a calendar counts that calendar's days, and $30,124 falls on
+14 days with no ES session (Good Fridays on which the treasuries trade,
+two days of Oct 2012, four of 2014 the vendor has no ES bar of, the two
+national days of mourning, a Sunday on which ETH trades).
 
 That difference was $34,478 on 14 days in the first run with a report,
 and two of the 14 were Sep 1 and Oct 1, 2026, ordinary sessions. The
@@ -1015,18 +1018,42 @@ pull's 81 roots were cut that way, and the store had no primary session
 on those two days for 16 of R8L's 26 roots. `scripts/r8l-repair.py`
 asked the vendor for the days again through the pulls' cost gate and
 replaced the files; `scripts/r8l-views.py` now takes the file with more
-rows where two pulls hold a day; the numbers above are R8L on the store
-staged again from them (before: 439.0 s, 16,347 legs, a Sharpe of 1.310
-on 4,231 sessions, 21.33% a year at 1.329 beside the book's 22.07% at
-1.347). The other weekdays on which some roots had no session were
+rows where two pulls hold a day; R8L on the store staged again from
+them, in memory and to the session of Nov 25, took 441.7 s and made
+16,348 legs at a Sharpe of 1.301 on 4,233 sessions, 21.22% a year at
+1.321 beside the book's 22.35% at 1.365 (before: 439.0 s, 16,347 legs,
+1.310 on 4,231 sessions, 21.33% at 1.329 beside 22.07% at 1.347). The other weekdays on which some roots had no session were
 asked for too: Feb 28, 2020 was cut in the history and the vendor holds
 more of it, whole for the equity indices, the yen and the livestock
 and without the hours from 14:00 to 20:00 UTC for the treasuries, the
 metals, the energies and the grains; fourteen days of 2012 and 2014
-are the vendor's own gaps. The
-pipeline's own pulls carry the same cut at month and quarter starts
-(`dbn-extra`, `dbn-live`): `docs/handoff/benchmark.md`, "The days a
-pull cut".
+are the vendor's own gaps.
+
+On Nov 27 the pulls were held against the vendor two more ways, and
+both found more. A day file's first and last bar must belong to the
+day it is named for: KC's and SB's do not from 2026-06-22. The pulls'
+writer drops the vendor's duplicate bars and then groups the frame by a
+day series numbered from zero, which pandas aligns by row label, so
+every row after a duplicate takes the day of a later row: each file
+holds the end of the day before and lacks its own, and a chunk's last
+rows are written nowhere (KC lacked 6,195 of its 303,233 bars from Aug
+3 to Nov 25, the last hours of four month ends). Both roots are asked
+for again from June 2026, a row's day taken by position. The other
+check is the vendor's own record count, a year of a root at a time and
+by halves down to the day where it differs from the files: for the 24
+CME roots every year agrees except on 17 days, among them the two
+national days of mourning (2018-12-05 and 2025-01-09), of which no
+pull held a file, and the dataset's first evening. 100 root-days are
+written whole, with eight more that a check of the files' footers had
+found (2020-06-30 cut at 14:10 UTC for six roots). The vendor held the session of Nov
+26 by the morning of Nov 27, and it is in: Thanksgiving, on which 16
+of the 26 roots trade. The store staged from all of it is on the
+pipeline machine's disk, where the room was made by the engine's own
+`gc` on the whole-day store (20.9 GB to 10.0 GB in 6.5 minutes), and
+the numbers of this section are R8L on it. The pipeline's own pulls
+carry the first and the third fault and are left as they are; its days
+are written whole beside them (`docs/handoff/benchmark.md`, "What the
+pulls lacked").
 
 *The store's `gc` on real data.* On a copy of the folded MW14 store,
 `abt data gc --disk-budget 0` evicted 58 superseded versions in 9.2 s
