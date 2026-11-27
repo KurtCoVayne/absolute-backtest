@@ -145,6 +145,22 @@ pub(crate) struct RowsPlan {
     prior: bool,
     order: Vec<Literal>,
     anchor: Vec<Literal>,
+    /// The anchor is the first literal of `order`, so a block solved past
+    /// it is the conjunction's block after its first literal; and it has no
+    /// constructor pattern, since `call` counts each time a stored relation
+    /// is asked through it (the coverage) and the anchor would be asked
+    /// once where it is asked twice.
+    anchor_first: bool,
+    /// The derived relations the conjunction reads, when a block solve of
+    /// it is a pure reading wherever each of them is memoised without a
+    /// stuck instance at the window's bar: every literal a positive atom
+    /// without a constructor pattern (nothing counted in the coverage,
+    /// nothing that sticks), a derived one keyed at the window's time, the
+    /// last literal a comparison or an assignment at most (an instance that
+    /// sticks there meets no later literal to be excluded by, which is
+    /// counted). `None` for any other conjunction. `prefetch_rows_window`
+    /// leaves such a solve out when no row would read it.
+    replayable: Option<Vec<usize>>,
     /// Every slot the conjunction mentions, ascending.
     conj_slots: Vec<usize>,
 }
@@ -158,6 +174,9 @@ pub(crate) struct AggPlan {
     /// leaves unbound are the keys the aggregation binds.
     group: Vec<usize>,
     window: Option<WindowPlan>,
+    /// The aggregate's function, parsed once: any but `count`, which is
+    /// the rows' number, and `quantile`, whose level a row gives.
+    f: Option<Function>,
 }
 
 /// The static shape of a calendar window served from the per-bar cache.
@@ -426,7 +445,7 @@ pub struct WindowKey {
 }
 
 /// Result sets larger than this are kept sorted by their first entity.
-const SORTED_MIN: usize = 16;
+pub(super) const SORTED_MIN: usize = 16;
 
 /// `env` extended by the tuple `tu` at the atom's variable slots (`slots`,
 /// one per term), pushed to `out` unless a term conflicts. A slot bound in
@@ -452,6 +471,59 @@ fn bind_row<S: Sink>(env: &[Option<Value>], slots: &[Option<usize>], tu: &[Value
             }
         }
     }
+}
+
+/// The merge of `Kernel::merge_join_atom`: the block's rows, ascending by
+/// the entity in `eslot`, beside a relation's `n` tuples at the bar, `tuple(j)`
+/// the j-th, read in place (a store's block or a memoised result: no tuple
+/// is copied). Each row is bound to the tuples of its entity's run that its
+/// own bindings (`slots`, one per term) and the atom's constants (`shared`)
+/// match, in the tuples' order. `false`, with nothing pushed, when the
+/// tuples are not ascending by `entity_pos`.
+#[allow(clippy::too_many_arguments)]
+fn merge_join_rows<'t>(live: &Block, next: &mut Block, eslot: usize, entity_pos: usize, slots: &[Option<usize>], shared: &[Option<Value>], n: usize, tuple: impl Fn(usize) -> &'t [Value]) -> bool {
+    if !(1..n).all(|j| tuple(j - 1)[entity_pos] <= tuple(j)[entity_pos]) {
+        return false;
+    }
+    let mut j = 0usize;
+    for i in 0..live.len() {
+        let env = live.row(i);
+        next.set_origin(live.origin_of(i));
+        let e = env[eslot].as_ref().expect("checked");
+        while j < n && tuple(j)[entity_pos] < *e {
+            j += 1;
+        }
+        let mut k = j;
+        while k < n {
+            let tu = tuple(k);
+            if tu[entity_pos] != *e {
+                break;
+            }
+            k += 1;
+            // The row's own bindings on the atom's other terms, and the constants.
+            let ok = slots.iter().zip(shared).zip(tu).all(|((slot, constant), v)| match slot {
+                Some(s) => env[*s].as_ref().is_none_or(|b| b == v),
+                None => constant.as_ref().is_none_or(|c| c == v),
+            });
+            if ok {
+                bind_row(env, slots, tu, next);
+            }
+        }
+    }
+    true
+}
+
+/// The bar an as-of read of a derived relation probes first: the latest
+/// label of the relation's domain at or before `t`, no earlier than `floor`.
+fn asof_latest(dom: &BTreeSet<i64>, floor: i64, t: i64) -> Option<i64> {
+    dom.range(floor..=t).next_back().copied()
+}
+
+/// The bar an as-of walk probes after `k`: the latest label before it, no
+/// earlier than `floor`. With `asof_latest`, the labels of `floor..=t` from
+/// the latest back, each looked up when the walk reaches it.
+fn asof_before(dom: &BTreeSet<i64>, floor: i64, k: i64) -> Option<i64> {
+    dom.range(floor..k).next_back().copied()
 }
 
 impl<'p> Kernel<'p> {
@@ -539,7 +611,7 @@ impl<'p> Kernel<'p> {
                 if key < oldest {
                     if let Some(v) = pattern[e].as_ref() {
                         return Ok(match self.memo.latest_row(rel, v) {
-                            Some((t, d)) if *t == key => narrow(d),
+                            Some((t, d)) if t == key => narrow(d),
                             _ => Arc::new(Vec::new()),
                         });
                     }
@@ -571,12 +643,17 @@ impl<'p> Kernel<'p> {
             Err(e) => {
                 if matches!(e, RunError::Arithmetic { .. }) {
                     self.memo_errors.insert(memo_key, e.clone());
+                    self.stuck_bars[rel] += 1;
                 }
                 return Err(e);
             }
         };
         if !stucks.is_empty() {
             self.memo_stuck.insert(memo_key.clone(), Arc::new(stucks));
+            self.stuck_bars[rel] += 1;
+        }
+        if results.len() <= SORTED_MIN {
+            self.small_bars[rel] += 1;
         }
         if let (Some(e), true) = (entity, results.len() > SORTED_MIN) {
             // The block solver yields its rows in the first generator's order,
@@ -854,7 +931,13 @@ impl<'p> Kernel<'p> {
         }
     }
 
+    /// A parameter of the rule's unit: from the rule's own table, filled
+    /// when the kernel was built; the kernel's table answers, or names the
+    /// unknown parameter, for one the rule's lacks.
     fn param_value(&self, cr: &CompiledRule, name: &str) -> Result<Value, RunError> {
+        if let Some(v) = cr.params.get(name) {
+            return Ok(v.clone());
+        }
         let unit = &self.prog.rules[cr.idx].unit;
         self.params
             .get(&(unit.clone(), name.to_string()))
@@ -956,8 +1039,17 @@ impl<'p> Kernel<'p> {
     /// An instance that meets a partial operation leaves no row (the rows it
     /// pushed are withdrawn) and is stuck, as there.
     pub(crate) fn solve_kleene_block(&mut self, cr: &Arc<CompiledRule>, lits: &[Literal], order: &[usize], start: Block, record: Option<usize>) -> Result<(Block, Vec<Stuck>), RunError> {
+        self.solve_kleene_block_from(cr, lits, order, start, Vec::new(), record)
+    }
+
+    /// `solve_kleene_block` continuing from a block and the instances the
+    /// literals before `order` left stuck: a conjunction past its first
+    /// literal, when that literal's block is wanted too
+    /// (`prefetch_rows_window`). A stuck instance's `at` counts from the
+    /// first literal of `order`.
+    fn solve_kleene_block_from(&mut self, cr: &Arc<CompiledRule>, lits: &[Literal], order: &[usize], start: Block, stuck: Vec<Stuck>, record: Option<usize>) -> Result<(Block, Vec<Stuck>), RunError> {
         let mut live = start;
-        let mut stuck: Vec<Stuck> = Vec::new();
+        let mut stuck: Vec<Stuck> = stuck;
         for (pos, &li) in order.iter().enumerate() {
             let lit = &lits[li];
             let entering = live.len();
@@ -1166,50 +1258,24 @@ impl<'p> Kernel<'p> {
         }
         shared[key_pos] = Some(Value::Time(key));
         let slots = Self::atom_slots(cr, atom);
-        // The relation, whole at the bar.
-        let tuples: Vec<Tuple> = if stored {
-            self.store_lookup(rel, key, None).iter().map(smallvec::SmallVec::from).collect()
-        } else {
-            let mkey: super::MemoKey = (rel, vec![Value::Time(key)]);
-            // A halt the whole demand meets is the row-at-a-time path's to
-            // place on the rows it belongs to.
-            let derived = match self.call(rel, &shared) {
-                Ok(d) => d,
-                Err(RunError::Arithmetic { .. }) => return Ok(false),
-                Err(e) => return Err(e),
-            };
-            if self.memo_stuck.contains_key(&mkey) {
-                return Ok(false);
-            }
-            derived.iter().map(|(tu, _)| tu.clone()).collect()
+        // The relation, whole at the bar, read where it lives: a stored
+        // relation's block, a derived one's memoised result.
+        if stored {
+            let rows = self.store_lookup(rel, key, None);
+            return Ok(merge_join_rows(live, next, eslot, entity_pos, &slots, &shared, rows.len(), |j| rows.row(j)));
+        }
+        let mkey: super::MemoKey = (rel, vec![Value::Time(key)]);
+        // A halt the whole demand meets is the row-at-a-time path's to
+        // place on the rows it belongs to.
+        let derived = match self.call(rel, &shared) {
+            Ok(d) => d,
+            Err(RunError::Arithmetic { .. }) => return Ok(false),
+            Err(e) => return Err(e),
         };
-        if !tuples.windows(2).all(|w| w[0][entity_pos] <= w[1][entity_pos]) {
+        if self.memo_stuck.contains_key(&mkey) {
             return Ok(false);
         }
-        let mut j = 0usize;
-        for i in 0..live.len() {
-            let env = live.row(i);
-            next.set_origin(live.origin_of(i));
-            let e = env[eslot].as_ref().expect("checked");
-            while j < tuples.len() && tuples[j][entity_pos] < *e {
-                j += 1;
-            }
-            let mut k = j;
-            while k < tuples.len() && tuples[k][entity_pos] == *e {
-                let tu = &tuples[k];
-                k += 1;
-                // The row's own bindings on the atom's other terms, and the constants.
-                let ok = atom.terms.iter().enumerate().all(|(p, term)| match term {
-                    Term::Var(v, _) => env[cr.slots[v]].as_ref().map(|b| b == &tu[p]).unwrap_or(true),
-                    Term::Wild(_) => true,
-                    _ => shared[p].as_ref().map(|s| s == &tu[p]).unwrap_or(true),
-                });
-                if ok {
-                    bind_row(env, &slots, tu, next);
-                }
-            }
-        }
-        Ok(true)
+        Ok(merge_join_rows(live, next, eslot, entity_pos, &slots, &shared, derived.len(), |j| derived[j].0.as_slice()))
     }
 
     /// `atom_matches` into a sink, in the same order.
@@ -1298,37 +1364,50 @@ impl<'p> Kernel<'p> {
                 }
             }
             let entity = info.entity_positions.first().and_then(|&e| pat[e].as_ref()).and_then(|v| v.as_equity());
+            // The relation's bars from T back to the floor, one label taken
+            // at a time (`asof_latest`): a call cannot hold the domain, and
+            // nothing opens a bucket while a body is solved, so the labels
+            // are those a copy of the range would have listed.
+            let Some(first) = asof_latest(self.domain_for(&info.cal, entity)?, floor, t) else {
+                return Ok(());
+            };
+            // The common case: the latest bar itself has a tuple (a relation
+            // read at its previous row). Answered directly, nothing memoised.
+            pat[info.key_pos] = Some(Value::Time(first));
+            let latest = self.call(rel, &pat)?;
+            if !latest.is_empty() {
+                return self.bind_tuples_into(cr, atom, env, &latest, out);
+            }
+            pat[info.key_pos] = None;
             // The walk's answer is the latest bar with a tuple matching this
             // pattern, so its memo is keyed by the whole pattern (the key
             // unbound), the entity with it: keyed by the inputs alone, one
             // entity's bar was served to the next (E-132).
             let akey: Vec<Option<Value>> = pat.clone();
-            let rel_dom: Vec<i64> = self.domain_for(&info.cal, entity)?.range(floor..=t).rev().copied().collect();
-            // The common case: the latest bar itself has a tuple (a relation
-            // read at its previous row). Answered directly, nothing memoised.
-            if let Some(k) = rel_dom.first().copied() {
-                pat[info.key_pos] = Some(Value::Time(k));
-                let first = self.call(rel, &pat)?;
-                if !first.is_empty() {
-                    return self.bind_tuples_into(cr, atom, env, &first, out);
-                }
-            }
+            let mut probe: super::AsofKey = (rel, akey, first);
             let mut walked: Vec<i64> = Vec::new();
             let mut found: Option<i64> = None;
-            for k in rel_dom {
-                if let Some(hit) = self.asof_memo.get(&(rel, akey.clone(), k)) {
+            let mut next = Some(first);
+            while let Some(k) = next {
+                probe.2 = k;
+                if let Some(hit) = self.asof_memo.get(&probe) {
                     found = *hit;
                     break;
                 }
                 walked.push(k);
-                pat[info.key_pos] = Some(Value::Time(k));
-                if !self.call(rel, &pat)?.is_empty() {
-                    found = Some(k);
-                    break;
+                // The first bar was just called and has no tuple.
+                if k != first {
+                    pat[info.key_pos] = Some(Value::Time(k));
+                    if !self.call(rel, &pat)?.is_empty() {
+                        found = Some(k);
+                        break;
+                    }
                 }
+                next = asof_before(self.domain_for(&info.cal, entity)?, floor, k);
             }
             for k in walked {
-                self.asof_memo.insert((rel, akey.clone(), k), found);
+                probe.2 = k;
+                self.asof_memo.insert(probe.clone(), found);
             }
             match found {
                 Some(k) => {
@@ -1733,7 +1812,10 @@ impl<'p> Kernel<'p> {
                 }
             }
             Literal::Agg { var, agg, args, conj, within, .. } => {
-                if self.pushed_answers(cr, lit, var, env, out) {
+                // The literal's position in the body, found once for the
+                // pushed answers and the plan, which are both kept by it.
+                let pos = self.body_position(cr, lit);
+                if self.pushed_answers(cr, pos, var, env, out) {
                     return Ok(());
                 }
                 let mut min_count: i64 = 0;
@@ -1744,7 +1826,7 @@ impl<'p> Kernel<'p> {
                     }
                 }
                 self.stats.window_calls += 1;
-                let plan = self.agg_plan(cr, lit, conj, args, within.as_deref());
+                let plan = self.agg_plan_at(cr, pos, lit, conj, args, within.as_deref());
                 let group_slots: Vec<usize> = plan.group.iter().copied().filter(|&s| env[s].is_none()).collect();
                 let grouped = !group_slots.is_empty();
                 // The rows of the group with the aggregate's arguments evaluated
@@ -1775,7 +1857,7 @@ impl<'p> Kernel<'p> {
                         } else if let Some(v) = running {
                             Value::Num(v)
                         } else {
-                            match aggregate(agg, &cols) {
+                            match plan.f.map_or_else(|| aggregate(agg, &cols), |f| reduce_columns(f, &cols)) {
                                 Ok(Some(v)) => v,
                                 Ok(None) => return Ok(()),
                                 Err(m) => {
@@ -1798,7 +1880,7 @@ impl<'p> Kernel<'p> {
                         let value = if agg == "count" {
                             Value::Count(count as i64)
                         } else {
-                            match aggregate(agg, &cols) {
+                            match plan.f.map_or_else(|| aggregate(agg, &cols), |f| reduce_columns(f, &cols)) {
                                 Ok(Some(v)) => v,
                                 Ok(None) => return Ok(()),
                                 Err(m) => {
@@ -1974,13 +2056,11 @@ impl<'p> Kernel<'p> {
     /// instrument's at that time, in the instrument order the local grouping
     /// gives; only when every row they read was received by the barrier
     /// being evaluated (ERRATA E-47). False when the window is evaluated here.
-    fn pushed_answers<S: Sink>(&mut self, cr: &CompiledRule, lit: &Literal, var: &str, env: &[Option<Value>], out: &mut S) -> bool {
+    fn pushed_answers<S: Sink>(&mut self, cr: &CompiledRule, pos: Option<usize>, var: &str, env: &[Option<Value>], out: &mut S) -> bool {
         if self.pushed.is_empty() {
             return false;
         }
-        let Some(pos) = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit)) else {
-            return false;
-        };
+        let Some(pos) = pos else { return false };
         let Some(p) = self.pushed.get(&(cr.idx, pos)).cloned() else { return false };
         let Some(Some(Value::Time(t))) = env.get(p.base_slot) else { return false };
         let Some(section) = p.by_time.get(t) else { return false };
@@ -2033,7 +2113,19 @@ impl<'p> Kernel<'p> {
     /// position in the rule's body (one nested in a case is planned at
     /// each call).
     fn agg_plan(&mut self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Arc<AggPlan> {
-        let pos = self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit));
+        let pos = self.body_position(cr, lit);
+        self.agg_plan_at(cr, pos, lit, conj, args, within)
+    }
+
+    /// The position of a literal in its rule's body, `None` for one nested
+    /// in another (a case's guard): found by its address among the body's
+    /// literals at each use, since a literal has no other name (E-130).
+    fn body_position(&self, cr: &CompiledRule, lit: &Literal) -> Option<usize> {
+        self.prog.rules[cr.idx].body.iter().position(|l| std::ptr::eq(l, lit))
+    }
+
+    /// `agg_plan` for a literal whose position in the body is in hand.
+    fn agg_plan_at(&mut self, cr: &CompiledRule, pos: Option<usize>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Arc<AggPlan> {
         if let Some(p) = pos.and_then(|p| self.agg_plans.get(&(cr.idx, p))) {
             return p.clone();
         }
@@ -2073,6 +2165,10 @@ impl<'p> Kernel<'p> {
         let plan = Arc::new(AggPlan {
             group,
             window: self.window_plan(cr, lit, conj, args),
+            f: match lit {
+                Literal::Agg { agg, .. } if agg != "count" && agg != "quantile" => Function::parse(agg, None).ok(),
+                _ => None,
+            },
         });
         if let Some(p) = pos {
             self.agg_plans.insert((cr.idx, p), plan.clone());
@@ -2493,6 +2589,30 @@ impl<'p> Kernel<'p> {
         let mut outer: Vec<usize> = refs.iter().map(|v| cr.slots[v]).filter(|&s| s != wslot).collect();
         outer.sort_unstable();
         outer.dedup();
+        let order: Vec<Literal> = conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect();
+        let anchor: Vec<Literal> = conj.iter().find(|l| matches!(l, Literal::Atom(_))).cloned().into_iter().collect();
+        let plain = |l: &Literal| matches!(l, Literal::Atom(a) if !a.terms.iter().any(|t| matches!(t, Term::Ctor(..))));
+        let replayable = order.split_last().and_then(|(last, before)| {
+            let atoms = if matches!(last, Literal::Cmp { .. } | Literal::Assign { .. }) { before } else { &order[..] };
+            let mut derived = Vec::new();
+            for l in atoms {
+                let Literal::Atom(a) = l else { return None };
+                let rel = *self.rel_ids.get(&a.name)?;
+                let info = &self.rels[rel];
+                if !plain(l) || !(info.stored || info.inputs.is_empty()) {
+                    return None;
+                }
+                // A derived relation is read at the window's bar, the one
+                // whose memoised result stands for the read.
+                if !info.stored {
+                    if !matches!(a.terms.get(info.key_pos), Some(Term::Var(v, _)) if v == wvar) {
+                        return None;
+                    }
+                    derived.push(rel);
+                }
+            }
+            Some(derived)
+        });
         let plan = Arc::new(RowsPlan {
             literal,
             wslot,
@@ -2501,8 +2621,10 @@ impl<'p> Kernel<'p> {
             outer,
             shareable,
             prior,
-            order: conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. })).collect(),
-            anchor: conj.iter().find(|l| matches!(l, Literal::Atom(_))).cloned().into_iter().collect(),
+            anchor_first: anchor.first().is_some_and(|a| order.first() == Some(a) && plain(a)),
+            replayable,
+            order,
+            anchor,
             conj_slots: {
                 let mut vars = Vec::new();
                 for l in conj {
@@ -2566,6 +2688,38 @@ impl<'p> Kernel<'p> {
                 return Ok(None);
             }
         }
+        // A group already brought to this bar has no fresh bar, and
+        // `rows_columns` reads a prefetch for a fresh bar only. When that is
+        // every row's group (the second aggregate over a shared window,
+        // whose state the first one fed on this pass) no row would read the
+        // prefetch, and it is not solved, provided the solve would be a
+        // pure reading: one that derives a relation, or meets a stuck
+        // instance, is counted in the run's statistics and coverage.
+        if let Some(derived) = &plan.replayable {
+            let mut key = WindowKey {
+                rule: cr.idx,
+                literal: plan.literal,
+                outer: Vec::with_capacity(plan.outer.len()),
+            };
+            let mut unread = true;
+            for i in 0..live.len() {
+                let row = live.row(i);
+                key.outer.clear();
+                key.outer.extend(plan.outer.iter().map(|&s| row[s].clone()));
+                if self.rows_state.get(&key).is_none_or(|st| st.upto != t) {
+                    unread = false;
+                    break;
+                }
+            }
+            let memoised = |k: &Self, rel: usize| {
+                let mkey: super::MemoKey = (rel, vec![Value::Time(t)]);
+                k.memo_get(&mkey).is_some() && !k.memo_stuck.contains_key(&mkey)
+            };
+            if unread && derived.iter().all(|&rel| memoised(self, rel)) {
+                self.stats.prefetch_skipped += 1;
+                return Ok(None);
+            }
+        }
         let n = live.len();
         let mut start = Block::with_capacity(cr.nslots, n);
         for i in 0..n {
@@ -2574,9 +2728,9 @@ impl<'p> Kernel<'p> {
             start.push_row(&e, i as u32);
         }
         let mut rows: Vec<Option<(bool, Vec<Env>)>> = vec![Some((plan.anchor.is_empty(), Vec::new())); n];
-        if !plan.anchor.is_empty() {
-            let order: Vec<usize> = (0..plan.anchor.len()).collect();
-            let (ab, astuck) = self.solve_kleene_block(cr, &plan.anchor, &order, start.clone(), None)?;
+        // The anchor holds on the rows its block kept; a row it stuck on is
+        // the row-at-a-time path's.
+        fn anchored(rows: &mut [Option<(bool, Vec<Env>)>], ab: &Block, astuck: &[Stuck]) {
             for j in 0..ab.len() {
                 if let Some((a, _)) = &mut rows[ab.origin_of(j) as usize] {
                     *a = true;
@@ -2587,7 +2741,25 @@ impl<'p> Kernel<'p> {
             }
         }
         let order: Vec<usize> = (0..plan.order.len()).collect();
-        let (sb, sstuck) = self.solve_kleene_block(cr, &plan.order, &order, start, None)?;
+        let (sb, sstuck) = if plan.anchor_first {
+            // The anchor is the conjunction's first literal: it is solved
+            // once, and the rest of the conjunction goes on from its block
+            // and the instances it left stuck, as the whole solve does past
+            // its first literal.
+            let (ab, astuck) = self.solve_kleene_block(cr, &plan.order, &order[..1], start, None)?;
+            anchored(&mut rows, &ab, &astuck);
+            if ab.is_empty() && astuck.is_empty() {
+                (ab, astuck)
+            } else {
+                self.solve_kleene_block_from(cr, &plan.order, &order[1..], ab, astuck, None)?
+            }
+        } else {
+            if !plan.anchor.is_empty() {
+                let (ab, astuck) = self.solve_kleene_block(cr, &plan.anchor, &[0], start.clone(), None)?;
+                anchored(&mut rows, &ab, &astuck);
+            }
+            self.solve_kleene_block(cr, &plan.order, &order, start, None)?
+        };
         for j in 0..sb.len() {
             if let Some((_, v)) = &mut rows[sb.origin_of(j) as usize] {
                 v.push(sb.row(j).to_vec());
@@ -2671,17 +2843,22 @@ impl<'p> Kernel<'p> {
         } else {
             Vec::new()
         };
-        let pre: Option<(bool, Vec<Env>)> = if fresh.len() == 1 && fresh[0] == t {
+        // The block's own solve of this bar (`Prefetch`), when the bar is the
+        // one the group lacks. The row's entry is taken, not copied: it is
+        // this row's alone and this call is its one reader (a call that
+        // finds it gone solves the bar itself, to the same rows).
+        let mut pre: Option<(bool, Vec<Env>)> = if fresh.len() == 1 && fresh[0] == t {
+            let row = self.prefetch_row;
             self.prefetch
-                .as_ref()
+                .as_mut()
                 .filter(|p| p.rule == cr.idx && p.literal == plan.literal && p.t == t)
-                .and_then(|p| p.rows.get(self.prefetch_row).cloned().flatten())
+                .and_then(|p| p.rows.get_mut(row).and_then(Option::take))
         } else {
             None
         };
         for &t1 in fresh.iter() {
-            let (anchored, sols) = match &pre {
-                Some((a, s)) => (*a, s.clone()),
+            let (anchored, sols) = match pre.take() {
+                Some(solved) => solved,
                 None => {
                     let mut e = env.to_vec();
                     e[plan.wslot] = Some(Value::Time(t1));
@@ -3423,9 +3600,175 @@ pub fn aggregate(name: &str, cols: &[Vec<f64>]) -> Result<Option<Value>, String>
     } else {
         None
     };
-    let f = Function::parse(name, level).map_err(|e| e.to_string())?;
-    let columns: Vec<&[f64]> = cols.iter().take(f.arity()).map(|c| c.as_slice()).collect();
-    abt_agg::reduce(f, abt_agg::Mode::TwoPass, &columns).map(|v| v.map(Value::Num)).map_err(|e| e.to_string())
+    reduce_columns(Function::parse(name, level).map_err(|e| e.to_string())?, cols)
+}
+
+/// `aggregate` past its function's name, for a function parsed once (an
+/// aggregation literal's plan): the two-pass reduction of the columns `f`
+/// reads, in their order; no tuple for an empty group.
+fn reduce_columns(f: Function, cols: &[Vec<f64>]) -> Result<Option<Value>, String> {
+    let reduced = match (f.arity(), cols) {
+        (_, [x, ..]) if x.is_empty() => return Ok(None),
+        (1, [x, ..]) => abt_agg::reduce(f, abt_agg::Mode::TwoPass, &[x.as_slice()]),
+        (2, [x, y, ..]) => abt_agg::reduce(f, abt_agg::Mode::TwoPass, &[x.as_slice(), y.as_slice()]),
+        _ => {
+            let columns: Vec<&[f64]> = cols.iter().take(f.arity()).map(|c| c.as_slice()).collect();
+            abt_agg::reduce(f, abt_agg::Mode::TwoPass, &columns)
+        }
+    };
+    reduced.map(|v| v.map(Value::Num)).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod row_path_tests {
+    use super::*;
+
+    /// The labels the lazy as-of walk visits, in its order.
+    fn lazy_walk(dom: &BTreeSet<i64>, floor: i64, t: i64) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut next = asof_latest(dom, floor, t);
+        while let Some(k) = next {
+            out.push(k);
+            next = asof_before(dom, floor, k);
+        }
+        out
+    }
+
+    #[test]
+    fn the_lazy_asof_walk_visits_the_bars_the_collected_walk_did() {
+        // Domains with holes, one of them reaching the first and the last instant.
+        let doms: Vec<BTreeSet<i64>> = vec![
+            BTreeSet::new(),
+            [5].into_iter().collect(),
+            [1, 2, 3, 7, 8, 20, 21, 40].into_iter().collect(),
+            [i64::MIN, -3, 0, 4, 9, i64::MAX].into_iter().collect(),
+        ];
+        let ts = [i64::MIN, -3, 0, 1, 4, 6, 8, 19, 20, 40, 41, i64::MAX];
+        let mut walks = 0;
+        for dom in &doms {
+            for &t in &ts {
+                // No floor (the whole history); a floor on a label, between
+                // two and at `t`; and a bucket's floor, one past a label
+                // before `t` (`within_bucket`).
+                let mut floors = vec![i64::MIN];
+                floors.extend(ts.iter().copied().filter(|f| *f <= t));
+                floors.extend(dom.range(..t).map(|p| p + 1));
+                for floor in floors {
+                    let collected: Vec<i64> = dom.range(floor..=t).rev().copied().collect();
+                    assert_eq!(lazy_walk(dom, floor, t), collected, "floor {} t {} in {:?}", floor, t, dom);
+                    walks += usize::from(collected.len() > 1);
+                }
+            }
+        }
+        assert!(walks > 100, "{} walks went past their first bar", walks);
+    }
+
+    /// The merge join as it ran when it copied the relation first: every
+    /// tuple cloned into a vector, the vector walked beside the block.
+    fn copied_join(live: &Block, next: &mut Block, eslot: usize, entity_pos: usize, slots: &[Option<usize>], shared: &[Option<Value>], relation: &[Tuple]) -> bool {
+        let tuples: Vec<Tuple> = relation.to_vec();
+        if !tuples.windows(2).all(|w| w[0][entity_pos] <= w[1][entity_pos]) {
+            return false;
+        }
+        let mut j = 0usize;
+        for i in 0..live.len() {
+            let env = live.row(i);
+            next.set_origin(live.origin_of(i));
+            let e = env[eslot].as_ref().expect("checked");
+            while j < tuples.len() && tuples[j][entity_pos] < *e {
+                j += 1;
+            }
+            let mut k = j;
+            while k < tuples.len() && tuples[k][entity_pos] == *e {
+                let tu = &tuples[k];
+                k += 1;
+                let ok = slots.iter().enumerate().all(|(p, slot)| match slot {
+                    Some(s) => env[*s].as_ref().map(|b| b == &tu[p]).unwrap_or(true),
+                    None => shared[p].as_ref().map(|c| c == &tu[p]).unwrap_or(true),
+                });
+                if ok {
+                    bind_row(env, slots, tu, next);
+                }
+            }
+        }
+        true
+    }
+
+    fn rows_of(b: &Block) -> Vec<(u32, Env)> {
+        (0..b.len()).map(|i| (b.origin_of(i), b.row(i).to_vec())).collect()
+    }
+
+    #[test]
+    fn a_merge_join_from_the_block_binds_what_the_copied_join_did() {
+        let (e, t, x) = (|s: u32| Some(Value::Equity(s)), Some(Value::Time(7)), |v: f64| Some(Value::Num(v)));
+        // Slots A, T, X, Y. An entity on two rows, one of them with X bound;
+        // an entity the relation lacks; a row whose X no tuple has.
+        let mut live = Block::with_capacity(4, 6);
+        for (i, row) in [
+            [e(1), t.clone(), None, None],
+            [e(1), t.clone(), x(2.0), None],
+            [e(3), t.clone(), None, None],
+            [e(4), t.clone(), None, None],
+            [e(4), t.clone(), x(9.0), None],
+            [e(6), t.clone(), None, None],
+        ]
+        .iter()
+        .enumerate()
+        {
+            live.push_row(row, 10 + i as u32);
+        }
+        // The relation (A, T, X, Y), ascending by A: runs of one to three
+        // tuples, entities the block lacks before, between and after its own.
+        let tu = |s: u32, a: f64, b: f64| -> Tuple { smallvec::smallvec![Value::Equity(s), Value::Time(7), Value::Num(a), Value::Num(b)] };
+        let relation: Vec<Tuple> = vec![
+            tu(0, 1.0, 10.0),
+            tu(1, 1.0, 11.0),
+            tu(1, 2.0, 12.0),
+            tu(1, 2.0, 2.0),
+            tu(2, 5.0, 14.0),
+            tu(4, 3.0, 3.0),
+            tu(4, 3.0, 16.0),
+            tu(5, 1.0, 17.0),
+            tu(6, 4.0, 18.0),
+            tu(6, 1.0, 1.0),
+            tu(8, 1.0, 19.0),
+        ];
+        let mut stored = super::super::rows::Rows::default();
+        for tuple in &relation {
+            stored.push(tuple.clone());
+        }
+        let derived: super::super::Derived = Arc::new(relation.iter().map(|tuple| (tuple.clone(), 0)).collect());
+        // r(A, T, X, Y); r(A, T, 1, Y); r(A, T, X, X); r(A, T, _, Y).
+        type Atom = (Vec<Option<usize>>, Vec<Option<Value>>);
+        let atoms: [Atom; 4] = [
+            (vec![Some(0), Some(1), Some(2), Some(3)], vec![None, t.clone(), None, None]),
+            (vec![Some(0), Some(1), None, Some(3)], vec![None, t.clone(), x(1.0), None]),
+            (vec![Some(0), Some(1), Some(2), Some(2)], vec![None, t.clone(), None, None]),
+            (vec![Some(0), Some(1), None, Some(3)], vec![None, t.clone(), None, None]),
+        ];
+        let mut bound = 0;
+        for (slots, shared) in &atoms {
+            let mut want = Block::with_capacity(4, 8);
+            assert!(copied_join(&live, &mut want, 0, 0, slots, shared, &relation));
+            let rows = stored.all();
+            let mut from_store = Block::with_capacity(4, 8);
+            assert!(merge_join_rows(&live, &mut from_store, 0, 0, slots, shared, rows.len(), |j| rows.row(j)));
+            let mut from_memo = Block::with_capacity(4, 8);
+            assert!(merge_join_rows(&live, &mut from_memo, 0, 0, slots, shared, derived.len(), |j| derived[j].0.as_slice()));
+            assert_eq!(rows_of(&from_store), rows_of(&want), "from the store's block, slots {:?}", slots);
+            assert_eq!(rows_of(&from_memo), rows_of(&want), "from the memoised result, slots {:?}", slots);
+            bound += want.len();
+        }
+        assert_eq!(bound, 9 + 3 + 4 + 12, "the rows the four atoms bind");
+        // Tuples out of entity order are the row-at-a-time path's: nothing is pushed.
+        let mut unsorted = relation.clone();
+        unsorted.swap(2, 7);
+        let (slots, shared) = &atoms[0];
+        let mut next = Block::with_capacity(4, 8);
+        assert!(!copied_join(&live, &mut next, 0, 0, slots, shared, &unsorted));
+        assert!(!merge_join_rows(&live, &mut next, 0, 0, slots, shared, unsorted.len(), |j| unsorted[j].as_slice()));
+        assert!(next.is_empty());
+    }
 }
 
 #[cfg(test)]

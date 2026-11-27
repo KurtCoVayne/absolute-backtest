@@ -53,9 +53,49 @@ pub(crate) struct Memo {
     latest: FxHashMap<(usize, Vec<Value>), (i64, Derived)>,
     /// Of the evicted buckets, the latest tuples of each entity of each
     /// derived relation with one: what a read of an entity's previous row
-    /// behind the horizon finds once the stores are trimmed (E-126).
+    /// behind the horizon finds once the stores are trimmed (E-126). An
+    /// entity the relation's `latest_block` holds at a later bar is read
+    /// there; what is kept here for it is then stale.
     latest_rows: FxHashMap<(usize, Value), (i64, Derived)>,
+    /// Of the evicted buckets, the latest result of each such relation that
+    /// was in entity order, kept whole: the latest tuples of every entity
+    /// it holds, without a regrouping per entity at each barrier. The
+    /// entities a later result no longer holds move to `latest_rows`.
+    latest_block: FxHashMap<usize, LatestBlock>,
     len: usize,
+}
+
+/// A relation's last evicted result, whole (`Memo::latest_block`).
+#[derive(Clone)]
+struct LatestBlock {
+    /// The bar it was derived at.
+    t: i64,
+    /// The position of the relation's first entity: the tuples ascend by it.
+    entity: usize,
+    rows: Derived,
+}
+
+impl LatestBlock {
+    /// Whether the block holds a tuple of `entity`.
+    fn holds(&self, entity: &Value) -> bool {
+        self.rows.binary_search_by(|(tu, _)| tu[self.entity].cmp(entity)).is_ok()
+    }
+}
+
+/// An entity's tuples of `rel` at `t` kept in `latest_rows`, unless it holds
+/// the entity's tuples of that bar or a later one: of two results evicted at
+/// one bar the first stands.
+fn keep_entity_rows(latest_rows: &mut FxHashMap<(usize, Value), (i64, Derived)>, rel: usize, entity: Value, t: i64, rows: impl FnOnce() -> Vec<(Tuple, usize)>) {
+    match latest_rows.entry((rel, entity)) {
+        std::collections::hash_map::Entry::Occupied(mut slot) => {
+            if slot.get().0 < t {
+                slot.insert((t, Arc::new(rows())));
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert((t, Arc::new(rows())));
+        }
+    }
 }
 
 impl Memo {
@@ -94,9 +134,16 @@ impl Memo {
         self.by_time.keys().next().copied()
     }
 
-    /// An entity's latest tuples of `rel` among the evicted buckets.
-    pub(crate) fn latest_row(&self, rel: usize, entity: &Value) -> Option<&(i64, Derived)> {
-        self.latest_rows.get(&(rel, entity.clone()))
+    /// An entity's latest tuples of `rel` among the evicted buckets, with
+    /// their bar: the entity's own tuples, or the relation's last evicted
+    /// result whole when that holds the entity at a later bar (the caller
+    /// narrows either to its pattern).
+    pub(crate) fn latest_row(&self, rel: usize, entity: &Value) -> Option<(i64, &Derived)> {
+        let own = self.latest_rows.get(&(rel, entity.clone())).map(|(t, d)| (*t, d));
+        match self.latest_block.get(&rel) {
+            Some(b) if own.is_none_or(|(t, _)| t < b.t) && b.holds(entity) => Some((b.t, &b.rows)),
+            _ => own,
+        }
     }
 
     /// Every result, bucket by bucket (a worker's overlay absorbed).
@@ -120,6 +167,77 @@ impl Memo {
                 // relation: a run whose stores are trimmed answers a read of
                 // the entity's previous row from here (`Kernel::call`); no
                 // other relation is read behind the horizon.
+                if let (Some(Some(e)), true) = (entity_pos.get(k.0), chained.contains(&k.0)) {
+                    self.keep_latest_rows(k.0, *e, t, &d, k.1.len() == 1);
+                }
+                if !keep.contains(&k.0) {
+                    continue;
+                }
+                let ins = k.1[1..].to_vec();
+                match self.latest.get_mut(&(k.0, ins.clone())) {
+                    Some(slot) if slot.0 < t => *slot = (t, d),
+                    Some(_) => {}
+                    None => {
+                        self.latest.insert((k.0, ins), (t, d));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tuples of `d`, the result of `rel` at `t` being evicted, become
+    /// the latest of each entity they hold, unless tuples of that bar or a
+    /// later one are kept for it. `e` is the relation's first entity;
+    /// `whole` says the result is the relation's whole cross-section (no
+    /// inputs in its key).
+    fn keep_latest_rows(&mut self, rel: usize, e: usize, t: i64, d: &Derived, whole: bool) {
+        // A cross-section of more than `SORTED_MIN` tuples is in entity
+        // order (`Kernel::call`). Later than the block held, it takes its
+        // place as it is: every entity it holds reads it from now on, and
+        // only the entities the block before held and it lacks are
+        // regrouped, each keeping the tuples that block had for it.
+        let ascending = whole && d.len() > eval::SORTED_MIN && d.iter().all(|(tu, _)| tu[e].as_equity().is_some()) && d.windows(2).all(|w| w[0].0[e] <= w[1].0[e]);
+        if ascending && self.latest_block.get(&rel).is_none_or(|b| b.t < t) {
+            let block = LatestBlock { t, entity: e, rows: d.clone() };
+            if let Some(prev) = self.latest_block.insert(rel, block) {
+                let mut rest = &d[..];
+                for run in prev.rows.chunk_by(|a, b| a.0[e] == b.0[e]) {
+                    let entity = &run[0].0[e];
+                    rest = &rest[rest.iter().take_while(|(tu, _)| tu[e] < *entity).count()..];
+                    if rest.first().is_none_or(|(tu, _)| tu[e] != *entity) {
+                        keep_entity_rows(&mut self.latest_rows, rel, entity.clone(), prev.t, || run.to_vec());
+                    }
+                }
+            }
+            return;
+        }
+        // Any other result (a few tuples, a result with inputs, one not
+        // later than the block held: a bar derived again behind the
+        // horizon) is regrouped per entity. An entity the block holds at
+        // this bar or a later one keeps the block's tuples.
+        let mut by_entity: FxHashMap<Value, Vec<(Tuple, usize)>> = FxHashMap::default();
+        for (tu, ri) in d.iter() {
+            by_entity.entry(tu[e].clone()).or_default().push((tu.clone(), *ri));
+        }
+        let block = self.latest_block.get(&rel).filter(|b| b.t >= t);
+        for (entity, rows) in by_entity {
+            if block.is_some_and(|b| b.holds(&entity)) {
+                continue;
+            }
+            keep_entity_rows(&mut self.latest_rows, rel, entity, t, || rows);
+        }
+    }
+
+    /// `evict_before` as it was before the last result was kept whole:
+    /// every evicted result of a chained relation regrouped per entity.
+    /// The oracle of `memo_tests`.
+    #[cfg(test)]
+    fn evict_before_per_entity(&mut self, cutoff: i64, keep: &FxHashSet<usize>, entity_pos: &[Option<usize>], chained: &FxHashSet<usize>) {
+        let recent = self.by_time.split_off(&cutoff);
+        let old = std::mem::replace(&mut self.by_time, recent);
+        for (t, bucket) in old {
+            self.len -= bucket.len();
+            for (k, d) in bucket {
                 if let (Some(Some(e)), true) = (entity_pos.get(k.0), chained.contains(&k.0)) {
                     let mut by_entity: FxHashMap<Value, Vec<(Tuple, usize)>> = FxHashMap::default();
                     for (tu, ri) in d.iter() {
@@ -681,8 +799,9 @@ pub struct KernelStats {
     /// Stored rows dropped behind the retention horizon.
     #[serde(default)]
     pub trimmed_rows: usize,
-    /// Seconds in the fold's phases: the stream's tuples inserted, the
-    /// barriers' fills, decisions and executor steps, and the wait for the
+    /// Seconds in the fold's phases: the stream's tuples met at the door and
+    /// stored (one clock a batch: its time less its barriers and checkpoints),
+    /// the barriers' fills, decisions and executor steps, and the wait for the
     /// next batch. Every `*_secs` field is wall-clock time, so none is
     /// serialised: the stats are a row of the run's `report` output and a
     /// part of its checkpoints, and two runs of one program over one
@@ -719,6 +838,20 @@ pub struct KernelStats {
     /// Aggregate literals answered by the data layer's pass (K-4.5).
     #[serde(default)]
     pub pushed_answers: usize,
+    /// Rows-window conjunctions not solved over a block because no row of
+    /// it would have read the result (`eval::prefetch_rows_window`). It
+    /// follows the evaluator and the thread count, not the run, so it is
+    /// not serialised (E-133).
+    #[serde(skip)]
+    pub prefetch_skipped: usize,
+    /// The process's resident set in MB when the stream reached its first
+    /// barrier, and its peak until then (`fold::resident_mb`): what the
+    /// binding, the preconditions and the first batch hold before anything
+    /// is derived. The machine's, so not serialised (E-133).
+    #[serde(skip)]
+    pub rss_at_first_barrier_mb: Option<f64>,
+    #[serde(skip)]
+    pub peak_rss_at_first_barrier_mb: Option<f64>,
     /// Tuples the stream delivered, of every relation, kept or not (the
     /// fold counts them at its door; the rows the executor and the kernel
     /// write into the stores themselves are not among them): what
@@ -747,6 +880,28 @@ pub struct KernelStats {
     pub stream_secs: f64,
     #[serde(skip)]
     pub write_secs: f64,
+    /// Seconds the phases above left without a name. Outside the stream
+    /// loop: the kernels built (the probe a truncated stream resolves its
+    /// literals on, and the run's own) and the stream's specification made
+    /// with its calendars put. Inside it: the invariants checked and the
+    /// observed relations read at each barrier, and `loop_other_secs`, what
+    /// is left of `stream_secs` once every phase of the fold is taken from
+    /// it (the rest of a barrier, the checkpoints, the progress reports).
+    /// After the run: `post_secs`, what the command does with the kernel
+    /// before it prints (`cli::run_keeping`: the coverage report and its
+    /// explanations, the ledger, the state tables).
+    #[serde(skip)]
+    pub build_secs: f64,
+    #[serde(skip)]
+    pub spec_secs: f64,
+    #[serde(skip)]
+    pub inv_secs: f64,
+    #[serde(skip)]
+    pub observe_secs: f64,
+    #[serde(skip)]
+    pub post_secs: f64,
+    #[serde(skip)]
+    pub loop_other_secs: f64,
 }
 
 /// What the evaluator derived for one relation over a run: how many times
@@ -1921,8 +2076,113 @@ struct Run {
     /// The block's length after the latest of them: anything else that
     /// changes the block ends the run.
     after: usize,
-    /// Their identities, hashed.
+    /// Whether each of them so far came after the one before in the order
+    /// of their identities: then no two share an identity, and none is
+    /// hashed.
+    ascending: bool,
+    /// Their identities, hashed, from the first that came out of that
+    /// order on.
     seen: FxHashSet<u64>,
+    /// Whether the key's block was in entity order when they began and
+    /// each of them has kept it so: the key is then not marked dirty, the
+    /// sort it would ask for having nothing to move.
+    ordered: bool,
+}
+
+/// The hash of a tuple's identity (`RelInfo::identity`).
+fn identity_hash(tuple: &[Value], identity: &[usize]) -> u64 {
+    let mut h = hash::FxHasher::default();
+    for &i in identity {
+        tuple[i].hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Whether `tuple`'s identity comes strictly after `prev`'s, column by
+/// column. Only entities and labels are compared, whose order is their
+/// equality (a number's is not: 0.0 and -0.0 are equal and ordered), so a
+/// run of tuples each after the one before holds no identity twice; any
+/// other value answers `false`.
+fn identity_after(prev: &[Value], tuple: &[Value], identity: &[usize]) -> bool {
+    for &i in identity {
+        let order = match (&prev[i], &tuple[i]) {
+            (Value::Equity(a), Value::Equity(b)) | (Value::Label(a), Value::Label(b)) => a.cmp(b),
+            _ => return false,
+        };
+        if order != std::cmp::Ordering::Equal {
+            return order == std::cmp::Ordering::Less;
+        }
+    }
+    false
+}
+
+/// The latest row of each identity among dropped blocks: the blocks walked
+/// from the latest key back and each from its last row, the first row met of
+/// an identity, with its place by the hash of the identity. `None` when two
+/// identities share a hash.
+#[allow(clippy::type_complexity)]
+fn latest_dropped(old: &BTreeMap<i64, Rows>, identity: &[usize], hash: &impl Fn(&[Value]) -> u64) -> Option<(Vec<Tuple>, FxHashMap<u64, usize>)> {
+    let mut rows: Vec<Tuple> = Vec::new();
+    let mut by_hash: FxHashMap<u64, usize> = FxHashMap::default();
+    for block in old.values().rev() {
+        for tu in block.iter().rev() {
+            match by_hash.entry(hash(tu)) {
+                std::collections::hash_map::Entry::Occupied(at) => {
+                    if !identity.iter().all(|&i| rows[*at.get()][i] == tu[i]) {
+                        return None;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(at) => {
+                    at.insert(rows.len());
+                    rows.push(smallvec::SmallVec::from(tu));
+                }
+            }
+        }
+    }
+    Some((rows, by_hash))
+}
+
+/// A store's kept rows after the blocks of `old` are dropped: the latest
+/// row of each identity among the rows kept before and the dropped ones (a
+/// dropped row replaces a kept one, a later dropped row an earlier), in
+/// tuple order. Only the dropped rows are hashed and sorted: the rows kept
+/// before are in order already, less those a dropped row replaces, and the
+/// two runs are merged. `hash` is `identity_hash`; two identities sharing a
+/// hash leave the call to `kept_rebuilt`.
+fn kept_after(mut kept: Vec<Tuple>, old: &BTreeMap<i64, Rows>, identity: &[usize], hash: impl Fn(&[Value]) -> u64) -> Vec<Tuple> {
+    let Some((mut latest, by_hash)) = latest_dropped(old, identity, &hash) else {
+        return kept_rebuilt(kept, old, identity);
+    };
+    kept.retain(|tu| by_hash.get(&hash(tu)).is_none_or(|&at| !identity.iter().all(|&i| latest[at][i] == tu[i])));
+    latest.sort();
+    // The rows kept before are in tuple order as this function leaves
+    // them; rows a caller set are put in it.
+    if !kept.windows(2).all(|w| w[0] <= w[1]) {
+        kept.sort();
+    }
+    let mut out: Vec<Tuple> = Vec::with_capacity(kept.len() + latest.len());
+    let (mut a, mut b) = (kept.into_iter().peekable(), latest.into_iter().peekable());
+    while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
+        out.extend(if x <= y { a.next() } else { b.next() });
+    }
+    out.extend(a);
+    out.extend(b);
+    out
+}
+
+/// `kept_after` through the identities themselves: every row kept before
+/// and every dropped row entered in a map by its identity, the later
+/// replacing the earlier, and the map's rows sorted.
+fn kept_rebuilt(kept: Vec<Tuple>, old: &BTreeMap<i64, Rows>, identity: &[usize]) -> Vec<Tuple> {
+    let mut latest: FxHashMap<Vec<Value>, Tuple> = kept.into_iter().map(|tu| (identity.iter().map(|&i| tu[i].clone()).collect(), tu)).collect();
+    for block in old.values() {
+        for tu in block.iter() {
+            latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), smallvec::SmallVec::from(tu));
+        }
+    }
+    let mut kept: Vec<Tuple> = latest.into_values().collect();
+    kept.sort();
+    kept
 }
 
 impl Store {
@@ -1956,20 +2216,9 @@ impl Store {
         }
         let recent = self.by_time.split_off(&cutoff);
         let old = std::mem::replace(&mut self.by_time, recent);
-        let mut dropped = 0;
+        let dropped = old.values().map(|b| b.len()).sum();
         if keep_latest {
-            let mut latest: FxHashMap<Vec<Value>, Tuple> = self.kept.drain(..).map(|tu| (identity.iter().map(|&i| tu[i].clone()).collect(), tu)).collect();
-            for (_, block) in old {
-                dropped += block.len();
-                for tu in block.iter() {
-                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), smallvec::SmallVec::from(tu));
-                }
-            }
-            let mut kept: Vec<Tuple> = latest.into_values().collect();
-            kept.sort();
-            self.kept = kept;
-        } else {
-            dropped = old.values().map(|b| b.len()).sum();
+            self.kept = kept_after(std::mem::take(&mut self.kept), &old, identity, |tu| identity_hash(tu, identity));
         }
         self.dirty = self.dirty.split_off(&cutoff);
         if let Some((_, runs)) = &mut self.runs {
@@ -1986,8 +2235,77 @@ impl Store {
     /// it (K-4.2). Only the rows of the key received at earlier instants
     /// are searched, and the instant's own when it has brought the identity
     /// already (two versions of one fact), so a bar received whole searches
-    /// none.
+    /// none. An instant's rows that arrive in ascending order of identity
+    /// cannot hold one twice and are not hashed; the first out of that
+    /// order hashes those before it, and the rest are hashed as they come.
+    /// A row that keeps a block in entity order does not mark its key
+    /// dirty.
     pub fn insert_received(&mut self, key: i64, tuple: Tuple, identity: &[usize], r: i64) {
+        self.inserted += 1;
+        let Store {
+            by_time,
+            entity_pos,
+            dirty,
+            runs,
+            open,
+            ..
+        } = self;
+        if runs.as_ref().is_none_or(|(at, _)| *at != r) {
+            *runs = Some((r, FxHashMap::default()));
+        }
+        let runs = &mut runs.as_mut().expect("just set").1;
+        let block = block_for(by_time, open, key, tuple.len());
+        let len = block.len();
+        let run = runs.entry(key).or_default();
+        if run.after != len || run.after == run.start {
+            // A block whose key is not dirty is in entity order.
+            *run = Run {
+                start: len,
+                after: len,
+                ascending: true,
+                seen: FxHashSet::default(),
+                ordered: entity_pos.is_some() && !dirty.contains(&key),
+            };
+        }
+        let same = |t: &[Value]| identity.iter().all(|&i| t[i] == tuple[i]);
+        let found = match (0..run.start).find(|&i| same(block.row(i))) {
+            Some(i) => Some(i),
+            None if run.ascending && (run.start == len || identity_after(block.row(len - 1), &tuple, identity)) => None,
+            None => {
+                if run.ascending {
+                    run.ascending = false;
+                    run.seen = (run.start..len).map(|i| identity_hash(block.row(i), identity)).collect();
+                }
+                if run.seen.contains(&identity_hash(&tuple, identity)) {
+                    (run.start..len).find(|&i| same(block.row(i)))
+                } else {
+                    None
+                }
+            }
+        };
+        match found {
+            Some(i) => block.set(i, tuple),
+            None => {
+                if !run.ascending {
+                    run.seen.insert(identity_hash(&tuple, identity));
+                }
+                if let Some(e) = *entity_pos {
+                    if run.ordered && len > 0 && tuple[e] < block.row(len - 1)[e] {
+                        run.ordered = false;
+                        dirty.insert(key);
+                    }
+                }
+                block.push(tuple);
+                run.after = len + 1;
+            }
+        }
+    }
+
+    /// `insert_received` as it was before an instant's rows in ascending
+    /// order went unhashed: every row hashed, every push marking its key
+    /// dirty. The oracle of `store_tests`.
+    #[cfg(test)]
+    fn insert_received_hashed(&mut self, key: i64, tuple: Tuple, identity: &[usize], r: i64) {
         self.inserted += 1;
         let Store {
             by_time,
@@ -2008,17 +2326,11 @@ impl Store {
             *run = Run {
                 start: len,
                 after: len,
-                seen: FxHashSet::default(),
+                ..Run::default()
             };
         }
         let same = |t: &[Value]| identity.iter().all(|&i| t[i] == tuple[i]);
-        let ident = {
-            let mut h = hash::FxHasher::default();
-            for &i in identity {
-                tuple[i].hash(&mut h);
-            }
-            h.finish()
-        };
+        let ident = identity_hash(&tuple, identity);
         let found = match (0..run.start).find(|&i| same(block.row(i))) {
             Some(i) => Some(i),
             None if run.seen.contains(&ident) => (run.start..len).find(|&i| same(block.row(i))),
@@ -2041,6 +2353,8 @@ impl Store {
     pub fn index_by(&mut self, entity_pos: Option<usize>) {
         self.entity_pos = entity_pos;
         self.dirty = if entity_pos.is_some() { self.by_time.keys().copied().collect() } else { BTreeSet::new() };
+        // Every block may be out of order now: no run is known to have kept its block's.
+        self.runs = None;
     }
 
     /// The tuples at `key`, narrowed to those whose entity is `entity` when
@@ -2127,6 +2441,10 @@ pub(crate) struct CompiledRule {
     /// The slot of the head's first entity variable: the instrument whose
     /// sessions a per-instrument calendar ranges over.
     pub entity_slot: Option<usize>,
+    /// The parameters of the rule's unit by name, with the values the run
+    /// uses (the overrides applied): what a parameter in the rule evaluates
+    /// to, read on every row that tests one.
+    pub params: FxHashMap<String, Value>,
 }
 
 pub type Env = Vec<Option<Value>>;
@@ -2370,6 +2688,13 @@ pub struct Kernel<'p> {
     /// (`--timing`'s per-relation table).
     pub(crate) derive_secs: Vec<f64>,
     pub(crate) derive_stack: Vec<(usize, std::time::Instant, f64)>,
+    /// Per relation, the derivations that left a stuck instance or a halt
+    /// at their key (`memo_stuck`, `memo_errors`), and those of at most
+    /// `eval::SORTED_MIN` tuples: the bars an evaluator over whole blocks
+    /// would decline, and those too small to gain by it. Beside the
+    /// seconds in `--timing`'s per-relation table; never stored.
+    pub(crate) stuck_bars: Vec<u64>,
+    pub(crate) small_bars: Vec<u64>,
     /// What the build noticed about the program against this data (a label
     /// the data never carries); reported with the run's warnings.
     pub(crate) run_warnings: Vec<RunWarning>,
@@ -2769,13 +3094,14 @@ impl<'p> Kernel<'p> {
                     _ => None,
                 })
             });
-            compiled.push(Arc::new(CompiledRule {
+            compiled.push(CompiledRule {
                 idx: i,
                 slots,
                 nslots,
                 label: prog.rule_label(i),
                 entity_slot,
-            }));
+                params: FxHashMap::default(),
+            });
         }
         // Parameters.
         let mut params = FxHashMap::default();
@@ -2835,6 +3161,16 @@ impl<'p> Kernel<'p> {
                 }
             }
         }
+        // Each rule's own table of its unit's parameters, now that the
+        // overrides are applied: `param_value` reads it by name.
+        let compiled: Vec<Arc<CompiledRule>> = compiled
+            .into_iter()
+            .map(|mut cr| {
+                let unit = &prog.rules[cr.idx].unit;
+                cr.params = params.iter().filter(|((u, _), _)| u == unit).map(|((_, name), v)| (name.clone(), v.clone())).collect();
+                Arc::new(cr)
+            })
+            .collect();
         // W7 on the values the run uses: the checker judged a calendar
         // window's `min K` against its duration on the parameters' defaults,
         // and an override may make the window unable to hold K bars, which
@@ -3177,9 +3513,11 @@ impl<'p> Kernel<'p> {
             coverage: vec![(0, 0, 0); n_rels],
             derive_secs: vec![0.0; n_rels],
             derive_stack: Vec::new(),
+            stuck_bars: vec![0; n_rels],
+            small_bars: vec![0; n_rels],
             run_warnings,
         };
-        let read = k.read_relations();
+        let read = k.relations_read();
         k.read_rels = (0..n_rels).map(|r| read.contains(&r)).collect();
         k.recursive_rels = (0..n_rels)
             .filter(|&r| {
@@ -3251,6 +3589,11 @@ impl<'p> Kernel<'p> {
     /// or after it in the schedule.
     pub fn label_on(&self, cal: &Cal, t: i64) -> Option<i64> {
         self.schedule.get(cal)?.range(t..).next().copied()
+    }
+
+    /// Whether `label` is a label of the decision calendar's schedule.
+    pub(crate) fn decides_at(&self, label: i64) -> bool {
+        self.schedule.get(&self.prog.decision_cal).is_some_and(|labels| labels.contains(&label))
     }
 
     /// A tuple keyed at `key` arrived after its bar closed: everything
@@ -3381,15 +3724,40 @@ impl<'p> Kernel<'p> {
         self.stats.trim_secs += started.elapsed().as_secs_f64();
     }
 
-    /// The stored relations this run keeps: every one but the pure data a
+    /// The stored relations this run keeps (`relations_read`, or every one
+    /// after `keep_unread_relations`): what the stream carries
+    /// (`bind::stream_spec`) and what the fold lets in at its door.
+    pub fn read_relations(&self) -> FxHashSet<usize> {
+        self.read_rels.iter().enumerate().filter(|(_, read)| **read).map(|(id, _)| id).collect()
+    }
+
+    /// Keep every relation, read or not (tests that prove the projection
+    /// changes nothing).
+    pub fn keep_unread_relations(&mut self) {
+        self.read_rels.fill(true);
+    }
+
+    /// Keep the listing when a command reads it after the run
+    /// (`Replay::read_after`): E-141 leaves it out only for want of a
+    /// reader. The companions, the tickers and the classification stay as
+    /// E-127 projects them, read after the run or not (E-142).
+    pub(crate) fn keep_read_after(&mut self, names: &[String]) {
+        if let Some(id) = self.rel_ids.get("listed").copied().filter(|_| names.iter().any(|n| n == "listed")) {
+            self.read_rels[id] = true;
+        }
+    }
+
+    /// The stored relations a run reads: every one but the pure data a
     /// run can prove it never reads -- the bar companions `open`, `high` and
     /// `low` when no rule names them and no decision fills at the open or on
-    /// a limit or stop, and the identity relations `ticker` and
-    /// `classification` when no rule names them. The executor and the
-    /// kernel read other relations by name (the settlements, the margins,
-    /// the quotes), so nothing else is projected (06-performance 3.3,
-    /// E-127: the first step of the stream projection).
-    pub fn read_relations(&self) -> FxHashSet<usize> {
+    /// a limit or stop, the identity relations `ticker` and
+    /// `classification` when no rule names them, and the listing `listed`
+    /// when no rule names it and no observation reads it (E-141; a command
+    /// that reads it after the run keeps it, `keep_read_after`). The
+    /// executor and the kernel read other relations by name (the
+    /// settlements, the margins, the quotes), so nothing else is projected
+    /// (06-performance 3.3, E-127: the first step of the stream projection).
+    fn relations_read(&self) -> FxHashSet<usize> {
         let mut named: FxHashSet<usize> = FxHashSet::default();
         for rule in &self.prog.rules {
             let mut stack: Vec<&Literal> = rule.body.iter().collect();
@@ -3421,6 +3789,9 @@ impl<'p> Kernel<'p> {
                 match name {
                     "open" | "high" | "low" => companions || named.contains(&id),
                     "ticker" | "classification" => named.contains(&id),
+                    // An observation reads its relation's rows at every bar
+                    // (`outputs::observe_bar`), whatever the rules name.
+                    "listed" => named.contains(&id) || self.prog.observes.iter().any(|o| o.rel == name),
                     _ => true,
                 }
             })
@@ -3443,15 +3814,18 @@ impl<'p> Kernel<'p> {
         matches!(self.prog.default_order.as_str(), "moo" | "moo_moc") || self.prog.rules.iter().filter(|r| r.head.name == "decide").any(|r| r.head.terms.iter().any(names))
     }
 
-    /// The relations by the seconds spent deriving them (callees excluded).
-    pub fn derive_times(&self) -> Vec<(String, f64, usize)> {
-        let mut v: Vec<(String, f64, usize)> = self
+    /// The relations by the seconds spent deriving them (callees excluded),
+    /// with their derivations: all of them, those that left a stuck
+    /// instance or a halt, and those of at most `eval::SORTED_MIN` tuples.
+    pub fn derive_times(&self) -> Vec<(String, f64, usize, u64, u64)> {
+        let mut v: Vec<(String, f64, usize, u64, u64)> = self
             .rels
             .iter()
             .zip(&self.derive_secs)
             .zip(&self.coverage)
-            .filter(|((_, s), _)| **s > 0.0)
-            .map(|((r, s), c)| (r.name.clone(), *s, c.0))
+            .zip(self.stuck_bars.iter().zip(&self.small_bars))
+            .filter(|(((_, s), _), _)| **s > 0.0)
+            .map(|(((r, s), c), (stuck, small))| (r.name.clone(), *s, c.0, *stuck, *small))
             .collect();
         v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         v
@@ -4426,6 +4800,14 @@ pub struct Replay {
     /// Evict the memo at every bar however small (tests that prove eviction
     /// changes nothing).
     pub force_memo_eviction: bool,
+    /// Stream and keep the relations nothing in the run reads (tests that
+    /// prove the stream projection changes nothing).
+    pub keep_unread: bool,
+    /// The relations a command reads after the run and names before it
+    /// (`abt run --ledger`, the relation of an `abt query` form or of `abt
+    /// table --rel`): a listing among them is kept as every run kept it
+    /// before E-141 (`Kernel::keep_read_after`).
+    pub read_after: Vec<String>,
     /// Write the run's outputs through the data layer at every checkpoint
     /// (the rows the run gained since the last) and when it ends or halts
     /// (K-7.1).
@@ -4566,7 +4948,13 @@ pub fn replay_observed<'p>(
     let periods = report_periods(prog, &bound, client)?;
     let check_secs = checking.elapsed().as_secs_f64();
     // A truncated stream resolves ticker literals where it ends.
-    let probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
+    let building = std::time::Instant::now();
+    let mut probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
+    if opts.keep_unread {
+        probe.keep_unread_relations();
+    }
+    probe.keep_read_after(&opts.read_after);
+    let mut build_secs = building.elapsed().as_secs_f64();
     let identity = Identity {
         program_hash: crate::compiler::normalise(prog).hash,
         binding_id: bound.binding.id.clone().unwrap_or_default(),
@@ -4597,7 +4985,9 @@ pub fn replay_observed<'p>(
         &identity.mode,
     );
     let identity = Identity { run_id: run.clone(), ..identity };
+    let specifying = std::time::Instant::now();
     let (mut spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
+    let spec_secs = specifying.elapsed().as_secs_f64();
     if let Some(session) = opts.mode.session() {
         spec.clock = abt_wire::generated::abt::wire::ClockSource::Live;
         spec.session = Some(session.to_string());
@@ -4634,12 +5024,18 @@ pub fn replay_observed<'p>(
     if cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() && !outputs::observes_at_barriers(prog) {
         cfg.trim_stores = false;
     }
+    let building = std::time::Instant::now();
     let mut kernel = match lowered {
         Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
         None => Kernel::bound(prog, &bound, cfg.clone())?,
     };
+    if opts.keep_unread {
+        kernel.keep_unread_relations();
+    }
+    kernel.keep_read_after(&opts.read_after);
     kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
     kernel.identity = identity;
+    build_secs += building.elapsed().as_secs_f64();
     // A literal the data layer does not answer is evaluated here: the run
     // says so (E-47).
     let pushing = std::time::Instant::now();
@@ -4648,6 +5044,8 @@ pub fn replay_observed<'p>(
     }
     kernel.stats.bind_secs += bind_secs;
     kernel.stats.check_secs += check_secs;
+    kernel.stats.build_secs += build_secs;
+    kernel.stats.spec_secs += spec_secs;
     kernel.stats.push_secs += pushing.elapsed().as_secs_f64();
     kernel.run_warnings.extend(pre_warnings);
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
@@ -4704,6 +5102,12 @@ pub fn replay_observed<'p>(
             let decoding = std::time::Instant::now();
             let events = decoder.events(&mut fold.kernel, &bound, &b)?;
             fold.kernel.stats.decode_secs += decoding.elapsed().as_secs_f64();
+            // The batch's tuples on one clock: its time less the barriers
+            // and checkpoints the fold clocked in it, and less what this
+            // loop does with a checkpoint or a closed bar.
+            let folding = std::time::Instant::now();
+            let outside = fold.outside_secs();
+            let mut aside = 0.0;
             for ev in events {
                 let before = fold.last_bar();
                 if let Err(e) = fold.step(ev.into()) {
@@ -4711,6 +5115,7 @@ pub fn replay_observed<'p>(
                     break 'stream;
                 }
                 if let Some(cp) = fold.take_checkpoint() {
+                    let started = std::time::Instant::now();
                     // The outputs incrementally at every checkpoint (K-7.1),
                     // before the checkpoint: a run resumed from it finds them.
                     if opts.write_outputs {
@@ -4725,8 +5130,10 @@ pub fn replay_observed<'p>(
                         }
                     }
                     on_checkpoint(cp);
+                    aside += started.elapsed().as_secs_f64();
                 }
                 if let Some(t) = fold.last_bar().filter(|t| before != Some(*t)) {
+                    let started = std::time::Instant::now();
                     let (k, r) = fold.parts();
                     match on_progress(Progress::Barrier { t }, k, r) {
                         Ok(Next::Continue) => {}
@@ -4736,10 +5143,15 @@ pub fn replay_observed<'p>(
                             break 'stream;
                         }
                     }
+                    aside += started.elapsed().as_secs_f64();
                 }
             }
+            fold.kernel.stats.insert_secs += (folding.elapsed().as_secs_f64() - (fold.outside_secs() - outside) - aside).max(0.0);
         }
-        fold.kernel.stats.stream_secs += streaming.elapsed().as_secs_f64();
+        let s = &mut fold.kernel.stats;
+        s.stream_secs += streaming.elapsed().as_secs_f64();
+        let phases = s.wait_secs + s.decode_secs + s.insert_secs + s.fill_secs + s.decide_secs + s.exec_secs + s.inv_secs + s.observe_secs + s.warm_secs + s.trim_secs + s.evict_secs;
+        s.loop_other_secs = (s.stream_secs - phases).max(0.0);
     }
     // The run's outputs, under its namespace (K-7.1): a halted run writes
     // what it has, and its halt is the error whether or not they could be.
@@ -5010,6 +5422,179 @@ mod store_tests {
         assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0)]);
     }
 
+    fn labelled(e: Sym, label: Sym, key: i64, v: f64) -> Tuple {
+        smallvec::smallvec![Value::Equity(e), Value::Label(label), Value::Time(key), Value::Num(v)]
+    }
+
+    fn blocks(s: &Store) -> Vec<(i64, Vec<Tuple>)> {
+        s.by_time.iter().map(|(k, b)| (*k, b.all().to_vec())).collect()
+    }
+
+    #[test]
+    fn an_instants_rows_in_ascending_order_are_not_hashed_and_keep_the_block_clean() {
+        let mut s = indexed();
+        for (e, v) in [(0, 10.0), (1, 20.0), (3, 30.0)] {
+            s.insert_received(KEY, tu(e, v), &IDENTITY, 100);
+        }
+        let run = &s.runs.as_ref().unwrap().1[&KEY];
+        assert!(run.ascending && run.seen.is_empty() && run.ordered, "{:?}", run);
+        assert!(s.dirty.is_empty(), "a block received in entity order needs no sort");
+        // The same identity again in the instant: the rows before it are
+        // hashed, it replaces its row, and the block's order stands.
+        s.insert_received(KEY, tu(1, 21.0), &IDENTITY, 100);
+        let run = &s.runs.as_ref().unwrap().1[&KEY];
+        assert!(!run.ascending && run.seen.len() == 3 && run.ordered, "{:?}", run);
+        assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0), (3, 30.0)]);
+        // A row below the one before it: pushed, hashed, and the key dirty.
+        s.insert_received(KEY, tu(2, 25.0), &IDENTITY, 100);
+        assert!(s.dirty.contains(&KEY) && s.runs.as_ref().unwrap().1[&KEY].seen.len() == 4);
+        // A later instant revises a row and adds one.
+        s.insert_received(KEY, tu(3, 31.0), &IDENTITY, 200);
+        s.insert_received(KEY, tu(4, 40.0), &IDENTITY, 200);
+        assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0), (3, 31.0), (2, 25.0), (4, 40.0)]);
+        assert_eq!(s.lookup(KEY, Some(&Value::Equity(2))).to_vec(), vec![tu(2, 25.0)]);
+        assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0), (2, 25.0), (3, 31.0), (4, 40.0)]);
+    }
+
+    #[test]
+    fn an_identity_is_after_another_only_through_entities_and_labels() {
+        let id = [0, 1];
+        let at = |e: Sym, l: Sym| labelled(e, l, KEY, 0.0);
+        assert!(identity_after(&at(1, 5), &at(2, 0), &id));
+        assert!(identity_after(&at(1, 5), &at(1, 6), &id));
+        assert!(!identity_after(&at(1, 5), &at(1, 5), &id), "the same identity is not after itself");
+        assert!(!identity_after(&at(1, 5), &at(1, 4), &id) && !identity_after(&at(1, 5), &at(0, 9), &id));
+        // Zero and minus zero are one number and two places in the order:
+        // a number in an identity is never taken as ascending.
+        let (zero, minus): (Tuple, Tuple) = (smallvec::smallvec![Value::Num(0.0)], smallvec::smallvec![Value::Num(-0.0)]);
+        assert!(zero[0] == minus[0] && minus[0] < zero[0]);
+        assert!(!identity_after(&minus, &zero, &[0]));
+        assert!(!identity_after(&at(1, 5), &at(1, 6), &[0, 2]), "a time is not compared");
+    }
+
+    /// The stream's tuples through `insert_received` leave the blocks the
+    /// code before left (`insert_received_hashed`), row for row and in the
+    /// same order, at every step: instants whose rows ascend, instants
+    /// whose rows do not, identities repeated within an instant and across
+    /// instants, lookups that sort a block in between, another writer's
+    /// rows, and trims.
+    #[test]
+    fn random_receipts_leave_the_blocks_the_hashed_inserts_left() {
+        const ID: [usize; 2] = [0, 1];
+        for seed in 0..40u64 {
+            let mut rng = crate::data::Rng::new(seed);
+            let mut pick = |n: u64| (rng.next_u64() % n) as usize;
+            let (mut new, mut old) = (Store::default(), Store::default());
+            new.index_by(Some(0));
+            old.index_by(Some(0));
+            let mut r = 100;
+            let ordered_stream = seed % 2 == 0;
+            for step in 0..400 {
+                match pick(20) {
+                    0 => r += 1 + pick(3) as i64,
+                    1 => {
+                        let (key, entity) = (pick(4) as i64, Value::Equity(pick(12) as Sym));
+                        assert_eq!(new.lookup(key, Some(&entity)).to_vec(), old.lookup(key, Some(&entity)).to_vec(), "seed {} step {}", seed, step);
+                    }
+                    2 => {
+                        let t = labelled(pick(12) as Sym, pick(3) as Sym, 0, step as f64);
+                        let key = pick(4) as i64;
+                        new.insert(key, t.clone());
+                        old.insert(key, t);
+                    }
+                    3 if step % 7 == 0 => {
+                        let cutoff = pick(3) as i64;
+                        assert_eq!(new.trim_before(cutoff, &ID, true), old.trim_before(cutoff, &ID, true));
+                        assert_eq!(new.kept, old.kept);
+                    }
+                    _ => {
+                        // A burst of one instant at one key: ascending by
+                        // identity in an ordered stream but for a few rows.
+                        let key = pick(4) as i64;
+                        let mut burst: Vec<(Sym, Sym)> = (0..1 + pick(10)).map(|_| (pick(12) as Sym, pick(3) as Sym)).collect();
+                        if ordered_stream {
+                            burst.sort();
+                            if pick(4) > 0 {
+                                burst.dedup();
+                            }
+                            if pick(5) == 0 {
+                                let at = pick(burst.len() as u64);
+                                burst.push(burst[at]);
+                            }
+                        }
+                        for (i, (e, l)) in burst.into_iter().enumerate() {
+                            let t = labelled(e, l, key, (step * 100 + i) as f64);
+                            new.insert_received(key, t.clone(), &ID, r);
+                            old.insert_received_hashed(key, t, &ID, r);
+                            assert_eq!(blocks(&new), blocks(&old), "seed {} step {}", seed, step);
+                        }
+                    }
+                }
+                assert!(new.dirty.is_subset(&old.dirty), "a key is dirty that the hashed inserts left clean");
+            }
+            new.seal();
+            old.seal();
+            assert_eq!(blocks(&new), blocks(&old), "seed {} sealed", seed);
+            assert_eq!(new.inserted, old.inserted);
+        }
+    }
+
+    /// `kept` after any sequence of trims is the vector the rebuild gave
+    /// (`kept_rebuilt`: every identity through a map, all of it sorted):
+    /// identities repeated within a block, across blocks and across trims,
+    /// and a hash that sends several identities to one value, which leaves
+    /// the call to the rebuild.
+    #[test]
+    fn random_trims_keep_the_rows_the_rebuild_kept() {
+        const ID: [usize; 2] = [0, 1];
+        let weak = |tu: &[Value]| tu[0].as_equity().unwrap() as u64 % 3;
+        let mut merged_calls = 0;
+        for seed in 0..60u64 {
+            let mut rng = crate::data::Rng::new(seed);
+            let mut pick = |n: u64| (rng.next_u64() % n) as usize;
+            let mut s = Store::default();
+            s.index_by(Some(0));
+            let mut expected: Vec<Tuple> = Vec::new();
+            let mut by_weak_hash: Vec<Tuple> = Vec::new();
+            let mut key = 0i64;
+            for step in 0..60 {
+                key += pick(3) as i64;
+                for i in 0..pick(30) {
+                    s.insert(key, labelled(pick(25) as Sym, pick(3) as Sym, key, (step * 100 + i) as f64));
+                }
+                if pick(3) == 0 {
+                    let _ = s.lookup(key, None);
+                }
+                if pick(4) == 0 {
+                    let cutoff = key - pick(4) as i64;
+                    let old: BTreeMap<i64, Rows> = s.by_time.range(..cutoff).map(|(k, b)| (*k, b.clone())).collect();
+                    let dropped: usize = old.values().map(|b| b.len()).sum();
+                    expected = kept_rebuilt(expected, &old, &ID);
+                    if dropped > 0 {
+                        merged_calls += usize::from(latest_dropped(&old, &ID, &|tu: &[Value]| identity_hash(tu, &ID)).is_some());
+                        by_weak_hash = kept_after(by_weak_hash, &old, &ID, weak);
+                        assert_eq!(by_weak_hash, expected, "seed {} step {}: under a hash that collides", seed, step);
+                    }
+                    assert_eq!(s.trim_before(cutoff, &ID, true), dropped);
+                    assert_eq!(s.kept, expected, "seed {} step {}", seed, step);
+                    assert!(s.kept.windows(2).all(|w| w[0] < w[1]));
+                }
+            }
+        }
+        assert!(merged_calls > 100, "{} trims took the merge", merged_calls);
+    }
+
+    #[test]
+    fn rows_kept_out_of_order_are_sorted_before_the_merge() {
+        const ID: [usize; 1] = [0];
+        let mut s = indexed();
+        s.kept = vec![tu(5, 1.0), tu(2, 2.0), tu(9, 3.0)];
+        s.insert(KEY, tu(4, 4.0));
+        s.insert(KEY, tu(2, 5.0));
+        assert_eq!(s.trim_before(KEY + 1, &ID, true), 2);
+        assert_eq!(s.kept, vec![tu(2, 5.0), tu(4, 4.0), tu(5, 1.0), tu(9, 3.0)]);
+    }
+
     /// A checkpoint keeps tuples (`Store::kept`) through serde. A tuple
     /// with its values inline, and one grown onto the heap, are the bytes
     /// the vector of the same values was, and read back from them: a
@@ -5025,6 +5610,150 @@ mod store_tests {
             assert_eq!(serde_json::to_string(&t).unwrap(), as_vector);
             assert_eq!(serde_json::from_str::<Tuple>(&as_vector).unwrap(), t);
         }
+    }
+}
+
+#[cfg(test)]
+mod memo_tests {
+    use super::*;
+
+    /// Two relations, their entity first and second.
+    const ENTITY: [usize; 2] = [0, 1];
+
+    fn row(rel: usize, entity: Sym, t: i64, v: f64) -> (Tuple, usize) {
+        let tuple: Tuple = if ENTITY[rel] == 0 {
+            smallvec::smallvec![Value::Equity(entity), Value::Time(t), Value::Num(v)]
+        } else {
+            smallvec::smallvec![Value::Time(t), Value::Equity(entity), Value::Num(v)]
+        };
+        (tuple, rel)
+    }
+
+    /// What a trimmed read of `entity` finds: the bar and the entity's
+    /// tuples there.
+    fn read(m: &Memo, rel: usize, entity: Sym) -> Option<(i64, Vec<(Tuple, usize)>)> {
+        let v = Value::Equity(entity);
+        m.latest_row(rel, &v).map(|(t, d)| (t, d.iter().filter(|(tu, _)| tu[ENTITY[rel]] == v).cloned().collect()))
+    }
+
+    /// Any sequence of evictions leaves, for every entity, the tuples the
+    /// regrouping per entity left (`evict_before_per_entity`): entities
+    /// that join and leave, results of a few tuples between results in
+    /// entity order, several tuples of one entity, a result with inputs, a
+    /// large result out of entity order, and bars derived again behind the
+    /// cutoff and evicted after a later bar's result.
+    #[test]
+    fn random_evictions_keep_the_latest_tuples_the_regrouping_kept() {
+        const NAMES: u64 = 60;
+        let entity_pos: Vec<Option<usize>> = ENTITY.iter().map(|e| Some(*e)).collect();
+        let chained: FxHashSet<usize> = [0, 1].into_iter().collect();
+        let keep: FxHashSet<usize> = [1].into_iter().collect();
+        let (mut whole_blocks, mut spilled, mut behind) = (0, 0, 0);
+        for seed in 0..40u64 {
+            let mut rng = crate::data::Rng::new(seed);
+            let mut pick = |n: u64| rng.next_u64() % n;
+            let (mut new, mut old) = (Memo::default(), Memo::default());
+            let mut listed: Vec<bool> = (0..NAMES).map(|_| pick(2) == 0).collect();
+            let mut cutoff = 0i64;
+            for t in 1..120i64 {
+                for name in listed.iter_mut() {
+                    if pick(8) == 0 {
+                        *name = !*name;
+                    }
+                }
+                // The bar's results, and now and then a bar behind the
+                // cutoff derived again.
+                let mut bars = vec![t];
+                if cutoff > 2 && pick(6) == 0 {
+                    bars.push(1 + pick(cutoff as u64 - 1) as i64);
+                    behind += 1;
+                }
+                for bar in bars {
+                    for rel in 0..2 {
+                        let few = pick(4) == 0;
+                        let mut rows: Vec<(Tuple, usize)> = Vec::new();
+                        for entity in (0..NAMES).filter(|e| listed[*e as usize]) {
+                            if few && pick(5) > 0 {
+                                continue;
+                            }
+                            for i in 0..1 + pick(6) / 5 {
+                                rows.push(row(rel, entity as Sym, bar, (t * 10 + i as i64) as f64));
+                            }
+                        }
+                        // A result of a few tuples is in the solver's order;
+                        // a larger one in entity order, as `call` leaves it,
+                        // but for one in a dozen.
+                        if rows.len() <= eval::SORTED_MIN || pick(12) == 0 {
+                            let n = rows.len().max(1) as u64;
+                            rows.rotate_left(pick(n) as usize);
+                        }
+                        let mut key: MemoKey = (rel, vec![Value::Time(bar)]);
+                        if pick(10) == 0 {
+                            key.1.push(Value::Label(pick(2) as Sym));
+                        }
+                        let d: Derived = Arc::new(rows);
+                        new.insert(key.clone(), d.clone());
+                        old.insert(key, d);
+                    }
+                }
+                if pick(3) > 0 {
+                    cutoff = cutoff.max(t - pick(4) as i64);
+                    let before = new.latest_rows.len();
+                    new.evict_before(cutoff, &keep, &entity_pos, &chained);
+                    old.evict_before_per_entity(cutoff, &keep, &entity_pos, &chained);
+                    spilled += new.latest_rows.len() - before;
+                    assert_eq!(new.len(), old.len());
+                    assert_eq!(new.oldest(), old.oldest());
+                    for rel in 0..2 {
+                        for entity in 0..NAMES as Sym {
+                            assert_eq!(read(&new, rel, entity), read(&old, rel, entity), "seed {} bar {} relation {} entity {}", seed, t, rel, entity);
+                        }
+                    }
+                }
+            }
+            whole_blocks += new.latest_block.len();
+            assert!(old.latest_block.is_empty());
+            new.clear();
+            assert!(new.latest_block.is_empty() && new.latest_rows.is_empty() && read(&new, 0, 0).is_none());
+        }
+        assert!(
+            whole_blocks == 80 && spilled > 1000 && behind > 100,
+            "{} blocks kept whole, {} entities regrouped, {} bars derived again",
+            whole_blocks,
+            spilled,
+            behind
+        );
+    }
+
+    #[test]
+    fn a_result_kept_whole_is_read_per_entity_and_gives_way_as_the_rows_did() {
+        let entity_pos = vec![Some(0)];
+        let chained: FxHashSet<usize> = [0].into_iter().collect();
+        let none = FxHashSet::default();
+        let at = |t: i64, names: std::ops::Range<Sym>| -> Derived { Arc::new(names.map(|e| row(0, e, t, t as f64)).collect()) };
+        let mut m = Memo::default();
+        m.insert((0, vec![Value::Time(1)]), at(1, 0..40));
+        m.insert((0, vec![Value::Time(2)]), at(2, 10..50));
+        m.evict_before(2, &none, &entity_pos, &chained);
+        // The first result is held whole: no entity was regrouped.
+        assert!(m.latest_rows.is_empty() && m.latest_block[&0].t == 1);
+        assert_eq!(read(&m, 0, 5), Some((1, vec![row(0, 5, 1, 1.0)])));
+        assert_eq!(read(&m, 0, 45), None);
+        m.evict_before(3, &none, &entity_pos, &chained);
+        // The second takes its place: the ten names it lacks keep their
+        // tuples of the first bar, the others read the second.
+        assert_eq!(m.latest_rows.len(), 10);
+        assert_eq!(read(&m, 0, 5), Some((1, vec![row(0, 5, 1, 1.0)])));
+        assert_eq!(read(&m, 0, 15), Some((2, vec![row(0, 15, 2, 2.0)])));
+        assert_eq!(read(&m, 0, 45), Some((2, vec![row(0, 45, 2, 2.0)])));
+        // A result of the first bar derived again and evicted now changes
+        // nothing: of two results at one bar the first stands, and a later
+        // bar's tuples stand before an earlier bar's.
+        m.insert((0, vec![Value::Time(1)]), Arc::new((0..60).map(|e| row(0, e, 1, 9.0)).collect()));
+        m.evict_before(3, &none, &entity_pos, &chained);
+        assert_eq!(read(&m, 0, 5), Some((1, vec![row(0, 5, 1, 1.0)])));
+        assert_eq!(read(&m, 0, 15), Some((2, vec![row(0, 15, 2, 2.0)])));
+        assert_eq!(read(&m, 0, 55), Some((1, vec![row(0, 55, 1, 9.0)])), "a name no result held before");
     }
 }
 

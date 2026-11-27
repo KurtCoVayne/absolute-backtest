@@ -369,3 +369,80 @@ fn a_batch_decodes_to_the_same_events_with_its_relations_resolved_once() {
     assert!(interleaved, "no batch interleaved two relations' tuples");
     assert!(["Equity(", "Label(", "Time(", "Num("].iter().all(|k| seen.contains(k)), "{:?}", seen);
 }
+
+/// The relations the stream of `p` over `ds` carries a tuple of.
+fn streamed(p: &Program, ds: &Dataset) -> std::collections::BTreeSet<String> {
+    let client = common::client(p, ds);
+    let bound = bind(p, &client).unwrap();
+    let mut k = Kernel::bound(p, &bound, ExecConfig::from_program(p)).unwrap();
+    let (spec, cal_of) = stream_spec(&k, &bound, &client, "test").unwrap();
+    let mut decoder = Decoder::new(&k, &bound, cal_of);
+    let mut sub = client.subscribe(spec, 1, None).unwrap();
+    let mut rels = std::collections::BTreeSet::new();
+    while let Some(b) = sub.next_batch().unwrap() {
+        for e in decoder.events(&mut k, &bound, &b).unwrap() {
+            if let StreamEvent::Tuple { rel, .. } = e {
+                rels.insert(k.relation_name(rel).to_string());
+            }
+        }
+    }
+    rels
+}
+
+#[test]
+fn a_listing_no_rule_names_is_not_streamed_and_one_a_rule_names_is() {
+    // Three books over one market, alike but for who reads the listing: a
+    // universe of the names that traded, which no rule names `listed` in;
+    // the same with the listing observed; the universe of listed names.
+    let book = |name: &str, universe: &str, rules: &str| {
+        let src = common::StrategyParts {
+            name: name.into(),
+            needs: "need bars @1d   need actions, listing".into(),
+            universe: universe.into(),
+            params: "    qty : Quantity<Shares> = 10 shares".into(),
+            rules: rules.into(),
+            decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).\n    decide(T, trade(A, Q)) :- held(A, T, Q0), Q = -Q0.".into(),
+            ..Default::default()
+        }
+        .render();
+        common::program(&src, name)
+    };
+    let unnamed = book("unnamed", "universe(A, T) :- traded@base(A, T).", "");
+    let observed = book("observed", "universe(A, T) :- traded@base(A, T).", "    observe listed");
+    let named = book("named", "universe(A, T) :- listed(A, T), traded@base(A, T).", "");
+    // The market splits and renames its second name and delists its last:
+    // a listing with something to say, bound by all three (`need listing`).
+    let ds = synthetic_daily(&SYMS, (2022, 1, 3), 120, 3);
+    let listing = ds.facts["listed"].len();
+    assert!(listing > 0 && [&unnamed, &observed, &named].iter().all(|p| p.relations.contains_key("listed")));
+    let carried = streamed(&unnamed, &ds);
+    assert!(carried.contains("close") && !carried.contains("listed"), "no rule names the listing: {:?}", carried);
+    assert!(streamed(&observed, &ds).contains("listed"), "an observation reads the listing");
+    assert!(streamed(&named, &ds).contains("listed"), "the universe reads the listing");
+    // The run without the listing is the run that keeps every relation of
+    // the binding, read or not: the listing, the companions, the tickers.
+    let cfg = ExecConfig::from_program(&unnamed);
+    let client = common::client(&unnamed, &ds);
+    let projected = abt_kernel::kernel::run_on(&unnamed, None, &client, cfg.clone(), &Replay::default()).unwrap();
+    let whole = abt_kernel::kernel::run_on(
+        &unnamed,
+        None,
+        &client,
+        cfg,
+        &Replay {
+            keep_unread: true,
+            ..Replay::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        projected.fills.len() > 100 && projected.actions.len() > 1,
+        "the book trades through the split and the dividends: {:?}",
+        projected.actions
+    );
+    assert_eq!(digest(&projected), digest(&whole));
+    let held = |r: &RunResult, name: &str| r.coverage.iter().find(|c| c.name == name).map(|c| c.tuples);
+    assert_eq!((held(&projected, "listed"), held(&whole, "listed")), (Some(0), Some(listing)));
+    assert_eq!(held(&projected, "close"), held(&whole, "close"));
+    assert!(whole.stats.received_rows >= projected.stats.received_rows + listing);
+}

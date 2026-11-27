@@ -5,12 +5,12 @@
 diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
 --- a/crates/abt-kernel/src/kernel/eval.rs
 +++ b/crates/abt-kernel/src/kernel/eval.rs
-@@ -1292,7 +1292,7 @@
+@@ -1383,7 +1383,7 @@
              // pattern, so its memo is keyed by the whole pattern (the key
              // unbound), the entity with it: keyed by the inputs alone, one
              // entity's bar was served to the next (E-132).
 -            let akey: Vec<Option<Value>> = pat.clone();
 +            let akey: Vec<Option<Value>> = info.inputs.iter().map(|&i| pat[i].clone()).collect();
-             let rel_dom: Vec<i64> = self.domain_for(&info.cal, entity)?.range(floor..=t).rev().copied().collect();
-             // The common case: the latest bar itself has a tuple (a relation
-             // read at its previous row). Answered directly, nothing memoised.
+             let mut probe: super::AsofKey = (rel, akey, first);
+             let mut walked: Vec<i64> = Vec::new();
+             let mut found: Option<i64> = None;

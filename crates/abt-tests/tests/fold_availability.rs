@@ -11,9 +11,11 @@ use abt_tests as common;
 use std::collections::BTreeMap;
 use std::fs;
 
+use abt_kernel::check::Program;
 use abt_kernel::data::{business_days, synthetic_daily, write_parquet_dir};
-use abt_kernel::kernel::time::format_timestamp;
-use abt_kernel::kernel::{run_on, Dataset, ExecConfig, Replay, Value};
+use abt_kernel::kernel::bind::{bind, stream_spec, Decoder, StreamEvent};
+use abt_kernel::kernel::time::{format_timestamp, DAY};
+use abt_kernel::kernel::{run_on, Dataset, Event, ExecConfig, Fold, Kernel, Replay, SimExecutor, Value};
 use abt_tests::{run, run_socket, verify_causality};
 
 const SYMS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "SPY"];
@@ -241,4 +243,139 @@ fn a_revision_replaces_the_row_it_revises() {
         .collect();
     held.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(held, vec![("X".to_string(), 30.0), ("Y".to_string(), 20.0)]);
+}
+
+/// A kernel bound over `ds` and the events of its stream.
+fn kernel_and_events<'p>(p: &'p Program, ds: &Dataset, cfg: ExecConfig) -> (Kernel<'p>, Vec<StreamEvent>) {
+    let client = common::client(p, ds);
+    let bound = bind(p, &client).unwrap();
+    let mut k = Kernel::bound(p, &bound, cfg).unwrap();
+    let (spec, cal_of) = stream_spec(&k, &bound, &client, "test").unwrap();
+    let mut decoder = Decoder::new(&k, &bound, cal_of);
+    let mut sub = client.subscribe(spec, 1, None).unwrap();
+    let mut events = Vec::new();
+    while let Some(b) = sub.next_batch().unwrap() {
+        events.extend(decoder.events(&mut k, &bound, &b).unwrap());
+    }
+    (k, events)
+}
+
+#[test]
+fn a_tuple_is_late_exactly_when_its_key_is_at_or_before_the_last_decided_label() {
+    // A weekly book over four weeks of daily bars: the decision calendar's
+    // labels are the weeks', and a daily key falls before, on or between
+    // them. K-4.4 calls a tuple late when its decision bucket, the first
+    // label at or after its key, was decided.
+    let src = common::StrategyParts {
+        name: "weekly".into(),
+        calendars: Some("weekly = weeks(1)".into()),
+        clock: "decide on weekly".into(),
+        universe: "universe(A, T) :- traded@weekly(A, T).".into(),
+        params: "    qty : Quantity<Shares> = 1 shares".into(),
+        decides: "    decide(T, trade(A, qty)) :- universe(A, T), flat(A, T).".into(),
+        report: "calendar weekly   periods 52 per year".into(),
+        ..Default::default()
+    }
+    .render();
+    let p = common::program(&src, "weekly");
+    let ds = common::market_from("X", (2024, 1, 8), &[10.0; 20]);
+    let cfg = ExecConfig::frictionless();
+    let (k, events) = kernel_and_events(&p, &ds, cfg.clone());
+    let decided = |e: &StreamEvent| match e {
+        StreamEvent::Barrier { cal, label, at, .. } if *cal == p.decision_cal => Some((*label, *at)),
+        _ => None,
+    };
+    let labels: Vec<i64> = events.iter().filter_map(decided).map(|(label, _)| label).collect();
+    assert_eq!(labels.len(), 4, "four weeks: {:?}", labels);
+    let close = k.relation_id("close").unwrap();
+    let a_close = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::Tuple { rel, tuple, .. } if *rel == close => Some(tuple.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let bucket_decided = |key: i64, last: i64| labels.iter().find(|l| **l >= key).is_some_and(|l| *l <= last);
+    // With a label of the schedule decided last, the bucket was decided
+    // exactly when the key is at or before that label, whichever label it
+    // is and wherever the key lies: before the first label, on one, between
+    // two, beyond the last.
+    for &last in &labels {
+        for &l in &labels {
+            for key in [l - 30 * DAY, l - DAY, l - 1, l, l + 1, l + DAY, l + 30 * DAY] {
+                assert_eq!(bucket_decided(key, last), key <= last, "key {} with {} decided last", format_timestamp(key), format_timestamp(last));
+            }
+        }
+    }
+    // The fold up to the barrier of a label, then closes received after it.
+    let fed_to = |k: Kernel<'_>, exec: &mut SimExecutor, last: i64, barrier: Option<i64>, keys: &[i64]| -> Vec<i64> {
+        let mut fold = Fold::new(k, exec);
+        let mut at = 0;
+        for e in &events {
+            fold.step(e.clone().into()).unwrap();
+            if let Some((label, instant)) = decided(e) {
+                at = instant;
+                if label == last {
+                    break;
+                }
+            }
+        }
+        assert_eq!(fold.last_bar(), Some(last));
+        assert!(fold.result().late.is_empty(), "every tuple of the market is received at its bar");
+        if let Some(label) = barrier {
+            let cal = p.decision_cal.clone();
+            fold.step(Event::Barrier { seq: 1 << 40, cal, label, at: at + 1 }).unwrap();
+            assert_eq!(fold.last_bar(), Some(label));
+        }
+        for (i, &key) in keys.iter().enumerate() {
+            let mut tuple = a_close.clone();
+            tuple[1] = Value::Time(key);
+            let seq = (1 << 40) + 1 + i as u64;
+            fold.step(Event::Tuple {
+                seq,
+                rel: close,
+                key,
+                r: at + 2,
+                tuple,
+            })
+            .unwrap();
+        }
+        assert_eq!(fold.kernel.stats().late_tuples, fold.result().late.len(), "each late tuple is counted and recorded");
+        let name = a_close[0].as_equity();
+        assert!(name.is_some() && fold.result().late.iter().all(|l| l.relation == "close" && l.entity == name && l.r == at + 2));
+        fold.result().late.iter().map(|l| l.t).collect()
+    };
+    // The second week decided last: keys before it, on it and after it, on
+    // a later label, and beyond the schedule's end.
+    let last = labels[1];
+    let keys = [
+        labels[0] - DAY,
+        labels[0],
+        labels[0] + DAY,
+        last - 1,
+        last,
+        last + 1,
+        last + DAY,
+        labels[2],
+        labels[3],
+        labels[3] + 1,
+        labels[3] + 30 * DAY,
+    ];
+    let mut exec = SimExecutor::new(cfg.clone());
+    let late = fed_to(k, &mut exec, last, None, &keys);
+    assert_eq!(late, keys.iter().copied().filter(|key| *key <= last).collect::<Vec<_>>());
+    assert_eq!(late, keys.iter().copied().filter(|key| bucket_decided(*key, last)).collect::<Vec<_>>());
+    assert_eq!(late.len(), 5);
+    // A barrier whose label the schedule does not hold (a live clock's)
+    // decides no bucket of the schedule: a key between the last scheduled
+    // label and it is at or before it and still not late, as before.
+    let off = labels[2] - 2 * DAY;
+    assert!(last < off && !labels.contains(&off));
+    let keys = [labels[0], last, last + 1, off - DAY, off, off + 1, labels[2]];
+    let (k, _) = kernel_and_events(&p, &ds, cfg.clone());
+    let mut exec = SimExecutor::new(cfg);
+    let late = fed_to(k, &mut exec, last, Some(off), &keys);
+    assert_eq!(late, vec![labels[0], last]);
+    assert_eq!(late, keys.iter().copied().filter(|key| bucket_decided(*key, off)).collect::<Vec<_>>());
+    assert!(keys.iter().filter(|key| **key <= off).count() > late.len());
 }
