@@ -1,0 +1,16 @@
+# proposition: E-146 (MW14 run from the data's first week trades from its first week, as the whole history does)
+# mutation: the targets are not held until `first_trade`
+# test: cargo test -p abt-tests --test mw14_parity a_run_from_the_datas_first_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/company/mw14.dsl b/corpus-v2/company/mw14.dsl
+--- a/corpus-v2/company/mw14.dsl
++++ b/corpus-v2/company/mw14.dsl
+@@ -152,7 +152,7 @@
+     rel in_book(A: Equity, @T)
+     in_book(A, T) :- eligible(A, T, _), latched(A, T).
+     rel target(A: Equity, @T, W: Scalar)
+-    target(A, T, W) :- in_book(A, T), T >= first_trade, N = count(A1) over (in_book(A1, T)) within (T),
++    target(A, T, W) :- in_book(A, T), first_trade <= first_trade, N = count(A1) over (in_book(A1, T)) within (T),
+         scale(T, S), W = least(1 / N * S, name_cap), W > min_weight.
+ 
+     # Observed for the researcher (8.1): the scale at every week and the latch

@@ -1,0 +1,16 @@
+# proposition: E-149 (an asset whose last print is a span's last trading day, with no bar in the next span, is delisted on the next span's first)
+# mutation: a last print on the span's last day is a current listing again
+# test: cargo test -p abt-data --test norgate an_asset_whose_last_print_is_a_spans_last_day_is_delisted_on_the_next_spans_first
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/norgate.rs b/crates/abt-data/src/adapters/norgate.rs
+--- a/crates/abt-data/src/adapters/norgate.rs
++++ b/crates/abt-data/src/adapters/norgate.rs
+@@ -513,7 +513,7 @@
+         span.insert(a, (f, l));
+         if l < last_day {
+             gone.insert(a, (l, next_day(l).expect("a day after a bar before the last")));
+-        } else if let Some(d) = next_session.filter(|_| !trades_again.contains(&a)) {
++        } else if let Some(d) = next_session.filter(|_| trades_again.contains(&a) && false) {
+             // The last print is the span's last trading day and the asset
+             // does not trade in the next span: delisted on its first day.
+             gone.insert(a, (l, d));

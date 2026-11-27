@@ -1,0 +1,16 @@
+# proposition: E-144 (a library rule reads the bars at its own calendar at every time it names)
+# mutation: a bar primitive's fresh key on the base calendar in a library rule too, as before
+# test: cargo test -p abt-tests --test label_day
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/check/link.rs b/crates/abt-kernel/src/check/link.rs
+--- a/crates/abt-kernel/src/check/link.rs
++++ b/crates/abt-kernel/src/check/link.rs
+@@ -1547,7 +1547,7 @@
+                             // fresh key takes the rule's calendar: the close
+                             // at a previous row is that row's bar view, not
+                             // the base bar on the label's day (E-144).
+-                            (unit == self.root.name).then_some(Cal::Base)
++                            Some(Cal::Base)
+                         } else if name == "session" {
+                             Some(Cal::Sessions)
+                         } else if let Some(sr) = self.strategy_rels.get(&name).filter(|_| unit == self.root.name) {

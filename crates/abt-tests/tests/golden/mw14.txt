@@ -38,16 +38,16 @@ fill 2023-03-24 E2 qty -2167.0037561398417 price 65.36000000000007 at_last false
 fill 2023-03-24 E3 qty -3709.198813056377 price 40.160000000000025 at_last false commission 148.9614243323442 fee 0.0 slippage 0.0 impact 0.0 participation 0.0007331271331356645 partial false forced false
 fill 2023-03-24 E4 qty -1562.5000000000016 price 107.40999999999987 at_last false commission 167.82812499999997 fee 0.0 slippage 0.0 impact 0.0 participation 0.0003468214507680018 partial false forced false
 fill 2023-03-24 E5 qty -2114.462926416691 price 78.10999999999996 at_last false commission 165.16069918240765 fee 0.0 slippage 0.0 impact 0.0 participation 0.0003953090281633766 partial false forced false
-fill 2023-04-28 E1 qty 4404.91001341441 price 34.052909036325445 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.000838472455362928 partial false forced false
+fill 2023-04-28 E1 qty 4292.453189225544 price 34.94505202211965 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.0008170663541683961 partial false forced false
 fill 2023-04-28 E2 qty 2410.025706940871 price 62.24000000000008 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.0005529474092833765 partial false forced false
 fill 2023-04-28 E3 qty 3901.1703511053283 price 38.45000000000003 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.0003970502471156163 partial false forced false
 fill 2023-04-28 E4 qty 1640.2405686167324 price 91.44999999999989 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.00031743456216358224 partial false forced false
 fill 2023-05-26 E4 qty -270.5026451394224 price 109.50999999999985 at_last false commission 29.622744669218104 fee 0.0 slippage 0.0 impact 0.0 participation 4.263802845251516e-5 partial false forced false
-fill 2023-06-02 E1 qty -4404.91001341441 price 32.00249774842391 at_last false commission 140.9681227863046 fee 0.0 slippage 0.0 impact 0.0 participation 0.0008716302813938079 partial false forced false
+fill 2023-06-02 E1 qty -4292.453189225544 price 32.84092256151976 at_last false commission 140.9681227863046 fee 0.0 slippage 0.0 impact 0.0 participation 0.0008493776648786259 partial false forced false
 fill 2023-06-02 E2 qty -2410.025706940871 price 64.12000000000009 at_last false commission 154.53084832904887 fee 0.0 slippage 0.0 impact 0.0 participation 0.0002630123947296884 partial false forced false
 fill 2023-06-02 E3 qty -3901.1703511053283 price 36.890000000000036 at_last false commission 143.9141742522757 fee 0.0 slippage 0.0 impact 0.0 participation 0.0008680662262897827 partial false forced false
 fill 2023-06-02 E4 qty -1369.73792347731 price 118.45999999999982 at_last false commission 162.25915441512188 fee 0.0 slippage 0.0 impact 0.0 participation 0.00019452406879024063 partial false forced false
-fill 2023-07-07 E1 qty 4703.383273069027 price 31.891936355448827 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.0007788720594625289 partial false forced false
+fill 2023-07-07 E1 qty 4583.306462368782 price 32.72746460040897 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.0007589875492251215 partial false forced false
 fill 2023-07-07 E2 qty 2416.237113402058 price 62.08000000000009 at_last false commission 149.99999999999997 fee 0.0 slippage 0.0 impact 0.0 participation 0.0004540844825095136 partial false forced false
 fill 2023-07-07 E3 qty 4743.833017077794 price 31.620000000000037 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.0008582162109936216 partial false forced false
 fill 2023-07-07 E4 qty 1372.7464079802346 price 109.26999999999983 at_last false commission 150.0 fee 0.0 slippage 0.0 impact 0.0 participation 0.00033331060866044953 partial false forced false
@@ -128,7 +128,7 @@ book 2023-05-05 cash 405213.23942161957 gross 609101.9481875633 net 609101.94818
 book 2023-05-12 cash 405213.23942161957 gross 623140.5635001729 net 623140.5635001729 equity 1028353.8029217925 leverage 0.6059593125728573
 book 2023-05-19 cash 405213.23942161957 gross 612056.7796472929 net 612056.7796472929 equity 1017270.0190689126 leverage 0.6016659964160711
 book 2023-05-26 cash 405213.23942161957 gross 634923.5285721958 net 634923.5285721958 equity 1040136.7679938154 leverage 0.6104231175259935
-book 2023-06-02 cash 434806.36134616844 gross 601672.299782751 net 601672.299782751 equity 1036478.6611289195 leverage 0.5804965623965834
+book 2023-06-02 cash 434806.36134616844 gross 601672.2997827511 net 601672.2997827511 equity 1036478.6611289196 leverage 0.5804965623965834
 book 2023-06-09 cash 1035876.9888291368 gross 0.0 net 0.0 equity 1035876.9888291368 leverage 0.0
 book 2023-06-16 cash 1035876.9888291368 gross 0.0 net 0.0 equity 1035876.9888291368 leverage 0.0
 book 2023-06-23 cash 1035876.9888291368 gross 0.0 net 0.0 equity 1035876.9888291368 leverage 0.0
@@ -136,7 +136,7 @@ book 2023-06-30 cash 1035876.9888291368 gross 0.0 net 0.0 equity 1035876.9888291
 book 2023-07-07 cash 1035876.9888291368 gross 0.0 net 0.0 equity 1035876.9888291368 leverage 0.0
 book 2023-07-14 cash 435276.9888291368 gross 599737.631721772 net 599737.631721772 equity 1035014.6205509088 leverage 0.5794484636386573
 final_cash 435276.9888291368
-position E1 4703.383273069027
+position E1 4583.306462368782
 position E2 2416.237113402058
 position E3 4743.833017077794
 position E4 1372.7464079802346

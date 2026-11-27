@@ -1,0 +1,16 @@
+# proposition: E-148 (MW14's target is the book's (1 / N) x scale, capped, to the bit)
+# mutation: the scale over the count, as before
+# test: cargo test -p abt-tests --test mw14_parity the_target_is_one_over_the_count_times_the_scale_capped
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/company/mw14.dsl b/corpus-v2/company/mw14.dsl
+--- a/corpus-v2/company/mw14.dsl
++++ b/corpus-v2/company/mw14.dsl
+@@ -153,7 +153,7 @@
+     in_book(A, T) :- eligible(A, T, _), latched(A, T).
+     rel target(A: Equity, @T, W: Scalar)
+     target(A, T, W) :- in_book(A, T), T >= first_trade, N = count(A1) over (in_book(A1, T)) within (T),
+-        scale(T, S), W = least(1 / N * S, name_cap), W > min_weight.
++        scale(T, S), W = least(S / N, name_cap), W > min_weight.
+ 
+     # Observed for the researcher (8.1): the scale at every week and the latch
+     # with the literal that excluded each name, in the ledger, without

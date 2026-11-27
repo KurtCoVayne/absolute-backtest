@@ -1,0 +1,18 @@
+# proposition: E-149 (the Norgate adapter's universe window: every span of a staging holds every asset ever a member in the window)
+# mutation: the universe is the span's members again
+# test: cargo test -p abt-data --test norgate a_staging_in_spans_holds_every_asset_of_the_universe_window_in_every_span
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/norgate.rs b/crates/abt-data/src/adapters/norgate.rs
+--- a/crates/abt-data/src/adapters/norgate.rs
++++ b/crates/abt-data/src/adapters/norgate.rs
+@@ -309,8 +309,8 @@
+     // A spell's `member_to` is its first day out, or with
+     // `member_to_inclusive` its last member day, which may be the window's
+     // first (E-149).
+-    let ends_before = |t: i64| if opts.member_to_inclusive { t < window_from } else { t <= window_from };
+-    let outside = |f: i64, to: Option<i64>| to.is_some_and(ends_before) || window_to.is_some_and(|t| f > t);
++    let ends_before = |t: i64| if opts.member_to_inclusive { t < opts.from } else { t <= opts.from };
++    let outside = |f: i64, to: Option<i64>| to.is_some_and(ends_before) || opts.to.is_some_and(|t| f > t);
+     let mut members: Vec<(i64, &str, i64, Option<i64>)> = Vec::new();
+     for b in read(lake, "indexes/index_membership", &["index_name", "asset_id", "member_from", "member_to"], |_| true)? {
+         let (name, asset, from, to) = (strings(&b, "index_name")?, ints(&b, "asset_id")?, days(&b, "member_from")?, days(&b, "member_to")?);

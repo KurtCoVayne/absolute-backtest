@@ -1,0 +1,16 @@
+# proposition: E-149 (`values = lake`: the lake's prices and dividend amounts reach the store bit for bit)
+# mutation: the prices rounded to six decimals whatever the option says
+# test: cargo test -p abt-data --test norgate the_lakes_values_reach_the_store_bit_for_bit_through_a_staging_and_an_append
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/norgate.rs b/crates/abt-data/src/adapters/norgate.rs
+--- a/crates/abt-data/src/adapters/norgate.rs
++++ b/crates/abt-data/src/adapters/norgate.rs
+@@ -472,7 +472,7 @@
+             *filled.entry("volume_null_to_zero".into()).or_default() += 1;
+             b.volume = 0.0;
+         }
+-        if !opts.lake_values {
++        if !opts.lake_values || b.close > 0.0 {
+             b.open = round6(b.open);
+             b.high = round6(b.high);
+             b.low = round6(b.low);

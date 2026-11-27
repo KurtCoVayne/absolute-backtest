@@ -7,8 +7,8 @@
 #   scripts/bench-mw14.sh LAKE SPXTR.parquet VIX.parquet CANON.npy [N]
 #
 #   LAKE    an NDLake root (curated/bars_by_date, registry, indexes, classification)
-#   SPXTR   the book's spxtr_daily.parquet ($SPXTR daily closes)
-#   VIX     the book's vix_weekly.parquet
+#   SPXTR   the book's spxtr_daily.parquet ($SPXTR daily closes, from 1988)
+#   VIX     the book's vix_weekly.parquet (the weekly VIX and its 4-week mean)
 #   CANON   _canon_wkret_mw14_full.npy, the book's 1,852 weekly returns
 #   N       repetitions (default 5)
 #
@@ -17,7 +17,9 @@
 # 1. Stages the store once. The store is keyed by a hash of what it is made
 #    from: every file of the lake, the two series files, the staging recipe,
 #    and the code that writes a store (the sources of crates/abt-data and
-#    crates/abt-codec and the series script, with their uncommitted changes). A second call with
+#    crates/abt-codec and the series script, with their uncommitted changes)
+#    and the adapter's options (every span holds every asset ever a member,
+#    `member_to` a member day, the lake's values: E-149). A second call with
 #    the same inputs reuses it: $BENCH/store-<hash>. RESTAGE=1 stages again;
 #    KEY_ONLY=1 prints the store's path and stops.
 #    STORE=DIR names a store already staged and skips this step; LAKE, SPXTR
@@ -53,8 +55,11 @@
 #
 # Env: BENCH=/data/bench (stores and logs), OUT=$BENCH/run-<time> (this call's
 # logs), ABT=target/release/abt, PY=python3, THREADS (--threads, default the
-# engine's), START=1991-01-04 and END=2026-07-02 (the canon's first decision
-# week and the bar after its last), EXTRA (more arguments to `abt run`),
+# engine's), START=1990-01-01 and END=2026-07-02 (the data's first week, so
+# that the rows, the latch and the gate warm up on 1990 as the book's features
+# do, while the program trades from its `first_trade`, 1991-01-04, the canon's
+# first decision week; and the bar after the canon's last: E-146), EXTRA (more
+# arguments to `abt run`),
 # KEEP=1 (keep each repetition's copy of the store), WRAP (a command the run
 # is started under, for a profile: ABT=target/profiling/abt WRAP='perf record
 # -e cpu-clock -F 299 -g --call-graph fp -o perf.data --'; such a repetition's
@@ -75,7 +80,7 @@ cd "$(dirname "$0")/.."
 ROOT=$PWD
 ABT=${ABT:-$ROOT/target/release/abt}
 PY=${PY:-python3}
-START=${START:-1991-01-04}
+START=${START:-1990-01-01}
 END=${END:-2026-07-02}
 THREADS=${THREADS:-}
 EXTRA=${EXTRA:-}
@@ -84,6 +89,11 @@ KEEP=${KEEP:-0}
 OUT=${OUT:-$BENCH/run-$(date -u +%Y%m%dT%H%M%S)}
 CORPUS="corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl"
 SPANS="1990-01-01:1994-12-31 1995-01-01:1999-12-31 2000-01-01:2004-12-31 2005-01-01:2009-12-31 2010-01-01:2014-12-31 2015-01-01:2019-12-31 2020-01-01:2026-12-31"
+# The adapter's options for the book (E-149): every span holds every asset that
+# is a member at any time from the first span's start to the last span's end, as
+# the book reads every bar of every name ever a member; `member_to` is a member
+# day, as the book's test is inclusive; the lake's prices and amounts unrounded.
+NORGATE_OPTS="--universe-start ${SPANS%%:*} --universe-end ${SPANS##*:} --member-to last_day --values lake"
 LISTS='S&P 500=SP500;S&P MidCap 400=SP400;S&P SmallCap 600=SP600'
 TICKERS='SPY=ETF;QQQ=ETF'
 mkdir -p "$BENCH" "$OUT"
@@ -117,7 +127,7 @@ else
   # their tests) and the series script.
   WRITER="crates/abt-data/src crates/abt-codec/src scripts/parity/mw14_series_bundles.py"
   # shellcheck disable=SC2086
-  KEY=$( { (cd "$LAKE" && find . -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum); sha256sum < "$SPXTR"; sha256sum < "$VIX"; echo "$SPANS|$LISTS|$TICKERS|reviewed=complete"
+  KEY=$( { (cd "$LAKE" && find . -type f | LC_ALL=C sort | tr '\n' '\0' | xargs -0 sha256sum); sha256sum < "$SPXTR"; sha256sum < "$VIX"; echo "$SPANS|$LISTS|$TICKERS|$NORGATE_OPTS|reviewed=complete"
            git rev-parse HEAD:crates/abt-data/src HEAD:crates/abt-codec/src HEAD:scripts/parity/mw14_series_bundles.py 2>/dev/null || echo no-git; git diff HEAD -- $WRITER 2>/dev/null || true; } | sha256sum | cut -c1-16)
   BASE=$BENCH/store-$KEY
   # KEY_ONLY=1: say which store this call would use, and stop.
@@ -129,7 +139,7 @@ else
     say "store: staging $BASE"
     rm -rf "$BASE" "$BENCH/series-$KEY"
     "$PY" scripts/parity/mw14_series_bundles.py "$SPXTR" "$VIX" "$BENCH/series-$KEY" >"$OUT/series.log" 2>&1
-    for b in series-spxtr:1d series-vix:1w; do
+    for b in series-spxtr:1d series-weekly:1w; do
       "$ABT" data ingest --store "$BASE" --adapter bundle_v2 --from "$BENCH/series-$KEY/${b%%:*}" --class series --base "${b##*:}" >"$OUT/ingest_${b%%:*}.log" 2>&1
       say "  ${b%%:*} staged"
     done
@@ -137,7 +147,8 @@ else
     # before staging (2 to 8 GB a chunk).
     for span in $SPANS; do
       a=${span%%:*}; b=${span##*:}
-      "$ABT" data ingest --store "$BASE" --adapter norgate --from "$LAKE" --lists "$LISTS" --tickers "$TICKERS" --start "$a" --end "$b" --attributes reviewed=complete >"$OUT/ingest_$a.log" 2>&1
+      # shellcheck disable=SC2086
+      "$ABT" data ingest --store "$BASE" --adapter norgate --from "$LAKE" --lists "$LISTS" --tickers "$TICKERS" --start "$a" --end "$b" $NORGATE_OPTS --attributes reviewed=complete >"$OUT/ingest_$a.log" 2>&1
       say "  $a staged: $(grep '^norgate:' "$OUT/ingest_$a.log" | cut -c1-100)"
     done
     date -u +%Y-%m-%dT%H:%M:%SZ >"$BASE/.staged"

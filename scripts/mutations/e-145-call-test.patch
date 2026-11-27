@@ -1,0 +1,16 @@
+# proposition: E-145 (a comparison with what only the call binds is a test of the window cache's rows)
+# mutation: such a comparison is cached with the conjunction again, so the cache is keyed by the call
+# test: cargo test -p abt-tests --test dividend_week the_dividend_window_keeps_one_group_per_name
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/eval.rs b/crates/abt-kernel/src/kernel/eval.rs
+--- a/crates/abt-kernel/src/kernel/eval.rs
++++ b/crates/abt-kernel/src/kernel/eval.rs
+@@ -2125,7 +2125,7 @@
+             Literal::Cmp { lhs, rhs, .. } if total_expr(lhs) && total_expr(rhs) => {
+                 let mut vs = Vec::new();
+                 literal_vars(l, &mut vs);
+-                vs.iter().any(|v| !inner.contains(v))
++                vs.iter().any(|v| !inner.contains(v)) && false
+             }
+             _ => false,
+         };

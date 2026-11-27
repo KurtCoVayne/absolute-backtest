@@ -1,0 +1,16 @@
+# proposition: E-149 (`member_to = last_day`: the lake's member_to counted as a member day, the Python book's test)
+# mutation: member_to is the first day out whatever the option says
+# test: cargo test -p abt-data --test norgate member_to_counted_as_a_member_day_is_the_books_test_at_the_names_last_bar_of_the_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/norgate.rs b/crates/abt-data/src/adapters/norgate.rs
+--- a/crates/abt-data/src/adapters/norgate.rs
++++ b/crates/abt-data/src/adapters/norgate.rs
+@@ -672,7 +672,7 @@
+             let f = mf.max(iv.from).max(first_bar);
+             let member_end = match mt {
+                 None => i64::MAX,
+-                Some(t) if opts.member_to_inclusive => t,
++                Some(t) if opts.member_to_inclusive => prev_day(t).unwrap_or(t - 1),
+                 Some(t) => prev_day(t).unwrap_or(t - 1),
+             };
+             let t = member_end.min(iv.to.unwrap_or(i64::MAX)).min(last_bar);

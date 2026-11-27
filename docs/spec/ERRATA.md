@@ -3464,6 +3464,307 @@ batch driver agree on every corpus program. Each bless since:
   did before E-141. `Kernel::keep_read_after` keeps the listing alone, so
   that no ledger changes from what it was before E-141; the companions,
   the tickers and the classification belong to this fix.
+- **E-144 (Proposition V-3.4, Definition V-3.5, V-7; a library rule's
+  bar at a time other than its own).** V-3.4 gives every body atom
+  outside a bucket aggregate the head's calendar, and V-7 makes a library
+  relation calendar-polymorphic: on the calendar it is instantiated at, a
+  bar primitive it names is that calendar's bar view (`link.rs`,
+  `resolve_rrel`). The linker did so only for an atom whose key already
+  had a calendar: the head's key, or a time bound by `prev`, `lag` or a
+  window. A key bound by another atom's value, as `T0` in `prev_row(A, T,
+  T0), close(A, T0, P0)`, was put on the base calendar (`infer_cals`: a
+  bar primitive's fresh key on the primitive's own calendar), and the
+  atom stayed the primitive. On a weekly calendar that is the daily close
+  on the label's day, where `close(A, T, P)` in the same rule is the
+  week's last close. A name with no bar on that day (a halt, a listing
+  that begins or ends within the week) had its weekly row and its weekly
+  close, and at its next row no previous close: no `total_return`,
+  `price_return`, `gap`, `gap_points` or `true_range` there, and no
+  `tr_index` from there on, since the index compounds through the missing
+  return. MW14 fills and marks at `tr_index@weekly`: in the full run of
+  Nov 25 (`1b3bf73`) 4,695 weekly rows had no close on their label day,
+  330,952 of 3,190,176 rows (10.4%) had no price, 1,981 orders expired
+  with `moc: no close`, and the canon held such a name in 1,101 weeks;
+  a replica of the book with this one difference accounts for 3.95 of
+  the 5.51 summed absolute weekly difference from the canon. [D] In a
+  library rule a bar primitive has no calendar of its own, so its fresh
+  key takes the rule's (`check/link.rs::infer_cals`) and the atom is the
+  bar view at every time the rule names. A rule on the base calendar
+  links as before, so no program deciding on its base moves: of the 26
+  pinned hashes (`tests/golden/program_hashes.tsv`) only `mw14` and
+  `r8l` change. What moves: `total_return`, `log_return`, `tr_index`,
+  `price_return`, `log_price_return`, `gap`, `gap_points` and
+  `true_range` on a calendar coarser than the base, at the row after one
+  whose label has no bar of the name; for R8L that is `true_range@session`
+  after a session whose label has no print of the root, and nowhere on
+  the golden market (both books' golden runs are unchanged). Rejected:
+  the view written in the library (a library rule cannot name the
+  calendar it is instantiated on); a close carried from row to row in the
+  library (a recursion for a value the view holds).
+  `abt-tests/tests/label_day.rs`: two names over three weeks, one with no
+  bar on the first week's Friday; its returns, its index, the bars
+  module's steps and its fill at the second week's close, by hand, and
+  the daily program's rules as linked before
+  (`scripts/mutations/e-144-library-bar.patch`). **Open:** (1) the
+  strategy's own rules keep the base reading: `prev_row(A, T, T0),
+  close(A, T0, P0)` written in a weekly strategy is accepted and reads
+  the daily close on the label's day, where V-3.4 would have WF-16
+  refuse it as it refuses `close(A, T, P)`; no corpus program writes it.
+  (2) With the stores trimmed (E-126) the view read at a previous row is
+  a non-recursive derived relation read behind the memo, which is E-134's
+  case: a name whose previous row is the bucket just evicted finds
+  `prev_row` and no close, where the base close was still held.
+- **E-145 (Definition V-3.2, V-3.3, V-7, data-bundle doc "Prices and
+  actions"; a dividend going ex in a bar's bucket).** The catalog's
+  `dividend_at` summed the dividends announced within the year whose
+  ex-date was the bar itself, `Ex = T`. The data-bundle doc applies the
+  cash dividend at its ex-date, and on a calendar C an ex-date at base
+  bar e is an event of β_C(e), the label of its bucket (Definition 3.2),
+  as `split_factor` already reads `split` on a coarser calendar: the
+  latest split in the label's bucket (`link.rs::resolve_rrel`,
+  `Read::Bucket`). On a weekly calendar only a dividend going ex on the
+  label counted: in the parity run of Nov 25, 24,193 of the store's
+  141,805 dividends (17.1%); the run held 684 dividend asset-weeks and
+  missed 550, −0.122 on its holdings, and a replica of the book with this
+  one difference has 386 weeks off the canon by more than 1e-4 and a CAGR
+  0.45 pp lower. [D] `dividend_at` sums the dividends going ex after the
+  calendar's previous bar and at or before T (`prev(T, T1)`, `Ex > T1,
+  Ex <= T`): T's bucket as `bucket(C, T)` selects it
+  (`eval.rs::window_times`), written without naming C, which a library
+  rule cannot. On the base calendar that is the bar's dividend, as
+  before; one announced on a bar and going ex on a day that is no bar (a
+  weekend) now counts at the next bar, the first close that is ex, where
+  it was in none. One keyed at such an ex-date (the Norgate adapter keys
+  every dividend at its ex-date) is not: on a daily base a catalog
+  relation's keys are base bars (`bind.rs`, the base domain), so the day
+  becomes a bar; on the base calendar the dividend is then still lost,
+  that day being the next bar's previous one, and on a coarser calendar
+  the period is labelled at that day and the dividend counts against the
+  cum-dividend close before it, a period before its first ex close
+  (a probe on `dividend_week.rs`'s market with Y's dividend keyed at
+  Saturday 2024-01-20: 0.5 at that week's label, 2024-01-20, against
+  Friday's close; daily, keyed at 2024-01-13, none at Monday). The lake
+  has no such ex-date (0 of 351,604, Nov 25). The calendar's first bar
+  has no previous one and reads no dividend; no return steps into it.
+  On a calendar finer than the
+  actions' daily one (a sub-daily base deciding on the base, `hours(n)`,
+  sessions) the window read `dividend` as of each of its bars (3.4), so
+  one dividend stood at every window bar from its key on and was summed
+  once per bar: 15.25 for 0.25 at the first minute of its ex-date, over
+  61 bars (`Ex = T` gave none there, no minute label being midnight).
+  The checker refuses an aggregate whose window reads a catalog relation
+  as of the window's bars (`link.rs::lower_literal`, code X), so
+  `dividend_at` and what reads it (`dividend_or_zero`, `total_return`,
+  `log_return`, `tr_index`) do not link below the actions' calendar; on
+  a minute base they are read on `daily`, where each bar of the window
+  reads its own bucket and the dividend counts once. The refusal holds
+  for every catalog relation (a count of `member` minutes too: derive
+  the relation at the bar outside the window and aggregate that). No
+  corpus program reads the catalog on a sub-daily base. No daily program
+  moves: `low_volatility`, `total_return_momentum`, `momentum_12_1` and
+  `short_term_reversal`
+  (the corpus programs reading `log_return`) render their golden runs
+  byte for byte as under `Ex = T`, their synthetic dividends going ex on
+  bars. MW14's golden run moves: its first name's dividends go ex within
+  the week, so its index and three of its fills change. The window cache
+  (E-75) defers a test of the base time to the rows each call assembles;
+  `Ex > T1` reads a time only the call binds, so the cache was keyed by
+  it, one group per call (1,435 groups and 206,523 bars solved and held
+  for five names over 300 days, where five groups and each bar once is
+  the case). Such a comparison is now deferred too
+  (`eval.rs::window_plan`: a total comparison reading a variable no
+  other literal of the conjunction mentions), which E-75's conditions
+  ("everything it reads is bound by the call or by the rows") already
+  admit. `tests/dividend_week.rs`: a weekly book with a dividend going ex
+  on a Tuesday, one on a Saturday and a split on a Wednesday, the daily
+  program on the same market, the cache's groups, and the minute window
+  refused (`scripts/mutations/e-145-dividend-bucket.patch`,
+  `e-145-call-test.patch`, `e-145-finer-window.patch`).
+  `tests/golden/program_hashes.tsv` changes for the programs linking
+  `dividend_at`. **Open:** (1) on a coarser
+  calendar `split` and `dividend` are read as the latest key of the name
+  in each bucket, so a week with two splits applies the later, and two
+  dividends announced in one week on different days (Norgate announces
+  on the ex-date) count the later; (2) the weekly total return is one
+  period on the week's closes, `(P F + D) / P0 − 1`, where the book
+  compounds the daily
+  `(close + dividend) split / previous close` through the week, so a
+  dividend going ex before the week's last day is reinvested at the
+  week's close and not at the ex-day's: on `dividend_week.rs`'s X,
+  0.0576923 against the book's 0.0579644 (2.7e-4, about D / P0 times
+  the return from the ex-day to the week's close), and a dividend going
+  ex after a split in the same week is per new share where the formula
+  takes it per old share; parity to 8e-15 needs a daily total-return
+  relation or a staged total-return close; (3) a dividend of a week in
+  which the name has no row is lost, as the book, which has no bar for
+  it, loses it; (4) below the actions' calendar `split_factor` reads
+  `split` as of each bar, outside a window and so not refused: a split
+  stands at every bar after it, and `cum_split` and `adj_close` apply it
+  once per bar there (as before this erratum; no corpus program).
+- **E-146 (`ExecConfig::start`, K-3.2's warm-up clause, V-3.4; MW14's
+  start and its gate's history).** The book computes its features, its
+  latch and its gate from the data's first week and trades from
+  1991-01-04, flat before (`run_book`'s window over a panel built from
+  1990). Two things kept the run from it. (1) A run with the stores
+  trimmed (`--history window`, `abt run`'s default and the benchmark's)
+  reads no row before its first decision bar: `Kernel::call` answers a
+  read behind the memo's oldest bucket from what the eviction kept, and
+  at the first decision bar that bucket is the bar itself (E-135's
+  path). So with `--start 1991-01-04` every name's rows began there: in
+  the Nov 25 run the 1,316 rows of bar 0 were all first rows, the first
+  score came at bar 17 and the first 40-row mean at bar 39, and the book
+  held nothing before 1991-05-03 where the canon latched 6, 11 and 23
+  names at bars 0, 2 and 17 (a replica: 162 weeks off by more than 1e-4,
+  CAGR 0.52 pp lower). `ExecConfig::start` says the bars before the
+  start remain data, and K-3.2 asks the binding to cover the window
+  plus the longest lookback so that the first decisions are warm. `--history all` warms up and does not fit the
+  benchmark machine (docs/assessment.md, Nov 6). (2) The book's gate is
+  `$SPXTR`'s weekly index against its 52-week mean over the index's own
+  weeks from 1988 (`data.py` `attach_gate_index`, `book.py` 334);
+  `rows[52]` over the weekly calendar starts with the equities, so there
+  was no gate in 1990 (alone: 86 weeks off by more than 1e-4). [D] The
+  run starts at the data's first week (`scripts/bench-mw14.sh`,
+  `START=1990-01-01`) and MW14 holds its targets until `first_trade`
+  (1991-01-04): its rows, latch and gate warm up on 1990, and from its
+  first week it decides and fills what a run of the whole history
+  started there does. The gate reads two weekly series the parity
+  bundle stages, `SPXTR_W` and `SPXTR_W_MA52`, the book's index (daily
+  ratios, weekly products and their running product in float32) and its
+  52-week mean, from 1988 (`scripts/parity/mw14_series_bundles.py`,
+  equal to the book's polars code to the bit), two new names of the
+  series class; `gate_rows` leaves the program. `mw14_compare.py`
+  aligns the two series on the decision week from the canon's first and
+  reports the weeks decided before it, whose returns must be 0.
+  Rejected: `--history all` (does not fit); a 1990 start without the
+  guard (the book would trade in 1990 and enter 1991 holding drifted
+  weights where the canon buys at 1 / N). E-135's fix, the eviction's
+  cutoff read in place of the memo's oldest bucket, is the cure for (1)
+  and makes the guard redundant, not wrong. MW14's golden market
+  (2022-2023) is after `first_trade` and its synthetic `SPXTR_W` and
+  `SPXTR_W_MA52` give the gate `rows[52]` gave, so the golden run's
+  decisions do not move by this. `tests/mw14_parity.rs::
+  a_run_from_the_datas_first_week_trades_from_the_books_first_week_as_the_whole_history_does`
+  (without the guard, 56 fills before the first week);
+  `scripts/parity/test_mw14_series_bundles.py`
+  (`scripts/mutations/e-146-first-trade.patch`).
+- **E-147 (V-3.4; MW14's weekly VIX keyed at the week's Friday).**
+  `mw14_series_bundles.py` keyed each weekly VIX row at its week's
+  Monday plus four days. The kernel labels a week at its last trading
+  day and reads the series as of the label, so in a week whose Friday is
+  a holiday the Thursday label read the previous week's VIX, and the
+  program's own 4-row mean carried it for four weeks: in the Nov 25 run
+  65 holiday-label bars, the scale on against off in 7 of them
+  (1994-03-31, 1994-04-15, 2001-04-12, 2008-03-20, 2009-04-24,
+  2009-07-02, 2025-04-17), −0.077 (a replica: 22 weeks off by more than
+  1e-4, CAGR 0.32 pp lower). [D] Every weekly series row is keyed at
+  its week's last `$SPXTR` date (68 weeks of 1988-2026 end before the
+  Friday); a VIX week with no `$SPXTR` date keeps its Friday (none in the
+  book's files). `VIX_MA4` is staged from the mart's own column and
+  `calm` reads it, as the book does (`vix_rows` leaves the program).
+  `scripts/parity/test_mw14_series_bundles.py::
+  test_a_holiday_week_is_keyed_at_its_last_trading_day` (under the
+  Friday keying, 2008-03-21 for 2008-03-20). No mutation: the test is a
+  script's, and runs only where pandas is. **Open:** a week whose last
+  equity bar differs from its last `$SPXTR` date reads the week before.
+  The data's last week is one: the lake's equity bars end on Wednesday
+  2026-06-24 and `spxtr_daily.parquet` runs to 2026-07-09, so that
+  week's four rows are keyed at Friday 2026-06-26 and the run's last
+  label, 2026-06-24, reads the previous week's gate, VIX and `VIX_MA4`
+  where the book reads that week's. It decides only the book's last
+  week, cost only, which is not compared; keying a partial last week at
+  the equities' last day would take the lake into the series script, and
+  is not done. Before it there is none (Nov 25: no equity day off
+  `$SPXTR`; the 26 `$SPXTR` days off the lake are all from 2026-06-25).
+  `mw14_compare.py` checks it per run (`label_key_misses`): every label
+  but the last is an `SPXTR_W` key (`labels_off_key`, 0 expected), and
+  the last is reported when it is not (`last_label_off_key`, 2026-06-24
+  expected); `test_mw14_series_bundles.py::
+  test_every_label_but_the_last_is_a_weekly_key`.
+- **E-148 (MW14's target weight, `engine_weighted.py`).** `target` was
+  `least(S / N, name_cap)`; the book takes the share 1 / N (unit weights
+  over their sum), times the scale, then the cap, as the first
+  formulation did (`docs/parity-mw14.md`, R4, "in the book's order of
+  operations"). With the dial's 0.7 the two part in the last bit for N
+  of 9, 13, 18, 21, ...: 187 of 1,744 canon weeks in the Nov 25
+  comparison, none by more than 1e-9, but a weight at the band's edge
+  can flip a trade. [D] `W = least(1 / N * S, name_cap)`.
+  `tests/mw14_parity.rs::the_target_is_one_over_the_count_times_the_scale_capped`
+  (under `S / N`: 9 names at 0.7, 0.07777777777777778 against the
+  book's 0.07777777777777777; `scripts/mutations/e-148-target-order.patch`).
+- **E-149 (D-7.7; `docs/handoff-data.md` section 4, decisions 1, 2, 3
+  and 9; the Norgate adapter read as the Python book reads the lake).**
+  Four readings the adapter made per ingest span or against the book,
+  measured on Nov 25 (D4, D5, D8 of the parity measurements). Each new
+  reading is an option of the adapter, default unchanged, and
+  `scripts/bench-mw14.sh` passes all of them (its store key names them).
+  (a) The universe was the members of the span (`norgate.rs` 1). Staged in
+  five-year spans, a span lacked every bar of an asset not a member in it:
+  4,437,783 of the lake's bars from 1990, of 2,303 of its 4,240 assets (a
+  replica: 192 weeks off by more than 1e-4, CAGR 0.34 pp). [D]
+  `universe_from` and `universe_to` (`--universe-start`, `--universe-end`)
+  name the window whose members are the universe; the member rows are
+  unchanged. (b) With such a window past the span, an asset whose last
+  print is the span's last trading day was taken for a current listing,
+  and the next span, holding no bar of it, emitted nothing: never
+  delisted (decision 3 says the first trading day after the last print).
+  [D] The lake's next year is read for the first trading day after the
+  span and the assets that trade again; one that does not is delisted on
+  that day, as that day's row alone (the next span cannot carry it). A
+  span read alone, or the last of its window, is read as before. (c) The
+  lake's `member_to` is the first trading day out
+  (`pipeline/ndlake/membership.py`: "the trading day AFTER the last member
+  day"), as decision 2 reads it; the book counts a name a member when
+  `member_from <= its week_end <= member_to`. And MW14 read `member` at
+  the week's label: `sp1500` is derived for the week's names at once, and
+  a bucket read with the entity unbound answers the bucket's last day with
+  any row (`Kernel::asof_matches`), so a member without a bar on the label
+  day was out that week. Nov 25 counted 578 store-only and 23 book-only
+  member asset-weeks (113 weeks off by more than 1e-4), under the
+  measurement's reading of any row in the week; in process the store-only
+  direction (out on a Wednesday, trading to Friday) does not reproduce.
+  [D] `member_to = last_day` (`--member-to last_day`) counts `member_to`
+  as a member day, stated on the member version, and the universe's test
+  reads it so: a spell whose last member day is the window's first is in
+  the universe (`member_to < from`, where the half-open reading drops
+  `member_to <= from`; before, such an asset had no bar and no member
+  row that day, as `two_span_lake`'s 16 in a span from 2015-01-05; not
+  met by `bench-mw14.sh`, whose window starts on a holiday). MW14 tests
+  the three lists at the name's own last bar of the week
+  (`sp1500_day@base`, its `last` over the bucket). (d) Decision 9
+  rounded prices and dividend
+  amounts to six decimals; the lake's are single-precision floats widened
+  (2017: none of 976,389 closes off `f32`, 909,946 off the 1e-6 grid): on
+  Nov 25 10,369,369 closes and 133,440 amounts differed from the lake's,
+  779 weeks by more than 1e-9 against the 8e-15 gate. The storage
+  specification has the store give the vendor's bits (07-storage, 2.1 and
+  "Floats on read"). [D] `values = lake` (`--values lake`) keeps them,
+  stated on the versions; the hot store holds a value off every decimal
+  grid as its raw bits (A-D54), exact in the `f64` view through a staged
+  version and an append, without an exact view or a ladder, about ten
+  bytes a value (inferred, not measured). Tests: `abt-data/tests/
+  norgate.rs::a_staging_in_spans_holds_every_asset_of_the_universe_window_in_every_span`,
+  `::an_asset_whose_last_print_is_a_spans_last_day_is_delisted_on_the_next_spans_first`,
+  `::member_to_counted_as_a_member_day_is_the_books_test_at_the_names_last_bar_of_the_week`,
+  `::the_lakes_values_reach_the_store_bit_for_bit_through_a_staging_and_an_append`;
+  `abt-tests/tests/mw14_parity.rs::a_name_is_a_member_in_a_week_when_it_is_one_at_its_last_bar_of_the_week`
+  (before: S05, halted on the label day, out of `eligible`). Mutations
+  `scripts/mutations/e-149-{universe-window,span-end-delisting,member-to,member-to-window,lake-values,member-week}.patch`.
+  Other programs: no default moves; the corpus's synthetic market has a
+  member row on every bar, so MW14's golden run is unchanged by (c) and
+  only its program hash moves. **Open:** the `f32` form (`floats = f32`
+  on the price versions, 07-storage's design for NDLake, no exception)
+  is not used: `staging/build.rs::value_int` (the ladder) and
+  `store_hot.rs::tail_row` (appended rows) take the `f64` grid test for an
+  `f32` column, so they would count such values as 0 (found by reading).
+  A bucket read whose answer depends on whether its entity is bound is
+  the evaluator's, not fixed here. A split day's dividend (decision 6,
+  D7): the adapter stores it per new share (`amount / factor`), the
+  library's `total_return` adds it to the old-share price (`P F + D`), and
+  the book computes `(P + D) F` with the lake's amount; the lake's 42
+  split-day dividends put the three apart (MSFT 2003-02-18: the book
+  3.685%, the engine 3.437%; CSR 2018-12-28, a 1:10 reverse split: 4.04%
+  against 144%). Not changed: none fell on a held name's label on Nov 25,
+  and the vendor's convention (per old or new share) is the owner's call.
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`

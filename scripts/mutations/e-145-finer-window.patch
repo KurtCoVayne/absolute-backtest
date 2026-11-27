@@ -1,0 +1,16 @@
+# proposition: E-145 (a window on a calendar finer than a catalog relation's does not read it as of its bars: the checker refuses it)
+# mutation: the refusal never fires, so the minute window sums a dividend once per bar
+# test: cargo test -p abt-tests --test dividend_week a_window_on_a_calendar_finer_than_the_actions_is_refused
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/check/link.rs b/crates/abt-kernel/src/check/link.rs
+--- a/crates/abt-kernel/src/check/link.rs
++++ b/crates/abt-kernel/src/check/link.rs
+@@ -2197,7 +2197,7 @@
+                     else {
+                         continue;
+                     };
+-                    if atom.name == "value" || !wvars.contains(&v.as_str()) {
++                    if true || atom.name == "value" || !wvars.contains(&v.as_str()) {
+                         continue;
+                     }
+                     let held = self

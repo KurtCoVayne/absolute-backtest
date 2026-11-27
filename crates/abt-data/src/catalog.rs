@@ -365,10 +365,15 @@ pub fn classes() -> Vec<ClassDef> {
                 name: "names",
                 // `VIX` is the parity bundle's weekly close (MW14 reads it over
                 // weekly rows); the lake's daily `$VIX` is `VIX_D` (E-103).
+                // `SPXTR_W` and `SPXTR_W_MA52` are the parity bundle's weekly
+                // `$SPXTR` index as the book chains it and its 52-week mean,
+                // from 1988: MW14's gate (E-146).
                 values: vec![
                     ("SPXTR", Some("1d")),
                     ("VIX", Some("1w")),
                     ("VIX_MA4", Some("1w")),
+                    ("SPXTR_W", Some("1w")),
+                    ("SPXTR_W_MA52", Some("1w")),
                     ("SPX", Some("1d")),
                     ("NDX", Some("1d")),
                     ("NDXTR", Some("1d")),

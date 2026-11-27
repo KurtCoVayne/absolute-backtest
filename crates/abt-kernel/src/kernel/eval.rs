@@ -187,10 +187,11 @@ pub(crate) struct WindowPlan {
     wslot: usize,
     /// The literal as the cache's key names it (shared windows share it).
     literal: usize,
-    /// The tests of the base time applied to the cached rows at each call
-    /// (`Ex = T`), each with the slots the call must bind for it: what
-    /// neither the base nor the cached rows give it, and an assignment's
-    /// variable unless an atom binds it (the assignment would bind it).
+    /// The tests of the base time or of what only the call binds, applied
+    /// to the cached rows at each call (`Ex = T`, `Ex > T1`), each with the
+    /// slots the call must bind for it: what neither the base nor the
+    /// cached rows give it, and an assignment's variable unless an atom
+    /// binds it (the assignment would bind it).
     late: Vec<(Literal, Vec<usize>)>,
     /// The outer bindings the cached conjunction reads, ascending: with the
     /// literal, a group of the cache.
@@ -2199,14 +2200,30 @@ impl<'p> Kernel<'p> {
             return None;
         }
         // A test of the base time (`Ex = T`: the dividend going ex at the
-        // bar) is applied to the rows each call assembles; the rest of the
-        // conjunction is solved once a bar and cached. The tests bind
-        // nothing, fail on no value, and the rows are sorted after, so the
-        // aggregate reads what a whole solve gives it.
+        // bar), or a comparison with what only the call binds (`Ex > T1`,
+        // after the calendar's previous bar, E-145), is applied to the rows
+        // each call assembles; the rest of the conjunction is solved once a
+        // bar and cached, and is not keyed by what the test reads. The
+        // tests bind nothing, fail on no value, and the rows are sorted
+        // after, so the aggregate reads what a whole solve gives it.
         let reads_base = |l: &Literal| {
             let mut vs = Vec::new();
             literal_vars(l, &mut vs);
             vs.iter().any(|v| v == bvar)
+        };
+        // A comparison's variable that no other literal of the conjunction
+        // mentions is bound by the call.
+        let mut inner: Vec<String> = Vec::new();
+        for l in conj.iter().filter(|l| !matches!(l, Literal::Cmp { .. })) {
+            literal_vars(l, &mut inner);
+        }
+        let reads_call = |l: &Literal| match l {
+            Literal::Cmp { lhs, rhs, .. } if total_expr(lhs) && total_expr(rhs) => {
+                let mut vs = Vec::new();
+                literal_vars(l, &mut vs);
+                vs.iter().any(|v| !inner.contains(v))
+            }
+            _ => false,
         };
         // A variable an atom of the cached conjunction binds (a match binds
         // all of an atom's variables).
@@ -2233,6 +2250,10 @@ impl<'p> Kernel<'p> {
                     // whole.
                     _ => return None,
                 }
+                continue;
+            }
+            if reads_call(l) {
+                late.push(l);
                 continue;
             }
             literal_vars(l, &mut refs);
@@ -2289,7 +2310,10 @@ impl<'p> Kernel<'p> {
             literal: self.literal_index(cr, lit),
             late: tests,
             outer,
-            order: conj_order(conj).into_iter().filter(|l| !matches!(l, Literal::Window { .. }) && !reads_base(l)).collect(),
+            order: conj_order(conj)
+                .into_iter()
+                .filter(|l| !matches!(l, Literal::Window { .. }) && !reads_base(l) && !reads_call(l))
+                .collect(),
         })
     }
 
