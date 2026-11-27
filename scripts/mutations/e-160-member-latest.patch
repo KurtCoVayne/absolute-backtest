@@ -1,0 +1,16 @@
+# proposition: E-160 (MW14's membership at a name's last bar of the week, read at that bar)
+# mutation: any member row of the name in the week, which keeps a name whose membership ends mid-week while it trades on
+# test: cargo test -p abt-tests --test mw14_parity eligible_holds_the_names_above_the_floors_that_are_members_at_their_own_last_bar_of_the_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/corpus-v2/company/mw14.dsl b/corpus-v2/company/mw14.dsl
+--- a/corpus-v2/company/mw14.dsl
++++ b/corpus-v2/company/mw14.dsl
+@@ -106,7 +106,7 @@
+     eligible(A, T, D) :- universe(A, T),
+         close@weekly(A, T, P), P >= price_floor,
+         D = mean(X) over (T1 in rows[dvol_rows], dvol(A, T1, X)), D >= dvol_floor,
+-        close@base(A, L, _) asof T, sp1500(A, L).
++        N = count(T2) over (T2 in bucket(weekly, T), sp1500(A, T2)), N > 0.
+ 
+     rel scored(A: Equity, @T, S: Scalar)
+     scored(A, T, S) :- eligible(A, T, _), clenow(A, T, S).
