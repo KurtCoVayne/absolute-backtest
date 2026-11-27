@@ -4,6 +4,10 @@
 //! `@session` views on a `decide on session` clock under `need bars @1m`,
 //! and the session bars under `need bars @1d`, which the resolver binds
 //! because it prefers the coarsest version that satisfies a need.
+//!
+//! E-177: a session aggregate of the minutes is its instrument's own
+//! session beside an instrument whose session closes earlier, on either
+//! clock a futures program has, with the data layer's pass or without.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -191,6 +195,190 @@ fn digest(r: &RunResult) -> (Vec<String>, Vec<String>) {
         .collect();
     fills.extend(r.events.iter().filter(|e| e.kind.name() == "roll").map(|e| format!("roll {:?}", e)));
     (decisions, fills)
+}
+
+/// Twelve winter trade dates of two roots whose sessions close an hour
+/// apart, as the treasuries' and the index futures' primary sessions do:
+/// ZN from 13:20 to 20:00 UTC, ES from 14:30 to 21:00. ES makes its range
+/// before ZN closes on the even dates (a 30-point spike at 15:00) and a
+/// point and a half on the odd ones; from ZN's close to its own it moves
+/// one point on every date, and it has a bar at ZN's closing minute. ZN
+/// moves a tenth of a point. Each has a bar half an hour after its open,
+/// where a base clock at `session + 30min` decides.
+fn two_closes() -> (Arc<DataService>, Vec<i64>) {
+    common::init();
+    let mut records = vec![def(1, "ESH4", "ES", "2024-03-15T13:30:00"), def(2, "ZNH4", "ZN", "2024-03-19T13:30:00")];
+    let mut days = Vec::new();
+    let mut day = t("2024-01-02");
+    while days.len() < 12 {
+        let weekday = (day / DAY + 4).rem_euclid(7);
+        if weekday != 0 && weekday != 6 {
+            let top = if days.len() % 2 == 0 { 4830.0 } else { 4801.0 };
+            for (m, open, close) in [
+                (870, 4800.0, 4800.0),
+                (900, 4800.0, top),
+                (1000, top, 4800.0),
+                (1190, 4800.0, 4800.5),
+                (1199, 4800.5, 4800.5),
+                (1230, 4800.5, 4801.0),
+                (1259, 4801.0, 4800.5),
+            ] {
+                records.push(bar(1, day + m * MIN, open, close, 500));
+            }
+            for (m, open, close) in [
+                (800, 110.0, 110.1),
+                (830, 110.1, 110.1),
+                (900, 110.1, 110.0),
+                (1000, 110.0, 110.1),
+                (1190, 110.1, 110.0),
+                (1199, 110.0, 110.1),
+            ] {
+                records.push(bar(2, day + m * MIN, open, close, 500));
+            }
+            days.push(day);
+        }
+        day += DAY;
+    }
+    let meta = Metadata {
+        version: 3,
+        dataset: "GLBX.MDP3".into(),
+        schema: Some(6),
+        start: t("2024-01-01") as u64,
+        end: Some(t("2024-01-31") as u64),
+        limit: None,
+        stype_in: Some(1),
+        stype_out: 0,
+        ts_out: false,
+        symbol_cstr_len: 71,
+        symbols: vec![],
+        partial: vec![],
+        not_found: vec![],
+        mappings: vec![],
+    };
+    let mut store = Store::temporary(&format!("two-closes-{}", std::process::id())).unwrap();
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta, &records), "fixture").unwrap();
+    let reviewed: BTreeMap<String, String> = [("reviewed".to_string(), "complete".to_string())].into_iter().collect();
+    let (fetched, _) = futures(&raw, &Options::default()).unwrap();
+    fetched.ingest(&mut store, "databento", "databento", &reviewed).unwrap();
+    (DataService::new(store), days)
+}
+
+/// The two clocks a futures program has, each reading a session's range
+/// from the minutes. `wide_yesterday` is R8L's shape: decided half an hour
+/// after the open on the base calendar, from the session before, in for the
+/// day when that one's range was 20 points. `wide_today` decides at the
+/// session's close: in at the next open after a wide session, out after a
+/// narrow one. `wide_unanchored` is that program reading the views alone.
+fn range_program(name: &str) -> abt_kernel::check::Program {
+    let src = match name {
+        "wide_yesterday" => {
+            "strategy wide_yesterday {
+  data { class future   need bars @1m from 2024-01-01   need sessions, point_value   require reviewed   prefer latest }
+  uses calendar, bars
+  calendars { session = sessions   es_days = sessions of \"ES\" }
+  clock { decide on base at session + 30min }
+  universe { universe(A, T) :- close(A, T, _). }
+  params { wide : Price<USD> = 20 USD/contract }
+  rules {
+    rel rng(A: Future, @S: session, R: Price<USD>)
+    rng(A, S, R) :- session(A, S, _), high@session(A, S, H), low@session(A, S, L), R = H - L.
+  }
+  decisions {
+    silence flat
+    orders  moo_moc
+    decide(T, hold(A, 1 contracts)) :- universe(A, T), session_of(A, T, S), prev(S, S1), rng(A, S1, R), R >= wide.
+  }
+  execution futures_house
+  report { calendar es_days   periods 252 per year }
+}"
+        }
+        "wide_today" => {
+            "strategy wide_today {
+  data { class future   need bars @1m from 2024-01-01   need sessions, point_value   require reviewed   prefer latest }
+  uses calendar, bars, book
+  calendars { session = sessions }
+  clock { decide on session }
+  universe { universe(A, T) :- session(A, T, _). }
+  params { wide : Price<USD> = 20 USD/contract }
+  rules {
+    rel rng(A: Future, @T, R: Price<USD>)
+    rng(A, T, R) :- universe(A, T), high@session(A, T, H), low@session(A, T, L), R = H - L.
+  }
+  decisions {
+    silence hold
+    orders  moo
+    decide(T, hold(A, 1 contracts)) :- rng(A, T, R), R >= wide, flat(A, T).
+    decide(T, hold(A, 0 contracts)) :- held(A, T, Q), Q > 0 contracts, rng(A, T, R), R < wide.
+  }
+  execution futures_house with { orders moo }
+  report { calendar session   periods 252 per year }
+}"
+        }
+        // The same decisions from the views read with no anchor: the rule
+        // takes every instrument the view has at the label.
+        _ => {
+            "strategy wide_unanchored {
+  data { class future   need bars @1m from 2024-01-01   need sessions, point_value   require reviewed   prefer latest }
+  uses calendar, bars, book
+  calendars { session = sessions }
+  clock { decide on session }
+  universe { universe(A, T) :- session(A, T, _). }
+  params { wide : Price<USD> = 20 USD/contract }
+  rules {
+    rel rng(A: Future, @T, R: Price<USD>)
+    rng(A, T, R) :- high@session(A, T, H), low@session(A, T, L), R = H - L.
+  }
+  decisions {
+    silence hold
+    orders  moo
+    decide(T, hold(A, 1 contracts)) :- rng(A, T, R), R >= wide, flat(A, T).
+    decide(T, hold(A, 0 contracts)) :- held(A, T, Q), Q > 0 contracts, rng(A, T, R), R < wide.
+  }
+  execution futures_house with { orders moo }
+  report { calendar session   periods 252 per year }
+}"
+        }
+    };
+    common::program(src, name)
+}
+
+/// A run on a store of its own (two runs of one program write the same
+/// run's outputs), with the data layer's pass or without it.
+fn run_two_closes(prog: &abt_kernel::check::Program, pushdown: bool) -> (RunResult, Vec<i64>) {
+    let (svc, days) = two_closes();
+    let client = DataClient::connect(inproc(&svc)).unwrap();
+    let cfg = ExecConfig {
+        pushdown,
+        ..ExecConfig::from_program(prog)
+    };
+    (abt_kernel::kernel::run_on(prog, None, &client, cfg, &Replay::default()).unwrap_or_else(|e| panic!("{}", e)), days)
+}
+
+#[test]
+fn a_session_aggregate_is_its_instruments_own_session_beside_one_that_closes_earlier() {
+    let every: Vec<usize> = (0..12).collect();
+    for (name, decided) in [("wide_yesterday", vec![1, 3, 5, 7, 9, 11]), ("wide_today", every.clone()), ("wide_unanchored", every.clone())] {
+        let prog = range_program(name);
+        let (pushed, days) = run_two_closes(&prog, true);
+        let (local, _) = run_two_closes(&prog, false);
+        // ES alone decides, on the dates its session (or the one before) was
+        // wide: its range is the whole session's, not the hour after ZN's close.
+        let on: Vec<usize> = pushed.decisions.iter().map(|d| days.iter().position(|&day| d.t.div_euclid(DAY) * DAY == day).unwrap()).collect();
+        assert_eq!(on, decided, "{}: the dates decided on", name);
+        for d in &pushed.decisions {
+            let text = pushed.describe_decision(&d.decision);
+            assert!(text.contains("ES") && !text.contains("ZN"), "{}: {}", name, text);
+        }
+        assert_eq!(digest(&pushed), digest(&local), "{}: with and without pushdown", name);
+        assert_eq!(pushed.final_cash.to_bits(), local.final_cash.to_bits(), "{}", name);
+        // On the session clock the pass still answers where its bucket is
+        // the session: ZN's, which no other label falls inside.
+        assert_eq!(local.stats.pushed_answers, 0, "{}", name);
+        if name != "wide_yesterday" {
+            assert!(pushed.stats.pushed_answers > 0, "{}: ZN's sessions are the pass's", name);
+        }
+    }
 }
 
 #[test]

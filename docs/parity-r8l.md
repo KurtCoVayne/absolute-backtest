@@ -141,3 +141,14 @@ python scripts/parity/r8l_compare.py S RUN ~/data/ref/r8l/results/leg_flags.parq
 ```
 
 Inputs and their checksums: `docs/parity-inputs.md`.
+
+## On the vendor's own bars
+
+The record above is on the book's own bars. `scripts/parity/r8l_legs.py
+STORE RUN LEGS_CSV` sets a run on a store staged from Databento's minute
+bars (`scripts/r8l-store.sh`, each root's primary session, ERRATA E-176)
+beside the book's legs: two vendors' histories, so it measures how much
+of the book the vendor's bars reproduce and not parity. Its result of
+Nov 26, 2026 is in `docs/handoff/benchmark.md`, "R8L's store": 94.8% of
+the book's legs over 2011-05 to 2026-08, 99.92% of them in the same
+direction.

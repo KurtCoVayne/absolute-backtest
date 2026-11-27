@@ -1,0 +1,16 @@
+# proposition: E-176 (a session window is in force from its date on)
+# mutation: the root's first window on every day
+# test: cargo test -p abt-data --test databento a_root_with_session_windows_keeps_its_windows_bars_and_opens_with_the_window
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -160,7 +160,7 @@
+ /// UTC day, which it cannot lie inside.
+ fn window_at(windows: &[Window], start: i64) -> Option<(i64, i64)> {
+     let day = start.div_euclid(DAY);
+-    let w = windows.iter().rev().find(|w| w.from <= day)?;
++    let w = windows.first()?;
+     let midnight = day * DAY + new_york_offset(day);
+     Some((midnight + w.open, midnight + w.close))
+ }

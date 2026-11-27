@@ -1,0 +1,16 @@
+# proposition: E-177 (the pass's answer for an instrument at a label that is no session of its own is no answer)
+# mutation: an answer at another instrument's label is kept, as the instrument's
+# test: cargo test -p abt-tests --test session_level a_session_aggregate_is_its_instruments_own_session_beside_one_that_closes_earlier
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1916,7 +1916,7 @@
+             for (t, section) in by_time.iter_mut() {
+                 section.retain_mut(|(sym, answer)| {
+                     let Some(session) = k.sessions.get(sym).and_then(|own| super::pushdown::own_session(own, *t)) else {
+-                        return false;
++                        return true;
+                     };
+                     answer.error |= !super::pushdown::whole_session(session, &session_labels);
+                     true

@@ -946,6 +946,77 @@ Three things they met, none of them new with this tree:
   unscoped run counts 135 (three days on which only other instruments
   have a bar), so its per-period metrics differ in the third digit.
 
+*MW14 on the real Russell 3000 (Nov 26).* The lake's own Russell
+memberships, the book's rules unchanged (`docs/handoff/benchmark.md`, "A
+wider universe"): 12,373 assets from 1990 to 2026-10-26, about 3,000 at
+a time. At `3c10fc5` with `--evaluator block` on the benchmark machine
+the run takes **164.8 s**, inside the owner's bound of 3 minutes for a
+universe of that size: 5,115 decisions, the run's process at 2.57 GB,
+the data service at 8.54 GB and ready after 18.0 s. The stream is
+135.2 s (decide 63.6, fill 23.0, insert 20.0, decode 7.3, trim 6.8), the
+checks 25.0 s and the pushed aggregates 17.6 s. The store is 3.7 GB,
+staged in 19 spans of two years in 46 minutes. There is no canon for
+it.
+
+*R8L on each root's primary session (Nov 26; E-176, E-177).* The
+Databento adapter takes a root's session windows (E-176) and
+`scripts/r8l-store.sh` stages the 26 roots with the book's: 33,217,867
+minute bars to the session of 2026-11-25, 3.0 GB where the whole-day
+store is 19 GB (120.2 of the 252.8 million bars read lie outside the
+windows; `gc` after each root evicts the versions its ingest
+superseded, which were 10 GB of the 19), in 29 minutes. `r8l.dsl` runs
+on it to the end: 449.6 s, 16,347 legs, the kernel at 8.1 GB and the
+service at 5.5 GB, a barrier 0.13 ms on average and a decision barrier
+5.0 ms (p99 12.7 ms, max 19.8 ms).
+
+The first run on that store was wrong, and found the engine fault of
+E-177. Its legs were 87.6% of the book's with 5,001 the book does not
+make, most of them short sidecar legs, at 1.45 to 1.5 times the book's
+P&L a matched leg: a risk unit an eighth to a quarter too small. ES's
+20-session mean true range on 2024-04-02 is 43.66 points from the
+store's bars and was 33.86 in the run; it is 43.66 again in a run of ES
+alone or of ES and NQ, 33.86 beside ZN and 36.73 beside GC, and exact
+with `--no-pushdown`. The data layer's pass buckets every instrument's
+rows by one list of labels, and the kernel's list for the sessions
+calendar is every root's session closes together, so ES's `high@session`
+and `low@session` were those of its last hour, after the treasuries'
+15:00 close. The kernel now reads the pass's answer only where it is the
+instrument's whole session and evaluates the others itself. That costs
+R8L about 70 s of 450 and 4 ms a decision barrier, until the pass is
+given a list of labels per instrument.
+
+With it R8L on Databento's history stands beside the Python book on
+TradeStation's (`scripts/parity/r8l_legs.py`), over 2011-05-25 to
+2026-08-14: 15,552 legs in the book and 15,484 in abt, 14,741 the same
+market and day (94.8% of the book's), 99.92% of those in the same
+direction, leg P&L correlation 0.974. On ES's 3,910 session days at the
+book's fixed base the book returns 22.07% a year at a Sharpe of 1.347
+with a 19.2% drawdown, and abt 21.33% at 1.329 with 17.7%; the daily
+series correlate 0.965. KC and SB (80% of the book's legs), HE (84%), LE
+and PL (87%) are the roots where the two vendors' sessions differ most.
+The run's own report has no periods on a vendor store: `sessions of
+"ES"` looks for an instrument named `ES`, and the series is `ES.v.0`.
+
+*The store's `gc` on real data.* On a copy of the folded MW14 store,
+`abt data gc --disk-budget 0` evicted 58 superseded versions in 9.2 s
+(76 version manifests to 18), and MW14 on the result gave the same
+returns in 65.2 s.
+
+*The agents again, and a plan's threads (Nov 26).* Two more posts
+through the pipeline's runner, one at a time, on the committed binaries
+($0.47): neither reached a full backtest. The equity post met the
+whole-history check run again (package 7 (a) and (b)). The NQ post's
+development plan, a base run and a grid, was killed at the slot's
+14 GB, where the day's earlier NQ post had finished with another
+program. Run by hand, that plan peaks at 15.3 GB on either build: `abt
+plan run --kernels 1` bounds the kernels and not the work, since the
+executor runs `threads` steps at a time on them (4 by default,
+`abt-query/src/plan/exec.rs`), and each step's run holds the store's
+history. With `--threads 1` the same plan peaks at 4.1 GB and takes
+2:44 where it took about 1:45. The pipeline's tool passes `--kernels 1`
+alone (`agents-harness/agents_harness/local.py`), so a grid on a minute
+store needs `--threads 1` beside it there, or package 7 (a).
+
 ### The panel
 
 (This first record was made before the rule above: three of its four

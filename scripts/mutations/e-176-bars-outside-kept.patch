@@ -1,0 +1,15 @@
+# proposition: E-176 (a root with session windows keeps the bars inside its day's window and no other)
+# mutation: the bars outside the window stay
+# test: cargo test -p abt-data --test databento a_root_with_session_windows_keeps_its_windows_bars_and_opens_with_the_window
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -921,7 +921,6 @@
+         let windows = opts.session_windows.get(root);
+         if let Some(w) = windows {
+             let before = rbars.len();
+-            rbars.retain(|b| window_at(w, b.start).is_some_and(|(open, close)| open <= b.start && b.t <= close));
+             *report.dropped.entry("outside_session_window".into()).or_default() += before - rbars.len();
+             if rbars.is_empty() {
+                 continue;

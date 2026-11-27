@@ -5,12 +5,20 @@
 # (docs/handoff/benchmark.md, "R8L's store"), with its places made variables; where that run removed the
 # slot reserve's file when a step ended, this one writes 0 to it. For each root: one view of every pull of it
 # (scripts/r8l-views.py), one ingest with the options of absolute-pipeline's scripts/store/point-values.sh
-# (sessions broken at 17:45 New York with a 20-minute gap, undefined instruments dropped, every root's
-# point value stated, reviewed=complete), each root's commission per contract per side, and the five bar
-# relations consolidated with their tails (ERRATA E-173): every row is then in the base segments, and a
-# service or a query opens the store without replaying its log. A root cannot be ingested twice (its
+# (undefined instruments dropped, every root's point value stated, reviewed=complete), each root's
+# commission per contract per side, each root's primary session (below), and the five bar relations
+# consolidated with their tails (ERRATA E-173): every row is then in the base segments, and a service or
+# a query opens the store without replaying its log. The versions a root's ingest supersedes are then
+# evicted (`gc`): each ingest writes the constant relations and the continuous series' map again, and at
+# 26 roots the superseded ones were 10 GB of a 19 GB store. A root cannot be ingested twice (its
 # back-adjustment restates facts), so newer bars are a new store. A root done is skipped: run it again as
 # it is after a stop.
+#
+# Sessions. The book trades each root's primary session and reads nothing outside it: SESSIONS=primary
+# (the default) gives the ingest the root's windows (ERRATA E-176), and the store holds those minutes only.
+# SESSIONS=day leaves the adapter's sessions, the electronic day broken at 17:45 New York with a 20-minute
+# gap, which is what the pipeline's own stores hold and what the store of Nov 26, 2026 was staged with:
+# `r8l.dsl` on such a store is another rule (docs/handoff/benchmark.md, "R8L's store").
 #
 # One heavy step at a time under the machine's ingest lock, in a memory scope (systemd-run), with two of
 # abt-slot's four slots withheld while a step runs. A root is staged once its newest pull is whole
@@ -18,7 +26,8 @@
 #
 # Env: M (the work directory: $M/target/release/abt-data, $M/logs), STORE, VIEWS, LOGS, REFRESH (the newest
 # pull, under VENDOR), LAST (its last whole session), ROOTS, CAP and GATE (GB: the scope and the memory a
-# step waits for), MIN_DISK_GB, PY (a Python with pyarrow), LOCK, RESERVE.
+# step waits for), MIN_DISK_GB, PY (a Python with pyarrow), LOCK, RESERVE, SESSIONS (primary or day), GC (0 keeps
+# the superseded versions).
 set -uo pipefail
 M=${M:-/srv/absolute/m8}; B=${B:-$M/target/release/abt-data}
 STORE=${STORE:-$M/store-futures}; VIEWS=${VIEWS:-$M/views}; LOGS=${LOGS:-$M/logs/stage}; mkdir -p "$LOGS" "$VIEWS"
@@ -35,6 +44,18 @@ PV='ES=50;NQ=20;RTY=50;6J=12500000;ZT=2000;ZF=1000;ZN=1000;ZB=1000;CL=1000;NG=10
 # Dollars per contract per side (d20-research config/costs.yaml, retrieved 2026-08-20): the broker's 0.85,
 # the exchange's fee and the venue's recovery and regulatory fees.
 declare -A COMM=( [ES]=2.297 [NQ]=2.297 [RTY]=2.297 [6J]=2.511 [LE]=3.011 [HE]=3.011 [GF]=3.011 [ETH]=6.411 [ZT]=1.57 [ZF]=1.57 [ZN]=1.72 [ZB]=1.79 [ZC]=3.07 [ZS]=3.07 [ZL]=3.07 [ZW]=3.07 [ZM]=3.07 [CL]=2.41 [HO]=2.41 [RB]=2.41 [NG]=2.51 [PL]=2.56 [GC]=2.56 [SI]=2.56 [SB]=2.96 [KC]=2.96 )
+# Each root's primary session in New York time (d20-research d20research/data/sessions.py, checked against
+# the exchanges' pages on 2026-08-20; its Chicago windows an hour later here): the window, then each later
+# window with the day it starts.
+SESSIONS=${SESSIONS:-primary}
+declare -A WIN=( [ZT]=08:20-15:00 [ZF]=08:20-15:00 [ZN]=08:20-15:00 [ZB]=08:20-15:00 [6J]=08:20-15:00
+  [ES]=09:30-16:00 [NQ]=09:30-16:00 [RTY]=09:30-16:00 [ETH]=09:30-16:00
+  [CL]=09:00-14:30 [NG]=09:00-14:30 [RB]=09:00-14:30 [HO]=09:00-14:30
+  [GC]=08:20-13:30 [SI]=08:20-13:30 [PL]=08:20-13:30
+  [ZC]=10:30-14:15,09:30-14:20@2012-04-09 [ZS]=10:30-14:15,09:30-14:20@2012-04-09 [ZW]=10:30-14:15,09:30-14:20@2012-04-09
+  [ZL]=10:30-14:15,09:30-14:20@2012-04-09 [ZM]=10:30-14:15,09:30-14:20@2012-04-09
+  [LE]=10:05-14:00,09:30-14:05@2010-06-07 [GF]=10:05-14:00,09:30-14:05@2010-06-07 [HE]=10:10-14:00,09:30-14:05@2010-06-07
+  [SB]=09:00-13:00,03:30-13:00@2008-03-03 [KC]=09:00-13:30,04:15-13:30@2008-03-03 )
 BARS="future.open future.high future.low future.close future.volume"
 ROOTS=${ROOTS:-"6J ETH CL ES GC GF HE HO LE NG NQ PL RB RTY SI ZB ZC ZF ZL ZM ZN ZS ZT ZW KC SB"}
 say() { echo "$* $(date -u +%FT%TZ)" | tee -a "$SUM"; }
@@ -66,7 +87,8 @@ run() { # name, command...
   return "$code"
 }
 trap free_slots EXIT
-say "== stage on $(sha256sum "$B" | cut -c1-12): $STORE, roots $ROOTS, disk $(avail)G"
+[ "$SESSIONS" = primary ] || [ "$SESSIONS" = day ] || { echo "SESSIONS is primary or day, not $SESSIONS"; exit 2; }
+say "== stage on $(sha256sum "$B" | cut -c1-12): $STORE, roots $ROOTS, sessions $SESSIONS, disk $(avail)G"
 while :; do
   r=; left=0
   for x in $ROOTS; do
@@ -79,10 +101,12 @@ while :; do
   if [ -z "$r" ]; then pgrep -f dbn_pull_extra.py >/dev/null || stop "$left roots have no whole pull and none is running"; sleep 30; continue; fi
   [ "$(avail)" -ge "$MIN_DISK_GB" ] || stop "under $MIN_DISK_GB GB of disk before $r"
   $PY "$HERE/r8l-views.py" "$VIEWS" "$r" >> "$SUM" 2>&1 || stop "view of $r"
+  W=(); [ "$SESSIONS" = primary ] && W=(--session-windows "$r=${WIN[$r]}")
   run "dbn-$r" "$B" ingest --store "$STORE" --adapter databento --from "$VIEWS/$r" --class future --undefined drop \
-    --session-break 17:45 --session-gap 20 --point-values "$PV" --commission "${COMM[$r]}" --attributes reviewed=complete \
+    --session-break 17:45 --session-gap 20 "${W[@]}" --point-values "$PV" --commission "${COMM[$r]}" --attributes reviewed=complete \
     --report "$LOGS/dbn-$r-report.json" || stop "ingest $r"
   for rel in $BARS; do run "cons-$r-$rel" "$B" consolidate --store "$STORE" "$rel" --tails || stop "consolidate $rel after $r"; done
+  [ "${GC:-1}" = 0 ] || run "gc-$r" "$B" gc --store "$STORE" --disk-budget 0 || stop "gc after $r"
   say "root $r ok: $(grep -aoE '[0-9]+ bars kept' "$LOGS/dbn-$r.time" "$LOGS/dbn-$r.log" 2>/dev/null | tail -1 | cut -d: -f2), store $(du -sBM "$STORE" | cut -f1) ($(du -sBM "$STORE"/log "$STORE"/part "$STORE"/hot 2>/dev/null | awk '{printf "%s %s ", $1, $2}' | sed "s#$STORE/##g")), disk $(avail)G"
 done
 say "== stage done: $(echo $ROOTS | wc -w) roots, $(du -sh "$STORE" | cut -f1)"

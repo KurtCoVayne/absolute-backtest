@@ -1649,6 +1649,11 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &mut 
     } else {
         abt_wire::generated::abt::wire::Numerics::TwoPass
     };
+    // The sessions calendar's labels, every instrument's together, which the
+    // pass walks for every instrument; and whether every session of every
+    // instrument is the pass's bucket at its label (ERRATA E-177).
+    let session_labels: BTreeSet<i64> = k.schedule.get(&Cal::Sessions).cloned().unwrap_or_default();
+    let sessions_whole = k.sessions.values().all(|own| own.iter().all(|&s| super::pushdown::whole_session(s, &session_labels)));
     // Every pushed literal's request, in the program's order.
     let mut asks: Vec<Ask> = Vec::new();
     for ((ri, li), e) in super::pushdown::eligibilities(k.prog) {
@@ -1729,7 +1734,10 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &mut 
         // no value, the pass's no row, only when the minimum is at least 1
         // (a bucket's always is).
         let hidden = super::pushdown::delivered_name(k.prog, ri, li);
-        let store = (k.cfg.deliver && min.is_some_and(|m| m >= 1) && super::pushdown::deliverable(&shape, k.prog).is_ok())
+        // A bucket of the sessions calendar is delivered when every session
+        // is the pass's bucket: a delivered answer is read with no test.
+        let own_sessions = matches!(&shape.window, crate::ir::WindowKind::Bucket(c) if c.per_entity());
+        let store = (k.cfg.deliver && (sessions_whole || !own_sessions) && min.is_some_and(|m| m >= 1) && super::pushdown::deliverable(&shape, k.prog).is_ok())
             .then(|| (k.prog.relations.len()..k.rels.len()).find(|&r| k.rels[r].name == hidden))
             .flatten();
         asks.push(Ask {
@@ -1897,6 +1905,24 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &mut 
         }
         for section in by_time.values_mut() {
             section.sort_by_key(|(s, _)| *s);
+        }
+        // A session is its instrument's own (ERRATA E-177), and the pass
+        // closed a bucket at every label of the calendar, every
+        // instrument's together. Its answer at a label that is no session
+        // of the instrument's is no answer; one at a session's label is the
+        // session only where no other label cut it, and is otherwise marked
+        // as one the pass could not give: its window is evaluated here.
+        if matches!(&a.shape.window, crate::ir::WindowKind::Bucket(c) if c.per_entity()) {
+            for (t, section) in by_time.iter_mut() {
+                section.retain_mut(|(sym, answer)| {
+                    let Some(session) = k.sessions.get(sym).and_then(|own| super::pushdown::own_session(own, *t)) else {
+                        return false;
+                    };
+                    answer.error |= !super::pushdown::whole_session(session, &session_labels);
+                    true
+                });
+            }
+            by_time.retain(|_, section| !section.is_empty());
         }
         k.pushed.insert(a.at, entry(by_time, None));
     }

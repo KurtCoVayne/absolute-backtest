@@ -1,0 +1,16 @@
+# proposition: E-177 (a bucket of the sessions calendar is delivered only when every session of every instrument is the pass's bucket)
+# mutation: a session bucket is delivered whatever the instruments' sessions
+# test: cargo test -p abt-tests --test session_level a_session_aggregate_is_its_instruments_own_session_beside_one_that_closes_earlier
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1737,7 +1737,7 @@
+         // A bucket of the sessions calendar is delivered when every session
+         // is the pass's bucket: a delivered answer is read with no test.
+         let own_sessions = matches!(&shape.window, crate::ir::WindowKind::Bucket(c) if c.per_entity());
+-        let store = (k.cfg.deliver && (sessions_whole || !own_sessions) && min.is_some_and(|m| m >= 1) && super::pushdown::deliverable(&shape, k.prog).is_ok())
++        let store = (k.cfg.deliver && (sessions_whole || !own_sessions || true) && min.is_some_and(|m| m >= 1) && super::pushdown::deliverable(&shape, k.prog).is_ok())
+             .then(|| (k.prog.relations.len()..k.rels.len()).find(|&r| k.rels[r].name == hidden))
+             .flatten();
+         asks.push(Ask {

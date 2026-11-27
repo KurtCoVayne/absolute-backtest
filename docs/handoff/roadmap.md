@@ -165,6 +165,13 @@ Do steps 1 and 2 before package 2a. They say how a week must be keyed, which 2a 
 
 **Gate.** 21,892 of 21,892 legs; 3 s and 0.6 GB (A-7.3). TRACE row `A-7.3 R8L full replay` moves to done.
 
+**State on Nov 26.** R8L runs in full on real history: the 26 roots staged from Databento with each root's primary session (E-176, `scripts/r8l-store.sh`), to the session of 2026-11-25, in 449.6 s and 8.1 GB with a decision barrier at 5.0 ms (`benchmark.md`, "R8L's store"). The gate's count is the parity bundle's, TradeStation's bars from 2000; on Databento's from 2010 the run makes 94.8% of the book's legs over the days both cover, 99.92% of them in the same direction. Open, in the order of what they cost:
+
+1. **A list of labels per instrument in the aggregate request.** The pass walks one list for every instrument, and the sessions calendar's is every root's closes together, so the kernel reads the pass's session bars only for a root no other label cuts (E-177) and evaluates the others itself: about 70 s of R8L's 450 and 4 ms of its 5 ms decision barrier. A change to `abt-wire`, `abt-data` and `abt-agg`.
+2. **The memory.** The kernel peaks at 8.1 GB (3.6 GB at its first barrier) and the data service at 5.5 GB, against the gate's 0.6 GB. The design's path above (the session features pushed, the fills as point queries) is not built.
+3. **`sessions of "ROOT"` on a vendor store.** The calendar names an instrument by the symbol's name and the root's series there is `ROOT.v.0`, so R8L's report calendar is empty and its per-period metrics and `--returns` with it. The instruments table resolves the root by its ticker; the calendar should too.
+4. **The roots where the vendors differ.** KC and SB (80% of the book's legs), HE (84%), LE and PL (87%): holidays, early closes and missing minutes, not looked at one by one.
+
 ## Package 7: the pipeline
 
 Specified in `/Users/alejandro/absolute-pipeline/docs/iterations/03-engine-handoff.md`. In short: build the merged tree on the pipeline machine, verify and serve the store with the corrected point values, and rerun the posts that failed.
@@ -178,6 +185,8 @@ Specified in `/Users/alejandro/absolute-pipeline/docs/iterations/03-engine-hando
 | c | A bound on what one binding costs the data service | ERRATA E-120. Unfinished work on it is in the amendments tree's stash | One query maps 15 to 21 GB. The machine lives with this today, so it does not block a first redeploy. It blocks re-enabling the full equity store and the move to a smaller machine |
 
 The fourth precondition is package 0's step 6: a store whose open does not hold its log in memory.
+
+**A plan's threads (Nov 26).** `abt plan run --kernels 1` bounds the kernels and not the work: the executor runs `threads` steps at a time on them, 4 by default (`abt-query/src/plan/exec.rs`), each holding its run's history until change (a) is in. A real agent's NQ grid peaks at 15.3 GB that way and at 4.1 GB with `--threads 1` (2:44 where it took about 1:45). The pipeline's tool passes `--kernels 1` alone, so its plans need `--threads 1` beside it on a minute store, or the default should follow `--kernels`: the owner's call.
 
 **When.** It does not have to wait for 25 s. A newer build first does something for the killed runs once package 0 is merged with changes (a) and (b). Package 2a then removes the case of a daily program on a minute base. Deploying package 0 alone would change nothing the team would notice.
 

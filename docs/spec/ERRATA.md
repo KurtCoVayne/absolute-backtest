@@ -5214,6 +5214,92 @@ batch driver agree on every corpus program. Each bless since:
   (batches of 1 row, 45 rows and 2^20 against the relation read whole);
   falsified: `scripts/mutations/agg-batch-last.patch` (the last batch
   left out).
+- **E-176 (D-2.4, D-7.7, E-104, E-108; a root's sessions from stated
+  windows).** D-2.4 gives a future its sessions and the Databento adapter
+  makes them of the bars' gaps (E-104): a session is the electronic day,
+  ended where a gap holds the venue's daily break (E-108). A book that
+  trades a root's primary session and reads nothing outside it cannot be
+  run on such a store: `corpus-v2/company/r8l.dsl` decides at `session +
+  30min`, half an hour after the evening's open there and half an hour
+  after the day session's open in the book, and its 20-session range, its
+  gap and its exit are the electronic day's. Run on the 26 roots staged
+  that way on Nov 26, 2026 it halted in 2014 with its base lost
+  (`docs/assessment.md`). The parity record's bundle held the primary
+  session's minutes only (`docs/parity-r8l.md`). [D] The adapter takes a
+  root's windows (`session_windows`, `--session-windows
+  'ROOT=HH:MM-HH:MM[,HH:MM-HH:MM@DATE];...'`): New York local time, the
+  first window from the root's first bar and each later one from the
+  civil day it names. A root named keeps the bars that lie inside its
+  day's window, start and close, and the others are dropped and counted
+  (`dropped.outside_session_window`); its session of a day opens at the
+  window's first instant, whenever its first bar prints, and closes at
+  its last bar, as a session from the gaps does. The roll, the
+  back-adjustment and the venue's statistics read those sessions as they
+  read the others. A root not named is as before. [D] A window lies
+  between 03:00 and 19:00 New York, and a setting outside that is
+  refused: inside it a bar's UTC day is its New York day and New York's
+  offset, which changes at 02:00, is one value through the window. A
+  window that crosses New York's evening would need the day's two
+  offsets; no primary session the book trades does. [D] The session's
+  open is the window's and not the first bar's because the book counts
+  its minutes from the window (`m` is read at minute 30 of the window, a
+  session whose first print comes later has fewer bars before it, not a
+  later decision).
+  `abt-data/tests/databento.rs::a_root_with_session_windows_keeps_its_windows_bars_and_opens_with_the_window`;
+  falsified: `scripts/mutations/e-176-bars-outside-kept.patch`,
+  `e-176-first-window-always.patch`, `e-176-open-at-first-bar.patch`.
+- **E-177 (K-4.5, D-6.1, E-47, E-157; a pushed bucket of the sessions
+  calendar is read only where it is its instrument's session).** K-4.5
+  asks the data layer for the window an aggregate literal reads, and
+  D-6.1's pass walks one list of labels for every group: the labels of
+  the bucket's calendar as the kernel wrote them
+  (`kernel.RUN.calendar_label`). The `sessions` calendar is per
+  instrument (3.5): a label is one instrument's session close, and the
+  kernel's bucket for an instrument at its label is its session, the
+  bars in `(open, label]` (`Kernel::window_times`). The list written for
+  that calendar is every instrument's labels together, so the pass
+  closed a bucket at each of them for every instrument. Beside a root
+  whose session closes at 15:00 New York, the bucket of one that trades
+  until 16:00 was its last hour, and its hours before were answered at a
+  label that is no session of its own. A bar view of such a root on the
+  sessions calendar (`high@session`, `low@session`, `open@session`,
+  `volume@session`) was then a stretch of the session; `close@session`
+  alone was the session's. No test and no record had two session shapes
+  in one run: the parity record ran on session bars, the synthetic roots
+  share their hours, and a program of one root has one list. R8L on the
+  26 roots staged with their primary sessions (E-176) has several: ES's
+  20-session mean true range on 2024-04-02 is 43.6625 points from the
+  store's bars, from a run of ES alone and from one of ES and NQ, and
+  was 33.8625 beside ZN and 36.725 beside GC. The risk unit followed it,
+  and the run made 19,599 legs where the corrected one makes 16,347.
+  [D] The kernel reads the pass's answer for a bucket of the sessions
+  calendar only where it is the session: at a label of the instrument's
+  own (`pushdown::own_session`) with no other label of the calendar
+  inside the session (`pushdown::whole_session`). An answer at an own
+  label that another label cut is marked as one the pass could not give
+  and its window is evaluated in the kernel, as for an answer whose
+  arithmetic failed (E-31); an answer at a label that is no session of
+  the instrument's is no answer and is left out (`bind::push_down`).
+  [D] Such a bucket is delivered in the stream (E-157) only when every
+  session of every instrument is whole, since a delivered answer is read
+  with no test: a program of one root, or of roots that share their
+  hours, is answered and delivered as before. [D] The request is
+  unchanged (protocol 1.3) and the pass still computes the buckets the
+  kernel then does not read. The remedy that keeps the pass for every
+  root is a list of labels per instrument in the request, which is open
+  (`docs/handoff/roadmap.md`, package 6): until then a book of roots
+  with different hours pays the kernel's own windows. R8L's full history
+  on the 26 roots took 449.6 s where the run that read the cut bars took
+  379.3 s, and a decision barrier 5.0 ms on average where it took 1.0 ms
+  (p99 12.7 ms, max 19.8 ms). No other window is concerned: a stored
+  relation is read at a session's label only through its bar view
+  (WF-16), whose window's time is on the base calendar.
+  `abt-tests/tests/session_level.rs::a_session_aggregate_is_its_instruments_own_session_beside_one_that_closes_earlier`
+  (two roots whose sessions close an hour apart; the base clock, the
+  session clock and the views read unanchored: the dates decided, and
+  the run without pushdown exactly); falsified:
+  `scripts/mutations/e-177-cut-session-read.patch`,
+  `e-177-cut-session-delivered.patch`, `e-177-other-label-answer.patch`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

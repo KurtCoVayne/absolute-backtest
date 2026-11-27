@@ -129,6 +129,40 @@ pub struct Options {
     pub undefined: Undefined,
     /// The bars written: the vendor's or one per session (E-105).
     pub level: Level,
+    /// A root's primary session, for a book that trades that and not the
+    /// electronic day (ERRATA E-176): its windows in New York local time,
+    /// each from a civil day on. A root named here keeps the bars that lie
+    /// inside its day's window and no other; its session of a day opens
+    /// when the window does, whenever its first bar prints, and closes at
+    /// its last bar. A root not named has its sessions from the gaps.
+    pub session_windows: BTreeMap<String, Vec<Window>>,
+}
+
+/// A session window of a root (ERRATA E-176): in force from the civil day
+/// `from` in New York (days since the epoch; `i64::MIN` for a root's first
+/// window), from `open` to `close`, nanoseconds after New York's midnight.
+/// A window lies between 03:00 and 19:00, so that a bar inside one starts
+/// on the same day in UTC and after the 02:00 at which New York's offset
+/// changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub from: i64,
+    pub open: i64,
+    pub close: i64,
+}
+
+/// The earliest a window opens and the latest it closes, in New York.
+const WINDOW_SPAN: (i64, i64) = (3 * 60 * MINUTE, 19 * 60 * MINUTE);
+
+/// The window a bar starting at `start` falls under, as the instants it
+/// opens and closes: the last of `windows` in force on the bar's day. A bar
+/// that starts outside 03:00 to 19:00 New York is given the window of its
+/// UTC day, which it cannot lie inside.
+fn window_at(windows: &[Window], start: i64) -> Option<(i64, i64)> {
+    let day = start.div_euclid(DAY);
+    let w = windows.iter().rev().find(|w| w.from <= day)?;
+    let midnight = day * DAY + new_york_offset(day);
+    Some((midnight + w.open, midnight + w.close))
 }
 
 /// The bars a futures read writes (E-105): the vendor's (each minute), or one
@@ -164,6 +198,7 @@ impl Default for Options {
             to: None,
             undefined: Undefined::Refuse,
             level: Level::Bars,
+            session_windows: BTreeMap::new(),
         }
     }
 }
@@ -810,7 +845,8 @@ fn receipt(bars: &[Bar], opts: &Options) -> String {
     )
 }
 
-/// A session of a root: its first bar's start, its last bar's close.
+/// A session of a root: its first bar's start (its window's open, under
+/// session windows), its last bar's close.
 #[derive(Clone, Copy, Debug)]
 struct Session {
     open: i64,
@@ -881,17 +917,31 @@ pub fn futures(raw: &Raw, opts: &Options) -> Result<(Fetched, Report), DataError
     let mut intervals = BTreeSet::new();
     for (root, mut rbars) in by_root {
         rbars.sort_by_key(|b| (b.t, b.id));
+        // A root with session windows keeps the bars inside them (E-176).
+        let windows = opts.session_windows.get(root);
+        if let Some(w) = windows {
+            let before = rbars.len();
+            rbars.retain(|b| window_at(w, b.start).is_some_and(|(open, close)| open <= b.start && b.t <= close));
+            *report.dropped.entry("outside_session_window".into()).or_default() += before - rbars.len();
+            if rbars.is_empty() {
+                continue;
+            }
+        }
         intervals.extend(rbars.iter().map(|b| b.t - b.start));
         // Sessions: runs of the root's bars, a gap ending one when it covers
-        // the venue's daily break or is long (E-104).
+        // the venue's daily break or is long (E-104); under windows, a
+        // day's window, open from the window's first instant (E-176).
         let mut sessions: Vec<Session> = Vec::new();
         for b in &rbars {
-            match sessions.last_mut() {
-                Some(s) if b.t - s.close <= opts.session_gap || !ends_session(s.close, b.start, opts.session_break) => {
+            let opened = windows.and_then(|w| window_at(w, b.start)).map(|(open, _)| open);
+            match (sessions.last_mut(), opened) {
+                (Some(s), Some(open)) if s.open == open => s.close = s.close.max(b.t),
+                (_, Some(open)) => sessions.push(Session { open, close: b.t }),
+                (Some(s), None) if b.t - s.close <= opts.session_gap || !ends_session(s.close, b.start, opts.session_break) => {
                     s.close = s.close.max(b.t);
                     s.open = s.open.min(b.start);
                 }
-                _ => sessions.push(Session { open: b.start, close: b.t }),
+                (_, None) => sessions.push(Session { open: b.start, close: b.t }),
             }
         }
         let session_of = |t: i64| sessions.partition_point(|s| s.close < t);
@@ -1313,7 +1363,9 @@ impl Databento {
     /// `stype_in` (`parent`) and `key_env` (the environment variable that
     /// holds the key, `DATABENTO_API_KEY` by default); and `class` (`future`
     /// or `equity`), `processing_delay` (seconds), `roll` (`volume` or
-    /// `expiry`), `session_gap` (minutes), `point_values` and `settlement`
+    /// `expiry`), `session_gap` (minutes), `session_break` and
+    /// `session_windows` (`ES=09:30-16:00;ZC=10:30-14:15,09:30-14:20@2012-04-09`,
+    /// New York time, E-176), `point_values` and `settlement`
     /// (`ZN=1000;ES=cash`), `commission`, `from` and `to` (dates).
     pub fn from_settings(settings: &BTreeMap<String, String>) -> Result<Databento, DataError> {
         let bad = |k: &str, v: &str, want: &str| DataError::Malformed(format!("the databento setting `{}` is {}, not `{}`", k, want, v));
@@ -1331,6 +1383,10 @@ impl Databento {
                 .collect()
         };
         let date = |k: &str, v: &str| abt_wire::scalar::parse_timestamp(v).ok_or_else(|| bad(k, v, "a date"));
+        let hm = |x: &str| -> Option<i64> {
+            let (h, m) = x.trim().split_once(':')?;
+            Some((h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?) * MINUTE)
+        };
         for (k, v) in settings {
             match k.as_str() {
                 "files" => files = Some(PathBuf::from(v)),
@@ -1365,12 +1421,29 @@ impl Databento {
                         _ => return Err(bad(k, v, "bars or session")),
                     }
                 }
-                "session_break" => {
-                    let hm = |x: &str| -> Option<i64> {
-                        let (h, m) = x.trim().split_once(':')?;
-                        Some((h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?) * MINUTE)
-                    };
-                    opts.session_break = hm(v).ok_or_else(|| bad(k, v, "HH:MM in New York"))?;
+                "session_break" => opts.session_break = hm(v).ok_or_else(|| bad(k, v, "HH:MM in New York"))?,
+                "session_windows" => {
+                    let want = "ROOT=HH:MM-HH:MM[,HH:MM-HH:MM@YYYY-MM-DD...] in New York, each window inside 03:00 to 19:00, each after the first from a later date";
+                    for (root, list) in pairs(k, v)? {
+                        let mut windows: Vec<Window> = Vec::new();
+                        for w in list.split(',') {
+                            let (span, since) = match w.split_once('@') {
+                                Some((span, since)) => (span, Some(since.trim())),
+                                None => (w, None),
+                            };
+                            let (open, close) = span.split_once('-').and_then(|(a, b)| Some((hm(a)?, hm(b)?))).ok_or_else(|| bad(k, w, want))?;
+                            let from = match (windows.last(), since) {
+                                (None, None) => i64::MIN,
+                                (Some(last), Some(d)) => Some(date(k, d)?.div_euclid(DAY)).filter(|&f| f > last.from).ok_or_else(|| bad(k, w, want))?,
+                                _ => return Err(bad(k, w, want)),
+                            };
+                            if !(WINDOW_SPAN.0..close).contains(&open) || close > WINDOW_SPAN.1 {
+                                return Err(bad(k, w, want));
+                            }
+                            windows.push(Window { from, open, close });
+                        }
+                        opts.session_windows.insert(root, windows);
+                    }
                 }
                 "point_values" => {
                     for (r, x) in pairs(k, v)? {

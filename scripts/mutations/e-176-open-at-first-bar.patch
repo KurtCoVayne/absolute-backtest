@@ -1,0 +1,16 @@
+# proposition: E-176 (a window's session opens when the window does, whenever its first bar prints)
+# mutation: the session opens at its first bar, as a session from the gaps does
+# test: cargo test -p abt-data --test databento a_root_with_session_windows_keeps_its_windows_bars_and_opens_with_the_window
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/adapters/databento.rs b/crates/abt-data/src/adapters/databento.rs
+--- a/crates/abt-data/src/adapters/databento.rs
++++ b/crates/abt-data/src/adapters/databento.rs
+@@ -936,7 +936,7 @@
+             let opened = windows.and_then(|w| window_at(w, b.start)).map(|(open, _)| open);
+             match (sessions.last_mut(), opened) {
+                 (Some(s), Some(open)) if s.open == open => s.close = s.close.max(b.t),
+-                (_, Some(open)) => sessions.push(Session { open, close: b.t }),
++                (_, Some(open)) => sessions.push(Session { open: open.max(b.start), close: b.t }),
+                 (Some(s), None) if b.t - s.close <= opts.session_gap || !ends_session(s.close, b.start, opts.session_break) => {
+                     s.close = s.close.max(b.t);
+                     s.open = s.open.min(b.start);
