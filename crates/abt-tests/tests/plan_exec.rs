@@ -12,7 +12,8 @@
 //! so another plan's run of the same point is another run, and a plan
 //! renamed is the same plan; one kernel or four give the same outcomes;
 //! `abt plan run` holds as many runs at once as it has kernels unless
-//! `--threads` says otherwise (ERRATA E-179).
+//! `--threads` says otherwise, beside the runs a `ledger` step reads
+//! (ERRATA E-179).
 
 #![allow(clippy::result_large_err)]
 
@@ -362,7 +363,10 @@ impl Service for Counted {
 }
 
 /// A grid of four points, so that a pool of three can be asked for more
-/// runs than it has kernels.
+/// runs than it has kernels. No `ledger` step reads a run of it, so every
+/// run is released when it ends: what the pool holds is what the plan asks
+/// for at once (a run a `ledger` step reads stays held until the plan ends,
+/// beside those).
 const PACED: &str = "study paced { program paced\n grid { n = 1, 2, 3, 4 } }";
 
 /// The momentum book `paced` and a data service holding its market.
@@ -454,4 +458,23 @@ fn the_executors_default_asks_for_one_run_at_a_time_on_any_pool() {
     let ex = execute(&study(PACED, "paced"), &program(&src, "paced"), &Endpoints { data: &data, kernels: &kernels }, &Options::default()).unwrap();
     assert_eq!(ex.outcomes.len(), 4);
     assert_eq!(held.most("the default on three kernels").0, 1);
+}
+
+/// E-179 bounds the runs a plan asks for at once, not every run a kernel
+/// holds. A run a `ledger` step reads is not released when it ends: one
+/// kernel holds it, with its history, beside each run of the grid in turn,
+/// and releases it when the plan ends.
+#[test]
+fn a_run_a_ledger_step_reads_stays_held_beside_the_runs_asked_for() {
+    let (src, svc) = paced_market();
+    let text = "study paced { program paced\n grid { n = 1, 2, 3, 4 }\n steps { run base\n grid main\n ledger picks: selected of base into picks } }";
+    let (pool, held) = counted_pool(&svc, 1, 1);
+    let raw = ["run".to_string(), "--json".to_string()];
+    let mut io = Captured::default();
+    let status = abt_query::cli::plan_served(&raw, text, program(&src, "paced"), abt::connect_data(&svc).unwrap(), pool, &mut io);
+    assert_eq!(status, 0, "{}", io.err);
+    let ex: serde_json::Value = serde_json::from_str(&io.out).unwrap_or_else(|e| panic!("{}: {}", e, io.out));
+    assert_eq!(ex["outcomes"].as_array().expect("outcomes").len(), 5, "{}", io.out);
+    assert_eq!(ex["ledgers"].as_array().expect("ledgers").len(), 1, "{}", io.out);
+    assert_eq!(held.most("one kernel, a run a ledger step reads").0, 2, "the run the ledger reads and one run of the grid at a time");
 }

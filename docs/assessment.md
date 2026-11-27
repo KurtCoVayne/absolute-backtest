@@ -1075,7 +1075,8 @@ history. With `--threads 1` the same plan peaks at 4.1 GB and takes
 alone (`agents-harness/agents_harness/local.py`), so a grid on a minute
 store needs `--threads 1` beside it there, or package 7 (a). (Since
 E-179, Nov 27, a plan asks for as many runs at once as it has kernels,
-so `--kernels 1` alone holds one history.) A third
+so `--kernels 1` alone asks for one at a time; a run a `ledger` step
+reads is still held beside it until the plan ends.) A third
 post on the build with E-177, with that flag added to its `plan run`
 by a wrapper beside the unmodified runner ($0.27), did not reach its
 plan: the agent wrote `commission per_contract 3.75`, the store states

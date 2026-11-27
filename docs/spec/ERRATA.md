@@ -5354,13 +5354,21 @@ batch driver agree on every corpus program. Each bless since:
   to kernel `i mod pool` whichever worker takes it, so on several kernels
   two runs can meet in one while another is idle. On one kernel, the
   pipeline's case, it is exact. A worker bound to a kernel would make it
-  exact on any pool, and is open.
+  exact on any pool, and is open. [D] It bounds the runs asked for, not
+  every run a kernel holds: a run a `ledger` step reads is not released
+  when it ends (`exec::execute`, `held`), and its kernel holds it, with its
+  history, until the plan ends, as before. A plan of a `run` step, a grid
+  and a `ledger` of the run holds two runs at once on one kernel: the run
+  the ledger reads, and one run of the grid at a time.
   `abt-tests/tests/plan_exec.rs::{a_plan_run_holds_as_many_runs_at_once_as_it_has_kernels,
   threads_on_a_plan_run_says_how_many_runs_are_held_at_once_whatever_the_kernels,
-  the_executors_default_asks_for_one_run_at_a_time_on_any_pool}` (the
+  the_executors_default_asks_for_one_run_at_a_time_on_any_pool,
+  a_run_a_ledger_step_reads_stays_held_beside_the_runs_asked_for}` (the
   command's words through `cli::plan_served`, over kernel services that
-  count the runs they hold from a run's request to its release; no clock is
-  read); falsified: `scripts/mutations/e-179-threads.patch`.
+  count the runs they hold from a run's request to its release; the first
+  three on a grid no `ledger` step reads; no duration is asserted, and the
+  one wait, of the first runs for each other, ends by itself only in a
+  failing case); falsified: `scripts/mutations/e-179-threads.patch`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.
