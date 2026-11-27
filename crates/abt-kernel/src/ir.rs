@@ -880,11 +880,14 @@ pub enum Literal {
     },
     /// `R(..., T0, ...) asof T`: the tuples of R at the latest key at or
     /// before T; with `within_bucket`, only a key in T's bucket of that
-    /// calendar (a bar view of a finer series).
+    /// calendar (a bar view of a finer series); with `every` as well, every
+    /// distinct tuple of the bucket, whatever its key (an action read in a
+    /// group on a coarser calendar, E-162).
     AsOf {
         atom: Atom,
         at: Term,
         within_bucket: Option<Cal>,
+        every: bool,
         span: Span,
     },
     /// `X = case { G -> e ; ... ; else -> e }`: the first branch whose guard
@@ -1015,6 +1018,7 @@ pub fn ctor_fields(name: &str) -> Option<Vec<Ty>> {
 /// The closed set of aggregates.
 pub const AGGREGATES: &[&str] = &[
     "sum",
+    "prod",
     "mean",
     "std",
     "var",
@@ -1154,6 +1158,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "limit",
     "stop",
     "sum",
+    "prod",
     "mean",
     "std",
     "var",

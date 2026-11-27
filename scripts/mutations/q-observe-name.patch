@@ -1,0 +1,16 @@
+# proposition: a run step's observed names are words (the plan parser refuses a name with a space and says where a step ends)
+# mutation: any text between the commas is taken for a name, as before
+# test: cargo test -p abt-query --test plan an_observed_name_is_one_word
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-query/src/plan/parse.rs b/crates/abt-query/src/plan/parse.rs
+--- a/crates/abt-query/src/plan/parse.rs
++++ b/crates/abt-query/src/plan/parse.rs
+@@ -492,7 +492,7 @@ fn step(line: &str) -> Result<Step, String> {
+                 // the line's end, and the run was refused at the kernel for
+                 // a relation named `enter_sig report main` (a real agent's
+                 // study, Nov 26, 2026). Said here, where the line is.
+-                if let Some(bad) = observe.iter().find(|o| o.split_whitespace().count() != 1) {
++                if let Some(bad) = observe.iter().find(|o| o.split_whitespace().count() == 0) {
+                     return Err(format!(
+                         "`{}`: `{}` is not a relation's name: `observe` takes names separated by commas, and a step ends at `;` or a new line",
+                         line, bad

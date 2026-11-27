@@ -103,6 +103,9 @@ pub(crate) struct WindowAggOp {
     pub within: Option<Cal>,
     pub pat: Vec<Option<Value>>,
     pub binds: Vec<(usize, usize)>,
+    /// Whether the read takes every key of the bar's bucket (ERRATA E-162)
+    /// rather than the latest that holds a tuple.
+    pub every: bool,
     /// The aggregate's arguments, and the tests each call applies to the
     /// cached rows, over a row's slots.
     pub args: Vec<CExpr>,
@@ -688,6 +691,175 @@ impl<'p> Kernel<'p> {
                 Err(_) => return None,
             }
         }
+        Some(out)
+    }
+
+    /// `ColOp::WindowAgg` for the whole frame in one walk of the stored
+    /// relation (ERRATA E-165): the window's bars in order, each bar's
+    /// bucket read once for every entity -- the tuples of an entity's
+    /// latest key there, or with `every` each distinct tuple of the bucket
+    /// whatever its key, as `Kernel::asof_matches` reads them -- and each
+    /// tuple found given to its entity's row of the frame, where it is
+    /// bound, its arguments computed, the bar's rows put in the order of
+    /// their own bindings and tested as `window_columns` does. No entity's
+    /// cache is read or written: what a bar costs is the tuples the
+    /// relation holds in the window, not the frame's entities times the
+    /// window's bars. `None` where the walk cannot say what the rules
+    /// would: a frame with two rows of one entity, a worker, a read with
+    /// no floor or reaching behind the trimmed horizon, a block not sorted
+    /// by the read's entity, an argument or a test without a value.
+    pub(crate) fn run_window_frame(&mut self, ri: usize, op: &WindowAggOp, ids: &[u32], cols: &[Option<FCol>], calls: &mut usize) -> Option<Vec<Option<Value>>> {
+        let prog = self.prog;
+        let cr = self.compiled[ri].clone();
+        let lit = &prog.rules[ri].body[op.li];
+        let Literal::Agg { agg, args, conj, within, .. } = lit else { return None };
+        if !self.cfg.window_cache || self.worker.is_some() || self.pushed.contains_key(&(ri, op.li)) {
+            return None;
+        }
+        if !ids.windows(2).all(|w| w[0] < w[1]) || self.store(op.rel).entity_pos != Some(op.epos) {
+            return None;
+        }
+        let plan = self.agg_plan_at(&cr, Some(op.li), lit, conj, args, within.as_deref());
+        let wp = plan.window.as_ref()?;
+        let mut env: Env = vec![None; cr.nslots];
+        let mut per_row: Vec<usize> = Vec::new();
+        for (s, c) in cols.iter().enumerate() {
+            match c {
+                Some(FCol::Const(v)) => env[s] = Some(v.clone()),
+                Some(FCol::Col(_)) => per_row.push(s),
+                None => {}
+            }
+        }
+        let unbound: Vec<usize> = (0..cr.nslots).filter(|&s| s != op.eslot && cols[s].is_none()).collect();
+        let is_unbound = |s: &usize| unbound.binary_search(s).is_ok();
+        if plan.group.iter().any(is_unbound) || !is_unbound(&wp.wslot) || wp.late.iter().any(|(_, need)| need.iter().any(is_unbound)) {
+            return None;
+        }
+        let mut min_count: i64 = 0;
+        for l in conj {
+            if let Literal::Window { min, .. } = l {
+                let k = self.eval_expr(&cr, min, &env).ok()?.as_f64().unwrap_or(0.0) as i64;
+                min_count = min_count.max(k);
+            }
+        }
+        let Literal::Window { kind, base, dur, lo, .. } = &conj[wp.window] else { return None };
+        if self.per_entity_window(kind) {
+            return None;
+        }
+        let times: Vec<i64> = self.window_times(&cr, kind, base, dur, lo.as_ref(), &env).ok()?;
+        let counted = agg == "count";
+        let nargs = if counted { 0 } else { op.args.len() };
+        let every = op.every && op.within.is_some();
+        let kp = self.rels[op.rel].key_pos;
+        let admits = |tu: &[Value]| op.pat.iter().zip(tu.iter()).enumerate().all(|(p, (q, v))| p == op.epos || q.as_ref().is_none_or(|q| q == v));
+        let mut counts: Vec<usize> = vec![0; ids.len()];
+        let mut acc: Vec<Vec<f64>> = vec![Vec::new(); ids.len() * nargs];
+        // A bar's tuples, each with its row of the frame; the rows of one
+        // entity at that bar, bound.
+        let mut bar: Vec<(u32, Tuple)> = Vec::new();
+        let mut keys: Vec<i64> = Vec::new();
+        let mut answered: FxHashMap<u32, i64> = FxHashMap::default();
+        let mut rows: Vec<(Env, smallvec::SmallVec<[f64; 2]>)> = Vec::new();
+        for &t1 in &times {
+            let floor = self.asof_floor(op.within.as_ref(), None, t1).ok()?;
+            if floor == i64::MIN || floor < self.horizon_floor {
+                return None;
+            }
+            keys.clear();
+            keys.extend(self.store(op.rel).by_time.range(floor..=t1).map(|(k, _)| *k));
+            bar.clear();
+            if every {
+                // Every key in time order.
+                for &k in &keys {
+                    for tu in self.store_mut(op.rel).lookup(k, None).iter().filter(|tu| admits(tu)) {
+                        let Value::Equity(e) = tu[op.epos] else { return None };
+                        if let Ok(i) = ids.binary_search(&e) {
+                            bar.push((i as u32, smallvec::SmallVec::from(tu)));
+                        }
+                    }
+                }
+            } else {
+                // The latest key that holds a tuple of the entity.
+                answered.clear();
+                for &k in keys.iter().rev() {
+                    for tu in self.store_mut(op.rel).lookup(k, None).iter().filter(|tu| admits(tu)) {
+                        let Value::Equity(e) = tu[op.epos] else { return None };
+                        if *answered.entry(e).or_insert(k) == k {
+                            if let Ok(i) = ids.binary_search(&e) {
+                                bar.push((i as u32, smallvec::SmallVec::from(tu)));
+                            }
+                        }
+                    }
+                }
+            }
+            if bar.is_empty() {
+                continue;
+            }
+            // Stable: an entity's tuples keep the order they were read in.
+            bar.sort_by_key(|(i, _)| *i);
+            let mut a = 0;
+            while a < bar.len() {
+                let i = bar[a].0 as usize;
+                let b = a + bar[a..].iter().take_while(|(j, _)| *j as usize == i).count();
+                for &s in &per_row {
+                    env[s] = cols[s].as_ref().map(|c| c.value(i));
+                }
+                env[op.eslot] = Some(Value::Equity(ids[i]));
+                rows.clear();
+                for x in a..b {
+                    let tu = &bar[x].1;
+                    // The key is no term of a read of every key: two tuples
+                    // equal but for it are one row.
+                    if every
+                        && bar[a..x]
+                            .iter()
+                            .any(|(_, f)| f.len() == tu.len() && f.iter().zip(tu.iter()).enumerate().all(|(p, (u, v))| p == kp || u == v))
+                    {
+                        continue;
+                    }
+                    let mut row = env.clone();
+                    row[wp.wslot] = Some(Value::Time(t1));
+                    for &(p, s) in &op.binds {
+                        row[s] = Some(tu[p].clone());
+                    }
+                    let vals: smallvec::SmallVec<[f64; 2]> = if counted {
+                        smallvec::SmallVec::new()
+                    } else {
+                        op.args.iter().map(|x| x.value_in(&row).and_then(|v| v.as_f64())).collect::<Option<_>>()?
+                    };
+                    rows.push((row, vals));
+                }
+                a = b;
+                if rows.len() > 1 {
+                    rows.sort_by(|x, y| unbound.iter().map(|&s| x.0[s].cmp(&y.0[s])).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+                }
+                'rows: for (row, vals) in rows.iter() {
+                    for (cmp, lhs, rhs) in &op.late {
+                        let (Some(l), Some(r)) = (lhs.value_in(row), rhs.value_in(row)) else { return None };
+                        if !eval::compare(*cmp, &l, &r) {
+                            continue 'rows;
+                        }
+                    }
+                    counts[i] += 1;
+                    for (c, v) in vals.iter().enumerate() {
+                        acc[i * nargs + c].push(*v);
+                    }
+                }
+            }
+        }
+        let mut out: Vec<Option<Value>> = Vec::with_capacity(ids.len());
+        for (i, &count) in counts.iter().enumerate() {
+            if (count as i64) < min_count {
+                out.push(None);
+            } else if counted {
+                out.push(Some(Value::Count(count as i64)));
+            } else {
+                let slices: Vec<&[f64]> = acc[i * nargs..(i + 1) * nargs].iter().map(|c| c.as_slice()).collect();
+                // The reduction halts: the row path raises it.
+                out.push(eval::rows_reduce(agg, plan.f, &slices).ok()?);
+            }
+        }
+        *calls += ids.len();
         Some(out)
     }
 

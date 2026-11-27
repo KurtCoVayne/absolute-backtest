@@ -19,7 +19,8 @@ use abt_wire::hash::Hash;
 use abt_wire::scalar::{civil_from_days, NANOS_PER_DAY, NANOS_PER_HOUR};
 use arrow::array::{AsArray, BooleanArray, RecordBatch};
 use arrow::datatypes::SchemaRef;
-use arrow::ipc::writer::StreamWriter;
+use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use arrow::ipc::CompressionType;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -676,7 +677,12 @@ impl Store {
         let tmp = path.with_extension("arrows.tmp");
         {
             let f = fs::File::create(&tmp)?;
-            let mut w = StreamWriter::try_new(std::io::BufWriter::new(f), schema)?;
+            // The segment's buffers are compressed by the format itself
+            // (ERRATA E-169): each batch's message names its codec, so a
+            // reader is told nothing and an uncompressed segment of an
+            // earlier store reads as it did.
+            let options = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
+            let mut w = StreamWriter::try_new_with_options(std::io::BufWriter::new(f), schema, options)?;
             w.write(rows)?;
             w.finish()?;
             // The segment's group commit (D-3.1, ST-8.8): durable before

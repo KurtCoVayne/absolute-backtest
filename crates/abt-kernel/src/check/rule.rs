@@ -164,6 +164,31 @@ impl<'c, 'a> Analyzer<'c, 'a> {
         self.vars.get(v).map(|s| s.prov).unwrap_or(TimeProv::Other)
     }
 
+    /// A time a comparison bounds above by one derived from the head time
+    /// is derived from it too (WF-6): after `Ex < L`, with `L` at or before
+    /// `T`, `Ex` is before `T`, and a later literal may read at it (a
+    /// dividend's ex-date, a value of the action, E-163).
+    fn bound_time(&mut self, op: CmpOp, lhs: &Expr, rhs: &Expr) {
+        let (lo, hi, strict) = match op {
+            CmpOp::Lt => (lhs, rhs, true),
+            CmpOp::Le => (lhs, rhs, false),
+            CmpOp::Gt => (rhs, lhs, true),
+            CmpOp::Ge => (rhs, lhs, false),
+            CmpOp::Eq => return,
+        };
+        let (Expr::Var(x, _), Expr::Var(y, _)) = (lo, hi) else { return };
+        let Some(st) = self.vars.get(x).cloned() else { return };
+        if st.ty != Some(Ty::Timestamp) || st.prov != TimeProv::Other {
+            return;
+        }
+        let prov = match self.prov_of(y) {
+            TimeProv::Strict => TimeProv::Strict,
+            TimeProv::Head | TimeProv::Causal => Self::derived_prov(TimeProv::Causal, strict),
+            _ => return,
+        };
+        self.bind(x, st.ty, prov);
+    }
+
     fn derived_prov(base: TimeProv, strict: bool) -> TimeProv {
         match base {
             TimeProv::Other => TimeProv::Other,
@@ -607,6 +632,7 @@ impl<'c, 'a> Analyzer<'c, 'a> {
                         self.err(Code::T, *span, format!("in `{} {} {}`: {}{}", lhs, op, rhs, m, hint));
                     } else {
                         self.resolve_cmp_strs(lhs, &tl, rhs, &tr);
+                        self.bound_time(*op, lhs, rhs);
                     }
                 }
             }

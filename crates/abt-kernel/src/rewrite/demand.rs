@@ -100,10 +100,17 @@ fn subst_literal(l: &Literal, m: &HashMap<String, Lit>) -> Literal {
             within: within.clone(),
             span: *span,
         },
-        Literal::AsOf { atom: a, at, within_bucket, span } => Literal::AsOf {
+        Literal::AsOf {
+            atom: a,
+            at,
+            within_bucket,
+            every,
+            span,
+        } => Literal::AsOf {
             atom: atom(a, m),
             at: term(at, m),
             within_bucket: within_bucket.clone(),
+            every: *every,
             span: *span,
         },
         Literal::Case { var, branches, otherwise, span } => Literal::Case {

@@ -499,7 +499,8 @@ impl HotVersion {
             .collect();
         let value_names: Vec<String> = manifest.columns.iter().take(ncols).map(|c| c.name.clone()).collect();
         let kinds: Vec<Kind> = manifest.columns.iter().take(ncols).map(|c| c.kind).collect();
-        Overlay::remove_earlier_generations(dir, manifest.generation)?;
+        let named: Vec<&str> = manifest.levels.iter().map(|l| l.presence.as_str()).collect();
+        Overlay::remove_earlier_generations(dir, manifest.generation, &named)?;
         let mut overlay = Overlay::new(dir, &value_names, &kinds, published, manifest.schema.calendar.clone(), manifest.generation);
         overlay.replay_journal()?;
         Ok(HotVersion {

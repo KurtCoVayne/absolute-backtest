@@ -273,6 +273,19 @@ fn run_keeping(
     })
 }
 
+/// The count, mean, median, 99th percentile and maximum of a run's seconds
+/// per barrier, in milliseconds, as `--timing` prints them.
+fn latency_line(secs: &[f32]) -> String {
+    if secs.is_empty() {
+        return "n=0".into();
+    }
+    let mut v: Vec<f32> = secs.to_vec();
+    v.sort_unstable_by(f32::total_cmp);
+    let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize] as f64 * 1e3;
+    let mean = v.iter().map(|x| *x as f64).sum::<f64>() / v.len() as f64 * 1e3;
+    format!("n={} mean_ms={:.3} p50_ms={:.3} p99_ms={:.3} max_ms={:.3}", v.len(), mean, at(0.5), at(0.99), at(1.0))
+}
+
 /// The strategy named on the command line, checked (every diagnostic
 /// printed; an error exits).
 fn checked_program(args: &Args) -> (crate::check::Program, Vec<crate::check::Diagnostic>) {
@@ -1422,6 +1435,11 @@ pub fn main_with(raw: Vec<String>) {
                     s.rows_walks,
                     s.rows_walked_bars
                 );
+                // What the kernel adds between a bar's barrier and its
+                // decisions (A-7.3): over every barrier of the run, and over
+                // those a decision was scheduled at.
+                eprintln!("barriers {}", latency_line(&s.barrier_secs));
+                eprintln!("decision barriers {}", latency_line(&s.decision_barrier_secs));
             }
             println!(
                 "strategy {} over {} bars ({} to {}), {} symbols",

@@ -99,7 +99,13 @@ pub fn classify(prev: Option<&HotVersion>, input: &Normalised, next_seq: u64) ->
     // Every stored instrument, kept unless the input touches it or it was
     // appended to since publication (its rows are not all in its runs,
     // ST-8): then it is rebuilt from its rows as read.
+    // An instrument a consolidation gave base rows is one too (E-173): its
+    // runs hold them, its ladder does not, and its overlay may hold none
+    // (a tail folded, or an append that ended on a block's last row).
     let appended = |p: &HotVersion, id: u64| -> bool {
+        if p.manifest.folded.binary_search(&id).is_ok() {
+            return true;
+        }
         let ov = p.overlay.lock().unwrap_or_else(|e| e.into_inner());
         ov.by_id.get(&id).is_some_and(|&o| ov.instruments[o].rows() > 0)
     };

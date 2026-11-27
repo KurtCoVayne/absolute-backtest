@@ -204,17 +204,66 @@ kill -TERM $SRV 2>/dev/null; sleep 2; kill -KILL $SRV 2>/dev/null
 
 The profiling scripts of issue #79, which sweep the universe size and stub one relation at a time, are in `/Users/alejandro/absolute-backtest/docs/perf/` (`run_prof.sh`, `prof_prep.py`, `prof_summarize.py`). They drive the old engine's command line and would need adapting.
 
-## A faster cell for iteration
+## Real history only
 
-A synthetic market of 1,000 names over ten years, no store needed. On Nov 5 it took 95.8 s before PR #80's changes and 93.8 s on four threads after the first of them (`docs/assessment.md`). Its time at the head, where `--history window` exists, is not recorded.
+The owner's rule of Nov 26, 2026: a benchmark or a validation run reads real market history. The synthetic 1,000-name cell this section used to hold, the synthetic stores of the panel and the lake cloned wider (`scripts/widen-lake.py`) are retired; their numbers of Nov 5 and Nov 26 stay in `docs/assessment.md` as what was measured then. A program with no real history to read (`opening_gap` and `resampled_momentum` on minute bars of equities, `pairs_trading` on two tickers no market lists) is not measured.
+
+## The freshest data
+
+| What | Where | To |
+|---|---|---|
+| Norgate lake | `s3://ndlake-094828274452` (its watermark in `_meta/manifest.json`); a copy on the machine at `/data/ndlake-20261027` | bars to 2026-10-26; the index memberships as written on Sep 19 |
+| `$SPXTR` daily and the weekly VIX | `scripts/mw14-series.py LAKE BOOK_SPXTR BOOK_VIX CBOE_CSV OUT_DIR`: the book's files carried to the lake's last day, `$SPXTR` from the lake and the VIX from CBOE's history, each checked equal to the book's file where they overlap | the lake's last day |
+| Databento futures, minute bars | the pipeline machine, `/srv/absolute/data/vendor/dbn*` (bucket `dbn-futures-094828274452`); the pull of Nov 26 is `dbn-refresh-20261126` | the session of 2026-11-25 |
+
+A newer lake needs the Norgate updater on the owner's Windows machine and its upload. The lake carries `curated/bars_by_date/archive/`, bars before 1990 that repeat some rows of the `year=` partitions; nothing from 1990 on is repeated, and every stage starts there. As on Nov 6, the membership file must be moved into a directory (`indexes/index_membership/data.parquet`).
+
+MW14 on the fresh lake is the same script with the fresh series (there is no canon for it: the canon was frozen on the June lake, which lacks the bars of 77 members of the early 1990s, so `compare` reports a difference that is the lake's):
 
 ```
-syms=$(python3.12 -c "print(','.join('S%03d' % i for i in range(1000)))")
-abt run --strategy mw14 --synthetic --days 2520 --symbols "$syms" --timing --history window \
-  corpus-v2/catalog corpus-v2/lib corpus-v2/company/mw14.dsl
+python3.12 scripts/mw14-series.py /data/ndlake-20261027 /data/spxtr_daily.parquet /data/vix_weekly.parquet VIX_History.csv /data/fresh
+END=2026-10-27 EXTRA="--evaluator block" scripts/bench-mw14.sh /data/ndlake-20261027 /data/fresh/spxtr_daily.parquet /data/fresh/vix_weekly.parquet /data/canon.npy 1
 ```
 
-It says nothing about the stream or the store, so it measures package 3's work and not package 2's.
+A staging ends with every hot relation consolidated with its tails (`abt data consolidate RELATION --tails`, E-173; `scripts/bench-mw14.sh` does it after the last span). The store's rows are then all in its base segments: a service opens it without reading its log, and its start in the benchmark falls from 32.6 s to 9.0 s, the time to read the segments from a cold disk. A store staged in spans by an engine before E-137 is healed by the same command with an engine after it.
+
+The staged store is kept under `$BENCH/store-<key>`, the key a hash of the lake, the series, the spans, the lists and the data layer's source at the tree's commit. A tree with no `.git` (a snapshot under `/data/bench/trees`) has no commit to hash, so a store staged by an older engine is reused: pass `RESTAGE=1` after a change to `abt-data` or `abt-codec`.
+
+## The panel
+
+`scripts/panel.sh NAME TREE [EXTRA...]` runs every program but MW14 once, cold, so that a change made for one book is measured on all of them. `TREE` is a directory holding a release `abt` and its `corpus-v2`. Each run reads its store through a data service of its own and holds the machine's lock for itself alone. One JSON line a run goes to `$BENCH/panel-NAME/cells.jsonl`: seconds, peak memory, decisions, fills and the SHA-256 of the returns, or why the run did not finish.
+
+Two groups, each on a real store over its whole history:
+
+- `eq`: every daily strategy of the corpus on the S&P 500 lake staged from 1990 (`EQ`, by default `$BENCH/pstore-eq`):
+
+  ```
+  abt data ingest --store $BENCH/pstore-eq --adapter norgate --from /data/ndlake --start 1990-01-01 --exceptions scripts/reviewed/norgate-spx-2014.parquet --attributes reviewed=complete
+  ```
+
+- `fut`: R8L as the book is written, on its 26 roots (`FUT`). **The store of Nov 26 does not carry the book's sessions, and the run on it is not the book** ("R8L's store", below). The store is on the pipeline machine, where the vendor's files are, so that group runs there: `PGROUPS=fut FUT=/srv/absolute/m8/store-futures-m8-20261125 INPLACE=1 LIMIT=10800 scripts/panel.sh NAME TREE`.
+
+A strategy that halts (a risk policy, a margin call) measures only the days before it halted; the cell says so (`halted`).
+
+## R8L's store
+
+`scripts/r8l-store.sh` stages the book's 26 roots from Databento's minute bars: per root, `scripts/r8l-views.py` makes one directory of links over every pull of the root (the pipeline's two generations and the newest pull, the newest winning a session both hold), then one ingest and the consolidation of the five bar relations with their tails (E-173), so that the store is whole in its base segments after every root and the next root's consolidation reads no log. The options are those of absolute-pipeline's `scripts/store/point-values.sh` (sessions broken at 17:45 New York with a 20-minute gap, undefined instruments dropped, each root's point value stated) plus each root's commission per contract per side and `reviewed=complete`, which the book's `need` and `require` clauses ask for. A root is ingested once: its back-adjustment restates facts, so newer bars mean a new store.
+
+The history is the vendor's: 2010-06-07 for CME's roots and 2018-12-23 for ICE's (KC, SB). The book asks for bars from 2000-01-01; the parity record's TradeStation history from 2000 is not in the store.
+
+The store of Nov 26 (`/srv/absolute/m8/store-futures-m8-20261125` on the pipeline machine): 26 roots, 96,308,743 minute bars a relation from 2010-06-07 to the session of 2026-11-25, 19 GB (log 6.2, part 11.6, hot 1.0). The part directory is the four constant relations (`future.tick`, `future.session`, `future.point_value`, `future.commission`), a row a contract a day in small files: the store's largest cost on disk, and open. A root takes 3.3 minutes with the tails folded (7.5 before, at the 22nd root). The stated commissions are the book's own (`d20-research`, `config/costs.yaml`), which `futures_fixed_base` reads (`commission per_contract from catalog`). By E-71 a program that writes `commission per_contract 3.75` (`futures_house`, the pipeline's agents) pays the catalog's rate on this store and not the one it writes: the owner's call left open in E-96, met by the agents on Nov 26 (`docs/assessment.md`).
+
+**Its sessions are not the book's.** The Databento adapter makes a session of the electronic day: it ends one where a gap of more than 20 minutes holds the 17:45 New York break. The book trades each root's primary session (`d20-research`, `d20research/data/sessions.py`: for example 08:30 to 15:00 Chicago for ES, NQ and RTY, 07:20 to 14:00 for the treasuries and 6J, 08:20 to 13:30 New York for the metals), and the parity bundle held those minutes only (`docs/parity-r8l.md`). On this store `session + 30min` is half an hour after the evening open. R8L run on it on Nov 26 halted at 2014-06-24 with its base lost (470 s, the kernel at 15.2 GB, the service at 11.3 GB): that is a different rule, and none of it is R8L's record. Before R8L is measured on Databento's history the adapter has to take each root's session window and its dates (the bars outside it left out, the session's open the window's and not the first bar's), and the 26 roots have to be staged again with them: about 1.5 hours on the pipeline machine, which has 9 GB free beside this store. The pipeline's own strategies are written for the electronic day, so the two are two stores.
+
+## A wider universe
+
+The lake in `s3://ndlake-094828274452` holds the Russell indexes' own memberships (the Mac's lake holds only the three S&P lists). The Russell 3000 is the Russell 1000 and the Russell 2000 together: 12,368 names since 1990-07-03, about 3,000 at a time. MW14 runs on it by naming those lists where the book's three are expected:
+
+```
+LISTS='Russell 1000=SP500;Russell Mid Cap=SP400;Russell 2000=SP600' END=2026-10-27 EXTRA="--evaluator block" scripts/bench-mw14.sh /data/ndlake-20261027 /data/fresh/spxtr_daily.parquet /data/fresh/vix_weekly.parquet /data/canon.npy 1
+```
+
+The book's rules are unchanged (its large-cap leg reads the Russell 1000, its mid-cap leg the Russell Mid Cap, a subset of the 1000, its small-cap leg the Russell 2000), so the run measures the engine at that width and is no book of the firm's. There is no canon for it.
 
 ## Traps met on Nov 6
 

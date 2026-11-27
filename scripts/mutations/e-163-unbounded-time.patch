@@ -1,0 +1,15 @@
+# proposition: E-163 (a time bounded above by one derived from the head time is derived from it, WF-6)
+# mutation: a comparison bounds no time, so a read at a dividend's ex-date is refused
+# test: cargo test -p abt-tests --test checker a_time_bounded_above_by_the_head_time_may_key_a_read
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/check/rule.rs b/crates/abt-kernel/src/check/rule.rs
+--- a/crates/abt-kernel/src/check/rule.rs
++++ b/crates/abt-kernel/src/check/rule.rs
+@@ -632,7 +632,6 @@
+                         self.err(Code::T, *span, format!("in `{} {} {}`: {}{}", lhs, op, rhs, m, hint));
+                     } else {
+                         self.resolve_cmp_strs(lhs, &tl, rhs, &tr);
+-                        self.bound_time(*op, lhs, rhs);
+                     }
+                 }
+             }

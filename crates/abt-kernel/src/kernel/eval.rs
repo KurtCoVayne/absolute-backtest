@@ -1581,8 +1581,11 @@ impl<'p> Kernel<'p> {
     /// has one matching the bound terms (data-bundle doc, section 2: the
     /// as-of join). A stored relation is answered from its index; a derived
     /// one by calling it at its own resolution's bars backwards from T,
-    /// with the answer memoised for every bar walked.
-    fn asof_matches<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, within: Option<&Cal>, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
+    /// with the answer memoised for every bar walked. With `every` (an
+    /// action read in a group on a coarser calendar, E-162), a stored
+    /// relation's every distinct tuple of the bucket, whatever its key.
+    #[allow(clippy::too_many_arguments)]
+    fn asof_matches<S: Sink>(&mut self, cr: &CompiledRule, atom: &Atom, at: &Term, within: Option<&Cal>, every: bool, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
         let t = self.time_of(cr, at, env)?;
         let info = self.rels[rel].clone();
@@ -1592,6 +1595,25 @@ impl<'p> Kernel<'p> {
         pat[info.key_pos] = None;
         let tuples = if info.stored {
             let mut found: Vec<(Tuple, usize)> = Vec::new();
+            if every && within.is_some() {
+                let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
+                // Every key of the bucket in time order; the key is no term
+                // of the read, so two tuples equal but for it are one row.
+                let keys: Vec<i64> = self.store(rel).by_time.range(floor..=t).map(|(k, _)| *k).collect();
+                let kp = info.key_pos;
+                let matches = |tu: &[Value]| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
+                for k in keys {
+                    for tu in self.store_lookup(rel, k, entity.as_ref()).iter().filter(|tu| matches(tu)) {
+                        let seen = found
+                            .iter()
+                            .any(|(f, _)| f.len() == tu.len() && f.iter().zip(tu.iter()).enumerate().all(|(i, (a, b))| i == kp || a == b));
+                        if !seen {
+                            found.push((smallvec::SmallVec::from(tu), usize::MAX));
+                        }
+                    }
+                }
+                return self.bind_tuples_into(cr, atom, env, &Arc::new(found), out);
+            }
             self.asof_stored_into(rel, floor, t, &pat, &mut found);
             Arc::new(found)
         } else {
@@ -1995,7 +2017,7 @@ impl<'p> Kernel<'p> {
     pub(crate) fn step<S: Sink>(&mut self, cr: &Arc<CompiledRule>, lit: &Literal, env: &[Option<Value>], out: &mut S) -> Result<(), RunError> {
         match lit {
             Literal::Atom(a) => self.atom_matches_into(cr, a, env, out)?,
-            Literal::AsOf { atom, at, within_bucket, .. } => self.asof_matches(cr, atom, at, within_bucket.as_ref(), env, out)?,
+            Literal::AsOf { atom, at, within_bucket, every, .. } => self.asof_matches(cr, atom, at, within_bucket.as_ref(), *every, env, out)?,
             Literal::Neg(a) => {
                 if self.atom_matches(cr, a, env)?.is_empty() {
                     out.push_env(env);

@@ -1,0 +1,16 @@
+# proposition: E-167 (a relation observed on a calendar other than the decision calendar's is read at the barriers: each of its bars after the previous barrier and up to this one)
+# mutation: the bar that is the barrier's own is not read
+# test: cargo test -p abt-tests --test outputs a_trimmed_run_writes_the_ledgers_of_the_whole_run_on_every_calendar
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -4179,7 +4179,7 @@
+     pub fn bars_between(&self, cal: &Cal, after: Option<i64>, upto: i64) -> Vec<i64> {
+         let Some(d) = self.domains.get(cal) else { return Vec::new() };
+         match after {
+-            Some(a) if a < upto => d.range((std::ops::Bound::Excluded(a), std::ops::Bound::Included(upto))).copied().collect(),
++            Some(a) if a < upto => d.range((std::ops::Bound::Excluded(a), std::ops::Bound::Excluded(upto))).copied().collect(),
+             Some(_) => Vec::new(),
+             None => d.range(upto..=upto).copied().collect(),
+         }

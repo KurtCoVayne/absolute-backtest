@@ -258,6 +258,25 @@ fn what_a_step_or_claim_reads_must_be_a_step_of_its_kind() {
     assert!(one("study s { program p.dsl\n claims { c : adf on returns of main expect maybe } }", "s").is_err_and(|e| e.contains("not an outcome")));
 }
 
+/// A real agent's study (Nov 26, 2026) wrote two steps on one line with
+/// nothing between them. The observe list ran to the line's end and the
+/// run was refused at the kernel, for a relation named `enter_sig report
+/// main`. The parser refuses the name and says where a step ends.
+#[test]
+fn an_observed_name_is_one_word() {
+    let e = one("study s { program p.dsl\n steps { run check observe atr, enter_sig report main } }", "s").err().unwrap_or_default();
+    assert!(e.contains("`enter_sig report main` is not a relation's name"), "{}", e);
+    assert!(e.contains("a step ends at `;` or a new line"), "{}", e);
+    // Separated, they are two steps, and the list is the names.
+    for text in [
+        "study s { program p.dsl\n steps { run check observe atr, enter_sig; report main } }",
+        "study s { program p.dsl\n steps {\n run check observe atr, enter_sig\n report main\n } }",
+    ] {
+        let p = one(text, "s").unwrap();
+        assert_eq!(p.steps.len(), 2, "{}", text);
+    }
+}
+
 /// E-118: a compare step's metrics bracketed, as the house template writes
 /// them, are its metrics; `[return, ...]` was taken for one metric's name.
 #[test]

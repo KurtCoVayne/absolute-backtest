@@ -68,6 +68,9 @@ pub struct DataCall {
     pub detail: String,
     pub rows: u64,
     pub secs: f64,
+    /// The thread that made the call: a run's preconditions are asked on
+    /// one of their own (ERRATA E-168).
+    pub thread: std::thread::ThreadId,
 }
 
 impl DataCall {
@@ -195,7 +198,10 @@ pub fn print_calls(client: &DataClient, mark: u64, stage: &str) {
     if std::env::var_os("ABT_TIMING_RELS").is_none() {
         return;
     }
-    let calls = client.calls_since(mark);
+    // A stage's calls are its thread's: the preconditions run beside the
+    // pushed aggregates (ERRATA E-168).
+    let here = std::thread::current().id();
+    let calls: Vec<DataCall> = client.calls_since(mark).into_iter().filter(|c| c.thread == here).collect();
     for c in &calls {
         eprintln!("{}", c.line());
     }
@@ -250,6 +256,7 @@ impl DataClient {
             detail: if detail.is_empty() { "-".to_string() } else { detail.replace(char::is_whitespace, "_") },
             rows: out.as_ref().map(&rows).unwrap_or(0),
             secs: started.elapsed().as_secs_f64(),
+            thread: std::thread::current().id(),
         };
         let mut log = self.calls.lock().unwrap_or_else(|p| p.into_inner());
         if log.kept.len() >= CALLS_KEPT {
@@ -1601,6 +1608,9 @@ fn shared_answer(asks: &[Ask], a: &Ask) -> Option<usize> {
         .position(|b| b.store.is_some() && b.shape.function != "count" && b.request.factor.is_none() && b.min <= a.min && bare(&b.request) == bare(&a.request))
 }
 
+/// The pushed aggregates a run asks of the data layer at once.
+const PUSH_THREADS: usize = 4;
+
 /// The pushed aggregate literals (K-4.5) asked of the data layer's pass. A
 /// literal the stream can deliver (`pushdown::deliverable`) is asked for
 /// its cache object first: when the pass proves no input row late, the
@@ -1736,6 +1746,29 @@ pub fn push_down(k: &mut Kernel, bound: &Bound, client: &DataClient, spec: &mut 
     // and only if the sibling's answer is not delivered.
     let sibling: Vec<Option<usize>> = asks.iter().map(|a| shared_answer(&asks, a)).collect();
     let order: Vec<usize> = (0..asks.len()).filter(|&i| sibling[i].is_none()).chain((0..asks.len()).filter(|&i| sibling[i].is_some())).collect();
+    // The distinct requests are asked together first, on a few threads: the
+    // data layer computes each on a thread of its own and keeps the answer
+    // (ERRATA E-168), so the loop below, which asks them one by one in an
+    // order the answers decide, reads each from the data layer's cache. A
+    // request that fails here fails again there, where it is told.
+    let mut together: Vec<&AggregateRequest> = Vec::new();
+    for &ix in &order {
+        if sibling[ix].is_none() && !together.iter().any(|r| **r == asks[ix].request) {
+            together.push(&asks[ix].request);
+        }
+    }
+    if together.len() > 1 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..together.len().min(PUSH_THREADS) {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(r) = together.get(i) else { break };
+                    let _ = client.aggregate_meta(&view, (*r).clone());
+                });
+            }
+        });
+    }
     // What the run is told, by literal, so that the order of the program
     // stands whatever the order asked.
     let mut noted: Vec<((usize, usize), String)> = Vec::new();

@@ -1,0 +1,17 @@
+# proposition: E-168 (the aggregate pass in two halves: a request whose answer another stored meanwhile is answered by that object and writes none of its own)
+# mutation: the second half stores its answer without looking for the object
+# test: cargo test -p abt-data --test agg two_passes_of_one_request_that_both_missed_store_one_object
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/agg.rs b/crates/abt-data/src/agg.rs
+--- a/crates/abt-data/src/agg.rs
++++ b/crates/abt-data/src/agg.rs
+@@ -254,9 +254,6 @@
+ /// request's answer whatever was written since; a request that stored the
+ /// same key meanwhile is answered by its object.
+ pub fn finish(store: &mut Store, p: Pending) -> Result<Answered, DataError> {
+-    if let Some(a) = store.cache_get(&p.key).and_then(|v| answered(store, &p.key, &v)) {
+-        return Ok(a);
+-    }
+     let version = store.cache_put_with(&p.key, &p.schema, &[p.batch], BTreeMap::from([(INEXACT_ROWS.to_string(), p.inexact.to_string())]))?;
+     answered(store, &p.key, &version).ok_or(DataError::UnknownVersion(version))
+ }

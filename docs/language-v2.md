@@ -776,7 +776,7 @@ returns and dollar volumes at any calendar.
 | Module | Relations | Treatment |
 | --- | --- | --- |
 | `calendar` | `bar`, `prev_row`, `first_row`, `row_number` | the decision calendar's bars and an entity's own rows (7.1); `prev`, `lag`, `month_start`, `day_start`, `session_of` and the bar views `close@C`, `traded@C` are builtins |
-| `catalog` | `split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `total_return`, `log_return`, `tr_index` | corporate actions applied causally (B-3); `tr_index` replaces the `trclose` data of R2 |
+| `catalog` | `split_factor`, `cum_split`, `adj_close`, `dividend_at`, `dividend_or_zero`, `dividend_reinvested`, `total_return`, `log_return`, `tr_index` | corporate actions applied causally (B-3); a dividend reinvested at the close of its ex-date, as a daily total-return series compounds (ERRATA E-163); `tr_index` replaces the `trclose` data of R2 |
 | `stat` | `mean_rows[N, R]`, `sum_rows`, `std_rows`, `max_rows`, `min_rows`, `median_rows[N, K, R]`, `mean_window[δ, K, R]`, `sum_window`, `std_window`, `max_window`, `min_window`, `max_prior_window`, `mean_prior_window`, `zscore_rows`, `zscore_window`, `cumsum[R]`, `cumprod[R]`, `ewm[λ, R]` | rolling and recursive moments and order statistics over any relation of the shape (entity, key, value) and any dimension; the aggregate classes of F-8 decide their cost |
 | `bars` | `true_range`, `range`, `gap_points`, `gap`, `price_return`, `log_price_return`, `dollar_volume`, `adv[N]`, `liquid[Floor]` | bar-level identities and the liquidity floor |
 | `xsec` | `decile[R]`, `zscore_xs[R]`, `share_above[R, Th]` | cross-sectional operators, each `within` an explicit group; `rank`, `rank_average` and `top[k]` are forms of the language |
@@ -1250,7 +1250,9 @@ What changed and why it is the same book: the data block asks for daily
 equity bars, actions, listing, three index lists and four weekly series and
 lets the kernel find them (3.6); the weekly facts are the daily facts
 bucketed (3.3); the total-return price is the catalog's `tr_index` derived
-from close, the dividends going ex in the week and its split (B-3); the S&P
+from close, the dividends going ex in the week, each reinvested at the close
+of its ex-date as the book compounds its days, and its split (B-3, ERRATA
+E-162 to E-164); the S&P
 1500 is written as the union of its three indices rather than a label built
 in an ingest script, a relation of the day read in `eligible` at the
 name's own last bar of the week, which `close@base(A, L, _) asof T` binds

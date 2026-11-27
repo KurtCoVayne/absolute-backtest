@@ -650,12 +650,25 @@ impl DataService {
             // for the response alone (protocol 1.3: a stream names the
             // object instead, ERRATA E-156).
             Message::AggregateCall(r) => {
+                // The pass reads the store under the read lock, so that it
+                // holds back neither another pass nor a query; storing its
+                // answer takes the write lock (ERRATA E-168).
                 let (a, batch) = {
-                    let mut st = self.store_mut();
+                    let st = self.store();
                     let view = ResolvedView::of(&st, r.view.as_deref()).map_err(data)?;
-                    let a = agg::aggregate(&mut st, &view, &r.request).map_err(data)?;
-                    let batch = if r.answer { Some(agg::answer(&st, &a.version).map_err(data)?) } else { None };
-                    (a, batch)
+                    match agg::prepare(&st, &view, &r.request).map_err(data)? {
+                        agg::Looked::Hit(a) => {
+                            let batch = if r.answer { Some(agg::answer(&st, &a.version).map_err(data)?) } else { None };
+                            (a, batch)
+                        }
+                        agg::Looked::Computed(p) => {
+                            drop(st);
+                            let mut st = self.store_mut();
+                            let a = agg::finish(&mut st, *p).map_err(data)?;
+                            let batch = if r.answer { Some(agg::answer(&st, &a.version).map_err(data)?) } else { None };
+                            (a, batch)
+                        }
+                    }
                 };
                 out.respond(Message::AggregateResponse(Box::new(AggregateResponse {
                     cache_key: a.key.hex(),

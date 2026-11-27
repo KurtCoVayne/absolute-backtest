@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use abt_agg::{reduce, reduce_ticks, Function, Mode, RowsWindow};
-use abt_data::agg::{aggregate, answer};
+use abt_data::agg::{aggregate, answer, set_batch_rows};
 use abt_data::query::ResolvedView;
 use abt_data::Store;
 use abt_wire::generated::abt::wire::{AggregateRequest, Duration, Factor, Grouping, Numerics, ReceiptFilter, WindowKind};
@@ -341,6 +341,36 @@ fn answers_are_cache_objects_keyed_by_request_and_versions() {
     req.t1 = Some(T0 + 22 * DAY);
     let got = rows(&mut s, &req);
     assert!(got.iter().all(|r| r.1 >= T0 + 20 * DAY && r.1 <= T0 + 22 * DAY) && !got.is_empty());
+}
+
+/// The pass in its two halves (ERRATA E-168): `prepare` reads the store
+/// and computes, `finish` stores. Two requests that both missed give one
+/// object, the second finding what the first stored; and the two halves
+/// give `aggregate`'s answer.
+#[test]
+fn two_passes_of_one_request_that_both_missed_store_one_object() {
+    use abt_data::agg::{finish, prepare, Looked};
+    let mut s = store();
+    let mut req = request("mean", WindowKind::Rows);
+    req.n = 3;
+    let view = ResolvedView::default();
+    let pending = |s: &Store| match prepare(s, &view, &req).unwrap() {
+        Looked::Computed(p) => *p,
+        Looked::Hit(_) => panic!("nothing is cached yet"),
+    };
+    let (first, second) = (pending(&s), pending(&s));
+    let a1 = finish(&mut s, first).unwrap();
+    let versions = |s: &Store| s.registry.versions().filter(|v| v.relation == a1.relation).count();
+    let stored = versions(&s);
+    let a2 = finish(&mut s, second).unwrap();
+    assert_eq!(a1, a2, "the second pass is answered by the first's object");
+    assert_eq!(versions(&s), stored, "and writes none of its own");
+    assert!(matches!(prepare(&s, &view, &req).unwrap(), Looked::Hit(a) if a == a1));
+    // The same rows as the pass in one call, on a store of its own.
+    let mut whole = store();
+    let b = aggregate(&mut whole, &view, &req).unwrap();
+    assert_eq!((a1.key, a1.rows, a1.inexact_rows), (b.key, b.rows, b.inexact_rows));
+    assert_eq!(answer(&s, &a1.version).unwrap(), answer(&whole, &b.version).unwrap());
 }
 
 /// A request protocol 1.2 could write keeps the cache key a 1.2 tree gave
@@ -741,6 +771,87 @@ fn an_instrument_filter_answers_only_those_instruments_under_its_own_key() {
     let got = rows_of(&mut s, &req);
     assert!(!got.is_empty());
     assert_eq!(got, all.into_iter().filter(|r| r.0 == 2).collect::<Vec<_>>());
+}
+
+/// A pass over a hot relation reads and reduces a batch of instruments at a
+/// time (`set_batch_rows`), so that it holds one batch's rows and not the
+/// relation's. Whatever the batches, the answer is the one of the relation
+/// read whole, column for column and bit for bit, with its inexact rows:
+/// rows and bucket windows, the three numerics, a product of two relations
+/// (the second holds an instrument the first has no row of), and a request
+/// scoped to instruments.
+#[test]
+fn a_pass_in_batches_of_instruments_is_the_pass_of_the_relation_read_whole() {
+    let close: Vec<Fact> = data_cents().into_iter().map(|(a, t, p)| (a, t, t, Some(p))).collect();
+    let mut volume: Vec<Fact> = close
+        .iter()
+        .filter(|r| (r.0, r.1) != (2, T0 + 7 * DAY))
+        .map(|&(a, t, r, _)| (a, t, r, Some((1_000 + (t / DAY + a as i64 * 37) % 5_000) as f64)))
+        .collect();
+    // A late receipt, after its week's barrier, and an instrument the
+    // close has no row of.
+    volume.iter_mut().filter(|r| (r.0, r.1) == (1, T0 + 2 * DAY)).for_each(|r| r.2 = T0 + 6 * DAY);
+    volume.extend((0..10).map(|d| (4, T0 + d * DAY, T0 + d * DAY, Some(7.0 + d as f64))));
+    volume.sort_by_key(|r| (r.1, r.0));
+    let mut s = store_of(&[("equity.close", "P", &close), ("equity.volume", "V", &volume)], true);
+    for r in ["equity.close", "equity.volume"] {
+        assert!(s.is_hot(s.registry.current(r, Some("test")).unwrap()), "{}", r);
+    }
+    let product = |mut req: AggregateRequest| {
+        req.factor = Some(Box::new(Factor {
+            relation: "equity.volume".into(),
+            column: "V".into(),
+        }));
+        req
+    };
+    let weekly = |function: &str| {
+        let mut req = request(function, WindowKind::Bucket);
+        req.bucket = Some("1w".into());
+        req
+    };
+    let last = |function: &str, n: u64| {
+        let mut req = request(function, WindowKind::Rows);
+        req.n = n;
+        req
+    };
+    let mut requests = vec![last("mean", 3), weekly("sum"), product(weekly("mean")), product(last("mean", 3))];
+    let mut running = last("std", 5);
+    running.numerics = Numerics::Running;
+    let mut exact = weekly("sum");
+    exact.numerics = Numerics::Exact;
+    let mut scoped = last("mean", 3);
+    scoped.entities = Some(vec![3, 1]);
+    let mut scoped_product = product(weekly("mean"));
+    scoped_product.entities = Some(vec![4, 2]);
+    requests.extend([running, exact, scoped, scoped_product]);
+    // 0 reads the relation whole; 1 makes every instrument a batch; 45
+    // puts the first two (40 rows each) in one and the third in another.
+    let sizes = [0u64, 1, 45, 1 << 20];
+    let mut answers = Vec::new();
+    for size in sizes {
+        set_batch_rows(size);
+        let mut got = Vec::new();
+        for (k, req) in requests.iter().enumerate() {
+            let mut req = req.clone();
+            // A name of its own for each size: no cache hit.
+            req.output = Some(format!("batch_{}_{}", size, k));
+            let a = aggregate(&mut s, &ResolvedView::default(), &req).unwrap();
+            let b = answer(&s, &a.version).unwrap();
+            assert!(b.num_rows() > 0, "request {}", k);
+            got.push((b.columns().to_vec(), a.inexact_rows));
+        }
+        answers.push(got);
+    }
+    set_batch_rows(1 << 20);
+    for (size, got) in sizes.iter().zip(&answers).skip(1) {
+        for (k, (mine, whole)) in got.iter().zip(&answers[0]).enumerate() {
+            assert_eq!(mine.1, whole.1, "the inexact rows of request {} in batches of {} rows", k, size);
+            assert!(mine.0 == whole.0, "request {} in batches of {} rows", k, size);
+        }
+    }
+    // The late volume is an inexact row of the weekly product, in batches
+    // as whole.
+    assert!(answers[0][2].1 >= 1, "{}", answers[0][2].1);
 }
 
 /// An answer's inexact rows: a row received after the barrier of the first

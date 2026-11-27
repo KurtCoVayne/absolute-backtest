@@ -273,9 +273,20 @@ fn timing_prints_one_stderr_line_with_every_field() {
         let rss = get(k);
         assert!(rss == "unavailable" || rss.parse::<f64>().unwrap() > 0.0, "{}", lines[0]);
     }
+    // What the kernel adds between a barrier and its decisions (A-7.3): one
+    // line over every barrier and one over those a decision was scheduled
+    // at, which here is every bar.
+    for prefix in ["barriers ", "decision barriers "] {
+        let line = stderr.lines().find(|l| l.starts_with(prefix)).unwrap_or_else(|| panic!("no `{}` line: {}", prefix, stderr));
+        let fields: Vec<(&str, &str)> = line[prefix.len()..].split(' ').filter_map(|kv| kv.split_once('=')).collect();
+        let get = |k: &str| fields.iter().find(|(n, _)| *n == k).unwrap_or_else(|| panic!("{} lacks {}", line, k)).1.parse::<f64>().unwrap();
+        assert_eq!(get("n"), 60.0, "{}", line);
+        assert!(0.0 < get("p50_ms") && get("p50_ms") <= get("p99_ms") && get("p99_ms") <= get("max_ms"), "{}", line);
+        assert!(get("mean_ms") <= get("max_ms"), "{}", line);
+    }
     // Without the flag there is no timing line.
     let (_, _, stderr) = abt(&["run", "--strategy", "sma_crossover", "--synthetic", "--days", "60", "--quiet", CATALOG, LIB, SMA]);
-    assert!(!stderr.contains("timing "), "{}", stderr);
+    assert!(!stderr.contains("timing ") && !stderr.contains("barriers "), "{}", stderr);
 }
 
 /// Under `ABT_TIMING_RELS` each derived relation has a line: its seconds,

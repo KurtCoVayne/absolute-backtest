@@ -14,6 +14,14 @@
 //! function of the log (ST-8.8), replayed from the least sequence number a
 //! tail holds. One column at a time, so the extra memory is one segment
 //! being written and the blocks of the instrument being copied.
+//!
+//! Asked to (`tails`, ERRATA E-173), a consolidation folds the tails too:
+//! an instrument's tail rows follow its sealed ones into the base, its
+//! last block the partial one ST-4.1 allows, and the replay then starts
+//! past the last row folded. An instrument that receives no more rows
+//! (a delisted name, an expired contract) otherwise keeps its tail for
+//! good, and the least sequence number a tail holds stays where that
+//! instrument stopped: every open read the log from there, most of it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,7 +33,7 @@ use abt_codec::summary::{Column, Cumulative};
 use abt_codec::tick::{encode, encode_integers, Encoded, Source};
 use abt_codec::BLOCK;
 
-use super::append::{block_hash_of, decode_block, encoded_of, Overlay};
+use super::append::{block_hash_of, decode_block, encoded_of, InstrumentOverlay, Overlay};
 use super::manifest::{Bucket, HotManifest, Kind, SegmentRef};
 use super::presence::{Instrument, Presence};
 use super::segment::{Sealed, Writer};
@@ -52,12 +60,13 @@ struct Plan {
 }
 
 /// Folds the sealed blocks of `v`'s overlay into its base segments and
-/// publishes the new layout under the version's id; `None` when nothing is
-/// sealed.
+/// publishes the new layout under the version's id; with `tails`, the
+/// tails' rows after them (E-173). `None` when there is nothing to fold.
 #[allow(clippy::needless_range_loop)]
-pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, DataError> {
+pub fn consolidate(root: &Path, v: &HotVersion, tails: bool) -> Result<Option<Consolidated>, DataError> {
     let mut ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
-    if ov.instruments.iter().all(|i| i.sealed.is_empty()) {
+    let folds = |i: &InstrumentOverlay| !i.sealed.is_empty() || (tails && !i.tail.is_empty());
+    if !ov.instruments.iter().any(folds) {
         return Ok(None);
     }
     let base = &v.levels[0];
@@ -67,9 +76,9 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
     debug_assert_eq!(ncols, nvalues + 1, "the base's columns are the values and the receipt residual");
     let kinds: Vec<Kind> = v.manifest.columns.iter().map(|c| c.kind).collect();
     // The instruments of the new layout, in id order: every published one
-    // and every overlay instrument with a sealed block.
+    // and every overlay instrument with something to fold.
     let mut ids: Vec<u64> = old.instruments.iter().map(|i| i.id).collect();
-    ids.extend(ov.instruments.iter().filter(|i| !i.sealed.is_empty()).map(|i| i.id));
+    ids.extend(ov.instruments.iter().filter(|i| folds(i)).map(|i| i.id));
     ids.sort_unstable();
     ids.dedup();
     let plans: Vec<Plan> = ids
@@ -97,6 +106,16 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
             seqs.extend(q[..s.rows as usize].iter().map(|&x| x as u64));
             folded_rows += s.rows as u64;
             folded_blocks += ncols as u64;
+        }
+        // The tail's rows follow the sealed ones (E-173).
+        if tails {
+            let tail = &ov.instruments[p.ov].tail;
+            for k in 0..tail.len() {
+                labels.push(tail.label_at(k));
+                res.push(tail.r_at(k) - tail.label_at(k));
+            }
+            seqs.extend_from_slice(tail.seqs());
+            folded_rows += tail.len() as u64;
         }
         folded.push((labels, res, seqs));
     }
@@ -191,6 +210,7 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
             let mut tail_ints: Vec<i64> = Vec::new();
             let mut tail_floats: Vec<f64> = Vec::new();
             let sealed = ov.instruments[p.ov].sealed.clone();
+            let tail_rows = if tails { ov.instruments[p.ov].tail.len() } else { 0 };
             if let Some(o) = p.old {
                 let view = v.column(c, o);
                 let up = abt_agg::exact::pow10((exponent - old.instruments[o].exponents[c]) as u32) as i64;
@@ -202,7 +222,7 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
                             *x = x.wrapping_mul(up);
                         }
                     }
-                    if ints.len() < BLOCK && !sealed.is_empty() {
+                    if ints.len() < BLOCK && (!sealed.is_empty() || tail_rows > 0) {
                         tail_ints.extend_from_slice(&ints);
                         tail_floats.extend_from_slice(&block.floats);
                     } else {
@@ -230,6 +250,23 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
                 } else {
                     tail_ints.extend_from_slice(&ints);
                     tail_floats.extend_from_slice(&floats);
+                }
+            }
+            // The tail's rows (E-173), re-encoded after the rows above: a
+            // value's integer at the run's exponent as the tail holds it
+            // (what a seal would summarise), its `f64` bit for bit; the
+            // receipt's residual in the last column.
+            if tail_rows > 0 {
+                let from = ov.instruments[p.ov].exponents.get(c).copied().unwrap_or(0);
+                let up = abt_agg::exact::pow10(exponent.saturating_sub(from) as u32) as i64;
+                for r in ov.tail_rows(p.ov, tail_rows) {
+                    if c < nvalues {
+                        tail_ints.push(r.ints[c].wrapping_mul(up));
+                        tail_floats.push(r.floats[c]);
+                    } else {
+                        tail_ints.push(r.r - r.label);
+                        tail_floats.push((r.r - r.label) as f64);
+                    }
                 }
             }
             for (ci, chunk) in tail_ints.chunks(BLOCK).enumerate() {
@@ -328,7 +365,14 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
     manifest.to = labels.last().copied();
     manifest.buckets = buckets;
     manifest.generation = generation;
-    manifest.replay_from = Some(ov.least_tail_seq().unwrap_or(folded_seq_max + 1).min(folded_seq_max + 1));
+    // The instruments given base rows: their ladder is the build's (E-173).
+    manifest.folded.extend(plans.iter().filter(|p| !folded[folded_of[&p.id]].0.is_empty()).map(|p| p.id));
+    manifest.folded.sort_unstable();
+    manifest.folded.dedup();
+    // The replay's start: the least sequence number a tail holds; past the
+    // last row folded when the tails were folded with it (E-173).
+    let least_tail = if tails { None } else { ov.least_tail_seq() };
+    manifest.replay_from = Some(least_tail.unwrap_or(folded_seq_max + 1).min(folded_seq_max + 1));
     let tmp = dir.join("manifest.json.tmp");
     write_synced(&tmp, &serde_json::to_vec_pretty(&manifest)?)?;
     crate::fault::point("consolidate-before-rename");
@@ -336,9 +380,9 @@ pub fn consolidate(root: &Path, v: &HotVersion) -> Result<Option<Consolidated>, 
     if let Ok(d) = fs::File::open(&dir) {
         let _ = d.sync_all();
     }
-    // The folded journal and its append files go at the next open
-    // (`Overlay::remove_earlier_generations`); the old base segments when
-    // no version names them (ST-7.5).
+    // The folded journal, its append files and the presence this one
+    // replaces go at the next open (`Overlay::remove_earlier_generations`);
+    // the old base segments when no version names them (ST-7.5).
     drop(ov);
     Ok(Some(Consolidated {
         manifest,

@@ -1,0 +1,17 @@
+# proposition: E-172 (the base level's presence files of earlier generations are removed at the next open)
+# mutation: only the journals and append directories of earlier generations are removed, as before the erratum
+# test: cargo test -p abt-data --test appends consolidation_keeps_every_answer_and_the_version_id
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/append.rs b/crates/abt-data/src/hot/append.rs
+--- a/crates/abt-data/src/hot/append.rs
++++ b/crates/abt-data/src/hot/append.rs
+@@ -462,8 +462,7 @@ impl Overlay {
+                 .strip_prefix("journal-")
+                 .and_then(|r| r.strip_suffix(".bin"))
+                 .or_else(|| name.strip_prefix("append-"))
+-                .and_then(|g| g.parse::<u64>().ok())
+-                .or(presence);
++                .and_then(|g| g.parse::<u64>().ok());
+             if gen.is_some_and(|g| g < generation) {
+                 if p.is_dir() {
+                     fs::remove_dir_all(&p)?;

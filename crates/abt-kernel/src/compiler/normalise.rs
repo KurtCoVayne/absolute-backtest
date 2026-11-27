@@ -1017,10 +1017,11 @@ pub fn rename_literal(l: &Literal, m: &HashMap<String, String>) -> Literal {
             within: within.as_ref().map(|w| w.iter().map(|v| rn(v, m)).collect()),
             span: *span,
         },
-        Literal::AsOf { atom, at, within_bucket, span } => Literal::AsOf {
+        Literal::AsOf { atom, at, within_bucket, every, span } => Literal::AsOf {
             atom: rename_atom(atom, m),
             at: rename_term(at, m),
             within_bucket: within_bucket.clone(),
+            every: *every,
             span: *span,
         },
         Literal::Case { var, branches, otherwise, span } => Literal::Case {

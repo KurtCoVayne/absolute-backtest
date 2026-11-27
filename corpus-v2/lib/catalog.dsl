@@ -31,10 +31,38 @@ library catalog {
     rel dividend_or_zero(A: Equity, @T, D: Price<USD>)
     dividend_or_zero(A, T, D) :- universe(A, T), D = case { dividend_at(A, T, D0) -> D0 ; else -> 0 USD/share }.
 
-    # Total return from the entity's previous row: (P F + D) / P0 - 1.
+    # T's bucket's dividends as the total return takes them, L the entity's
+    # last bar at or before T: G, the growth of a share that reinvests each
+    # dividend announced in the bucket and going ex at an earlier bar of it
+    # at the close of its ex-date; X, every other, reinvested at L's close,
+    # the bucket's last price. `Ex < L` bounds the ex-date before T, so its
+    # close is read causally (WF-6, E-163). A dividend going ex on a split's
+    # day is held per share after the split, the vendor's amount over the
+    # factor (the Norgate adapter's rescaling); times the day's factor it is
+    # the vendor's amount, which the book adds to the day's close before
+    # the split, (close + D) split (E-164). On the base calendar L is the
+    # bar and G is 1.
+    rel dividend_reinvested(A: Equity, @T, X: Price<USD>, G: Scalar)
+    dividend_reinvested(A, T, X, 1.0) :- dividend_at(A, T, D), prev(T, T1), close@base(A, L, _) asof T,
+        FL = case { split@base(A, L, F0) -> F0 ; else -> 1 },
+        N = count(Ex) over (dividend(A, T, Ex, _, _), Ex > T1, Ex < L, close@base(A, Ex, _)), N = 0, X = D * FL.
+    dividend_reinvested(A, T, X, G) :- dividend_at(A, T, D), prev(T, T1), close@base(A, L, _) asof T,
+        FL = case { split@base(A, L, F0) -> F0 ; else -> 1 },
+        S = sum(Amt) over (dividend(A, T, Ex, _, Amt), Ex > T1, Ex < L, close@base(A, Ex, _)),
+        G = prod(1 + Amt * F / C) over (dividend(A, T, Ex, _, Amt), Ex > T1, Ex < L, close@base(A, Ex, C),
+            F = case { split@base(A, Ex, F0) -> F0 ; else -> 1 }),
+        X = (D - S) * FL.
+
+    # Total return from the entity's previous row with each dividend
+    # reinvested at the close of its ex-date, as the book compounds the
+    # daily (close + D) split / previous close over the bucket (E-163):
+    #   1 + R = (P + X) F / P0 x G.
+    # On the base calendar it is the day's (P + D F) F / P0.
     rel total_return(A: Equity, @T, R: Scalar)
-    total_return(A, T, R) :- close(A, T, P), prev_row(A, T, T0), close(A, T0, P0),
-        split_factor(A, T, F), dividend_or_zero(A, T, D), R = (P * F + D) / P0 - 1.
+    total_return(A, T, R) :- close(A, T, P), not dividend_at(A, T, _), prev_row(A, T, T0), close(A, T0, P0),
+        split_factor(A, T, F), R = P * F / P0 - 1.
+    total_return(A, T, R) :- close(A, T, P), dividend_at(A, T, _), prev_row(A, T, T0), close(A, T0, P0),
+        split_factor(A, T, F), dividend_reinvested(A, T, X, G), R = (P + X) * F / P0 * G - 1.
     rel log_return(A: Equity, @T, R: Scalar)
     log_return(A, T, R) :- total_return(A, T, R0), R = log(1 + R0).
 

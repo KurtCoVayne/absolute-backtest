@@ -404,6 +404,12 @@ impl<'a> Interp<'a> {
         let ty_of = |t: &Option<String>| t.as_deref().and_then(Ty::parse_text);
         match agg {
             "count" => AbsVal::of_interval(Some(&Ty::Count), Interval::new(n.lo.max(0.0), n.hi)),
+            // A Scalar with no bound the interval domain carries through n
+            // factors.
+            "prod" => AbsVal {
+                may_undef: x.may_undef,
+                ..AbsVal::top(Some(&scalar))
+            },
             "sum" => AbsVal {
                 may_undef: x.may_undef,
                 ..AbsVal::of_interval(ty_of(&x.ty).as_ref(), span_err(n.mul(xi), n))

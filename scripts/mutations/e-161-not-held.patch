@@ -1,0 +1,24 @@
+# proposition: E-161 (a delisting is remembered from its first row and applies whenever the name is held)
+# mutation: a delisting whose first row comes while the name is not held is dropped for good, so a name bought in its last week stays in the book
+# test: cargo test -p abt-tests --test actions on_a_weekly_calendar_a_delisting_applies_at_the_first_bar_without_a_print
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/sim/equity.rs b/crates/abt-kernel/src/sim/equity.rs
+--- a/crates/abt-kernel/src/sim/equity.rs
++++ b/crates/abt-kernel/src/sim/equity.rs
+@@ -140,7 +140,7 @@
+                         .iter()
+                         .find_map(|v| if let Value::Label(l) = v { Some(k.labels.name(*l).to_string()) } else { None })
+                         .unwrap_or_default();
+-                    let seen = self.delisted.len();
++                    let seen = if self.book.positions.contains_key(&sym) { self.delisted.len() } else { usize::MAX };
+                     self.delisted.insert(sym, (seen, reason));
+                 }
+             }
+@@ -151,6 +151,7 @@
+                 .keys()
+                 .filter_map(|s| self.delisted.get(s).map(|(seen, reason)| (*seen, *s, reason.clone())))
+                 .collect();
++            gone.retain(|g| g.0 != usize::MAX);
+             gone.sort_unstable_by_key(|g| g.0);
+             for (_, sym, reason) in gone {
+                 if coarse && k.bar_price(sym, t).is_some() {

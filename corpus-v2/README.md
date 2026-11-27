@@ -90,8 +90,8 @@ signature (F-9, dimension polymorphism). There are no binding modes (4.2).
 
 **Literals of a body**, in any order (5.1): an atom; `not atom` over a closed
 relation; a comparison; `X = expr`; `X = agg(e) over (conj) [within (vars)]`
-with `agg` in sum, mean, std, var, median, quantile, max, min, count, corr,
-cov, ols_slope, ols_r, first, last; `K = rank(R(...) by (k dir, ...)) within
+with `agg` in sum, prod, mean, std, var, median, quantile, max, min, count,
+corr, cov, ols_slope, ols_r, first, last (`prod` of a Scalar alone, E-163); `K = rank(R(...) by (k dir, ...)) within
 (vars)` and `rank_average`; `top[k](R(...) by (...)) within (vars)`, a
 reduction binding R's variables; `X = case { G -> e ; ... [; else -> e] }`
 (5.3); `R(..., T0, ...) asof T`; the builtins `prev(T, T1)`, `lag(T, DUR,

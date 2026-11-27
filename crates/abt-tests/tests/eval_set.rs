@@ -276,7 +276,10 @@ fn the_block_evaluator_derives_what_the_set_evaluator_does_on_mw14_with_holes() 
         "total_return",
         "latch[enter, stay]",
         "split_factor",
-        "dividend_or_zero",
+        // `dividend_or_zero` is planned too (E-170) and no longer demanded:
+        // the total return reads `dividend_at` and `dividend_reinvested`
+        // since E-163. Its case is held by
+        // `the_case_and_the_calendar_window_over_actions_are_the_row_paths`.
         "dividend_at",
     ] {
         assert!(planned_rels.iter().any(|r| r == name), "`{}` has no plan; the plans: {:?}", name, planned_rels);

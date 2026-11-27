@@ -1,0 +1,16 @@
+# proposition: E-173 (after a fold with the tails the replay starts past the last row folded)
+# mutation: the replay starts at the least sequence number a tail held, as after a fold without them
+# test: cargo test -p abt-data --test appends a_consolidation_with_the_tails_leaves_nothing_to_replay
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/consolidate.rs b/crates/abt-data/src/hot/consolidate.rs
+--- a/crates/abt-data/src/hot/consolidate.rs
++++ b/crates/abt-data/src/hot/consolidate.rs
+@@ -371,7 +371,7 @@ pub fn consolidate(root: &Path, v: &HotVersion, tails: bool) -> Result<Option<Co
+     manifest.folded.dedup();
+     // The replay's start: the least sequence number a tail holds; past the
+     // last row folded when the tails were folded with it (E-173).
+-    let least_tail = if tails { None } else { ov.least_tail_seq() };
++    let least_tail = ov.least_tail_seq();
+     manifest.replay_from = Some(least_tail.unwrap_or(folded_seq_max + 1).min(folded_seq_max + 1));
+     let tmp = dir.join("manifest.json.tmp");
+     write_synced(&tmp, &serde_json::to_vec_pretty(&manifest)?)?;

@@ -236,6 +236,53 @@ fn a_time_window_reduces_the_rows_it_holds() {
     assert_eq!(w.value(100).unwrap(), None, "below the minimum count");
 }
 
+/// `prod` (E-163) is the rows multiplied in their order from 1, one
+/// rounding a row, in every mode and every window state alike; on factors
+/// whose product is exact in f64 it is the exact product; an empty group
+/// has no value.
+#[test]
+fn a_product_is_its_rows_multiplied_in_order() {
+    let mut g = stream(17, 1.0, false);
+    let xs: Vec<f64> = (0..300).map(|_| 1.0 + g() / 64.0).collect();
+    for n in [1, 2, 5, 52, 300] {
+        let w = &xs[..n];
+        let mut want = 1.0;
+        for x in w {
+            want *= x;
+        }
+        for mode in [Mode::TwoPass, Mode::Running, Mode::Exact] {
+            assert_eq!(reduce(Function::Prod, mode, &[w]).unwrap().map(f64::to_bits), Some(want.to_bits()), "{} rows, {:?}", n, mode);
+        }
+    }
+    // Factors of four significant bits: six of them multiply exactly.
+    let small = [1.5, 0.75, 1.125, 2.0, 0.875, 1.25];
+    assert_eq!(reduce(Function::Prod, Mode::TwoPass, &[&small]).unwrap(), Some(1.5 * 0.75 * 1.125 * 2.0 * 0.875 * 1.25));
+    assert_eq!(
+        reduce(Function::Prod, Mode::TwoPass, &[&small]).unwrap(),
+        Some(Q::of(1.5).mul(Q::of(0.75)).mul(Q::of(1.125)).mul(Q::of(2.0)).mul(Q::of(0.875)).mul(Q::of(1.25)).f64())
+    );
+    assert_eq!(reduce(Function::Prod, Mode::TwoPass, &[&[]]), Ok(None));
+    // Ticks have no integer product at their scale: their views multiplied.
+    let units = [150i128, 75, 200];
+    assert_eq!(abt_agg::reduce_ticks(Function::Prod, &[abt_agg::Ticks { units: &units, scale: 2 }]).unwrap(), Some(1.5 * 0.75 * 2.0));
+    // A time window and a rows window give the reduction of what they hold.
+    let mut tw = WindowState::new(Function::Prod, Mode::TwoPass);
+    let mut rw = RowsWindow::new(Function::Prod, Mode::Running, 5);
+    for (t, x) in xs.iter().enumerate().take(40) {
+        let t = t as i64;
+        tw.push(t, &[*x]);
+        tw.evict(t - 4);
+        rw.step(t as u64, t, true, Some(&[*x]));
+        let lo = (t - 4).max(0) as usize;
+        let held = &xs[lo..=t as usize];
+        let want = reduce(Function::Prod, Mode::TwoPass, &[held]).unwrap();
+        assert_eq!(tw.value(1).unwrap(), want, "time window at {}", t);
+        assert_eq!(rw.value(1).unwrap(), want, "rows window at {}", t);
+    }
+    assert_eq!(Function::parse("prod", None), Ok(Function::Prod));
+    assert_eq!(Function::Prod.name(), "prod");
+}
+
 #[test]
 fn order_statistics_follow_the_sorted_window() {
     let mut g = stream(13, 0.0, false);

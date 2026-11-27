@@ -779,10 +779,17 @@ pub struct KernelStats {
     /// Windowed aggregations evaluated.
     pub window_calls: usize,
     /// Bars whose rows a windowed aggregation solved (once per group with the cache).
+    /// This and the two below say how the windows were computed, not what
+    /// the run derived: an evaluator that reads a window without the
+    /// per-group cache counts none. Like the clocks, they are not stored
+    /// (ERRATA E-165): `--timing` reads them from the result in process.
+    #[serde(skip)]
     pub window_bars_solved: usize,
     /// Windowed aggregation groups the cache holds.
+    #[serde(skip)]
     pub window_groups: usize,
     /// Bars' rows the cache holds now.
+    #[serde(skip)]
     pub window_rows_cached: usize,
     /// Tuples that arrived after their bar closed (the fold only).
     pub late_tuples: usize,
@@ -918,6 +925,17 @@ pub struct KernelStats {
     pub post_secs: f64,
     #[serde(skip)]
     pub loop_other_secs: f64,
+    /// The seconds the fold spent at each barrier of the decision calendar
+    /// inside the run's window, in the stream's order: the fills, the marks,
+    /// the decision, the executor's take, the invariants, the observation
+    /// and the trimming, without the insertion of the bar's tuples. It is
+    /// what the kernel adds between a bar's barrier and its decisions (A-7.3,
+    /// "barrier to decision"). In process only, like the clocks (E-133).
+    #[serde(skip)]
+    pub barrier_secs: Vec<f32>,
+    /// Of `barrier_secs`, the barriers at which a decision was scheduled.
+    #[serde(skip)]
+    pub decision_barrier_secs: Vec<f32>,
 }
 
 /// What the evaluator derived for one relation over a run: how many times
@@ -2763,6 +2781,9 @@ pub struct Kernel<'p> {
     /// eviction's last.
     pub(crate) horizon_floor: i64,
     pub(crate) evict_cutoff: i64,
+    /// Per `rows_lookback` entry, the latest bar of its calendar the
+    /// eviction last walked back from and the bar it reached.
+    pub(crate) rows_back: Vec<(i64, i64)>,
     /// What the build noticed about the program against this data (a label
     /// the data never carries); reported with the run's warnings.
     pub(crate) run_warnings: Vec<RunWarning>,
@@ -3612,6 +3633,7 @@ impl<'p> Kernel<'p> {
             closed_rels: vec![true; n_rels],
             horizon_floor: i64::MIN,
             evict_cutoff: i64::MIN,
+            rows_back: Vec::new(),
             run_warnings,
         };
         let read = k.relations_read();
@@ -3707,6 +3729,22 @@ impl<'p> Kernel<'p> {
         self.schedule.get(&self.prog.decision_cal).is_some_and(|labels| labels.contains(&label))
     }
 
+    /// Under a session-offset clock, the instruments whose clock strikes at
+    /// the bar `t`: its decision bars are the clock's, an instrument's own
+    /// (language-v2 3.5), and a bar at which none strikes decides nothing.
+    /// `None` for a program without one, whose every bar of the decision
+    /// calendar is a decision bar.
+    pub(crate) fn clock_syms_at(&self, t: i64) -> Option<Vec<Sym>> {
+        self.clock_rel.map(|cid| {
+            let epos = self.rels[cid].entity_positions.first().copied().unwrap_or(0);
+            self.store(cid)
+                .by_time
+                .get(&t)
+                .map(|tus| tus.iter().filter_map(|tu| tu[epos].as_equity()).collect())
+                .unwrap_or_default()
+        })
+    }
+
     /// A tuple keyed at `key` arrived after its bar closed: everything
     /// derived at or after `key` may have read its absence. Derived values
     /// are recomputed on demand; the windowed groups forget the bars from
@@ -3758,12 +3796,30 @@ impl<'p> Kernel<'p> {
             return;
         }
         let mut cutoff = (t - h).min(keep_from);
-        for (res, n) in &self.rows_lookback {
-            if let Some(&back) = self.domains.get(res).and_then(|d| d.range(..=t).rev().nth(*n + 3)) {
-                cutoff = cutoff.min(back);
-            } else {
-                return;
-            }
+        for (i, (res, n)) in self.rows_lookback.iter().enumerate() {
+            // The walk back over a window's bars, once per bar of its
+            // calendar: a barrier between two of them (a minute of a
+            // session calendar) finds the same bar.
+            let Some(d) = self.domains.get(res) else { return };
+            let Some(&latest) = d.range(..=t).next_back() else { return };
+            let back = match self.rows_back.get(i) {
+                Some(&(at, back)) if at == latest => back,
+                _ => {
+                    let Some(&back) = d.range(..=t).rev().nth(*n + 3) else { return };
+                    self.rows_back.resize(self.rows_lookback.len(), (i64::MIN, i64::MIN));
+                    self.rows_back[i] = (latest, back);
+                    back
+                }
+            };
+            cutoff = cutoff.min(back);
+        }
+        // A cutoff that has not moved drops nothing the last pass kept
+        // (what was memoised behind it since is dropped when it moves):
+        // under a rows window of another calendar it moves once a bar of
+        // that calendar, not once a barrier.
+        if cutoff == self.evict_cutoff && self.asof_memo.len() < self.asof_memo_next && self.workers.iter().all(|w| w.asof_memo.len() < w.asof_memo_next) {
+            self.stats.evict_secs += started.elapsed().as_secs_f64();
+            return;
         }
         let entity_pos: Vec<Option<usize>> = self.rels.iter().map(|r| if r.stored { None } else { r.entity_positions.first().copied() }).collect();
         let chained: FxHashSet<usize> = self.recursive_rels.iter().copied().collect();
@@ -4154,6 +4210,17 @@ impl<'p> Kernel<'p> {
     /// be queried at.
     pub fn bars_at(&self, cal: &Cal) -> Vec<i64> {
         self.domains.get(cal).map(|d| d.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// The calendar's bars after `after` and up to `upto`; with no `after`,
+    /// `upto` alone when it is one of them.
+    pub fn bars_between(&self, cal: &Cal, after: Option<i64>, upto: i64) -> Vec<i64> {
+        let Some(d) = self.domains.get(cal) else { return Vec::new() };
+        match after {
+            Some(a) if a < upto => d.range((std::ops::Bound::Excluded(a), std::ops::Bound::Included(upto))).copied().collect(),
+            Some(_) => Vec::new(),
+            None => d.range(upto..=upto).copied().collect(),
+        }
     }
 
     /// `t` is a bar of the calendar's domain, or the error naming the
@@ -5171,125 +5238,137 @@ pub fn replay_observed<'p>(
         cfg.pushdown = false;
         cfg.deliver = false;
     }
-    // The preconditions, before the first barrier (K-3.2).
-    let checking = std::time::Instant::now();
-    let mut contract = crate::contract::contract(prog);
-    let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, &bound, client, &cfg)?;
-    let periods = report_periods(prog, &bound, client)?;
-    let check_secs = checking.elapsed().as_secs_f64();
-    // A truncated stream resolves ticker literals where it ends.
-    let building = std::time::Instant::now();
-    let mut probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
-    if opts.keep_unread {
-        probe.keep_unread_relations();
-    }
-    probe.keep_read_after(&opts.read_after);
-    let mut build_secs = building.elapsed().as_secs_f64();
-    let identity = Identity {
-        program_hash: crate::compiler::normalise(prog).hash,
-        binding_id: bound.binding.id.clone().unwrap_or_default(),
-        mode: opts.mode.name().into(),
-        run_id: String::new(),
-        // Through a JSON value: a field that is infinite (no leverage
-        // limit) is null there, and canonical JSON has no infinity.
-        config: abt_wire::Hash::of(
-            abt_wire::to_canonical_json(&serde_json::to_value(&cfg).map_err(|e| RunError::Internal(e.to_string()))?)
-                .map_err(|e| RunError::Internal(e.to_string()))?
-                .as_bytes(),
-        )
-        .hex(),
-        deployment: opts.deployment.as_ref().map(|d| d.hash()),
-    };
-    let run = bind::run_id(
-        &identity.program_hash,
-        &identity.binding_id,
-        &bind::plan_step(
-            opts.plan_step.as_ref(),
-            &cfg,
-            opts.to_seq,
-            opts.horizon,
-            opts.received_by,
-            opts.mode.session(),
-            opts.replay_of.as_deref(),
-        ),
-        &identity.mode,
-    );
-    let identity = Identity { run_id: run.clone(), ..identity };
-    let specifying = std::time::Instant::now();
-    let (mut spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
-    let spec_secs = specifying.elapsed().as_secs_f64();
-    if let Some(session) = opts.mode.session() {
-        spec.clock = abt_wire::generated::abt::wire::ClockSource::Live;
-        spec.session = Some(session.to_string());
-    }
-    if let Some(clock) = recorded {
-        bind::with_recorded_clock(&mut spec, clock);
-    }
-    let mut to_seq = opts.to_seq;
-    let mut end_label: Option<i64> = None;
-    if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() {
-        // The cut is a seq of this stream, which a delivered answer would
-        // move: a run with a cut reads every answer as a table (E-157).
-        cfg.deliver = false;
-        let dcal = prog.decision_cal.to_string();
-        let index = client.stream_index(spec.clone())?;
-        let mut cut = |at: Option<&bind::IndexRow>| {
-            let seq = at.map(|r| r.seq).unwrap_or(0);
-            to_seq = Some(to_seq.map_or(seq, |s| s.min(seq)));
-        };
-        if let Some(h) = opts.horizon {
-            cut(index.iter().rfind(|r| r.calendar == dcal && r.label <= h));
-        }
-        // `holdout after TIME`: the last decision barrier whose instant is
-        // at or before the receipt time, so nothing received after it is
-        // read (Q-2.3, E-97).
-        if let Some(rb) = opts.received_by {
-            cut(index.iter().rfind(|r| r.calendar == dcal && r.at <= rb));
-        }
-        end_label = index.iter().filter(|r| to_seq.is_none_or(|s| r.seq <= s)).map(|r| r.label).max();
-    }
-    drop(probe);
-    if let Some(end) = end_label.or(opts.horizon) {
-        cfg.as_of = Some(cfg.as_of.or(bound.bundle_date()).map_or(end, |a| a.min(end)));
-    }
-    // An observed relation off the decision calendar is read after the run,
-    // bar by bar: the history stays whole for it.
-    if cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() && !outputs::observes_at_barriers(prog) {
-        cfg.trim_stores = false;
-    }
-    let building = std::time::Instant::now();
-    let mut kernel = match lowered {
-        Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
-        None => Kernel::bound(prog, &bound, cfg.clone())?,
-    };
-    if opts.keep_unread {
-        kernel.keep_unread_relations();
-    }
-    kernel.keep_read_after(&opts.read_after);
-    kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
-    kernel.identity = identity;
-    build_secs += building.elapsed().as_secs_f64();
-    // A literal the data layer does not answer is evaluated here: the run
-    // says so (E-47). What the executor reads by name stays in the stream
-    // when delivery leaves its other readers without it (E-158). A command
-    // that reads the kernel after the run may read a relation by name or
-    // derive one again from inputs only a delivered literal read during it,
-    // so a run with one keeps every relation, as a run that keeps every
-    // relation does.
-    let pushing = std::time::Instant::now();
-    let keep: Vec<String> = if opts.keep_unread || opts.read_after_any || !opts.read_after.is_empty() {
-        prog.relations.keys().cloned().collect()
-    } else {
-        exec.reads_stores(&kernel)
-    };
-    for message in bind::push_down(&mut kernel, &bound, client, &mut spec, &keep)? {
-        kernel.run_warnings.push(RunWarning { bias: "pushdown".into(), message });
-    }
+    // The preconditions, before the first barrier (K-3.2), on a thread of
+    // their own while this one builds the kernel and asks the pushed
+    // aggregates of the data layer, which answers each request on a thread
+    // (ERRATA E-168). Both end before the stream opens, and a refusal is the
+    // run's error whatever the other thread met, as when they ran in turn.
+    let check_cfg = cfg.clone();
+    let checked_bound = &bound;
+    let (checked, prepared) = std::thread::scope(|s| {
+        let checks = s.spawn(move || {
+            let checking = std::time::Instant::now();
+            let mut contract = crate::contract::contract(prog);
+            let pre_warnings = crate::contract::check::preconditions(&mut contract, prog, checked_bound, client, &check_cfg)?;
+            let periods = report_periods(prog, checked_bound, client)?;
+            Ok::<_, RunError>((contract, pre_warnings, periods, checking.elapsed().as_secs_f64()))
+        });
+        let prepared = (|| -> Result<_, RunError> {
+            // A truncated stream resolves ticker literals where it ends.
+            let building = std::time::Instant::now();
+            let mut probe = Kernel::build(lowered.map(|l| l.program_for(prog)).unwrap_or(prog), &bound, cfg.clone())?;
+            if opts.keep_unread {
+                probe.keep_unread_relations();
+            }
+            probe.keep_read_after(&opts.read_after);
+            let mut build_secs = building.elapsed().as_secs_f64();
+            let identity = Identity {
+                program_hash: crate::compiler::normalise(prog).hash,
+                binding_id: bound.binding.id.clone().unwrap_or_default(),
+                mode: opts.mode.name().into(),
+                run_id: String::new(),
+                // Through a JSON value: a field that is infinite (no leverage
+                // limit) is null there, and canonical JSON has no infinity.
+                config: abt_wire::Hash::of(
+                    abt_wire::to_canonical_json(&serde_json::to_value(&cfg).map_err(|e| RunError::Internal(e.to_string()))?)
+                        .map_err(|e| RunError::Internal(e.to_string()))?
+                        .as_bytes(),
+                )
+                .hex(),
+                deployment: opts.deployment.as_ref().map(|d| d.hash()),
+            };
+            let run = bind::run_id(
+                &identity.program_hash,
+                &identity.binding_id,
+                &bind::plan_step(
+                    opts.plan_step.as_ref(),
+                    &cfg,
+                    opts.to_seq,
+                    opts.horizon,
+                    opts.received_by,
+                    opts.mode.session(),
+                    opts.replay_of.as_deref(),
+                ),
+                &identity.mode,
+            );
+            let identity = Identity { run_id: run.clone(), ..identity };
+            let specifying = std::time::Instant::now();
+            let (mut spec, cal_of) = bind::stream_spec(&probe, &bound, client, &run)?;
+            let spec_secs = specifying.elapsed().as_secs_f64();
+            if let Some(session) = opts.mode.session() {
+                spec.clock = abt_wire::generated::abt::wire::ClockSource::Live;
+                spec.session = Some(session.to_string());
+            }
+            if let Some(clock) = recorded {
+                bind::with_recorded_clock(&mut spec, clock);
+            }
+            let mut to_seq = opts.to_seq;
+            let mut end_label: Option<i64> = None;
+            if opts.horizon.is_some() || opts.received_by.is_some() || opts.to_seq.is_some() {
+                // The cut is a seq of this stream, which a delivered answer would
+                // move: a run with a cut reads every answer as a table (E-157).
+                cfg.deliver = false;
+                let dcal = prog.decision_cal.to_string();
+                let index = client.stream_index(spec.clone())?;
+                let mut cut = |at: Option<&bind::IndexRow>| {
+                    let seq = at.map(|r| r.seq).unwrap_or(0);
+                    to_seq = Some(to_seq.map_or(seq, |s| s.min(seq)));
+                };
+                if let Some(h) = opts.horizon {
+                    cut(index.iter().rfind(|r| r.calendar == dcal && r.label <= h));
+                }
+                // `holdout after TIME`: the last decision barrier whose instant is
+                // at or before the receipt time, so nothing received after it is
+                // read (Q-2.3, E-97).
+                if let Some(rb) = opts.received_by {
+                    cut(index.iter().rfind(|r| r.calendar == dcal && r.at <= rb));
+                }
+                end_label = index.iter().filter(|r| to_seq.is_none_or(|s| r.seq <= s)).map(|r| r.label).max();
+            }
+            drop(probe);
+            if let Some(end) = end_label.or(opts.horizon) {
+                cfg.as_of = Some(cfg.as_of.or(bound.bundle_date()).map_or(end, |a| a.min(end)));
+            }
+            let building = std::time::Instant::now();
+            let mut kernel = match lowered {
+                Some(l) => Kernel::bound_planned(prog, l, &bound, cfg.clone())?,
+                None => Kernel::bound(prog, &bound, cfg.clone())?,
+            };
+            if opts.keep_unread {
+                kernel.keep_unread_relations();
+            }
+            kernel.keep_read_after(&opts.read_after);
+            kernel.data_ids = outputs::instrument_ids(&kernel, &bound);
+            kernel.identity = identity;
+            build_secs += building.elapsed().as_secs_f64();
+            // A literal the data layer does not answer is evaluated here: the run
+            // says so (E-47). What the executor reads by name stays in the stream
+            // when delivery leaves its other readers without it (E-158). A command
+            // that reads the kernel after the run may read a relation by name or
+            // derive one again from inputs only a delivered literal read during it,
+            // so a run with one keeps every relation, as a run that keeps every
+            // relation does.
+            let pushing = std::time::Instant::now();
+            let keep: Vec<String> = if opts.keep_unread || opts.read_after_any || !opts.read_after.is_empty() {
+                prog.relations.keys().cloned().collect()
+            } else {
+                exec.reads_stores(&kernel)
+            };
+            for message in bind::push_down(&mut kernel, &bound, client, &mut spec, &keep)? {
+                kernel.run_warnings.push(RunWarning { bias: "pushdown".into(), message });
+            }
+            Ok((kernel, spec, cal_of, to_seq, run, build_secs, spec_secs, pushing.elapsed().as_secs_f64()))
+        })();
+        let checked = checks.join().unwrap_or_else(|_| Err(RunError::Internal("the thread of the preconditions panicked".into())));
+        (checked, prepared)
+    });
+    let (contract, pre_warnings, periods, check_secs) = checked?;
+    let (mut kernel, spec, cal_of, to_seq, run, build_secs, spec_secs, push_secs) = prepared?;
     kernel.stats.bind_secs += bind_secs;
     kernel.stats.check_secs += check_secs;
     kernel.stats.build_secs += build_secs;
     kernel.stats.spec_secs += spec_secs;
-    kernel.stats.push_secs += pushing.elapsed().as_secs_f64();
+    kernel.stats.push_secs += push_secs;
     kernel.run_warnings.extend(pre_warnings);
     let mut decoder = bind::Decoder::new(&kernel, &bound, cal_of);
     let mut fold = match &opts.from {
@@ -5298,7 +5377,8 @@ pub fn replay_observed<'p>(
     }
     .with_contract(contract);
     // A run that writes outputs observes its relations at the barriers when
-    // its stores are trimmed (`outputs::observe_bar`, E-126).
+    // its stores are trimmed (`outputs::observe_bar`, E-126), whatever
+    // their calendars (E-167).
     if fold.kernel.cfg.trim_stores && opts.write_outputs && !prog.observes.is_empty() {
         fold.observe_as_it_goes();
     }

@@ -1,0 +1,16 @@
+# proposition: E-162 (an action read in a group on a calendar coarser than its own is every action of the bar's bucket)
+# mutation: the bar view's latest tuple alone again, so of two dividends going ex in one week the later counts
+# test: cargo test -p abt-tests --test dividend_week a_weekly_row_takes_every_dividend_of_one_name_going_ex_in_its_week
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/check/link.rs b/crates/abt-kernel/src/check/link.rs
+--- a/crates/abt-kernel/src/check/link.rs
++++ b/crates/abt-kernel/src/check/link.rs
+@@ -2203,7 +2203,7 @@
+                     } = &mut cj[i]
+                     {
+                         if super::Demand::need_for(&atom.name) == "actions" {
+-                            *every = true;
++                            *every = false;
+                         }
+                     }
+                 }

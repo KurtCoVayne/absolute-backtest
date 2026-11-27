@@ -5,12 +5,12 @@
 diff --git a/crates/abt-kernel/src/check/link.rs b/crates/abt-kernel/src/check/link.rs
 --- a/crates/abt-kernel/src/check/link.rs
 +++ b/crates/abt-kernel/src/check/link.rs
-@@ -2197,7 +2197,7 @@
+@@ -2218,7 +2218,7 @@
                      else {
                          continue;
                      };
--                    if atom.name == "value" || !wvars.contains(&v.as_str()) {
-+                    if true || atom.name == "value" || !wvars.contains(&v.as_str()) {
+-                    if atom.name == "value" || !wvars.contains(v) {
++                    if true || atom.name == "value" || !wvars.contains(v) {
                          continue;
                      }
                      let held = self

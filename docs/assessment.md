@@ -694,6 +694,293 @@ package 3's first operators without the delivered answers: 180.2 s,
 167.1 (the as-of read), 159.2 (the previous row), 149.4 (the chains),
 141.5 (the case).
 
+**Package 5, third part (Nov 26): 1,851 of 1,851 weeks to 8e-15, and the
+calendar window read for the whole frame: 78.7 s.** E-161 to E-166. The
+five mechanisms the second part measured are in the engine (every action
+of a bar's bucket on a coarser calendar, E-162; the dividend compounded
+at its ex-date, `prod` and `dividend_reinvested`, E-163; a delisting's
+week, E-161; the split-day dividend as the adapter's decision, E-164):
+the weekly returns equal the canon in all 1,851 weeks to 8e-15
+(fingerprint `be605991…`, 4,862 decisions). Merged onto the remaining
+operators the run costs 90.8 s, not 81.4: `dividend_at` now reads every
+key of the bucket, which E-171's operator does not, so the rule went back
+to the row path (15.4 s). `Kernel::run_window_frame` (E-165) reads each
+bar's bucket once for every entity and scatters its tuples to the frame's
+rows: `dividend_at` 3.1 s, the run 78.7 s, the same fingerprint, the
+front's peak 1.14 GB. Its clock: `bind` 3.7 s, `check` 8.1, `push` 14.6,
+the stream 52.1 (`decide` 23.5, `fill` 10.6, `insert` 5.4, `decode` 3.3,
+`trim` 2.6, the invariants 2.4, `wait` 1.8, `warm` 1.2); `clenow` 8.2 s,
+`eligible` 3.8, `dividend_reinvested` 3.2, `dividend_at` 3.1, `ma` 3.0,
+the rest under 1.4 s each. The kernel's thread is the critical path (67 s
+of CPU at 90.8 s) and its profile is flat: no symbol above 7%, the
+allocator 15% together. The stream still carries 53M rows (`close` and
+`volume` 20.1M each, `member` 12.9M), which the data service's
+subscription thread spends 34 s of CPU producing.
+
+The socket pass of the gate failed on the remaining operators' tree:
+`eval_set` could not start a data service (`Cannot allocate memory`) at
+4.3 GB resident. Over a socket a dropped client never ended its
+connection (the reader's thread held the socket's other descriptor), so a
+test binary kept every service it started and the stores they map: 58,308
+mappings at the base tree, the limit of 65,530 with the new tests. E-166
+shuts the socket down with its last writer.
+
+**R8L read at its clock's bars (Nov 26): 393.8 s and 5.79 GB to 32.9 s and
+0.60 GB.** E-167. The market is synthetic, since the book's own history
+is on the pipeline machine alone: the book's 26 roots, 3,000 days of
+minute bars from 2000 (180,000 barriers, 23.6M tuples), `--evaluator
+block`, and `risk=65 USD`, a hundredth of the book's risk a leg, because
+the synthetic market ruins the book at its own risk within two years and
+a ruined book stops deciding. Every run below makes the same 4,618
+decisions and 9,236 fills.
+
+| Tree | Run | Kernel peak | Where the time is |
+| --- | --- | --- | --- |
+| `3be3ba4` (PR #80 merged) | 393.8 s | 5.79 GB | an observed relation off the base calendar switched the history's trim off |
+| observation at the barriers, the trim kept | 244.3 s | 2.61 GB | `observe` 204.1 s: the three observed relations queried at each of the 180,000 minutes |
+| observation at the clock's bars (E-167) | 32.9 s | 0.60 GB | the stream 23.6 s: `observe` 10.4, `decide` 4.8, `insert` 2.8, the invariants 2.0, `decode` 1.2 |
+
+The last row ran beside a staging job on the same machine, so it is not a
+clean clock; the first two ran alone. `--timing` now prints two latency
+lines. Over all 180,000 barriers: mean 0.106 ms, median 0.017, p99 3.32,
+max 29.0. Over the 3,000 barriers a decision is made at: mean 1.66 ms,
+median 1.68, p99 2.20, max 29.0, against A-7.3's 50 ms from a barrier to
+its decision. That is the kernel's share in a replay. A live feed's
+transport is not in it, and the live rehearsal feed (`abt data serve
+--record synthetic`) is equities only, so no live R8L run can be made from
+the command line.
+
+What is left on R8L, in the order of its cost:
+
+- **The session view counts the universe at every minute.**
+  `universe@session` is generated as a count over the session's bucket of
+  the base `universe`, so the base relation is evaluated at each of the
+  180,000 minutes: `universe@session` 3.5 s, `universe` 2.0, `instruments`
+  2.1 of the 23.6.
+- **The session's windows are walked in the kernel.**
+  `close_before[30min]@base` 2.3 s, `close_before[30min]@session` 2.0,
+  `close_before[20min]@base` 1.3. They are not pushed to the data service
+  as MW14's weekly aggregates are.
+- **Two block plans are declined at every bar** (`atr`, `m_median`).
+- **Every base minute is still a barrier.** The design of
+  `docs/spec/06-performance.md` section 3.3 (the kernel woken at the
+  178k decision bars, the session's features pushed down, a fill as a
+  point query) is not built. On the book's real history, minute bars of 26
+  roots from 2010, the run has not been made on this tree.
+- **A live run keeps its whole history** (`trim_stores` is off for a live
+  run, `cli.rs`). Whether a live run may trim is a decision of the owner's.
+
+**The work before the stream, together (E-168).** MW14's preconditions
+(8.1 s) and its pushed aggregates (14.6 s) ran one after the other, and
+the data service answered one aggregate at a time, since a pass held the
+store's write lock from its first read to its stored answer. A pass is
+now two halves: `agg::prepare` computes under the read lock, `agg::finish`
+stores under the write lock and takes an answer another pass stored
+first. The kernel asks its distinct pushed requests on four threads and
+checks the preconditions on a thread of their own while it builds and
+pushes. MW14 on the parity store: 78.7 s to 68.1 s, the same fingerprint
+(`be605991…`), 1,851 of 1,851 weeks to 8e-15. The clock before the stream
+is 16.6 s where it was 26.4 (`check` 13.2 s and `push` 11.1 s now
+overlap; each is slower than alone, the machine having four cores); the
+stream is the 51.3 s it was (`decide` 22.8, `fill` 10.4, `insert` 5.3,
+`decode` 3.4, `trim` 2.4, the invariants 2.4). The front peaks at
+1.11 GB; the data service at 7.61 GB with 89 s of CPU, which is now the
+run's memory. `--threads 4` on the same store takes 72.7 s (`decide`
+28.4): under the block evaluator the windowed rules are not cut across
+workers, so the workers add their overhead and nothing else.
+
+**Real history only (Nov 26).** The owner's rule from this day: a
+benchmark or a validation run reads real market history, never a
+synthetic market and never a lake cloned wider. The records above that
+were made on a synthetic market (R8L's of this morning, the 1,000-name
+cell of Nov 5) are kept as what was measured then and are not the
+project's numbers. What follows was run on the vendors' data, brought up
+to date the same day.
+
+*The data.* Norgate: the lake in `s3://ndlake-094828274452`, the newest
+there is, bars to 2026-10-26 (`_meta/manifest.json`, watermark
+2026-10-27) where the Mac's lake ends on 2026-06-24. Its index
+membership file was last written on Sep 19: the lists are those of that
+day carried forward. A newer lake needs the Norgate updater on the
+owner's Windows machine and its upload. Databento: the 81 futures roots
+the pipeline holds, pulled again from 2026-08-01 through the pipeline's
+cost gate (every request priced at $0.00 before it was made), to the
+session of 2026-11-25; the history before it is the pipeline machine's
+(2010-06-07 for CME, 2018-12-23 for ICE). TradeStation, the R8L parity
+record's source from 2000, ends on 2026-08-24 and is extended only by an
+export of the owner's.
+
+*MW14 on the lake of Oct 27.* The book's two series are carried to the
+lake's last day by `scripts/mw14-series.py`, each from the source the
+book's own file was made from: `$SPXTR` from the lake, equal to the
+book's file on each of the 9,717 days they share; the weekly VIX from
+CBOE's history (the week's last close and its 4-week mean), equal to the
+book's file in each of its 1,906 whole weeks. The lake's own `$VIX` is
+not used: its weekly last close differs from CBOE's in 11 of those weeks.
+The run: 65.0 s on those series (71.8 s before the store's fold and the
+batched pass below, the same returns to the byte), 1,869 weeks from
+1991-01-04 to 2026-10-23, 17 past the canon's last. Against the canon
+over the 1,852 weeks they share:
+correlation 0.9983, CAGR 21.16% where the canon has 20.90%, Sharpe 1.030
+against 1.020, the same drawdown (26.19% and 26.18%), 417 weeks equal to
+8e-15 and 1,469 to 1e-4, the largest difference 3.3% (the week of
+1994-07-29). The same tree on the June lake equals the canon in every
+week, so the difference is the lake's, and it was measured file against
+file over the days both hold (to 2026-06-24, the three lists' names):
+
+- The memberships are the same, 6,004 intervals.
+- 77 names that were S&P 500 members on 1990-01-02 have no bar in the
+  June lake and their whole history in the lake of Oct 27: most were
+  delisted between 1994 and 2006 (Grumman, Gerber, Syntex, American
+  Cyanamid, the old McKesson, UAL), and CNA and NL still trade. They are
+  63,541 member-days of 18.7 million. The canon's book never saw them;
+  this one ranks them.
+- Of 20.1 million shared bars: the close differs in 10 (two names), a
+  dividend in 10 (six names; four moved from June 24 to June 23), the
+  volume in 1,194 (985 names).
+
+So the canon is not the reference for this lake. The reference would be
+the Python book run on the same lake, which is the owner's to make
+(`strategy/ivmom/data.py` builds the panel the canon was frozen from).
+The lake also carries `curated/bars_by_date/archive/`, 2.9 million bars
+from 1896 to 1989 that repeat some rows of the yearly partitions (505
+days of `$SPXTR`, the same bar twice); no (asset, day) is repeated inside
+a partition and the archive ends on 1989-12-29, so nothing a stage reads
+(from 1990) is repeated.
+
+*The log compressed (E-169).* A log segment is written with the Arrow
+IPC format's zstd body compression. On the real 6J the log goes from
+1,350 MB to 374 MB and the store from 1,865 MB to 890 MB, with the same
+versions, an ingest of 73 s where it took 80 and the same 5.0 GB peak.
+
+*The hot store after a restart (E-137, E-172, E-173).* The two stores
+staged this day were the first real ones opened again after their
+appends, and three faults of the append path showed, none of which the
+fixtures reach. A seal record named its instrument by an ordinal that a
+later instrument moves (E-137): a service restarted on the futures store
+refused its own journal. The presences of earlier generations were never
+removed (E-172): 3.8 GB of 4.5 in the futures store's hot directory at
+15 roots, and the staging stopped on its disk guard at 23. And an
+instrument that receives no more rows keeps its tail, so every open
+replays the log from where that instrument stopped (E-173): the equity
+store took 21.5 s and 2.5 GB to serve. A staging now ends by folding the
+tails (`abt data consolidate RELATION --tails`). The equity service on
+the pipeline machine: 55 s and 6.2 GB to serve before the three, 0.2 to
+0.5 s and 1.03 GB after. MW14 on the benchmark machine, the same store
+before and after its fold: the service ready in 32.6 s, then 9.0 s; its
+CPU over the run 92.0 s, then 42.4 s; the run 71.9 s, then 69.0 s.
+
+*The data service's memory in a run (E-174).* After the fold the service
+still peaked at 8.2 GB in a MW14 run whose kernel holds 1.15 GB. It was
+the aggregate pass: it read a relation whole and held its rows several
+times while it reduced them, and a run asks four passes at once. The
+pass over a hot relation now reads a batch of instruments at a time: the
+peak is 4.74 GB, the service's CPU 37.5 s, the run 65.0 s, the returns
+the same bytes. What it does not reach: one instrument with millions of
+rows (a futures root's minute bars), and the answers that are not passes.
+A run's checks ask for whole relations (`equity.close`, 30 million rows,
+6.6 s), and a stream of the whole equity store held the service at 6 to
+10.6 GB on the pipeline machine with the batched pass in. That is the
+roadmap's package 7 (c).
+
+*R8L's store, and R8L on it.* The 26 roots from Databento's minute bars
+(`scripts/r8l-store.sh`): 96,308,743 bars a relation from 2010-06-07 to
+the session of 2026-11-25 (KC and SB from 2018-12-23), 19 GB, opened in
+0.9 s. **The book does not run on it, and no number of this run is the
+book's.** The store's sessions are the pipeline's, the electronic day
+ended at the 17:45 New York break. The book's are each root's primary
+session (`d20-research`, `d20research/data/sessions.py`: 08:30 to 15:00
+Chicago for the equity indices, 07:20 to 14:00 for the treasuries and
+the yen, 08:30 to 13:20 for the grains since April 2012), which is what
+the parity bundle was built from (`docs/parity-r8l.md`). `r8l.dsl`
+decides at `session + 30min`: on this store that is half an hour after
+the evening open, held to the next afternoon's close. The run halted on
+2014-06-24, its $1M base lost, after 470 s, with the kernel at 15.2 GB
+and the service at 11.3 GB. A halted run prints no clock, so the 15.2 GB
+is not attributed; the synthetic record above (32.9 s, 0.60 GB) did not
+predict it. What R8L needs before it is measured on real history: the
+Databento adapter told each root's session window (bars outside it are
+not the book's), a store staged with them, and room for it (the pipeline
+machine has 9 GB free beside this store). The same run cut at
+`--end 2014-06-01` was killed at 22.3 GB: a run reads its stream to the
+store's last row whatever its window, and nothing after the window is
+trimmed.
+
+*The pipeline's agents on this engine.* The pipeline's own runner
+(`agents-harness/direct/run_direct.py`, unmodified, its side-run mode:
+nothing posted to the team) with the real quant agent, on the two stores
+above served by this tree's binaries beside production's, four posts:
+
+| Post | Result | Time | Spend |
+| --- | --- | --- | --- |
+| NQ, an IBS rule | done, a full backtest: the check, the plan (sanity, base, grid, reveal), the report, the submission | 1,269 s | $0.41 |
+| ES, Double Seven | failed its translation check: the program states $7.50 a round turn and the fills pay $4.594 | 672 s | $0.28 |
+| S&P 500 mean reversion (twice) | the first time the check passed and two trades reconciled to the cent, then the study died with a test service I had capped at 8 GB; the second time both check runs were killed at `abt-slot`'s 14 GB | 730 s, 633 s | $0.28 each |
+
+Three things they met, none of them new with this tree:
+
+- *Every agent's first plan is refused.* The skill's example writes two
+  steps on one line with nothing between them
+  (`abt-plans-and-claims/SKILL.md:94`), the parser reads one step that
+  observes `size report main`, and each agent spent a call finding out.
+  The deployed engine parses the same. The refusal now says where a step
+  ends; the skill's line is the pipeline's to change.
+- *The commission.* The catalog's rate is charged before the program's
+  (E-71), and this store states each root's (R8L reads `per_contract from
+  catalog`), so a `futures_house` program that writes 3.75 a side pays
+  2.297. E-96 left the precedence to the owner. One store cannot serve
+  both until it is settled.
+- *A check run holds the store's whole history.* The second equity
+  failure, repeated by hand: the agent's program over its six-month
+  window, one ticker, took 121.6 s and 11.6 GB in the kernel (23.5 GB
+  with every name), of which the decisions were 1.9 s. The stream carried
+  256.8 million tuples from 1990 to the store's last day. A plan's kernel
+  trims nothing (the roadmap's package 7 (a)), a stream has no lower
+  bound (7 (b)), and before a run's window opens nothing is trimmed even
+  by `abt run`. The deployed engine trims nowhere: 23 of the 134 jobs in
+  production's own job directory met the same kill. The skill teaches a
+  parameter for a one-instrument check (`only`), which scopes nothing.
+  The same program with `need instruments where ticker = "AAPL"` in its
+  data block (E-99 scopes the stream by it) took 9.2 s and 0.09 GB: the
+  same 5 decisions, 5 fills and $9,568.33, over 132 bars where the
+  unscoped run counts 135 (three days on which only other instruments
+  have a bar), so its per-period metrics differ in the third digit.
+
+### The panel
+
+(This first record was made before the rule above: three of its four
+stores were synthetic. `scripts/panel.sh` now runs two groups, each on
+real history: R8L on its 26 roots from Databento and the corpus's daily
+strategies on the S&P 500 lake.)
+
+The owner's instruction of Nov 26: a change made for one book is measured
+on every program. `scripts/panel.sh NAME TREE` runs each program but MW14
+once, cold, on a fresh copy of its store with a data service of its own,
+over the store's whole history, and writes one line a run: seconds, peak
+memory, decisions, fills and the SHA-256 of the returns. The stores:
+`r8l` on the synthetic minute futures market above; `opening_gap` and
+`resampled_momentum` on a synthetic minute equity market (20 names, 250
+days); the daily strategies written for a small market on a synthetic
+daily market from 1990; the six strategies that need the list `SPX` on
+the S&P 500 lake staged from 1990, every member.
+
+The base tree (`3be3ba4`), the cells that finished:
+
+| Program | Store | Run | Peak | Returns |
+| --- | --- | --- | --- | --- |
+| `r8l` | futures, minute | 393.8 s | 5.65 GB | |
+| `opening_gap` | equity, minute | 1.3 s | | `806d34321af46911` |
+| `monthly_rebalance` | equity, daily | 1.8 s | | `e76d74745ff99a24` |
+| `pairs_trading` | equity, daily | 4.3 s | 0.07 GB | `de43af1eb64fb0f3` |
+| `dividend_capture` | S&P 500 lake | 72.9 s | 1.50 GB | |
+
+Most of the small daily strategies halt on the 100-name synthetic market
+(a risk policy refuses the book's first orders), and `resampled_momentum`
+halts on a margin call: a halted run measures nothing. The daily market is
+staged again with the five names those strategies were written for. The
+current tree's column and the rest of the base column are not measured
+yet.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

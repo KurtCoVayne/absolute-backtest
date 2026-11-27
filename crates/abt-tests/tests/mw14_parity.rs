@@ -379,3 +379,139 @@ fn eligible_holds_the_names_above_the_floors_that_are_members_at_their_own_last_
     assert_eq!(decisions(&r, i64::MIN), decisions(&trimmed, i64::MIN));
     assert_eq!(fills(&r, i64::MIN), fills(&trimmed, i64::MIN));
 }
+
+/// The names of `rel` at `t`.
+fn names_at(k: &mut Kernel, rel: &str, t: i64) -> BTreeSet<String> {
+    k.query(rel, t, &[])
+        .unwrap()
+        .iter()
+        .filter_map(|tu| tu.iter().find(|v| matches!(v, Value::Equity(_))).map(|v| k.show(v)))
+        .collect()
+}
+
+/// `name` prints for the last time at `last` and is delisted from the next
+/// trading day on, a row a day, as the Norgate adapter writes it (its bars,
+/// its listing, its membership and its classification stop).
+fn delist_after(ds: &mut Dataset, name: &str, last: i64, days: &BTreeSet<i64>) {
+    let s = ds.intern(name);
+    let reason = ds.intern_label("acquisition");
+    let after = |tu: &abt_kernel::kernel::Tuple| tu[0] == Value::Equity(s) && tu[1].as_time().is_some_and(|t| t > last);
+    for (rel, tuples) in ds.facts.iter_mut() {
+        if matches!(rel.as_str(), "open" | "high" | "low" | "close" | "volume" | "listed" | "member" | "classification") {
+            tuples.retain(|tu| !after(tu));
+        }
+    }
+    for &t in days.range(last + 1..) {
+        ds.add("delisted", vec![Value::Equity(s), Value::Time(t), Value::Label(reason)]);
+    }
+}
+
+/// The book's delisting (engine_weighted.py, `simulate_weighted`: "drop
+/// names with no row this week (delist) at zero cost"): a name trades
+/// normally at its last row, the week whose bucket holds its last print,
+/// and leaves the book at no cost the week after. X, held and in the target,
+/// prints for the last time on the Wednesday of its week and Y, not held, is
+/// bought in its last week, which also ends on a Wednesday; each is delisted
+/// from the Thursday. The executor applied the delisting at the bar of the
+/// week holding the delisting session: X was closed there, before the
+/// week's decisions, and bought back at the same close at 1/N; Y was not
+/// held when the delisting came and was bought after it, so the delisting
+/// was never applied. Neither could be sold again, and each week's exit
+/// expired (the Nov 25 residual: 105 names, 83,830 expired orders).
+#[test]
+fn a_name_trades_at_its_last_row_and_leaves_the_book_at_no_cost_at_the_next_week() {
+    let p = mw14();
+    let base = market(&p);
+    let cfg = ExecConfig::from_program(&p);
+    let (r0, mut k0) = common::run_kernel(&p, &base, cfg.clone()).unwrap();
+    let bars = r0.bars.clone();
+    let days: BTreeSet<i64> = base.facts["close"].iter().filter_map(|tu| tu[1].as_time()).collect();
+    // The names with an action of their own (a dividend, a split and a
+    // rename, the synthetic delisting) are left alone.
+    let plain = |s: &String| !["E1", "E2", "E40"].contains(&s.as_str());
+    let wednesday = |i: usize| *days.range(bars[i - 1] + 1..=bars[i]).nth(2).unwrap();
+    let (mut held_in, mut bought_in) = (Vec::new(), Vec::new());
+    for i in 60..bars.len() - 4 {
+        let (before, target) = (names_at(&mut k0, "held", bars[i - 1]), names_at(&mut k0, "target", bars[i]));
+        held_in.extend(before.intersection(&target).filter(|s| plain(s)).map(|s| (s.clone(), i)));
+        bought_in.extend(target.difference(&before).filter(|s| plain(s)).map(|s| (s.clone(), i)));
+    }
+    let mut checked = false;
+    for ((x, i), (y, j)) in held_in.iter().step_by(7).zip(bought_in.iter().step_by(5)).take(12) {
+        let (i, j) = (*i, *j);
+        if x == y {
+            continue;
+        }
+        let mut ds = base.clone();
+        delist_after(&mut ds, x, wednesday(i), &days);
+        delist_after(&mut ds, y, wednesday(j), &days);
+        let (r, mut k) = common::run_kernel(&p, &ds, cfg.clone()).unwrap();
+        let of = |s: Sym, name: &str| r.symbols[s as usize] == name;
+        // The cut moved the week's closes: the cases hold on this market.
+        let bought = |name: &str, t: i64| r.fills.iter().any(|f| of(f.equity, name) && f.t == t && f.quantity > 0.0 && !f.forced);
+        if !(names_at(&mut k, "held", bars[i - 1]).contains(x) && names_at(&mut k, "target", bars[i]).contains(x)) {
+            continue;
+        }
+        if names_at(&mut k, "held", bars[j - 1]).contains(y) || !bought(y, bars[j]) {
+            continue;
+        }
+        for (name, w, case) in [(x, i, "held"), (y, j, "bought")] {
+            let at = |t: i64| format_timestamp(t);
+            let forced: Vec<_> = r.fills.iter().filter(|f| of(f.equity, name) && f.forced).collect();
+            let delisted: Vec<i64> = r.actions.iter().filter(|a| of(a.equity, name)).map(|a| a.t).collect();
+            let story: Vec<String> = r
+                .events
+                .iter()
+                .filter(|e| e.instrument.is_some_and(|s| of(s, name)) && e.t >= bars[w - 1] && e.t <= bars[w + 2])
+                .map(|e| format!("{} {:?}", at(e.t), e.kind))
+                .collect();
+            if case == "held" {
+                assert!(
+                    names_at(&mut k, "held", bars[w]).contains(name),
+                    "{} ({}): held at its last week {}, its last print {}: {:#?}",
+                    name,
+                    case,
+                    at(bars[w]),
+                    at(wednesday(w)),
+                    story
+                );
+            }
+            assert_eq!(delisted, vec![bars[w + 1]], "{} ({}): delisted the week after its last, {}: {:#?}", name, case, at(bars[w + 1]), story);
+            assert_eq!(forced.len(), 1, "{} ({}): {:#?}", name, case, story);
+            // Its price at its last week: its mark there, or the close it was bought at.
+            let last = r
+                .holdings
+                .iter()
+                .find(|h| of(h.instrument, name) && h.t == bars[w])
+                .and_then(|h| h.mark)
+                .or_else(|| r.fills.iter().find(|f| of(f.equity, name) && f.t == bars[w]).map(|f| f.price));
+            assert_eq!(forced[0].t, bars[w + 1], "{} ({}): {:#?}", name, case, story);
+            assert_eq!(Some(forced[0].price.to_bits()), last.map(f64::to_bits), "{} ({}): at its last price", name, case);
+            assert_eq!(forced[0].commission, 0.0, "{} ({}): at no cost", name, case);
+            assert!(
+                r.decisions.iter().all(|d| !of(d.decision.equity, name) || d.t <= bars[w]),
+                "{} ({}): nothing decided on it after its last week: {:#?}",
+                name,
+                case,
+                story
+            );
+            assert!(
+                r.holdings.iter().all(|h| !of(h.instrument, name) || h.t <= bars[w]),
+                "{} ({}): not held after its last week",
+                name,
+                case
+            );
+            assert!(
+                !r.events
+                    .iter()
+                    .any(|e| e.instrument.is_some_and(|s| of(s, name)) && matches!(e.kind, abt_kernel::kernel::EventKind::ExpiredOrder { .. })),
+                "{} ({}): no exit waits for a print that never comes",
+                name,
+                case
+            );
+        }
+        checked = true;
+        break;
+    }
+    assert!(checked, "no held name in the target and no entering name on this market: the test proves nothing");
+}

@@ -1,0 +1,16 @@
+# proposition: E-169 (a log segment is written with the Arrow IPC format's zstd body compression)
+# mutation: the segment is written without it, as before the erratum
+# test: cargo test -p abt-data --test store a_log_segment_is_compressed_and_an_uncompressed_one_still_reads
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store.rs b/crates/abt-data/src/store.rs
+--- a/crates/abt-data/src/store.rs
++++ b/crates/abt-data/src/store.rs
+@@ -681,7 +681,7 @@
+             // (ERRATA E-169): each batch's message names its codec, so a
+             // reader is told nothing and an uncompressed segment of an
+             // earlier store reads as it did.
+-            let options = IpcWriteOptions::default().try_with_compression(Some(CompressionType::ZSTD))?;
++            let options = IpcWriteOptions::default().try_with_compression(None)?;
+             let mut w = StreamWriter::try_new_with_options(std::io::BufWriter::new(f), schema, options)?;
+             w.write(rows)?;
+             w.finish()?;

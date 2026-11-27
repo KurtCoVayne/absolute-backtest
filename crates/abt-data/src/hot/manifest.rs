@@ -111,6 +111,12 @@ pub struct HotManifest {
     /// journal of generation `g` into the base and opens `g + 1`.
     #[serde(default)]
     pub generation: u64,
+    /// The instruments a consolidation gave base rows since the version
+    /// was built, in id order (ERRATA E-173): their ladder is the build's,
+    /// over the rows they had then, so a later version rebuilds them from
+    /// their rows where it would copy a kept instrument's bars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded: Vec<u64>,
     pub buckets: Vec<Bucket>,
     pub revisions: Vec<Revision>,
     pub attributes: BTreeMap<String, String>,

@@ -487,6 +487,17 @@ fn step(line: &str) -> Result<Step, String> {
             }
             if let Some(r) = tail.strip_prefix("observe ") {
                 observe = list(r);
+                // A relation's name is one word. Two steps on one line with
+                // nothing between them read as one step: the list ran to
+                // the line's end, and the run was refused at the kernel for
+                // a relation named `enter_sig report main` (a real agent's
+                // study, Nov 26, 2026). Said here, where the line is.
+                if let Some(bad) = observe.iter().find(|o| o.split_whitespace().count() != 1) {
+                    return Err(format!(
+                        "`{}`: `{}` is not a relation's name: `observe` takes names separated by commas, and a step ends at `;` or a new line",
+                        line, bad
+                    ));
+                }
                 tail = "";
             }
             if !tail.is_empty() {

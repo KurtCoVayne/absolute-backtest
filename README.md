@@ -582,7 +582,10 @@ supersedes it; a capped `trade`'s remainder expires. Corporate actions act
 on the book at the bar's open, before the mark: a split multiplies the
 position at its ex-date, a dividend's receivable is recorded at the ex-date
 and paid at the pay date, a delisted name is force-closed at its last trade
-less the haircut for the reason. The NAV is cash, the marked positions and
+less the haircut for the reason, at the bar of the delisting date or, on a
+calendar coarser than the base, at the first bar whose bucket holds no
+print of it: the bar that holds its last print is its last, and it trades
+there like any other name (ERRATA E-161). The NAV is cash, the marked positions and
 the receivables. Every change to the book is an event of the run's log
 (`RunResult.events`: decisions, orders with their ids, fills, drops,
 replacements, expiries, actions, funding, margin calls, each with the cash

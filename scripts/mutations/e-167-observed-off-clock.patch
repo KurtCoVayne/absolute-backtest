@@ -1,0 +1,16 @@
+# proposition: E-167 (under a session-offset clock an observed relation on the decision calendar is listed at an instrument's decision bar, for that instrument, and at no other bar)
+# mutation: the observation reads the relation at every bar of the decision calendar, for every instrument
+# test: cargo test -p abt-tests --test outputs an_observation_under_a_session_clock_lists_an_instrument_at_its_decision_bar
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/outputs.rs b/crates/abt-kernel/src/kernel/outputs.rs
+--- a/crates/abt-kernel/src/kernel/outputs.rs
++++ b/crates/abt-kernel/src/kernel/outputs.rs
+@@ -802,7 +802,7 @@
+ /// arguments is read at every bar some clock strikes at.
+ fn observed_at(k: &mut Kernel, rel: usize, info: &super::RelInfo, pattern: &mut [Option<Value>], b: i64, at_clock: bool) -> Result<(Vec<Tuple>, Vec<(Vec<Option<Value>>, String)>), RunError> {
+     pattern[info.key_pos] = Some(Value::Time(b));
+-    let clock = if at_clock { k.clock_syms_at(b) } else { None };
++    let clock: Option<Vec<Sym>> = None.filter(|_: &Vec<Sym>| at_clock);
+     let (mut live, stuck) = match (clock, info.entity_positions.first().copied()) {
+         (Some(syms), _) if syms.is_empty() => return Ok((Vec::new(), Vec::new())),
+         (Some(syms), Some(epos)) => {

@@ -553,7 +553,8 @@ impl<'p, 'e> Fold<'p, 'e> {
         if self.kernel.cfg.start.map(|s| label < s).unwrap_or(false) || self.kernel.cfg.end.map(|e| label > e).unwrap_or(false) {
             return Ok(());
         }
-        let started = std::time::Instant::now();
+        let arrived = std::time::Instant::now();
+        let started = arrived;
         if self.decided_once {
             self.exec.fill(&mut self.kernel, label, &mut self.result)?;
         }
@@ -610,7 +611,7 @@ impl<'p, 'e> Fold<'p, 'e> {
         if let Some(acc) = &mut self.ledger_acc {
             let started = std::time::Instant::now();
             let prog = self.kernel.prog;
-            super::outputs::observe_bar(prog, &mut self.kernel, label, acc)?;
+            super::outputs::observe_bar(prog, &mut self.kernel, self.last_bar, label, acc)?;
             self.kernel.stats.observe_secs += started.elapsed().as_secs_f64();
         }
         self.recent.push_back(label);
@@ -628,6 +629,13 @@ impl<'p, 'e> Fold<'p, 'e> {
         self.last_scheduled = self.kernel.decides_at(label);
         self.ran_decision = true;
         self.bars_since_checkpoint += 1;
+        let spent = arrived.elapsed().as_secs_f32();
+        self.kernel.stats.barrier_secs.push(spent);
+        // A decision barrier: a bar of the schedule and, under a
+        // session-offset clock, one some instrument's clock strikes at.
+        if self.last_scheduled && self.kernel.clock_syms_at(label).is_none_or(|syms| !syms.is_empty()) {
+            self.kernel.stats.decision_barrier_secs.push(spent);
+        }
         if let Some(source) = self.control.as_ref().and_then(|c| c.halt_requested()) {
             self.result.emit(super::RunEvent::new(
                 label,

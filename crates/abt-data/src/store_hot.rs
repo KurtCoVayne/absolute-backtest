@@ -338,6 +338,20 @@ impl Store {
     /// layout published under the same version id, the tails rebuilt from
     /// the log. `None` when the relation has nothing sealed.
     pub fn consolidate(&mut self, relation: &str) -> Result<Option<(String, Consolidated)>, DataError> {
+        self.consolidate_as(relation, false)
+    }
+
+    /// `consolidate` with the tails folded too (ERRATA E-173): what a
+    /// staging ends with. The version then holds every row in its base
+    /// segments, and an open replays nothing of the log and holds no tail.
+    /// A row that arrives later inside a folded tail's span is a revision
+    /// (a version) where ST-8.5 would have inserted it, which is why an
+    /// append's own consolidation does not fold them.
+    pub fn consolidate_with_tails(&mut self, relation: &str) -> Result<Option<(String, Consolidated)>, DataError> {
+        self.consolidate_as(relation, true)
+    }
+
+    fn consolidate_as(&mut self, relation: &str, tails: bool) -> Result<Option<(String, Consolidated)>, DataError> {
         let version = self
             .registry
             .current(relation, None)
@@ -348,7 +362,19 @@ impl Store {
             return Err(DataError::Malformed(format!("`{}` is not held hot: nothing to consolidate (ST-8.7)", relation)));
         }
         let v = self.hot(&version)?;
-        let Some(done) = consolidate::consolidate(&self.root, &v)? else { return Ok(None) };
+        // A tail past a block's rows is sealed first (ERRATA E-137). An
+        // append seals the tails it fills; a store whose journal a restart
+        // cut holds tails of several blocks, and those of an instrument
+        // that receives no more rows would stay in memory for good.
+        {
+            let mut ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
+            for o in 0..ov.instruments.len() {
+                while ov.due(o) {
+                    ov.seal(o)?;
+                }
+            }
+        }
+        let Some(done) = consolidate::consolidate(&self.root, &v, tails)? else { return Ok(None) };
         // The store's manifest of the version: its partitions are the
         // folded layout's buckets now.
         let partitions: Vec<PartitionRef> = done
@@ -413,6 +439,19 @@ impl Store {
             journal_records: 0,
             generation: hm.generation,
         })
+    }
+
+    /// A hot version's instruments in id order, each with the rows it
+    /// holds, the base's and the appends': what a pass over the version
+    /// divides its reads by (`agg::batches`).
+    pub fn hot_instrument_rows(&self, version: &str) -> Result<Vec<(u64, u64)>, DataError> {
+        let v = self.hot(version)?;
+        let mut rows: BTreeMap<u64, u64> = v.presence().instruments.iter().map(|i| (i.id, i.rows)).collect();
+        let ov = v.overlay.lock().unwrap_or_else(|p| p.into_inner());
+        for i in &ov.instruments {
+            *rows.entry(i.id).or_default() += i.rows();
+        }
+        Ok(rows.into_iter().collect())
     }
 
     /// The figures of a hot version for `stats`: bytes of its segments,

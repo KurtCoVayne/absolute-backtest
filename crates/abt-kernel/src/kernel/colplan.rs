@@ -340,7 +340,14 @@ impl<'p> Kernel<'p> {
                         }
                     }
                 }
-                Literal::AsOf { atom, at, within_bucket, .. } if eslot.is_some() => self.compile_asof(cr, atom, at, within_bucket.as_ref(), &mut bound, eslot)?,
+                // A read of every key of the bucket (E-162) has no operator: the rules.
+                Literal::AsOf {
+                    atom,
+                    at,
+                    within_bucket,
+                    every: false,
+                    ..
+                } if eslot.is_some() => self.compile_asof(cr, atom, at, within_bucket.as_ref(), &mut bound, eslot)?,
                 // `not R(A, T, ..)` at the bar with the frame's entity, its
                 // other terms wildcards or constants.
                 Literal::Neg(atom) if eslot.is_some() => {
@@ -717,7 +724,13 @@ impl<'p> Kernel<'p> {
                 }
                 Some(Guard::Atom { rel: r, binds })
             }
-            Literal::AsOf { atom, at, within_bucket, .. } => match self.compile_asof(cr, atom, at, within_bucket.as_ref(), bound, Some(es))? {
+            Literal::AsOf {
+                atom,
+                at,
+                within_bucket,
+                every: false,
+                ..
+            } => match self.compile_asof(cr, atom, at, within_bucket.as_ref(), bound, Some(es))? {
                 ColOp::AsofStored { rel, at, within, epos, pat, binds } => Some(Guard::AsofStored { rel, at, within, epos, pat, binds }),
                 _ => None,
             },
@@ -784,7 +797,12 @@ impl<'p> Kernel<'p> {
         if bslot != key_slot || wslot != wp.wslot || bound[wslot] || !consts.is_empty() {
             return None;
         }
-        let [Literal::AsOf { atom, at, within_bucket, .. }] = wp.order.as_slice() else { return None };
+        // The window reads its action at each bar: the latest key of the
+        // bar's bucket, or every key of it (E-162, an action in a group on
+        // a coarser calendar), which the frame's walk alone reads (E-165).
+        let [Literal::AsOf { atom, at, within_bucket, every, .. }] = wp.order.as_slice() else {
+            return None;
+        };
         if var_slot(cr, at)? != wslot {
             return None;
         }
@@ -848,6 +866,7 @@ impl<'p> Kernel<'p> {
             within: within_bucket.clone(),
             pat,
             binds,
+            every: *every,
             args: cargs,
             late,
         })
@@ -1149,7 +1168,13 @@ impl<'p> Kernel<'p> {
                     f.cols[op.out] = Some(FCol::Col(Col::of_values(values.into_iter().flatten().collect())));
                 }
                 ColOp::WindowAgg(op) => {
-                    let values = self.run_window_agg(rp.ri, op, &f.ids, &f.cols, t, calls)?;
+                    // The frame's walk of the relation; where it declines,
+                    // each entity's cache, which reads the latest key only.
+                    let values = match self.run_window_frame(rp.ri, op, &f.ids, &f.cols, calls) {
+                        Some(v) => v,
+                        None if !op.every => self.run_window_agg(rp.ri, op, &f.ids, &f.cols, t, calls)?,
+                        None => return None,
+                    };
                     let keep: Vec<u32> = values.iter().enumerate().filter(|(_, v)| v.is_some()).map(|(i, _)| i as u32).collect();
                     f.keep(&keep);
                     f.cols[op.out] = Some(FCol::Col(Col::of_values(values.into_iter().flatten().collect())));
