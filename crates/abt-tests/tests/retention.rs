@@ -1,8 +1,10 @@
 //! The retention horizon (06-performance 3.1, `Kernel::trim_stores`): a run
 //! that drops the stored rows behind its lookback at every barrier decides,
 //! fills and holds what the run keeping every row does, on every corpus
-//! program and both books, alone and with the worker kernels; and it holds
-//! fewer rows wherever the market is longer than the lookback.
+//! program and both books, alone and with the worker kernels, under the set
+//! evaluator and the block evaluator (ERRATA E-150: no plan runs and no
+//! relation is read as columns behind the horizon); and it holds fewer rows
+//! wherever the market is longer than the lookback.
 
 #![allow(clippy::result_large_err)]
 
@@ -17,17 +19,22 @@ fn a_trimmed_run_equals_the_whole_run_on_every_corpus_program_and_both_books() {
     for path in golden_programs() {
         let (p, ds) = golden_inputs(&path).unwrap();
         let whole = run_kernel(&p, &ds, ExecConfig::from_program(&p)).map(|(r, k)| (tv::digest(&r), k.store_rows()));
-        for threads in [1, 4] {
+        for (threads, block) in [(1, false), (4, false), (1, true), (4, true)] {
             let mut cfg = ExecConfig::from_program(&p);
             cfg.trim_stores = true;
             cfg.threads = threads;
             cfg.parallel_min_rows = 1;
+            cfg.block_eval = block;
+            cfg.block_identity = block;
             let trimmed = run_kernel(&p, &ds, cfg).map(|(r, k)| (tv::digest(&r), k.store_rows(), k.stats().trimmed_rows));
             match (&whole, &trimmed) {
                 (Ok((d0, rows0)), Ok((d1, rows1, dropped))) => {
                     if d0 != d1 {
                         let (at, a, b) = tv::first_difference(d0, d1).unwrap_or((0, String::new(), String::new()));
-                        panic!("{} ({} thread(s)): the trimmed run differs at line {}:\n  whole:   {}\n  trimmed: {}", p.strategy, threads, at, a, b);
+                        panic!(
+                            "{} ({} thread(s), block {}): the trimmed run differs at line {}:\n  whole:   {}\n  trimmed: {}",
+                            p.strategy, threads, block, at, a, b
+                        );
                     }
                     assert!(rows1 <= rows0, "{}: trimmed holds {} rows, whole {}", p.strategy, rows1, rows0);
                     if *dropped > 0 {
@@ -49,7 +56,8 @@ fn a_trimmed_run_equals_the_whole_run_on_every_corpus_program_and_both_books() {
 /// bars are under the 71 the book looks back over, so the corpus gate never
 /// trims it): 120 names over six years, so that most names are first priced
 /// long after their first row (the total-return index is a recursion back
-/// to it, E-126); whole against trimmed, alone and on four workers.
+/// to it, E-126); whole against trimmed, alone and on four workers, under
+/// the set and the block evaluators.
 #[test]
 fn mw14_over_a_market_longer_than_its_horizon_is_trimmed_and_equal() {
     let names: Vec<String> = (0..120).map(|i| format!("S{:03}", i)).collect();
@@ -60,15 +68,22 @@ fn mw14_over_a_market_longer_than_its_horizon_is_trimmed_and_equal() {
     let (d0, rows0) = (tv::digest(&whole), k0.store_rows());
     assert!(whole.bars.len() > 200, "{} bars", whole.bars.len());
     assert!(whole.fills.len() > 100, "{} fills", whole.fills.len());
-    for threads in [1, 4] {
+    for (threads, block) in [(1, false), (4, false), (1, true), (4, true)] {
         let mut cfg = ExecConfig::from_program(&p);
         cfg.trim_stores = true;
         cfg.threads = threads;
+        cfg.block_eval = block;
         let (r, k) = run_kernel(&p, &ds, cfg).unwrap();
         let d1 = tv::digest(&r);
         if d0 != d1 {
             let (at, a, b) = tv::first_difference(&d0, &d1).unwrap_or((0, String::new(), String::new()));
-            panic!("mw14 ({} thread(s)): the trimmed run differs at line {}:\n  whole:   {}\n  trimmed: {}", threads, at, a, b);
+            panic!(
+                "mw14 ({} thread(s), block {}): the trimmed run differs at line {}:\n  whole:   {}\n  trimmed: {}",
+                threads, block, at, a, b
+            );
+        }
+        if block {
+            assert!(k.plan_counts().iter().any(|c| c.1 && c.2 > 0), "no plan ran: {:?}", k.plan_counts());
         }
         let dropped = k.stats().trimmed_rows;
         assert!(dropped > 0 && k.store_rows() < rows0, "nothing trimmed: {} dropped, {} of {} rows held", dropped, k.store_rows(), rows0);

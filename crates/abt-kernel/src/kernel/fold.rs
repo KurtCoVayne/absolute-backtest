@@ -377,6 +377,7 @@ impl<'p, 'e> Fold<'p, 'e> {
             kernel.literal_counts = cp.literal_counts;
         }
         kernel.memo.clear();
+        kernel.memo_cleared();
         kernel.asof_memo.clear();
         kernel.memo_errors.clear();
         kernel.domain_vecs.clear();

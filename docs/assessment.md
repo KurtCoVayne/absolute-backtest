@@ -608,6 +608,36 @@ tuple of the bucket; the executor applying a delisting at the first
 decision bar whose week has no print of the name, and expiring orders on
 a delisted name.
 
+**Package 3, the column-block evaluator's first operators (Nov 26): the
+parity run from 249 s to 180 s, the same returns.** Units S05, S06, S07,
+S09 and S10 of the evaluator's plan (E-150, E-151). `--evaluator block`:
+on a memo miss `Kernel::call` asks the relation's compiled plan
+(`kernel/colplan.rs`) to derive the whole cross-section at the bar as
+columns (`kernel/col.rs`, `ColBlock`, a `BlockMemo` inside the memo), and
+falls back to the rules where the plan declines (a partial operation, a
+read behind the horizon, a block that is not one row an entity). The
+operators: a scan, a join, a binding and a test over columns with one
+arithmetic shared with the row path (`kernel/cexpr.rs`); a pushed
+aggregate's answer; a rows window fed per entity from columns
+(`kernel/colops.rs`, over S05's per-entity window state, which is on by
+default for the row path too). Planned on MW14: `adj_close`,
+`close@weekly`, `dollar_volume@base`, `scored`, `stay`, `latched`,
+`extension`, `in_book`, `ma`, `clenow`. `eligible` is not: since E-160 its
+body holds an as-of read no operator plans yet.
+
+On the benchmark of package 1's store (no parity changes), before and
+after: `clenow` 34.8 s to 6.0, `ma` 15.7 to 2.2, `eligible` 13.1 to 2.2,
+the run 280 s to 206 s (a tree without package 2's first part). On the
+parity benchmark, on top of package 5's second part: 249 s to 180.2 s,
+`clenow` 9.1 s, `ma` 3.2, `eligible` 13.2 (row path); the fingerprint
+`6e72c9bb…` unchanged; the stored counters equal to the set evaluator's.
+What the parity run still derives row by row: `dvol` 39.7 and
+`traded@weekly` 15.7 (delivered by package 2's second part),
+`dividend_at` 16.9, `eligible` 13.2, `total_return` 5.7, `prev_row` 4.5,
+`tr_index` 4.4, `cum_split` 4.3, `split_factor` 3.8, `row_number` 3.7,
+`dividend_or_zero` 3.6, and `fill` 59.7 s (the executor's reads of
+`tr_index@weekly`): S11 to S14.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

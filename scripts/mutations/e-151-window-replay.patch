@@ -1,0 +1,16 @@
+# proposition: E-151 (a bar the window operator declines is derived by the rules meeting the outcomes of the window steps the operator already ran, not running them again, so its counts are the row path's)
+# mutation: the steps' outcomes are not kept, and the rules run each step a second time
+# test: cargo test -p abt-tests --test eval_set the_window_operator_feeds_what_the_row_path_feeds_under_every_asking_pattern
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -282,7 +282,7 @@
+             Ok(rows) if rows.len() <= 1 => Some(rows.first().and_then(|r| r[op.out].clone())),
+             _ => None,
+         };
+-        self.rows_replay.push((ri, op.li, env, outcome));
++        let _ = (env, outcome);
+         value
+     }
+ }

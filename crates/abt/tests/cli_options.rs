@@ -258,6 +258,8 @@ fn timing_prints_one_stderr_line_with_every_field() {
         "rss_at_first_barrier_mb",
         "peak_rss_at_first_barrier_mb",
         "prefetch_skipped",
+        "rows_walks",
+        "rows_walked_bars",
     ] {
         assert!(names.contains(&want), "timing lacks {}: {}", want, lines[0]);
     }

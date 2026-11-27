@@ -1,0 +1,16 @@
+# proposition: E-150 (a compiled expression's partial operation declines the bar to the row path, which raises or excludes the instance)
+# mutation: a division by zero over a column gives NaN instead of declining
+# test: cargo test -p abt-tests --test eval_set compiled_expressions_give_the_row_paths_values_and_halts
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/cexpr.rs b/crates/abt-kernel/src/kernel/cexpr.rs
+--- a/crates/abt-kernel/src/kernel/cexpr.rs
++++ b/crates/abt-kernel/src/kernel/cexpr.rs
+@@ -359,7 +359,7 @@
+                 };
+                 let mut out = Vec::with_capacity(n);
+                 for i in 0..n {
+-                    out.push(bin_num(*op, p.at(i), q.at(i)).ok()?);
++                    out.push(bin_num(*op, p.at(i), q.at(i)).unwrap_or(f64::NAN));
+                 }
+                 Cow::Owned(FCol::Col(Col::Num(out)))
+             }
