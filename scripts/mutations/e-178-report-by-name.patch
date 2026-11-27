@@ -1,0 +1,16 @@
+# proposition: E-178 (a report on `sessions of "ROOT"` has the days of the instrument carrying the root's ticker)
+# mutation: the report's days are those of the symbol of the root's name
+# test: cargo test -p abt-tests --test session_level sessions_of_a_root_are_those_of_the_instrument_carrying_its_ticker
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -1954,7 +1954,7 @@
+             // The root's instrument, as the kernel's calendar names it
+             // (`sessions_root`, ERRATA E-178); none when no instrument is it.
+             let root: Option<Option<Sym>> = match &cal {
+-                Cal::SessionsOf(r) => Some(sessions_root(&bound.securities, &bound.symbols, r, bound.bundle_date().unwrap_or(0))),
++                Cal::SessionsOf(r) => Some(bound.symbols.get(r)),
+                 _ => None,
+             };
+             let days: BTreeSet<i64> = bound

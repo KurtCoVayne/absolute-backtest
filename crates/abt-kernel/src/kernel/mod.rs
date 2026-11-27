@@ -334,6 +334,15 @@ pub struct Security {
     pub to: Option<i64>,
 }
 
+/// The instrument a `sessions of "ROOT"` calendar names (ERRATA E-178): the
+/// security carrying the root's ticker, as an instruments table resolves
+/// it (a vendor's continuous series is the symbol `ES.v.0` and carries
+/// `ES`), else the symbol of that name, for a binding with no security
+/// table.
+pub fn sessions_root(securities: &[Security], symbols: &Symbols, root: &str, as_of: i64) -> Option<Sym> {
+    resolve_ticker(securities, root, as_of).ok().or_else(|| symbols.get(root))
+}
+
 /// The security carrying `ticker` at `as_of`, in a table; when none does
 /// yet, the first to carry it after (E-117): a root of an instruments table
 /// that lists after a plan's in-sample end (ETH_N, from 2021, in a study
@@ -1942,14 +1951,16 @@ pub fn report_periods(prog: &Program, bound: &Bound, client: &DataClient) -> Res
     match &cal {
         Cal::Days => p.by_day = true,
         Cal::Sessions | Cal::SessionsOf(_) => {
-            let root = match &cal {
-                Cal::SessionsOf(r) => Some(r.clone()),
+            // The root's instrument, as the kernel's calendar names it
+            // (`sessions_root`, ERRATA E-178); none when no instrument is it.
+            let root: Option<Option<Sym>> = match &cal {
+                Cal::SessionsOf(r) => Some(sessions_root(&bound.securities, &bound.symbols, r, bound.bundle_date().unwrap_or(0))),
                 _ => None,
             };
             let days: BTreeSet<i64> = bound
                 .scan(client, "session", None)?
                 .iter()
-                .filter(|r| root.as_ref().is_none_or(|root| r.sym.is_some_and(|s| bound.symbols.name(s) == root)))
+                .filter(|r| root.is_none_or(|of| r.sym.is_some() && r.sym == of))
                 .map(|r| time::day_key(r.t) * time::DAY)
                 .collect();
             p.by_day = true;
@@ -3163,7 +3174,7 @@ impl<'p> Kernel<'p> {
                 Cal::Base => base_bars.clone(),
                 Cal::Sessions => sessions.values().flat_map(|v| v.iter().map(|(_, l)| *l)).collect(),
                 Cal::SessionsOf(root) => {
-                    let sym = symbols.get(root);
+                    let sym = sessions_root(&securities, &symbols, root, as_of.unwrap_or(0));
                     sym.and_then(|s| sessions.get(&s)).map(|v| v.iter().map(|(_, l)| *l).collect()).unwrap_or_default()
                 }
                 civil => {

@@ -165,11 +165,11 @@ Do steps 1 and 2 before package 2a. They say how a week must be keyed, which 2a 
 
 **Gate.** 21,892 of 21,892 legs; 3 s and 0.6 GB (A-7.3). TRACE row `A-7.3 R8L full replay` moves to done.
 
-**State on Nov 26.** R8L runs in full on real history: the 26 roots staged from Databento with each root's primary session (E-176, `scripts/r8l-store.sh`), to the session of 2026-11-25, in 449.6 s and 8.1 GB with a decision barrier at 5.0 ms (`benchmark.md`, "R8L's store"). The gate's count is the parity bundle's, TradeStation's bars from 2000; on Databento's from 2010 the run makes 94.8% of the book's legs over the days both cover, 99.92% of them in the same direction. Open, in the order of what they cost:
+**State on Nov 26.** R8L runs in full on real history: the 26 roots staged from Databento with each root's primary session (E-176, `scripts/r8l-store.sh`), to the session of 2026-11-25, in 439.0 s and 8.1 GB with a decision barrier at 4.9 ms, and its report on ES's sessions (E-178) gives a Sharpe of 1.310 (`benchmark.md`, "R8L's store"). The gate's count is the parity bundle's, TradeStation's bars from 2000; on Databento's from 2010 the run makes 94.8% of the book's legs over the days both cover, 99.92% of them in the same direction. Open, in the order of what they cost:
 
 1. **A list of labels per instrument in the aggregate request.** The pass walks one list for every instrument, and the sessions calendar's is every root's closes together, so the kernel reads the pass's session bars only for a root no other label cuts (E-177) and evaluates the others itself: about 70 s of R8L's 450 and 4 ms of its 5 ms decision barrier. A change to `abt-wire`, `abt-data` and `abt-agg`.
 2. **The memory.** The kernel peaks at 8.1 GB (3.6 GB at its first barrier) and the data service at 5.5 GB, against the gate's 0.6 GB. The design's path above (the session features pushed, the fills as point queries) is not built.
-3. **`sessions of "ROOT"` on a vendor store.** The calendar names an instrument by the symbol's name and the root's series there is `ROOT.v.0`, so R8L's report calendar is empty and its per-period metrics and `--returns` with it. The instruments table resolves the root by its ticker; the calendar should too.
+3. **Days with no ES session.** R8L's report counts ES's session days (`report { calendar es_days }`), as the book's scorecard does: $34,478 of the run's $3,554,094 falls on 14 days that have none in the store and is in no period of it.
 4. **The roots where the vendors differ.** KC and SB (80% of the book's legs), HE (84%), LE and PL (87%): holidays, early closes and missing minutes, not looked at one by one.
 
 ## Package 7: the pipeline

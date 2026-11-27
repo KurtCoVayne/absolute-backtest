@@ -5300,6 +5300,28 @@ batch driver agree on every corpus program. Each bless since:
   the run without pushdown exactly); falsified:
   `scripts/mutations/e-177-cut-session-read.patch`,
   `e-177-cut-session-delivered.patch`, `e-177-other-label-answer.patch`.
+- **E-178 (3.5, V-4.5, D-2.4, E-117; `sessions of "ROOT"` names the
+  instrument carrying the root's ticker).** A calendar `sessions of
+  "ES"` is the sessions of one instrument (3.5), and the kernel took
+  that instrument to be the symbol named `ES`: `Kernel::build` for the
+  calendar's labels, `report_periods` for the days of a report on it
+  (V-4.5). A symbol's name is the instrument's key in the store. The
+  parity bundle keys the root's series `ES`; the Databento adapter keys
+  it by the vendor's continuous symbol, `ES.v.0` (D-2.4), which carries
+  the ticker `ES`. An instruments table resolves `ES` by the ticker
+  (E-117), so on a vendor store R8L traded `ES.v.0` while its report
+  calendar, `es_days = sessions of "ES"`, had no label: the full run of
+  Nov 26, 2026 printed its metrics over 0 periods and wrote an empty
+  `--returns`. [D] Both read the root as the instruments table does
+  (`kernel::sessions_root`): the security carrying the ticker at the
+  bundle date, else the symbol of that name, which is all a binding
+  with no security table has. A decision clock on such a calendar had
+  no barrier on a vendor store either, and has them now.
+  `abt-tests/tests/session_level.rs::sessions_of_a_root_are_those_of_the_instrument_carrying_its_ticker`
+  (the adapter's two roots: a report on `sessions of "ES"` has ES's
+  twelve days, and a clock on it decides at ES's closes); falsified:
+  `scripts/mutations/e-178-calendar-by-name.patch`,
+  `e-178-report-by-name.patch`.
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
   (the sector), while the lake holds the four GICS levels of its snapshot.

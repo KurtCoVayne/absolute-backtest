@@ -304,9 +304,15 @@ fn every_answer_survives_a_kill_at_a_random_moment() {
         match exited {
             Some(st) => assert!(st.success(), "round {}: the child finished the script: {:?}", round, st),
             None => {
+                // The child can finish the script between the last look and
+                // the kill, and a kill of a process that has exited kills
+                // nothing: its status is then the script's, not a signal's.
                 child.kill().unwrap();
                 let st = child.wait().unwrap();
-                assert_eq!(std::os::unix::process::ExitStatusExt::signal(&st), Some(9), "round {}: killed", round);
+                match std::os::unix::process::ExitStatusExt::signal(&st) {
+                    Some(9) => {}
+                    signal => assert!(signal.is_none() && st.success(), "round {}: killed, or the script finished first: {:?}", round, st),
+                }
             }
         }
         recover_and_finish(&dir, &format!("kill after {} ms", wait_ms));

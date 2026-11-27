@@ -24,7 +24,7 @@ Three programs that share only a protocol:
 - **No commit, push, merge, or edit of a pull request or issue unless the owner asks.** The roadmap lists commits and a merge as steps; that is a list of work, not permission.
 - **Do not `git stash`.** This tree is a worktree, and the stash list it shares with the other engine trees already holds unfinished work. The `SmallVec` experiment of Nov 6 was measured and kept on Nov 25 (package 1, `docs/assessment.md`): `Tuple` is a `SmallVec` in the tree and the patch file is gone.
 - **Other AWS profiles** (`default`, `production`, `john-root`) are other accounts: never touch them. In `signos`, ask before stopping `hermes-prod` or `absolute-pipeline`.
-- **A deviation from the spec gets an erratum.** E-138 to E-177 are written or held by open branches (E-140 and E-143 are unused); the next free number is E-178. Update `docs/spec/TRACE.md` in the same change.
+- **A deviation from the spec gets an erratum.** E-138 to E-178 are written or held by open branches (E-140 and E-143 are unused); the next free number is E-179. Update `docs/spec/TRACE.md` in the same change.
 
 ## Cadence
 

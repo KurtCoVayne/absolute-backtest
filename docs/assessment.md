@@ -965,9 +965,9 @@ minute bars to the session of 2026-11-25, 3.0 GB where the whole-day
 store is 19 GB (120.2 of the 252.8 million bars read lie outside the
 windows; `gc` after each root evicts the versions its ingest
 superseded, which were 10 GB of the 19), in 29 minutes. `r8l.dsl` runs
-on it to the end: 449.6 s, 16,347 legs, the kernel at 8.1 GB and the
+on it to the end: 439.0 s, 16,347 legs, the kernel at 8.1 GB and the
 service at 5.5 GB, a barrier 0.13 ms on average and a decision barrier
-5.0 ms (p99 12.7 ms, max 19.8 ms).
+4.9 ms (p99 12.6 ms, max 19.0 ms).
 
 The first run on that store was wrong, and found the engine fault of
 E-177. Its legs were 87.6% of the book's with 5,001 the book does not
@@ -994,8 +994,14 @@ book's fixed base the book returns 22.07% a year at a Sharpe of 1.347
 with a 19.2% drawdown, and abt 21.33% at 1.329 with 17.7%; the daily
 series correlate 0.965. KC and SB (80% of the book's legs), HE (84%), LE
 and PL (87%) are the roots where the two vendors' sessions differ most.
-The run's own report has no periods on a vendor store: `sessions of
-"ES"` looks for an instrument named `ES`, and the series is `ES.v.0`.
+The run's own report had no periods at first: `sessions of "ES"` looked
+for a symbol named `ES`, and a vendor store's series is `ES.v.0`
+(E-178, which names it by its ticker as an instruments table does). On
+ES's 4,231 sessions from 2010-06-07 it gives an additive annual return
+of 20.96%, a Sharpe of 1.310 and a drawdown of 22.97%. Its total P&L,
+$3,519,616, is 1% under the sum of the fills' cash flows ($3,554,094):
+a report on a calendar counts that calendar's days, and $34,478 falls
+on 14 days with no ES session in the store.
 
 *The store's `gc` on real data.* On a copy of the folded MW14 store,
 `abt data gc --disk-budget 0` evicted 58 superseded versions in 9.2 s
@@ -1015,7 +1021,15 @@ executor runs `threads` steps at a time on them (4 by default,
 history. With `--threads 1` the same plan peaks at 4.1 GB and takes
 2:44 where it took about 1:45. The pipeline's tool passes `--kernels 1`
 alone (`agents-harness/agents_harness/local.py`), so a grid on a minute
-store needs `--threads 1` beside it there, or package 7 (a).
+store needs `--threads 1` beside it there, or package 7 (a). A third
+post on the build with E-177, with that flag added to its `plan run`
+by a wrapper beside the unmodified runner ($0.27), did not reach its
+plan: the agent wrote `commission per_contract 3.75`, the store states
+the book's 2.297 for NQ, and its translation check refused the
+difference (E-71 and E-96's open call, as on the ES post before). The
+stores staged here carry R8L's commissions, so an agent's house program
+cannot be checked on them until the precedence is settled or a store
+is staged without them.
 
 ### The panel
 

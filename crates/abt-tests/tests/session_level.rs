@@ -5,6 +5,9 @@
 //! and the session bars under `need bars @1d`, which the resolver binds
 //! because it prefers the coarsest version that satisfies a need.
 //!
+//! E-178: `sessions of "ES"` is the calendar of the instrument that carries
+//! the ticker, a vendor's continuous series, for the clock and the report.
+//!
 //! E-177: a session aggregate of the minutes is its instrument's own
 //! session beside an instrument whose session closes earlier, on either
 //! clock a futures program has, with the data layer's pass or without.
@@ -379,6 +382,42 @@ fn a_session_aggregate_is_its_instruments_own_session_beside_one_that_closes_ear
             assert!(pushed.stats.pushed_answers > 0, "{}: ZN's sessions are the pass's", name);
         }
     }
+}
+
+#[test]
+fn sessions_of_a_root_are_those_of_the_instrument_carrying_its_ticker() {
+    // The adapter's series of the root is the symbol `ES.v.0`, which carries
+    // the ticker `ES`: an instruments table names it by the ticker, and so
+    // does `sessions of "ES"`. A report on that calendar has ES's twelve
+    // days for its periods, each as its first instant.
+    let (reported, days) = run_two_closes(&range_program("wide_yesterday"), true);
+    assert_eq!(reported.periods.days.as_deref(), Some(&days[..]), "the report's days");
+    // And a clock on it decides at ES's closes: both roots bought at the
+    // first, 21:00 UTC, and held.
+    let src = "strategy at_es_close {
+  data { class future   need bars @1m from 2024-01-01   need sessions, point_value   require reviewed   prefer latest }
+  uses calendar, bars, book
+  calendars { es_days = sessions of \"ES\" }
+  clock { decide on es_days }
+  universe { universe(A, T) :- close@es_days(A, T, _). }
+  params { lot : Quantity<Contracts> = 1 contracts }
+  rules {
+    rel seen(A: Future, @T)
+    seen(A, T) :- universe(A, T).
+  }
+  decisions {
+    silence hold
+    orders  moo
+    decide(T, hold(A, lot)) :- seen(A, T), flat(A, T).
+  }
+  execution futures_house with { orders moo }
+  report { calendar es_days   periods 252 per year }
+}";
+    let (r, days) = run_two_closes(&common::program(src, "at_es_close"), true);
+    let at: Vec<i64> = r.decisions.iter().map(|d| d.t).collect();
+    assert!(!at.is_empty() && at.iter().all(|&t| t == days[0] + 1260 * MIN), "decided at {:?}", at);
+    let text: Vec<String> = r.decisions.iter().map(|d| r.describe_decision(&d.decision)).collect();
+    assert!(text.iter().any(|d| d.contains("ES")) && text.iter().any(|d| d.contains("ZN")), "{:?}", text);
 }
 
 #[test]
