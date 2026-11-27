@@ -648,3 +648,22 @@ fn hash_prints_the_program_hash_and_shows_what_it_hashed() {
     let bytes = text(&shown).0;
     assert_eq!(abt_wire::Hash::of(bytes.trim_end_matches('\n').as_bytes()).hex(), hash);
 }
+
+/// `abt --version` and `-V` print one line and nothing else, `abt VERSION
+/// (BUILD)`: the crate's version and the identity the build script gave the
+/// build (`scripts/build_id.rs`), which is never empty.
+#[test]
+fn version_prints_the_crates_version_and_the_builds_identity() {
+    for flag in ["--version", "-V"] {
+        let out = abt(&[flag]);
+        let (stdout, stderr) = text(&out);
+        assert_eq!(out.status.code(), Some(0), "{}: {}", flag, stderr);
+        assert_eq!(stderr, "", "{}", flag);
+        let id = stdout
+            .strip_prefix(concat!("abt ", env!("CARGO_PKG_VERSION"), " ("))
+            .and_then(|rest| rest.strip_suffix(")\n"))
+            .unwrap_or_else(|| panic!("{}: {:?}", flag, stdout));
+        assert!(!id.is_empty() && id.trim() == id && !id.contains('\n'), "{}: {:?}", flag, stdout);
+        assert_eq!(id, env!("ABT_BUILD"), "{}: the identity printed is the build's", flag);
+    }
+}
