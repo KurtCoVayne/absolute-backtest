@@ -24,12 +24,12 @@ fn an_indexed_lookup_equals_the_scan() {
         for _ in 0..2_000 {
             let key = (rng.next_u64() % 5) as i64;
             let sym = (rng.next_u64() % 50) as u32;
-            st.insert(key, vec![Value::Equity(sym), Value::Time(key), Value::Num(rng.uniform())]);
+            st.insert(key, vec![Value::Equity(sym), Value::Time(key), Value::Num(rng.uniform())].into());
         }
         for key in 0..6 {
             for sym in 0..55 {
                 let reference = scan(&st, key, 0, sym);
-                let mut got: Vec<Vec<Value>> = st.lookup(key, Some(&Value::Equity(sym))).to_vec();
+                let mut got: Vec<Vec<Value>> = st.lookup(key, Some(&Value::Equity(sym))).iter().map(|t| t.to_vec()).collect();
                 got.sort();
                 assert_eq!(got, reference, "round {} key {} sym {}", round, key, sym);
             }
@@ -39,7 +39,7 @@ fn an_indexed_lookup_equals_the_scan() {
     }
     // Unindexed: every lookup is the whole block.
     let mut plain = Store::default();
-    plain.insert(1, vec![Value::Time(1), Value::Num(1.0)]);
-    plain.insert(1, vec![Value::Time(1), Value::Num(2.0)]);
+    plain.insert(1, vec![Value::Time(1), Value::Num(1.0)].into());
+    plain.insert(1, vec![Value::Time(1), Value::Num(2.0)].into());
     assert_eq!(plain.lookup(1, Some(&Value::Equity(3))).len(), 2);
 }

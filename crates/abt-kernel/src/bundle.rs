@@ -205,7 +205,7 @@ pub fn write_bundle(prog: &Program, ds: &Dataset, dir: &Path, name: &str, versio
         let res = sig.native.unwrap_or(prog.base);
         let records = ds.availability_of(rel).is_some();
         let schema = Arc::new(schema_of(sig, records)?);
-        let mut by_month: BTreeMap<String, Vec<(usize, &Vec<Value>)>> = BTreeMap::new();
+        let mut by_month: BTreeMap<String, Vec<(usize, &crate::kernel::Tuple)>> = BTreeMap::new();
         for (i, tu) in tuples.iter().enumerate() {
             let t = tu[key_pos].as_time().ok_or_else(|| format!("`{}`: a tuple without a timestamp key", rel))?;
             by_month.entry(month_label(t)).or_default().push((i, tu));

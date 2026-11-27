@@ -34,7 +34,9 @@ pub use events::{Book, EventKind, OrderId, RunEvent};
 pub use fold::{Checkpoint, CheckpointEvery, Event, Fold};
 pub use value::{Ctor, Decision, Order, OrderKind, Sym, Symbols, Tif, Value};
 
-pub type Tuple = Vec<Value>;
+/// A relation's tuple: its values inline up to four (no allocation for
+/// nearly every tuple), on the heap beyond.
+pub type Tuple = smallvec::SmallVec<[Value; 4]>;
 /// Memo key: relation id, then the key time and the input values.
 pub(crate) type MemoKey = (usize, Vec<Value>);
 /// The key of an as-of walk's memo: the relation, the atom's bound terms
@@ -414,7 +416,7 @@ impl Dataset {
         let mut out = Vec::with_capacity(rows.len());
         for (sym, t, ticker) in rows {
             let label = self.labels.intern(&ticker);
-            out.push(vec![Value::Equity(sym), Value::Time(t), Value::Label(label)]);
+            out.push(smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(label)]);
         }
         self.facts.insert("ticker".to_string(), out);
     }
@@ -428,7 +430,10 @@ impl Dataset {
             _ => None,
         }
     }
-    pub fn add(&mut self, relation: &str, tuple: Tuple) {
+    /// Add a tuple, from a `Tuple` or from anything that converts into one
+    /// (a `Vec<Value>`, which is how the loaders and the tests build theirs).
+    pub fn add(&mut self, relation: &str, tuple: impl Into<Tuple>) {
+        let tuple: Tuple = tuple.into();
         let key = tuple.iter().find_map(|v| v.as_time());
         let n = self.facts.get(relation).map(|v| v.len()).unwrap_or(0);
         if let Some(avails) = self.available_at.get_mut(relation) {
@@ -441,7 +446,8 @@ impl Dataset {
     }
     /// Add a tuple available at `avail` (at or after its bar's close); the
     /// relation then records availability for every tuple.
-    pub fn add_available(&mut self, relation: &str, tuple: Tuple, avail: i64) {
+    pub fn add_available(&mut self, relation: &str, tuple: impl Into<Tuple>, avail: i64) {
+        let tuple: Tuple = tuple.into();
         if !self.available_at.contains_key(relation) {
             let existing: Vec<i64> = self
                 .facts
@@ -1956,7 +1962,7 @@ impl Store {
             for (_, block) in old {
                 dropped += block.len();
                 for tu in block.iter() {
-                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), tu.to_vec());
+                    latest.insert(identity.iter().map(|&i| tu[i].clone()).collect(), smallvec::SmallVec::from(tu));
                 }
             }
             let mut kept: Vec<Tuple> = latest.into_values().collect();
@@ -3074,7 +3080,7 @@ impl<'p> Kernel<'p> {
                 }
             }
             for (sym, b) in facts {
-                stores[cid].insert(b, vec![Value::Equity(sym), Value::Time(b)]);
+                stores[cid].insert(b, smallvec::smallvec![Value::Equity(sym), Value::Time(b)]);
             }
         }
         // A week of slack covers `prev` across weekends and holidays at any resolution.
@@ -4940,7 +4946,7 @@ mod store_tests {
     const IDENTITY: [usize; 1] = [0];
 
     fn tu(e: Sym, v: f64) -> Tuple {
-        vec![Value::Equity(e), Value::Time(KEY), Value::Num(v)]
+        smallvec::smallvec![Value::Equity(e), Value::Time(KEY), Value::Num(v)]
     }
 
     fn rows(s: &Store) -> Vec<(Sym, f64)> {
@@ -5002,6 +5008,23 @@ mod store_tests {
         assert_eq!(s.lookup(KEY, None).len(), 2);
         s.insert_received(KEY, tu(1, 21.0), &IDENTITY, 200);
         assert_eq!(rows(&s), vec![(0, 10.0), (1, 21.0)]);
+    }
+
+    /// A checkpoint keeps tuples (`Store::kept`) through serde. A tuple
+    /// with its values inline, and one grown onto the heap, are the bytes
+    /// the vector of the same values was, and read back from them: a
+    /// checkpoint written before K-7.1 restores after it.
+    #[test]
+    fn a_tuple_serialises_as_the_vector_of_its_values() {
+        let inline = tu(1, 2.5);
+        let mut spilled = tu(2, 3.5);
+        spilled.extend([Value::Num(4.5), Value::Count(6)]);
+        assert!(!inline.spilled() && spilled.spilled());
+        for t in [inline, spilled] {
+            let as_vector = serde_json::to_string(&t.to_vec()).unwrap();
+            assert_eq!(serde_json::to_string(&t).unwrap(), as_vector);
+            assert_eq!(serde_json::from_str::<Tuple>(&as_vector).unwrap(), t);
+        }
     }
 }
 

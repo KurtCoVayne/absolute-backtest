@@ -355,6 +355,125 @@ reading is right is measured, not argued: the benchmark of
 `docs/handoff/roadmap.md` package 1 records the data service's CPU time
 beside the front's wait.)
 
+**Package 1 (Nov 25): the benchmark is a script, and it reproduces Nov 6.**
+`scripts/bench-mw14.sh LAKE SPXTR VIX CANON N` stages its own store (keyed by
+a hash of the lake, the series and the code that writes a store), runs N
+cold repetitions, each on a fresh copy of that store with its own data
+service, compares each with the canon and prints one JSON line. On
+`m8-bench2` (`m8g.xlarge`, Rust 1.99.1), staging takes 20 minutes and a
+data service is serving 39 s after it starts (the store's open; not in the
+run's seconds below).
+
+| | Runs | Run s | Front CPU s | Front peak | Service CPU s | Decisions | Weekly correlation |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| The Nov 6 commit's binary (`2040b40`) on this store | 2 | 372.0, 372.3 | 279.4 | 3.51 GB | 139.7 | 6,455 | 0.977724 |
+| The merged head (`1b3bf73`) | 5 | 379.4 mean (373.5 to 383.3, s.d. 3.3) | 288.3 | 3.51 GB | 137.3 | 6,481 | 0.977595 |
+| The head with `Tuple` as a `SmallVec` | 4 | 302.3 mean (301.2 to 303.7) | 210.9 | 3.51 GB | 137.6 | 6,481 | 0.977595 |
+| The head with mimalloc (a trial, not in the tree) | 2 | 313.1, 318.2 | 222.1 | 4.42, 3.80 GB | 136.3 | 6,481 | 0.977595 |
+| `SmallVec` and mimalloc (a trial) | 2 | 270.5, 272.4 | 179.0 | 4.43, 3.80 GB | 132.8 | 6,481 | 0.977595 |
+
+The Nov 6 binary gives the Nov 6 record again: 372 s against 367 s (one
+run then), the same correlation of 0.9777. The head is 7 s slower (2%)
+and decides 26 times more. Between the two are package 0's fixes: E-130
+(an atom's slot map computed at each use, where the cache served one atom
+another's map) and E-132 (the as-of memo keyed by the whole pattern,
+which is what changes the decisions); the 7 s are not divided between
+them. Package 1's gate reads "five repetitions reproduce 367 s within 3%":
+the Nov 6 code does (+1.4%), and the head's mean is 3.4% over it because
+the head is no longer that code. Its five repetitions write the same 1,851 weekly returns to the last bit (one
+SHA-256 over them, `compare.abt_sha256` in the script's line). Against the
+canon: 464 weeks equal to 1e-4, 226 to 1e-9, 196 to 8e-15; CAGR 18.54%
+against 20.91%, Sharpe 0.962 against 1.020, maximum drawdown −25.90%
+against −26.18%.
+
+*Where the 379 s go* (the mean of the five; the run's clock now covers the
+whole run, `phases` under `ABT_TIMING_RELS=1`):
+
+| Before the stream | s | In the stream loop | s |
+| --- | ---: | --- | ---: |
+| `bind`: the resolver, then the binding's reads of the store | 55.3 | `decide`: derivations the decisions demand | 149.7 |
+| `check`: the preconditions | 37.4 | `fill`: derivations the executor demands (prices, marks) | 56.7 |
+| `push`: the pushed aggregate (`close@weekly`) | 7.5 | `evict`: the memo behind the horizon | 17.6 |
+| `open`: the subscription | 0.0 | `decode`: batches into tuples | 17.1 |
+| | | `insert`: tuples into the stores | 9.2 |
+| | | `trim`: stored rows behind the horizon | 8.9 |
+| | | `warm`: inputs derived before a parallel cut | 3.4 |
+| | | `wait`: blocked on the next batch | 0.9 |
+| | | in no phase | 15.6 |
+| **Total** | **100.2** | **Total** (`stream`) | **279.1** |
+
+Writing the outputs takes 0.2 s. This settles the question the Nov 24
+note left open, and neither reading was right. The "75 s waiting on the
+stream" of Nov 6 is not a wait on the stream: the front waits 0.9 s for
+batches in the whole run, so the data service is never what the fold is
+waiting for. It is 100 s *before the first tuple*: `bind_at` asks the data
+layer for the distinct times of every bound base relation and the distinct
+labels of every label column, each a pass over a relation of 13 to 16
+million rows, and the preconditions read `close`, `listed` and `member`
+whole into a row object apiece. Neither needs the rows: this is the
+cheapest quarter of the run to remove. The rest of the data path is the
+35 s that move rows (decode, insert, trim) and the 57 s of the three
+derivations that only bucket daily rows (`dvol` 31.5, `dollar_volume@base`
+14.0, `traded@weekly` 11.3): 192 s in all, against 187 s of evaluation
+proper.
+
+The stream delivers 61,508,345 tuples: `close`, `volume` and `listed`
+15,691,165 each, `member` 12,868,490, `delisted` 1,404,787, `dividend`
+145,460, `value` 11,624, `split` 4,489; 59,173,737 are dropped behind the
+horizon. No rule of the book names `listed`. Seconds per derived relation
+(194.7 of the 209.3 in derivations): `clenow` 40.1, `dvol` 31.5,
+`eligible` 17.5, `ma` 17.2, `dollar_volume@base` 14.0, `prev_row` 13.4,
+`dividend_at` 12.2, `traded@weekly` 11.3, `total_return` 6.9, `tr_index`
+4.4, `cum_split` 4.1, `split_factor` 3.5, `dividend_or_zero` 3.4,
+`row_number` 2.9, `adj_close` 2.9, `universe` 2.8, `stay` 2.4, `extension`
+2.2, `member@weekly` 1.9.
+
+*The profile* (`[profile.profiling]`, frame pointers, 299 Hz, one
+repetition under `perf` through the script's `WRAP`; it ran in 379.9 s,
+the release build's time). **The allocator is a third of the front's
+CPU**: `malloc` with what it calls 22.7%, `free` 9.1%, `realloc` 3.4%
+(`_int_malloc` alone 16.6%, with `unlink_chunk` and `malloc_consolidate`:
+glibc's slow paths). Nov 6 read 14%. After it: `solve_kleene_block` 2.8%
+of its own, `Block::push_env` 2.8%, a closure of `rows_columns` 2.7%,
+`Fold::step` 2.5%, `Value::clone` 2.2%, `Value::cmp` 1.8%, the collection
+of a domain's range in the as-of walk 1.8%. By callers: `Kernel::call`
+71.6%, the decisions 51.1%, the executor's prices 19.4% (all of it
+derivation behind `bar_price`), `rows_columns` 14.1%,
+`prefetch_bucket_window` 8.5%, `evict_memo` 6.0%, `Decoder::events` 5.9%,
+`trim_stores` 4.2%, the preconditions 3.7%.
+
+*The `SmallVec` experiment of Nov 6 is kept.* The handoff expected to drop
+it. Measured with the release binary against the same store, two runs of
+the patch on the head and two of the gated tree: 302.3 s against 379.4 s,
+77 s less (20%), the same returns to the last bit. The
+stream loop falls from 279 to 201 s: `decide` 150 to 118, `fill` 57 to
+44, `evict` 17.6 to 5.8, `decode` 17.1 to 9.6, `insert` 9.2 to 6.7, `trim`
+8.9 to 4.5; the front's CPU from 288 to 210 s. `bind` and `check` do not
+move (55 and 37 s): they build no tuples. A tuple of up
+to its inline length no longer allocates, which is where a third of the
+CPU was going.
+
+*The allocator, a trial.* With mimalloc as the `abt` binary's global
+allocator (a `#[global_allocator]` static in `crates/abt/src/main.rs`, the
+crate built from its C source; the change is in no branch of the
+repository):
+315.6 s alone, 271.5 s on top of the `SmallVec`, the same returns to the
+last bit in all four runs. It is 17% alone and 10% after the `SmallVec`
+has taken the tuples' share, and it costs memory: the front's peak goes
+from 3.51 GB to 3.80 GB in one repetition and 4.43 GB in the other of
+each pair. The note under the allocator table above (nothing is changed
+for Linux alone) stands until the owner decides: it is a new dependency, and
+of the two gates of package 3 (60 s and 1.5 GB) the memory one is the
+nearer. The share it removes also shrinks as packages 2 and 3 stop
+building a tuple per row.
+
+*The synthetic cell* (1,000 names, 2,520 days, `--history window`, no
+store; `docs/handoff/benchmark.md`): 96.9 and 96.5 s at the head, 3.86 GB
+peak, 25.2M tuples (Nov 5: 95.8 s); 88.1 and 87.9 s and 3.58 GB with the
+`SmallVec`; 87.9 and 87.3 s and 3.85 GB with mimalloc. The cell
+understates the book: 9% there for either change, 20% and 17% on the real
+run.
+
 **Scale stops at the Russell 1000 on a 16 GB machine.** Run time and memory
 are linear in the number of names. The limits are per-bar windowed
 aggregation (time) and ~1.8 KB per price row in the CSV ingest (memory).

@@ -1,6 +1,6 @@
 # absolute-backtest: the three-layer engine
 
-This tree is the newest code of `absolute-backtest` (`abt`), a backtesting engine in Rust. It is on branch `perf/m8-parallel`, the head of pull request #80 into `spec/three-layer-split`.
+This tree is the newest code of `absolute-backtest` (`abt`), a backtesting engine in Rust. Pull request #80 (`perf/m8-parallel`) was merged into `spec/three-layer-split` on Nov 25; each later package is a branch off it with a pull request of its own.
 
 **Read `docs/handoff/README.md` before anything else.** It gives the state of the project on Nov 24, 2026, the goal and the first steps. The rest of `docs/handoff/` holds the approach, the ledger of what is and is not built, the roadmap and the benchmark recipe.
 
@@ -22,7 +22,7 @@ Three programs that share only a protocol:
 - **Full history.** A book run or a benchmark uses the whole window and the whole universe. If that is too slow or too large, the engine gets fixed, not the run.
 - **`/Users/alejandro/absolute-backtest` is the owner's checkout.** Read it; change nothing in it.
 - **No commit, push, merge, or edit of a pull request or issue unless the owner asks.** The roadmap lists commits and a merge as steps; that is a list of work, not permission.
-- **Do not `git stash`.** This tree is a worktree, and the stash list it shares with the other engine trees already holds unfinished work. The `SmallVec` experiment of Nov 6 (16 files that make `Tuple` a `SmallVec`) was taken out of the tree on Nov 25 and is kept as `docs/handoff/smallvec-nov6.patch`; package 1 of `docs/handoff/roadmap.md` decides it.
+- **Do not `git stash`.** This tree is a worktree, and the stash list it shares with the other engine trees already holds unfinished work. The `SmallVec` experiment of Nov 6 was measured and kept on Nov 25 (package 1, `docs/assessment.md`): `Tuple` is a `SmallVec` in the tree and the patch file is gone.
 - **Other AWS profiles** (`default`, `production`, `john-root`) are other accounts: never touch them. In `signos`, ask before stopping `hermes-prod` or `absolute-pipeline`.
 - **A deviation from the spec gets an erratum.** The next free number is E-138. Update `docs/spec/TRACE.md` in the same change.
 

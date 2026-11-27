@@ -377,7 +377,7 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
         let vol = 0.01 + 0.004 * k;
         for (k, &t) in bars.iter().enumerate() {
             if i + 1 == n && n > 2 && k >= delist_bar {
-                ds.add("delisted", vec![Value::Equity(sym), Value::Time(t), Value::Label(bankrupt)]);
+                ds.add("delisted", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(bankrupt)]);
                 continue;
             }
             let spike = rng.uniform() < 0.03;
@@ -385,14 +385,14 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
             price *= (drift + shock + vol * rng.normal()).exp();
             if i == 1 && n > 1 && k == split_bar {
                 price /= 2.0;
-                ds.add("split", vec![Value::Equity(sym), Value::Time(t), Value::Num(2.0)]);
+                ds.add("split", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(2.0)]);
             }
             if i == 0 && k >= 10 && (k - 10) % 63 == 0 && k + 15 < days {
                 // Announced at k, ex at k + 10, paid at k + 25 (clamped to the data).
                 let amount = (price * 0.005 * 100.0).round() / 100.0;
                 ds.add(
                     "dividend",
-                    vec![
+                    smallvec::smallvec![
                         Value::Equity(sym),
                         Value::Time(t),
                         Value::Time(bars[k + 10]),
@@ -413,15 +413,18 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
             let h = c.max(o) * (1.0 + 0.004 * rng.uniform());
             let l = c.min(o) * (1.0 - 0.004 * rng.uniform());
             let volume = (1_000_000.0 * (0.3 * rng.normal()).exp() * if spike { 3.0 } else { 1.0 }).round();
-            ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
-            ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
-            ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
-            ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
-            ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
-            ds.add("listed", vec![Value::Equity(sym), Value::Time(t)]);
-            ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
-            ds.add("member", vec![Value::Equity(sym), Value::Time(t), Value::Label(sp500)]);
-            ds.add("classification", vec![Value::Equity(sym), Value::Time(t), Value::Label(scheme), Value::Label(sectors[i % 3])]);
+            ds.add("open", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+            ds.add("high", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+            ds.add("low", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+            ds.add("close", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+            ds.add("volume", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(volume)]);
+            ds.add("listed", smallvec::smallvec![Value::Equity(sym), Value::Time(t)]);
+            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(spx)]);
+            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(sp500)]);
+            ds.add(
+                "classification",
+                smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Label(scheme), Value::Label(sectors[i % 3])],
+            );
         }
     }
     // The series: a daily index level, and a weekly volatility index keyed
@@ -431,12 +434,12 @@ pub fn synthetic_daily(symbols: &[&str], start: (i64, u32, u32), days: usize, se
     let mut last_week: Option<i64> = None;
     for (k, &t) in bars.iter().enumerate() {
         level *= (0.0003 + 0.009 * rng.normal()).exp();
-        ds.add("value", vec![Value::Label(spxtr), Value::Time(t), Value::Num((level * 100.0).round() / 100.0)]);
+        ds.add("value", smallvec::smallvec![Value::Label(spxtr), Value::Time(t), Value::Num((level * 100.0).round() / 100.0)]);
         let wk = week_key(t);
         let ends_week = bars.get(k + 1).map(|&n| week_key(n) != wk).unwrap_or(true);
         if ends_week && last_week != Some(wk) {
             vix_level = (vix_level * (0.03 * rng.normal()).exp()).clamp(9.0, 80.0);
-            ds.add("value", vec![Value::Label(vix), Value::Time(t), Value::Num((vix_level * 100.0).round() / 100.0)]);
+            ds.add("value", smallvec::smallvec![Value::Label(vix), Value::Time(t), Value::Num((vix_level * 100.0).round() / 100.0)]);
             last_week = Some(wk);
         }
     }
@@ -464,8 +467,8 @@ pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, b
             // An overnight move, occasionally a sizeable gap.
             let gap = 0.01 * rng.normal() + if rng.uniform() < 0.1 { -0.03 } else { 0.0 };
             price *= (gap).exp();
-            ds.add("listed", vec![Value::Equity(sym), Value::Time(d)]);
-            ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(spx)]);
+            ds.add("listed", smallvec::smallvec![Value::Equity(sym), Value::Time(d)]);
+            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Label(spx)]);
             for b in 0..bars_per_day {
                 let t = d + 9 * time::HOUR + 31 * time::MIN + (b as i64) * time::MIN;
                 let o = (price * 100.0).round() / 100.0;
@@ -473,11 +476,14 @@ pub fn synthetic_minute(symbols: &[&str], start: (i64, u32, u32), days: usize, b
                 let c = (price * 100.0).round() / 100.0;
                 let h = c.max(o) * (1.0 + 0.0005 * rng.uniform());
                 let l = c.min(o) * (1.0 - 0.0005 * rng.uniform());
-                ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
-                ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
-                ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
-                ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
-                ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num((3000.0 * (0.3 * rng.normal()).exp()).round())]);
+                ds.add("open", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+                ds.add("high", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+                ds.add("low", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+                ds.add("close", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+                ds.add(
+                    "volume",
+                    smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((3000.0 * (0.3 * rng.normal()).exp()).round())],
+                );
             }
         }
     }
@@ -512,10 +518,10 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
             let open_t = d + 9 * time::HOUR + 30 * time::MIN;
             let gap = 0.004 * rng.normal();
             price += price.abs().max(1.0) * gap;
-            ds.add("point_value", vec![Value::Equity(sym), Value::Time(d), Value::Num(50.0 - 10.0 * (i % 4) as f64)]);
-            ds.add("commission", vec![Value::Equity(sym), Value::Time(d), Value::Num(2.0 + 0.5 * i as f64)]);
-            ds.add("usable", vec![Value::Equity(sym), Value::Time(d)]);
-            ds.add("member", vec![Value::Equity(sym), Value::Time(d), Value::Label(home)]);
+            ds.add("point_value", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Num(50.0 - 10.0 * (i % 4) as f64)]);
+            ds.add("commission", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Num(2.0 + 0.5 * i as f64)]);
+            ds.add("usable", smallvec::smallvec![Value::Equity(sym), Value::Time(d)]);
+            ds.add("member", smallvec::smallvec![Value::Equity(sym), Value::Time(d), Value::Label(home)]);
             let mut last = open_t;
             for b in 0..bars_per_session {
                 let t = open_t + time::MIN + (b as i64) * time::MIN;
@@ -524,14 +530,17 @@ pub fn synthetic_futures(roots: &[&str], start: (i64, u32, u32), days: usize, ba
                 let c = (price * 100.0).round() / 100.0;
                 let h = c.max(o) + 0.01 * rng.uniform();
                 let l = c.min(o) - 0.01 * rng.uniform();
-                ds.add("open", vec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
-                ds.add("high", vec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
-                ds.add("low", vec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
-                ds.add("close", vec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
-                ds.add("volume", vec![Value::Equity(sym), Value::Time(t), Value::Num((500.0 * (0.3 * rng.normal()).exp()).round())]);
+                ds.add("open", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(o)]);
+                ds.add("high", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((h * 100.0).round() / 100.0)]);
+                ds.add("low", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((l * 100.0).round() / 100.0)]);
+                ds.add("close", smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(c)]);
+                ds.add(
+                    "volume",
+                    smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num((500.0 * (0.3 * rng.normal()).exp()).round())],
+                );
                 last = t;
             }
-            ds.add("session", vec![Value::Equity(sym), Value::Time(last), Value::Time(open_t)]);
+            ds.add("session", smallvec::smallvec![Value::Equity(sym), Value::Time(last), Value::Time(open_t)]);
         }
     }
     ds

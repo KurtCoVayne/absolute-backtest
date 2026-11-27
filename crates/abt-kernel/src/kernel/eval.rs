@@ -467,7 +467,12 @@ impl<'p> Kernel<'p> {
         let matches = |tu: &[Value]| pattern.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
         if info.stored {
             let entity = info.entity_positions.first().and_then(|&e| pattern[e].as_ref());
-            let tuples: Vec<(Tuple, usize)> = self.store_lookup(rel, key, entity).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)).collect();
+            let tuples: Vec<(Tuple, usize)> = self
+                .store_lookup(rel, key, entity)
+                .iter()
+                .filter(|tu| matches(tu))
+                .map(|tu| (smallvec::SmallVec::from(tu), usize::MAX))
+                .collect();
             let cov = &mut self.coverage[rel];
             cov.0 += 1;
             cov.1 += usize::from(!tuples.is_empty());
@@ -720,7 +725,7 @@ impl<'p> Kernel<'p> {
             }
             for i in 0..sols.len() {
                 let sol = sols.row(i);
-                let mut tu = Vec::with_capacity(rule.head.terms.len());
+                let mut tu: Tuple = smallvec::SmallVec::with_capacity(rule.head.terms.len());
                 for term in &rule.head.terms {
                     tu.push(self.term_value(&cr, term, sol)?);
                 }
@@ -1163,7 +1168,7 @@ impl<'p> Kernel<'p> {
         let slots = Self::atom_slots(cr, atom);
         // The relation, whole at the bar.
         let tuples: Vec<Tuple> = if stored {
-            self.store_lookup(rel, key, None).iter().map(|tu| tu.to_vec()).collect()
+            self.store_lookup(rel, key, None).iter().map(smallvec::SmallVec::from).collect()
         } else {
             let mkey: super::MemoKey = (rel, vec![Value::Time(key)]);
             // A halt the whole demand meets is the row-at-a-time path's to
@@ -1262,7 +1267,12 @@ impl<'p> Kernel<'p> {
             let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
             let mut cur = t;
             while let Some(k) = self.stores[rel].by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
-                found.extend(self.store_lookup(rel, k, entity.as_ref()).iter().filter(|tu| matches(tu)).map(|tu| (tu.to_vec(), usize::MAX)));
+                found.extend(
+                    self.store_lookup(rel, k, entity.as_ref())
+                        .iter()
+                        .filter(|tu| matches(tu))
+                        .map(|tu| (smallvec::SmallVec::from(tu), usize::MAX)),
+                );
                 if !found.is_empty() || k == i64::MIN {
                     break;
                 }

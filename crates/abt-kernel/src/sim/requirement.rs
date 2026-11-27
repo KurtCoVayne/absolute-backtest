@@ -138,13 +138,16 @@ impl SimExecutor {
     /// warnings count: the bars `approx` priced, the models passed over.
     pub(super) fn write_requirement(&mut self, k: &mut Kernel, t: i64, initial: f64, maintenance: f64, margin: Option<&Margin>) {
         if let Some(&rel) = k.rel_ids.get("margin_req") {
-            k.stores[rel].insert(t, vec![Value::Time(t), Value::Num(initial), Value::Num(maintenance)]);
+            k.stores[rel].insert(t, smallvec::smallvec![Value::Time(t), Value::Num(initial), Value::Num(maintenance)]);
         }
         let Some(margin) = margin else { return };
         if let Some(&rel) = k.rel_ids.get("margin_by") {
             for r in &margin.rows {
                 let Some(source) = k.labels.get(r.source.name()).map(Value::Label) else { continue };
-                k.stores[rel].insert(t, vec![Value::Equity(r.instrument), Value::Time(t), Value::Num(r.initial), Value::Num(r.maintenance), source]);
+                k.stores[rel].insert(
+                    t,
+                    smallvec::smallvec![Value::Equity(r.instrument), Value::Time(t), Value::Num(r.initial), Value::Num(r.maintenance), source],
+                );
             }
         }
         if margin.approx_used {
@@ -222,7 +225,7 @@ impl SimExecutor {
                     let m = k.multiplier(sym);
                     result.costs.commissions += commission;
                     result.costs.turnover += qty.abs() * p * m;
-                    k.stores[fill_rel].insert(t, vec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
+                    k.stores[fill_rel].insert(t, smallvec::smallvec![Value::Equity(sym), Value::Time(t), Value::Num(qty), Value::Num(p)]);
                     let fill = FillRecord {
                         t,
                         equity: sym,

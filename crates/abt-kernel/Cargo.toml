@@ -20,4 +20,7 @@ abt-wire.workspace = true
 arrow.workspace = true
 parquet.workspace = true
 serde.workspace = true
+# A tuple's values inline (K-7.1: no allocation per tuple for the two to four
+# values nearly every relation has).
+smallvec = { version = "1", features = ["serde"] }
 serde_json.workspace = true
