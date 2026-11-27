@@ -1110,6 +1110,15 @@ changes. The agent's notes name one more thing of the pipeline's: its
 `plan_check` refused the forward plan the skill prescribes (`holdout
 after H` without a window, then with one).
 
+A sixth run on Nov 27, the NQ post alone, on the NQ store staged on the
+pipeline machine's disk from the pulls as repaired, to the session of
+Nov 26 ($0.60): a full backtest again, submitted, in 1,204 s and 34
+tool calls, nothing killed. Its agent read the fill ledger as it is (a
+`moc` fill shown at the next bar, at the close of the decision's own
+session) and reconciled two trades by hand against the store's bars
+before going on. Its notes name `plan_check` and the forward plan
+again. The runner's recorded spend stands at $76.68.
+
 ### The panel
 
 (This first record was made before the rule above: three of its four
