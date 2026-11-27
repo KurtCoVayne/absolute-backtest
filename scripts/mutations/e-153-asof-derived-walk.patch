@@ -1,0 +1,16 @@
+# proposition: E-153 (the block evaluator's as-of read of a derived relation with the entity bound walks the labels the row path's walk takes and stops where the entity has a tuple, found in the relation's columns where they are held)
+# mutation: the walk never finds the entity in the columns
+# test: cargo test -p abt-tests --test eval_set the_previous_row_over_columns_is_the_row_paths_across_holes_and_the_horizon
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
+--- a/crates/abt-kernel/src/kernel/colops.rs
++++ b/crates/abt-kernel/src/kernel/colops.rs
+@@ -329,7 +329,7 @@
+         }
+         let found = self.asof_walk(rel, cal, None, akey, first, floor, |k: &mut Self, at: i64| -> Result<bool, Decline> {
+             match k.cols_of(rel, at) {
+-                Some(b) => Ok(b.find(e).is_some()),
++                Some(_) => Ok(false),
+                 None => {
+                     pat[key_pos] = Some(Value::Time(at));
+                     Ok(!k.call(rel, &pat)?.is_empty())

@@ -5,7 +5,7 @@
 diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kernel/colops.rs
 --- a/crates/abt-kernel/src/kernel/colops.rs
 +++ b/crates/abt-kernel/src/kernel/colops.rs
-@@ -282,7 +282,7 @@
+@@ -426,7 +426,7 @@
              Ok(rows) if rows.len() <= 1 => Some(rows.first().and_then(|r| r[op.out].clone())),
              _ => None,
          };
@@ -13,4 +13,4 @@ diff --git a/crates/abt-kernel/src/kernel/colops.rs b/crates/abt-kernel/src/kern
 +        let _ = (env, outcome);
          value
      }
- }
+ 

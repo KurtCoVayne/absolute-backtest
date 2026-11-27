@@ -178,32 +178,32 @@ pub(crate) struct RowsPlan {
 pub(crate) struct AggPlan {
     /// The group's variables as slots, ascending: those of them a call
     /// leaves unbound are the keys the aggregation binds.
-    group: Vec<usize>,
-    window: Option<WindowPlan>,
+    pub(crate) group: Vec<usize>,
+    pub(crate) window: Option<WindowPlan>,
     /// The aggregate's function, parsed once: any but `count`, which is
     /// the rows' number, and `quantile`, whose level a row gives.
-    f: Option<Function>,
+    pub(crate) f: Option<Function>,
 }
 
 /// The static shape of a calendar window served from the per-bar cache.
 #[derive(Debug)]
 pub(crate) struct WindowPlan {
     /// The window literal's position in the conjunction.
-    window: usize,
-    wslot: usize,
+    pub(crate) window: usize,
+    pub(crate) wslot: usize,
     /// The literal as the cache's key names it (shared windows share it).
-    literal: usize,
+    pub(crate) literal: usize,
     /// The tests of the base time or of what only the call binds, applied
     /// to the cached rows at each call (`Ex = T`, `Ex > T1`), each with the
     /// slots the call must bind for it: what neither the base nor the
     /// cached rows give it, and an assignment's variable unless an atom
     /// binds it (the assignment would bind it).
-    late: Vec<(Literal, Vec<usize>)>,
+    pub(crate) late: Vec<(Literal, Vec<usize>)>,
     /// The outer bindings the cached conjunction reads, ascending: with the
     /// literal, a group of the cache.
-    outer: Vec<usize>,
+    pub(crate) outer: Vec<usize>,
     /// The cached conjunction, in its solve order.
-    order: Vec<Literal>,
+    pub(crate) order: Vec<Literal>,
 }
 
 /// A rows window served: its rows' count, and the aggregate over them
@@ -746,7 +746,7 @@ fn merge_join_rows<'t>(live: &Block, next: &mut Block, eslot: usize, entity_pos:
 
 /// The bar an as-of read of a derived relation probes first: the latest
 /// label of the relation's domain at or before `t`, no earlier than `floor`.
-fn asof_latest(dom: &BTreeSet<i64>, floor: i64, t: i64) -> Option<i64> {
+pub(crate) fn asof_latest(dom: &BTreeSet<i64>, floor: i64, t: i64) -> Option<i64> {
     dom.range(floor..=t).next_back().copied()
 }
 
@@ -1586,47 +1586,13 @@ impl<'p> Kernel<'p> {
         let rel = self.rel_ids.get(&atom.name).copied().ok_or_else(|| RunError::Internal(format!("unknown relation `{}`", atom.name)))?;
         let t = self.time_of(cr, at, env)?;
         let info = self.rels[rel].clone();
-        // A bar view of a finer relation (3.4): only a key within the bucket
-        // of the as-of bar on that calendar is read.
-        let floor: i64 = match within {
-            Some(c) => {
-                let entity = cr.entity_slot.and_then(|sl| env.get(sl)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
-                let dom = self.domain_for(c, entity)?;
-                dom.range(..t).next_back().map(|p| p + 1).unwrap_or(i64::MIN)
-            }
-            None => i64::MIN,
-        };
+        let entity = cr.entity_slot.and_then(|sl| env.get(sl)).and_then(|v| v.as_ref()).and_then(|v| v.as_equity());
+        let floor = self.asof_floor(within, entity, t)?;
         let mut pat = self.atom_pattern(cr, atom, env)?;
         pat[info.key_pos] = None;
         let tuples = if info.stored {
-            let matches = |tu: &[Value]| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
             let mut found: Vec<(Tuple, usize)> = Vec::new();
-            let entity = info.entity_positions.first().and_then(|&e| pat[e].clone());
-            let mut cur = t;
-            while let Some(k) = self.store(rel).by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
-                found.extend(
-                    self.store_lookup(rel, k, entity.as_ref())
-                        .iter()
-                        .filter(|tu| matches(tu))
-                        .map(|tu| (smallvec::SmallVec::from(tu), usize::MAX)),
-                );
-                if !found.is_empty() || k == i64::MIN {
-                    break;
-                }
-                cur = k - 1;
-            }
-            // Behind the retention horizon: the latest row of each identity
-            // the trimmed blocks held (`Store::trim_before`).
-            if found.is_empty() && floor == i64::MIN {
-                let e = info.entity_positions.first().copied();
-                found.extend(
-                    self.store(rel)
-                        .kept
-                        .iter()
-                        .filter(|tu| entity.as_ref().map(|v| e.map(|e| tu[e] == *v).unwrap_or(true)).unwrap_or(true) && matches(tu))
-                        .map(|tu| (tu.clone(), usize::MAX)),
-                );
-            }
+            self.asof_stored_into(rel, floor, t, &pat, &mut found);
             Arc::new(found)
         } else {
             for &i in &info.inputs {
@@ -1650,36 +1616,12 @@ impl<'p> Kernel<'p> {
                 return self.bind_tuples_into(cr, atom, env, &latest, out);
             }
             pat[info.key_pos] = None;
-            // The walk's answer is the latest bar with a tuple matching this
-            // pattern, so its memo is keyed by the whole pattern (the key
-            // unbound), the entity with it: keyed by the inputs alone, one
-            // entity's bar was served to the next (E-132).
             let akey: Vec<Option<Value>> = pat.clone();
-            let mut probe: super::AsofKey = (rel, akey, first);
-            let mut walked: Vec<i64> = Vec::new();
-            let mut found: Option<i64> = None;
-            let mut next = Some(first);
-            while let Some(k) = next {
-                probe.2 = k;
-                if let Some(hit) = self.asof_memo.get(&probe) {
-                    found = *hit;
-                    break;
-                }
-                walked.push(k);
-                // The first bar was just called and has no tuple.
-                if k != first {
-                    pat[info.key_pos] = Some(Value::Time(k));
-                    if !self.call(rel, &pat)?.is_empty() {
-                        found = Some(k);
-                        break;
-                    }
-                }
-                next = asof_before(self.domain_for(&info.cal, entity)?, floor, k);
-            }
-            for k in walked {
-                probe.2 = k;
-                self.asof_memo.insert(probe.clone(), found);
-            }
+            let key_pos = info.key_pos;
+            let found = self.asof_walk(rel, &info.cal, entity, akey, first, floor, |k: &mut Self, at: i64| -> Result<bool, RunError> {
+                pat[key_pos] = Some(Value::Time(at));
+                Ok(!k.call(rel, &pat)?.is_empty())
+            })?;
             match found {
                 Some(k) => {
                     pat[info.key_pos] = Some(Value::Time(k));
@@ -1689,6 +1631,100 @@ impl<'p> Kernel<'p> {
             }
         };
         self.bind_tuples_into(cr, atom, env, &tuples, out)
+    }
+
+    /// The bar an as-of read of the derived relation `rel` finds when the
+    /// latest label at or before its time, `first`, holds no tuple for the
+    /// pattern `akey` (its key unbound): the labels of the relation's
+    /// calendar `cal` before `first`, back to `floor`, each asked through
+    /// `holds` (whether the relation has a tuple for the pattern there)
+    /// until one does, or the answer an earlier walk from a label kept in
+    /// `asof_memo`; the answer is kept there for every label walked. The
+    /// memo is keyed by the whole pattern, the entity with it: keyed by the
+    /// inputs alone, one entity's bar was served to the next (E-132). The
+    /// one walk of the row path (`asof_matches`, whose `holds` is its call)
+    /// and of the block evaluator (`ColOp::AsofDerived`, whose `holds` finds
+    /// the entity in the relation's columns where they are held and calls
+    /// where they are not).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn asof_walk<E: From<RunError>>(
+        &mut self,
+        rel: usize,
+        cal: &Cal,
+        entity: Option<Sym>,
+        akey: Vec<Option<Value>>,
+        first: i64,
+        floor: i64,
+        mut holds: impl FnMut(&mut Self, i64) -> Result<bool, E>,
+    ) -> Result<Option<i64>, E> {
+        let mut probe: super::AsofKey = (rel, akey, first);
+        let mut walked: Vec<i64> = Vec::new();
+        let mut found: Option<i64> = None;
+        let mut next = Some(first);
+        while let Some(k) = next {
+            probe.2 = k;
+            if let Some(hit) = self.asof_memo.get(&probe) {
+                found = *hit;
+                break;
+            }
+            walked.push(k);
+            // The first bar was asked by the caller and has no tuple.
+            if k != first && holds(self, k)? {
+                found = Some(k);
+                break;
+            }
+            next = asof_before(self.domain_for(cal, entity)?, floor, k);
+        }
+        for k in walked {
+            probe.2 = k;
+            self.asof_memo.insert(probe.clone(), found);
+        }
+        Ok(found)
+    }
+
+    /// The first time an as-of read at `t` may find a key at: a bar view of
+    /// a finer relation (3.4) reads only a key within the bucket of `t` on
+    /// its calendar `within` (after the calendar's previous bar); any other
+    /// read has no floor. `entity` picks the domain of the per-instrument
+    /// sessions calendar.
+    pub(crate) fn asof_floor(&self, within: Option<&Cal>, entity: Option<Sym>, t: i64) -> Result<i64, RunError> {
+        Ok(match within {
+            Some(c) => self.domain_for(c, entity)?.range(..t).next_back().map(|p| p + 1).unwrap_or(i64::MIN),
+            None => i64::MIN,
+        })
+    }
+
+    /// What an as-of read of the stored relation `rel` at `t` finds for the
+    /// pattern `pat` (its key unbound): the rows `pat` admits at the latest
+    /// key at or before `t`, no earlier than `floor`, that has one, read
+    /// from the entity's run of each block when `pat` binds the entity;
+    /// with no such key and no floor, the latest row of each identity the
+    /// trimmed blocks held behind the retention horizon
+    /// (`Store::trim_before`) that `pat` admits. Appended to `found` in the
+    /// block's order. The one walk the row path (`asof_matches`) and the
+    /// block evaluator (`ColOp::AsofStored`) take.
+    pub(crate) fn asof_stored_into(&mut self, rel: usize, floor: i64, t: i64, pat: &[Option<Value>], found: &mut Vec<(Tuple, usize)>) {
+        let matches = |tu: &[Value]| pat.iter().zip(tu.iter()).all(|(p, v)| p.as_ref().map(|p| p == v).unwrap_or(true));
+        let e = self.rels[rel].entity_positions.first().copied();
+        let entity = e.and_then(|e| pat[e].as_ref());
+        let start = found.len();
+        let mut cur = t;
+        while let Some(k) = self.store(rel).by_time.range(floor..=cur).next_back().map(|(k, _)| *k) {
+            found.extend(self.store_lookup(rel, k, entity).iter().filter(|tu| matches(tu)).map(|tu| (smallvec::SmallVec::from(tu), usize::MAX)));
+            if found.len() > start || k == i64::MIN {
+                break;
+            }
+            cur = k - 1;
+        }
+        if found.len() == start && floor == i64::MIN {
+            found.extend(
+                self.store(rel)
+                    .kept
+                    .iter()
+                    .filter(|tu| entity.map(|v| e.map(|e| tu[e] == *v).unwrap_or(true)).unwrap_or(true) && matches(tu))
+                    .map(|tu| (tu.clone(), usize::MAX)),
+            );
+        }
     }
 
     /// The bindings of `env` extended by each of `tuples` the atom's terms
@@ -1786,7 +1822,7 @@ impl<'p> Kernel<'p> {
 
     /// The calendar of a time variable: what the elaborator inferred for
     /// it (3.4, 3.5), else the rule's.
-    fn term_cal(&self, cr: &CompiledRule, term: &Term) -> Cal {
+    pub(crate) fn term_cal(&self, cr: &CompiledRule, term: &Term) -> Cal {
         if let Term::Var(v, _) = term {
             if let Some(c) = self.prog.var_cals.get(cr.idx).and_then(|m| m.get(v)) {
                 return c.clone();
@@ -1827,7 +1863,7 @@ impl<'p> Kernel<'p> {
     /// (3.3, 3.5): the bars of `t`'s bucket on the calendar; the bars of the
     /// instrument's session holding `t` (or labelled `t`) with offset in
     /// [lo, hi), at or before `t`.
-    fn window_times(&mut self, cr: &CompiledRule, kind: &WindowKind, base: &Term, dur: &Expr, lo: Option<&Expr>, env: &[Option<Value>]) -> Result<Vec<i64>, RunError> {
+    pub(crate) fn window_times(&mut self, cr: &CompiledRule, kind: &WindowKind, base: &Term, dur: &Expr, lo: Option<&Expr>, env: &[Option<Value>]) -> Result<Vec<i64>, RunError> {
         let t = self.time_of(cr, base, env)?;
         match kind {
             WindowKind::Window | WindowKind::Prior => {
@@ -1901,7 +1937,7 @@ impl<'p> Kernel<'p> {
 
     /// A constraint whose bars depend on the instrument: a session, or a
     /// bucket of the per-instrument sessions calendar.
-    fn per_entity_window(&self, kind: &WindowKind) -> bool {
+    pub(crate) fn per_entity_window(&self, kind: &WindowKind) -> bool {
         match kind {
             WindowKind::Session => true,
             WindowKind::Bucket(c) => c.per_entity(),
@@ -2465,7 +2501,7 @@ impl<'p> Kernel<'p> {
     }
 
     /// `agg_plan` for a literal whose position in the body is in hand.
-    fn agg_plan_at(&mut self, cr: &CompiledRule, pos: Option<usize>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Arc<AggPlan> {
+    pub(crate) fn agg_plan_at(&mut self, cr: &CompiledRule, pos: Option<usize>, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Arc<AggPlan> {
         if let Some(p) = pos.and_then(|p| self.agg_plans.get(&(cr.idx, p))) {
             return p.clone();
         }
@@ -2477,28 +2513,7 @@ impl<'p> Kernel<'p> {
         // input of the group; an unbound one is a key the aggregation binds,
         // with one result per distinct binding (`close@C(A, T, P) :- P =
         // last(P1) over (...)` groups by A).
-        let group_vars: Vec<String> = match within {
-            Some(w) => w.to_vec(),
-            None => {
-                let mut aggregated: Vec<String> = Vec::new();
-                for l in conj {
-                    if let Literal::Window { var: Term::Var(v, _), .. } = l {
-                        aggregated.push(v.clone());
-                    }
-                }
-                for a in args {
-                    let mut vs = Vec::new();
-                    a.vars(&mut vs);
-                    aggregated.extend(vs.into_iter().map(|(v, _)| v));
-                }
-                let outer = outer_vars(&self.prog.rules[cr.idx], lit);
-                let mut mentioned: Vec<String> = Vec::new();
-                for l in conj {
-                    literal_vars(l, &mut mentioned);
-                }
-                mentioned.into_iter().filter(|v| !aggregated.contains(v) && outer.contains(v)).collect()
-            }
-        };
+        let group_vars = group_vars(&self.prog.rules[cr.idx], lit, conj, args, within);
         let mut group: Vec<usize> = group_vars.iter().filter_map(|v| cr.slots.get(v).copied()).collect();
         group.sort_unstable();
         group.dedup();
@@ -2519,7 +2534,7 @@ impl<'p> Kernel<'p> {
     /// The shape of a calendar window served from the per-bar cache, or
     /// `None` when no call can be: more than one window, a `rows` window, or
     /// the base time read otherwise than by a test the cache can apply.
-    fn window_plan(&self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Option<WindowPlan> {
+    pub(crate) fn window_plan(&self, cr: &CompiledRule, lit: &Literal, conj: &[Literal], args: &[Expr]) -> Option<WindowPlan> {
         let windows: Vec<usize> = conj.iter().enumerate().filter(|(_, l)| matches!(l, Literal::Window { .. })).map(|(i, _)| i).collect();
         if windows.len() != 1 {
             return None;
@@ -3901,6 +3916,33 @@ pub(crate) fn outer_vars(rule: &Rule, lit: &Literal) -> Vec<String> {
         }
     }
     out
+}
+
+/// The group of an aggregation literal of `rule` (language-v2, 4.2;
+/// semantic model, 5.1): with `within`, exactly its variables; otherwise
+/// the variables its conjunction shares with the rest of the rule, less the
+/// windows' variables and the arguments'.
+pub(crate) fn group_vars(rule: &Rule, lit: &Literal, conj: &[Literal], args: &[Expr], within: Option<&[String]>) -> Vec<String> {
+    if let Some(w) = within {
+        return w.to_vec();
+    }
+    let mut aggregated: Vec<String> = Vec::new();
+    for l in conj {
+        if let Literal::Window { var: Term::Var(v, _), .. } = l {
+            aggregated.push(v.clone());
+        }
+    }
+    for a in args {
+        let mut vs = Vec::new();
+        a.vars(&mut vs);
+        aggregated.extend(vs.into_iter().map(|(v, _)| v));
+    }
+    let outer = outer_vars(rule, lit);
+    let mut mentioned: Vec<String> = Vec::new();
+    for l in conj {
+        literal_vars(l, &mut mentioned);
+    }
+    mentioned.into_iter().filter(|v| !aggregated.contains(v) && outer.contains(v)).collect()
 }
 
 pub(crate) fn literal_vars(l: &Literal, out: &mut Vec<String>) {

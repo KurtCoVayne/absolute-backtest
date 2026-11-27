@@ -19,6 +19,15 @@
 //! are kept for `derive_rules` (`Kernel::rows_replay`), which then meets
 //! each as it was instead of running it twice, so that the bar's counts
 //! are the row path's.
+//!
+//! The calendar window operator (ERRATA E-171): a window over the bars of
+//! the rule's calendar whose conjunction is one as-of read of a stored
+//! relation at the window's bar, with tests applied at each call
+//! (`dividend_at`). Each entity's per-bar cache is the row path's own
+//! (`Kernel::windows`, `eval::WindowCache`), taken, brought to the bar and
+//! put back as `window_columns` does; a bar the cache lacks is read from
+//! the as-of read of every entity at once (`Kernel::asof_bucket`), and the
+//! rows are assembled, tested and reduced as there.
 
 use std::sync::Arc;
 
@@ -26,9 +35,11 @@ use abt_agg::Function;
 
 use super::cexpr::{CExpr, FCol};
 use super::col::ColBlock;
+use super::colplan::Decline;
 use super::eval;
-use super::{Env, Kernel, MemoKey, Value};
-use crate::ir::Literal;
+use super::hash::FxHashMap;
+use super::{Env, Kernel, MemoKey, Tuple, Value};
+use crate::ir::{Cal, CmpOp, Literal};
 
 /// A `rows[n]` aggregate of a rule whose group is the entity the frame
 /// binds (`colplan::ColOp::RowsAgg`).
@@ -71,6 +82,40 @@ struct BarCols {
     t: i64,
     blocks: Vec<Option<Option<Arc<ColBlock>>>>,
     cursors: Vec<usize>,
+}
+
+/// A calendar window's aggregate of a rule whose group the frame binds,
+/// its conjunction one as-of read of a stored relation at the window's
+/// bar with the frame's entity bound (`colplan::ColOp::WindowAgg`).
+#[derive(Debug)]
+pub(crate) struct WindowAggOp {
+    /// The literal's position in the rule's body.
+    pub li: usize,
+    /// The slot the aggregate binds, and the frame's entity.
+    pub out: usize,
+    pub eslot: usize,
+    /// The stored relation read, the position of its entity, the calendar
+    /// whose bucket bounds the read, the pattern's constants (the entity
+    /// and the key unbound) and the slot each other variable binds (tuple
+    /// position, slot).
+    pub rel: usize,
+    pub epos: usize,
+    pub within: Option<Cal>,
+    pub pat: Vec<Option<Value>>,
+    pub binds: Vec<(usize, usize)>,
+    /// The aggregate's arguments, and the tests each call applies to the
+    /// cached rows, over a row's slots.
+    pub args: Vec<CExpr>,
+    pub late: Vec<(CmpOp, CExpr, CExpr)>,
+}
+
+/// What an as-of read of a stored relation at one bar finds: for every
+/// entity at once (`Kernel::asof_bucket`), or to be read entity by entity
+/// from the floor.
+struct LabelRows {
+    t: i64,
+    floor: i64,
+    each: Option<Vec<(u32, Tuple)>>,
 }
 
 /// What the columns say of an entity at a bar.
@@ -304,6 +349,66 @@ impl<'p> Kernel<'p> {
         Feed::Row(true, Some(vals))
     }
 
+    /// What the row path's as-of read of the derived relation `rel` (of
+    /// `arity` arguments, on calendar `cal`) finds for entity `e`, given the
+    /// latest label at or before the read's time, `first`, and the
+    /// relation's columns there when held (`at_first`): the entity's one
+    /// tuple at the bar the walk stops at (`Kernel::asof_walk`, from
+    /// `first` back to `floor`), or none. The relation is read at each bar
+    /// as the row path reads it: from its columns where `cols_of` holds
+    /// them, else by the row path's call for the entity, whose answer
+    /// behind the horizon is the one the row path gets (E-126). `Decline`
+    /// for two tuples of the entity at the bar and for a call that halts.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn asof_derived_tuple(&mut self, rel: usize, cal: &Cal, arity: usize, e: u32, first: i64, floor: i64, at_first: Option<&ColBlock>) -> Result<Option<Tuple>, Decline> {
+        let (key_pos, epos) = {
+            let info = &self.rels[rel];
+            (info.key_pos, info.entity_positions[0])
+        };
+        let mut pat: Vec<Option<Value>> = vec![None; arity];
+        pat[epos] = Some(Value::Equity(e));
+        let akey = pat.clone();
+        if let Some(tu) = self.entity_tuple_at(rel, &mut pat, key_pos, e, first, at_first)? {
+            return Ok(Some(tu));
+        }
+        let found = self.asof_walk(rel, cal, None, akey, first, floor, |k: &mut Self, at: i64| -> Result<bool, Decline> {
+            match k.cols_of(rel, at) {
+                Some(b) => Ok(b.find(e).is_some()),
+                None => {
+                    pat[key_pos] = Some(Value::Time(at));
+                    Ok(!k.call(rel, &pat)?.is_empty())
+                }
+            }
+        })?;
+        match found {
+            Some(k) => {
+                let b = self.cols_of(rel, k);
+                self.entity_tuple_at(rel, &mut pat, key_pos, e, k, b.as_deref())
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Entity `e`'s one tuple of the derived relation `rel` at bar `at`:
+    /// from the relation's columns there when given, else by the row path's
+    /// call with the pattern `pat` (the entity bound) keyed at `at`.
+    fn entity_tuple_at(&mut self, rel: usize, pat: &mut [Option<Value>], key_pos: usize, e: u32, at: i64, b: Option<&ColBlock>) -> Result<Option<Tuple>, Decline> {
+        if let Some(b) = b {
+            let Some(j) = b.find(e) else { return Ok(None) };
+            if b.ids.get(j + 1) == Some(&e) {
+                return Err(Decline);
+            }
+            return Ok(Some(b.tuple(j)));
+        }
+        pat[key_pos] = Some(Value::Time(at));
+        let d = self.call(rel, pat)?;
+        match d.as_slice() {
+            [] => Ok(None),
+            [(tu, _)] => Ok(Some(tu.clone())),
+            _ => Err(Decline),
+        }
+    }
+
     /// The row path's step of the aggregate for row `i` of the frame, its
     /// outcome kept for `derive_rules` should the bar be declined: the
     /// aggregate's value, `None` for no tuple. `None` outright (the bar
@@ -323,5 +428,325 @@ impl<'p> Kernel<'p> {
         };
         self.rows_replay.push((ri, op.li, env, outcome));
         value
+    }
+
+    /// What an as-of read of the stored relation `rel` at `t`, no earlier
+    /// than `floor`, finds for every entity, read from the blocks of
+    /// `floor..=t` at once: per entity the tuples the pattern `pat` admits
+    /// (its entity and key aside) at the latest key that has one, in the
+    /// block's order, the entities ascending -- for each entity what
+    /// `Kernel::asof_stored_into` finds walking its runs back. `None` where
+    /// the walk is the only reading: a read with no floor (which reaches
+    /// the rows trimmed away), a block not yet sorted by the entity (the
+    /// walk's lookup sorts it), and blocks holding more than `limit`
+    /// tuples, where the walk, stopping at the first key an entity has,
+    /// reads less.
+    pub(crate) fn asof_bucket(&self, rel: usize, epos: usize, pat: &[Option<Value>], floor: i64, t: i64, limit: usize) -> Option<Vec<(u32, Tuple)>> {
+        let st = self.store(rel);
+        if floor == i64::MIN || self.worker.is_some() || st.entity_pos != Some(epos) || st.dirty.range(floor..=t).next().is_some() {
+            return None;
+        }
+        if st.by_time.range(floor..=t).map(|(_, b)| b.len()).sum::<usize>() > limit {
+            return None;
+        }
+        let admits = |tu: &[Value]| pat.iter().zip(tu.iter()).enumerate().all(|(p, (q, v))| p == epos || q.as_ref().is_none_or(|q| q == v));
+        // The key that answers each entity: the latest that holds a tuple
+        // of it the pattern admits.
+        let mut answered: FxHashMap<u32, i64> = FxHashMap::default();
+        let mut out: Vec<(u32, Tuple)> = Vec::new();
+        for (&k, block) in st.by_time.range(floor..=t).rev() {
+            for tu in block.iter().filter(|tu| admits(tu)) {
+                let Value::Equity(e) = tu[epos] else { return None };
+                if *answered.entry(e).or_insert(k) == k {
+                    out.push((e, smallvec::SmallVec::from(tu)));
+                }
+            }
+        }
+        // Stable: an entity's tuples, all of one key, keep their order.
+        out.sort_by_key(|(e, _)| *e);
+        Some(out)
+    }
+
+    /// The as-of read of the stored relation `rel` (`ColOp::AsofStored`)
+    /// for the rows `rows` of a frame whose entities are `ids` (ascending)
+    /// and whose read times are `at`: per row the one tuple the row path's
+    /// read finds (`Kernel::asof_stored_into`), with the row; a row it
+    /// finds none for is left out. Rows that share one time read the
+    /// relation for every entity at once where it holds few tuples there
+    /// (`asof_bucket`). `None` for a row that finds two tuples, which would
+    /// be two rows of one entity, and for a time that is not one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn asof_stored_frame(&mut self, rel: usize, at: &FCol, within: Option<&Cal>, epos: usize, pat: &[Option<Value>], ids: &[u32], rows: &[u32]) -> Option<Vec<(u32, Tuple)>> {
+        let mut out: Vec<(u32, Tuple)> = Vec::with_capacity(rows.len());
+        if let FCol::Const(Value::Time(t0)) = at {
+            let floor = self.asof_floor(within, None, *t0).ok()?;
+            if let Some(each) = self.asof_bucket(rel, epos, pat, floor, *t0, rows.len()) {
+                let mut j = 0usize;
+                for &r in rows {
+                    let e = ids[r as usize];
+                    while j < each.len() && each[j].0 < e {
+                        j += 1;
+                    }
+                    match each[j..].iter().take_while(|(x, _)| *x == e).count() {
+                        0 => {}
+                        1 => out.push((r, each[j].1.clone())),
+                        _ => return None,
+                    }
+                }
+                return Some(out);
+            }
+        }
+        let mut pat = pat.to_vec();
+        let mut found: Vec<(Tuple, usize)> = Vec::with_capacity(1);
+        let mut floor: Option<(i64, i64)> = None;
+        for &r in rows {
+            let Value::Time(t0) = at.value(r as usize) else { return None };
+            let lo = match floor {
+                Some((t, lo)) if t == t0 => lo,
+                _ => {
+                    let lo = self.asof_floor(within, None, t0).ok()?;
+                    floor = Some((t0, lo));
+                    lo
+                }
+            };
+            pat[epos] = Some(Value::Equity(ids[r as usize]));
+            found.clear();
+            self.asof_stored_into(rel, lo, t0, &pat, &mut found);
+            match found.as_mut_slice() {
+                [] => {}
+                [(tu, _)] => out.push((r, std::mem::take(tu))),
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// The calendar window's aggregate at bar `t` for each row of the frame
+    /// (`ids`, the entities, ascending; `cols`, the frame's slots): its
+    /// value, or `None` where the row has no tuple. Per entity, as
+    /// `Kernel::window_columns` serves a call: the group's cache taken from
+    /// `Kernel::windows`, the window's bars it lacks read and kept (each
+    /// counted as solved), the rows of the window's bars in time order, those
+    /// of one bar in the order of the bindings the call leaves unbound, each
+    /// tested; the cache's bars before the window forgotten and the cache put
+    /// back; the rows reduced by the row path's function. `None` (the bar
+    /// declined) where the row path would solve the window whole or halt:
+    /// what the operator has done to the caches by then is what the row
+    /// path's own calls would have done, so that they go on from there.
+    /// `calls` counts the window calls answered.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_window_agg(&mut self, ri: usize, op: &WindowAggOp, ids: &[u32], cols: &[Option<FCol>], t: i64, calls: &mut usize) -> Option<Vec<Option<Value>>> {
+        let prog = self.prog;
+        let cr = self.compiled[ri].clone();
+        let lit = &prog.rules[ri].body[op.li];
+        let Literal::Agg { agg, args, conj, within, .. } = lit else { return None };
+        if !self.cfg.window_cache || self.pushed.contains_key(&(ri, op.li)) {
+            return None;
+        }
+        let plan = self.agg_plan_at(&cr, Some(op.li), lit, conj, args, within.as_deref());
+        let wp = plan.window.as_ref()?;
+        // A call's binding: the frame's constants, the entity and the
+        // slots each row binds; the rest unbound.
+        let mut env: Env = vec![None; cr.nslots];
+        let mut per_row: Vec<usize> = Vec::new();
+        for (s, c) in cols.iter().enumerate() {
+            match c {
+                Some(FCol::Const(v)) => env[s] = Some(v.clone()),
+                Some(FCol::Col(_)) => per_row.push(s),
+                None => {}
+            }
+        }
+        let unbound: Vec<usize> = (0..cr.nslots).filter(|&s| s != op.eslot && cols[s].is_none()).collect();
+        let is_unbound = |s: &usize| unbound.binary_search(s).is_ok();
+        // A group the call does not bind, a window variable it binds, or a
+        // test reading what it leaves unbound: the row path solves the
+        // window whole.
+        if plan.group.iter().any(is_unbound) || !is_unbound(&wp.wslot) || wp.late.iter().any(|(_, need)| need.iter().any(is_unbound)) {
+            return None;
+        }
+        let mut min_count: i64 = 0;
+        for l in conj {
+            if let Literal::Window { min, .. } = l {
+                let k = self.eval_expr(&cr, min, &env).ok()?.as_f64().unwrap_or(0.0) as i64;
+                min_count = min_count.max(k);
+            }
+        }
+        let Literal::Window { kind, base, dur, lo, .. } = &conj[wp.window] else { return None };
+        if self.per_entity_window(kind) {
+            return None;
+        }
+        let times: Vec<i64> = self.window_times(&cr, kind, base, dur, lo.as_ref(), &env).ok()?;
+        let lo = times.first().copied().unwrap_or(t);
+        let counted = agg == "count";
+        let mut labels: Vec<LabelRows> = Vec::new();
+        let mut pat = op.pat.clone();
+        let mut found: Vec<(Tuple, usize)> = Vec::new();
+        let mut tested = env.clone();
+        let mut missing: Vec<i64> = Vec::new();
+        let mut acc: Vec<Vec<f64>> = vec![Vec::new(); if counted { 0 } else { args.len() }];
+        let mut out: Vec<Option<Value>> = Vec::with_capacity(ids.len());
+        for (i, &e) in ids.iter().enumerate() {
+            for &s in &per_row {
+                env[s] = cols[s].as_ref().map(|c| c.value(i));
+                tested[s] = env[s].clone();
+            }
+            env[op.eslot] = Some(Value::Equity(e));
+            tested[op.eslot] = env[op.eslot].clone();
+            let key = eval::WindowKey {
+                rule: cr.idx,
+                literal: wp.literal,
+                outer: wp.outer.iter().map(|&s| env[s].clone()).collect(),
+            };
+            let mut cache = self.windows.remove(&key).unwrap_or_default();
+            // The window's bars the cache does not hold, in order.
+            missing.clear();
+            {
+                let mut have = cache.range(lo, t).map(|(k, _)| *k).peekable();
+                for &t1 in &times {
+                    while have.peek().is_some_and(|&k| k < t1) {
+                        have.next();
+                    }
+                    if have.peek() == Some(&t1) {
+                        have.next();
+                    } else {
+                        missing.push(t1);
+                    }
+                }
+            }
+            for &t1 in &missing {
+                match self.window_bar_rows(op, &mut labels, &mut pat, &mut found, &env, wp.wslot, counted, ids.len(), e, t1) {
+                    Some(rows) => {
+                        self.stats.window_bars_solved += 1;
+                        cache.insert(t1, rows);
+                    }
+                    // An argument the row path cannot evaluate: its own call
+                    // solves this bar again and meets it.
+                    None => {
+                        self.windows.insert(key, cache);
+                        return None;
+                    }
+                }
+            }
+            let mut count = 0usize;
+            acc.iter_mut().for_each(Vec::clear);
+            let mut halted = false;
+            {
+                let mut held = cache.range(lo, t).peekable();
+                'bars: for &t1 in &times {
+                    while held.peek().is_some_and(|(k, _)| *k < t1) {
+                        held.next();
+                    }
+                    let Some((_, bar)) = held.next_if(|(k, _)| *k == t1) else { continue };
+                    let mut order: Vec<usize> = (0..bar.len()).collect();
+                    if bar.len() > 1 {
+                        order.sort_by(|&a, &b| unbound.iter().map(|&s| bar[a].0[s].cmp(&bar[b].0[s])).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+                    }
+                    'rows: for k in order {
+                        let (row, vals) = &bar[k];
+                        if !op.late.is_empty() {
+                            for &s in &unbound {
+                                tested[s] = row[s].clone();
+                            }
+                            for (cmp, lhs, rhs) in &op.late {
+                                let (Some(a), Some(b)) = (lhs.value_in(&tested), rhs.value_in(&tested)) else {
+                                    halted = true;
+                                    break 'bars;
+                                };
+                                if !eval::compare(*cmp, &a, &b) {
+                                    continue 'rows;
+                                }
+                            }
+                        }
+                        count += 1;
+                        for (c, v) in acc.iter_mut().zip(vals) {
+                            c.push(*v);
+                        }
+                    }
+                }
+            }
+            // A test the row path cannot evaluate: its call solves the
+            // window whole.
+            if halted {
+                self.windows.insert(key, cache);
+                return None;
+            }
+            cache.forget_before(lo);
+            self.windows.insert(key, cache);
+            *calls += 1;
+            if (count as i64) < min_count {
+                out.push(None);
+                continue;
+            }
+            if counted {
+                out.push(Some(Value::Count(count as i64)));
+                continue;
+            }
+            let slices: Vec<&[f64]> = acc.iter().map(|c| c.as_slice()).collect();
+            match eval::rows_reduce(agg, plan.f, &slices) {
+                Ok(v) => out.push(v),
+                // The reduction halts: the row path raises it.
+                Err(_) => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// The rows of the window's bar `t1` for entity `e`, as the row path's
+    /// solve of the cached conjunction gives them: the call's binding `env`
+    /// with the window's variable at `t1` and the read's tuples bound, each
+    /// with the aggregate's arguments evaluated (none for a count). The
+    /// read at `t1` is made once for every entity of the frame (`labels`),
+    /// or entity by entity. `None` where an argument is partial or not a
+    /// number.
+    #[allow(clippy::too_many_arguments)]
+    fn window_bar_rows(
+        &mut self,
+        op: &WindowAggOp,
+        labels: &mut Vec<LabelRows>,
+        pat: &mut [Option<Value>],
+        found: &mut Vec<(Tuple, usize)>,
+        env: &Env,
+        wslot: usize,
+        counted: bool,
+        limit: usize,
+        e: u32,
+        t1: i64,
+    ) -> Option<eval::WindowRows> {
+        let at = match labels.iter().position(|l| l.t == t1) {
+            Some(at) => at,
+            None => {
+                let floor = self.asof_floor(op.within.as_ref(), None, t1).ok()?;
+                let each = self.asof_bucket(op.rel, op.epos, pat, floor, t1, limit);
+                labels.push(LabelRows { t: t1, floor, each });
+                labels.len() - 1
+            }
+        };
+        found.clear();
+        match &labels[at].each {
+            Some(each) => {
+                let lo = each.partition_point(|(x, _)| *x < e);
+                found.extend(each[lo..].iter().take_while(|(x, _)| *x == e).map(|(_, tu)| (tu.clone(), usize::MAX)));
+            }
+            None => {
+                pat[op.epos] = Some(Value::Equity(e));
+                let floor = labels[at].floor;
+                self.asof_stored_into(op.rel, floor, t1, pat, found);
+            }
+        }
+        let mut rows: eval::WindowRows = Vec::with_capacity(found.len());
+        for (tu, _) in found.iter() {
+            let mut row = env.clone();
+            row[wslot] = Some(Value::Time(t1));
+            for &(p, s) in &op.binds {
+                row[s] = Some(tu[p].clone());
+            }
+            let vals: Vec<f64> = if counted {
+                Vec::new()
+            } else {
+                op.args.iter().map(|a| a.value_in(&row).and_then(|v| v.as_f64())).collect::<Option<Vec<f64>>>()?
+            };
+            rows.push((row, vals));
+        }
+        Some(rows)
     }
 }

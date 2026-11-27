@@ -182,10 +182,11 @@ fn run_keeping(
         // below derive more.
         let derive_total = k.derive_times().iter().map(|x| x.1).sum::<f64>();
         if timing {
-            // Per relation: the seconds deriving it, its derivations, and of
-            // those the ones that left a stuck instance or a halt and the
-            // ones of a few tuples.
-            for (name, secs, calls, stuck, small) in k.derive_times().iter().take(20) {
+            // Per derived relation, every one the run derived, slowest
+            // first: the seconds deriving it, its derivations, and of those
+            // the ones that left a stuck instance or a halt and the ones of
+            // a few tuples.
+            for (name, secs, calls, stuck, small) in k.derive_times().iter() {
                 eprintln!("derive {:28} {:8.3} s {:8} calls stuck_bars={} small_bars={}", name, secs, calls, stuck, small);
             }
             // Under the block evaluator, per relation with a plan over

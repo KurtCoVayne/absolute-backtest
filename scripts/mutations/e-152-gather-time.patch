@@ -1,0 +1,17 @@
+# proposition: E-152 (the block evaluator's read of a relation at a time each row binds reads it at the row's time, as the row path's atom does)
+# mutation: the operator reads the relation at the rule's bar instead
+# test: cargo test -p abt-tests --test eval_set an_as_of_read_with_the_entity_bound_finds_the_row_paths_bar_and_the_read_there_its_tuple
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/colplan.rs b/crates/abt-kernel/src/kernel/colplan.rs
+--- a/crates/abt-kernel/src/kernel/colplan.rs
++++ b/crates/abt-kernel/src/kernel/colplan.rs
+@@ -752,7 +752,8 @@
+                     let mut index: FxHashMap<i64, usize> = FxHashMap::default();
+                     let mut last = usize::MAX;
+                     for (i, &id) in f.ids.iter().enumerate() {
+-                        let Value::Time(t1) = f.cols[*tslot].as_ref()?.value(i) else { return None };
++                        let Value::Time(_) = f.cols[*tslot].as_ref()?.value(i) else { return None };
++                        let t1 = t;
+                         let k = match blocks.get(last) {
+                             Some((t, _)) if *t == t1 => last,
+                             _ => match index.get(&t1) {

@@ -4073,7 +4073,7 @@ batch driver agree on every corpus program. Each bless since:
   names, the memo kept and evicted at every barrier, whole and trimmed:
   the stats row with its requests behind a group's last bar, and the
   coverage), and the MW14 test with holes with `ma` and `clenow`
-  planned and `eligible` not;
+  planned (and `eligible`, whose as-of read E-152 plans);
   `tests/retention.rs` block legs; `kernel/eval.rs`
   `rows_state_tests` (the flat state against the deque it replaced).
   Falsified: `scripts/mutations/e-151-window-replay.patch` (a declined
@@ -4417,6 +4417,219 @@ batch driver agree on every corpus program. Each bless since:
   derive through their plans at all 1,904 bars, none declined; 63.4M
   tuples, the daily close and volume 20.1M each, each delivered answer
   4.2M.
+
+- **E-152 (06-performance 3.2; the block evaluator's as-of read of a
+  stored relation, and a read at a time a row binds).** 3.2's block plan
+  has no operator for an as-of join or for an atom keyed at a time other
+  than the rule's. [D] Under `--evaluator block` two more literals are
+  operators of a relation's plan (`kernel/colplan.rs`). An as-of read of
+  a stored relation whose entity an earlier literal binds, at a bound
+  time, its key and other variables fresh and its other terms wildcards
+  or constants (`close@base(A, L, _) asof T`, MW14's membership test since
+  E-160), is `ColOp::AsofStored`: per row of the frame, what the row
+  path's walk finds for the entity and the constants, through the one
+  function both take (`Kernel::asof_stored_into`, factored out of
+  `asof_matches`: the rows of the latest key at or before the time, no
+  earlier than the floor of a read within a bucket (`asof_floor`), that
+  has one, and with no floor the latest rows the trim kept behind the
+  horizon); an entity with two tuples there declines the bar. An atom of
+  a relation with the frame's entity keyed at a time a row binds (the
+  key of that read, `sp1500(A, L)`; a previous row's bar,
+  `close@weekly(A, T0, P0)` in `total_return`) is `ColOp::GatherAt`: the
+  relation's columns at each time the rows bind, fetched in the order the
+  rows first reach it (as the row path's calls derive it), each row
+  found in them by its entity; a time whose relation is not one tuple per
+  entity there, or is behind the horizon, declines the bar. `eligible`
+  and `total_return` are planned on MW14. `tests/eval_set.rs`:
+  `an_as_of_read_with_the_entity_bound_finds_the_row_paths_bar_and_the_read_there_its_tuple`
+  (a weekly book over names missing bars, some on the week's last day,
+  each read at its own last bar of the week and its close read there
+  through a relation of the base calendar; whole and trimmed, 1 and 4
+  workers, the counts and the stats row on one), and the MW14 test with
+  holes with `eligible` planned. Falsified:
+  `scripts/mutations/e-152-asof-walk.patch` (only a row at the read's own
+  time is kept) and `scripts/mutations/e-152-gather-time.patch` (the
+  relation is read at the rule's bar). Measured on the full MW14, one cold
+  run under `--evaluator block` against the parity store, the weekly
+  returns' fingerprint unchanged (`6e72c9bb…`): 167.1 s where the tree
+  before took 180.2 s (`k3-asof-1`), `eligible` 13.2 s to 3.9 s, planned
+  at its 1,904 bars with none declined, `total_return` 5.7 s to under
+  0.9 s (planned at 1,902 of 1,903), `decide` 83.9 s to 75.5 s.
+
+- **E-153 (06-performance 3.2; the block evaluator's previous row: an
+  as-of read of a derived relation, a negated read, `prev`).** [D] Under
+  `--evaluator block` three more literals are operators of a relation's
+  plan (`kernel/colplan.rs`). An as-of read of a derived relation whose
+  entity an earlier literal binds, its key and other variables fresh, on
+  a calendar that is not an instrument's (`universe(A, T1) asof T0` in
+  `prev_row`), is `ColOp::AsofDerived`: per row, the bar the row path's
+  walk stops at, through the one walk both take
+  (`Kernel::asof_walk`, factored out of `asof_matches`: the relation's
+  labels from the latest at or before the read's time back to its
+  floor, the answers of earlier walks read from `asof_memo` and this
+  walk's written there for every label walked, keyed by the whole
+  pattern as E-132 keys it). The relation is read at the first label
+  from its columns once for the rows, and at each label walked as the
+  row path reads it: from its columns where `cols_of` holds them, else by
+  the row path's own call for the entity, whose answer behind the
+  horizon is the one E-126 gives (`Kernel::asof_derived_tuple`); so the
+  walk asks, derives and memoises at the bars the row path's does, and no
+  bar declines for an entity whose previous row is behind the horizon. A
+  call that halts, or two tuples of the entity at the bar, declines the
+  bar. A negated atom at the bar with the frame's entity and its other
+  terms wildcards or constants (`not member@weekly(A, T, "ETF")` in
+  `universe`, `not prev_row(A, T, _)` in `first_row`) is
+  `ColOp::AntiJoin`: the rows whose entity has no tuple of the relation's
+  columns there that the constants match, a literal's value taken from
+  `lit_value` when the operator first reads it, as the row path's
+  pattern takes it. `prev(T, T0)` of a time the frame binds once is
+  `ColOp::Prev`, a constant: the label before it on the time's
+  calendar (not an instrument's), or no row. `universe`, `prev_row` and
+  `first_row` are planned on MW14. `tests/eval_set.rs`:
+  `the_previous_row_over_columns_is_the_row_paths_across_holes_and_the_horizon`
+  (a daily book over names missing bars, one absent 300 days, longer
+  than the horizon; `prev_row`, `first_row`, `row_number` and the close
+  at the previous row; whole and trimmed, 1 and 4 workers, the counts and
+  the stats row on one), and the MW14 test with holes with the three
+  planned. Falsified: `scripts/mutations/e-153-asof-derived-walk.patch`
+  (the walk never finds the entity in the columns),
+  `scripts/mutations/e-153-antijoin-consts.patch` (a negation excludes
+  the entity whatever its constants), `scripts/mutations/e-153-prev.patch`
+  (`prev` binds the label two before); E-132's
+  `scripts/mutations/e-132-asof-entity.patch` is rebased on the walk's
+  new place, and `tests/asof.rs::a_derived_relation_is_walked_back_for_each_entity`
+  still fails under it. Measured on the full MW14 (`k3-s12-1`), the
+  fingerprint unchanged: 159.2 s where E-152's tree took 167.1 s,
+  `prev_row` 4.5 s to 1.4 s, `universe` 2.5 s and `first_row` 2.1 s to
+  under 0.8 s each, the three planned at every one of the 1,904 bars and
+  none declined, `fill` 55.3 s to 48.1 s.
+
+- **E-154 (06-performance 3.2; the block evaluator's chains).** E-150
+  plans no temporally recursive relation. [D] A temporally recursive
+  relation is planned as any other (`Kernel::compile_col_plan`): its
+  read of itself at an earlier bar a row binds (`row_number(A, T1, K0)`
+  after `prev_row(A, T, T1)`; `cum_split`, `tr_index`, the latch) is
+  E-152's `GatherAt`, which reads the relation's columns there, memoised
+  by the chain's extension at each barrier (`Kernel::trim_stores`) or
+  derived there first through `cols_of` as the row path's call would
+  derive them, by the plan when it has one; a bar whose earlier bar is
+  behind the horizon declines, and the row path reads the entity's
+  latest tuples there (E-126). The relation's rules are united as E-150
+  unites them (a first-row rule's rows, then the step rule's, in entity
+  order above 16 tuples, `RuleTag::Per`). No depth bound is put on the
+  recursion: a chain derived down to its first rows (a memo cleared by a
+  late tuple) recurses through the plans as through the rules, and needs
+  less stack so (a daily book of 950 bars with its memo cleared ran on
+  4 MB through the plans and needed 8 MB through the rules; a run's
+  kernel thread has 512 MB). `call_first` is unchanged: a plan's result
+  is memoised as tuples at once (E-150), which it reads by binary
+  search; what the executor's price read costs under `fill` is the
+  derivation at the bar of what it is the first to ask for (the
+  universe's relations, the total-return chain and its dividends).
+  `tests/eval_set.rs`: the MW14 test with holes with `row_number`,
+  `cum_split`, `tr_index`, `total_return` and the latch planned, and a
+  split and a dividend in a name's first week;
+  `the_block_evaluator_resumed_or_fed_late_tuples_decides_as_the_set_evaluator`
+  (E-152's and E-153's books with a name's closes received three days
+  late, on every weekday in turn, whole and trimmed, and resumed from
+  monthly checkpoints against the set evaluator resumed from the same
+  one, which with the whole history is the unbroken run);
+  `tests/retention.rs`'s long-market MW14 test (the index recursing to
+  each name's first row, E-126) with block legs. Measured on the full
+  MW14 (`k3-s11-1`), the fingerprint unchanged: 149.4 s where E-153's
+  tree took 159.2 s, `tr_index` 4.4 s to 1.3 s, `cum_split` 4.4 s to
+  1.2 s, `row_number` 3.7 s to 0.8 s, the latch 2.6 s to under 0.7 s,
+  each planned at all but one or (the latch) 173 of 1,904 bars, `fill`
+  48.1 s to 45.4 s, `decide` 75.2 s to 67.9 s.
+
+- **E-170 (06-performance 3.2; the block evaluator's case).** 3.2's block
+  plan has no operator for a case form. [D] Under `--evaluator block` a
+  case whose variable is unbound and whose every guard is one read with
+  the frame's entity bound is `ColOp::Case` (`kernel/colplan.rs`): an atom
+  at the bar whose other terms are wildcards or fresh variables
+  (`dividend_at(A, T, D0)` in `dividend_or_zero`), read from its columns as
+  a `Join` reads them, or an as-of read of a stored relation
+  (`split(A, _, F0) asof T` within the week in `split_factor`), read as
+  E-152's `AsofStored` reads it. Per row the first branch whose guard
+  finds the entity's tuple gives the value, computed over the guard's
+  bindings and the row's with the row path's arithmetic (`cexpr.rs`); each
+  branch's guard is read for the rows no earlier branch took, as
+  `case_value` tries a row's branches in turn, so a derived relation a
+  later guard names is derived at the bar only when a row reaches it; the
+  `else` value is the remaining rows', and without one they have no row. A
+  guard with two tuples for a row (the row path takes the first; the
+  stores hold one per identity, so `split` and `dividend` never have two),
+  a guard that cannot be read as columns, and a value partial on any row
+  decline the bar. The as-of read of a stored relation at a time every row
+  shares reads the relation for every entity at once where the bucket's
+  blocks hold no more tuples than the frame has rows
+  (`Kernel::asof_bucket`, `kernel/colops.rs`): per entity the tuples at
+  the latest key of `floor..=t` that holds one the pattern admits, in the
+  block's order -- what `asof_stored_into` finds walking the entity's runs
+  back; a read with no floor (which reaches the rows the trim kept), a
+  block not yet sorted by the entity (the walk's lookup sorts it) and a
+  denser bucket are walked entity by entity as before
+  (`Kernel::asof_stored_frame`, which `AsofStored` now calls too).
+  `split_factor` and `dividend_or_zero` are planned on MW14.
+  `tests/eval_set.rs`:
+  `the_case_and_the_calendar_window_over_actions_are_the_row_paths` (a
+  weekly book over names missing bars with random actions: two dividends
+  announced in one week, dividends announced after they go ex, two splits
+  in a week, a name's dividends received late; whole and trimmed, 1 and 4
+  workers, the counts and the stats row on one), the MW14 test with holes
+  with two splits of a name in one week and a split on a week's last bar,
+  and the resumed and late-tuple test over the same book. Falsified:
+  `scripts/mutations/e-170-case-first-branch.patch` (a row a guard took is
+  offered to the `else` again) and
+  `scripts/mutations/e-170-bucket-latest-key.patch` (the earliest key of
+  the bucket answers). MEASURED-S13
+
+- **E-171 (06-performance 3.2; the block evaluator's calendar window over
+  an as-of read).** [D] Under `--evaluator block` an aggregate over a
+  calendar window of the rule's calendar (`window`, `prior_window` or a
+  bucket; not a rows window, not an instrument's sessions) whose base is
+  the rule's key, whose length and minimum are constants, which the row
+  path serves from its per-bar cache (`Kernel::window_plan`), and whose
+  cached conjunction is one as-of read of a stored relation at the
+  window's bar with the frame's entity bound, its other variables fresh,
+  is `ColOp::WindowAgg` (`kernel/colops.rs`, `Kernel::run_window_agg`):
+  `dividend_at`'s sum of the dividends announced over a year of weeks,
+  each week read as of its label within it, tested at each call against
+  the call's week (`Ex > T1`, `Ex <= T`). The tests the call applies
+  (comparisons) and the arguments compile to `CExpr`. Per entity, in the
+  frame's order, it does what `window_columns` does for that entity's
+  call: the group's cache taken from `Kernel::windows` by the row path's
+  key (`WindowKey`, the plan's literal and outer slots), the window's
+  bars it lacks read and kept with their rows as the row path's solve
+  binds them (the call's binding, the window's bar, the read's tuples,
+  the arguments' values) and counted as solved, the rows of the window's
+  bars in time order and those of one bar in the order of the slots the
+  call leaves unbound, each tested on the call's binding, the bars before
+  the window forgotten and the cache put back; then the minimum and the
+  row path's reduction (`eval::rows_reduce`). So the caches, the
+  checkpoints that carry them, `window_bars_solved`, `window_groups` and
+  `window_rows_cached` are the set evaluator's, and the row order within
+  a bar, which decides a float sum, is the cache's own. A bar the caches
+  lack is read for every entity of the frame at once by E-170's
+  `asof_bucket`, or entity by entity by `asof_stored_into` (the window's
+  first label, whose bucket has no start). An argument that is partial or
+  not a number, a test that cannot be evaluated and a reduction that halts
+  decline the bar where the row path's call would solve the window whole
+  or halt, with the caches as the row path's own call would have left
+  them by then: the label the argument fails on is neither kept nor
+  counted, so that the rules, deriving the bar, meet it as the row path
+  does. Its rule is not cut across the workers under the block evaluator,
+  as E-151's. A cached conjunction of more than the one read (a join, a
+  test of its own) keeps the row path. `dividend_at` is planned on MW14.
+  `tests/eval_set.rs`: E-170's test, whose book adds a sum of an
+  expression of the dividends over half a year with a test of what only
+  the call binds and a count over the quarter before with none; the MW14
+  test with holes with three dividends of a name going ex on one day,
+  announced over two weeks, and one announced after it goes ex.
+  Falsified: `scripts/mutations/e-171-window-tests.patch` (the call's
+  tests are not applied) and `scripts/mutations/e-171-bars-solved.patch`
+  (the bars read are not counted as solved: the stats row differs).
+  MEASURED-S14
 
 - **E-98 (D-2.3, D-7.7; the GICS levels below the sector).** The Norgate
   adapter emitted only level 1 of `classification/classification_full`
