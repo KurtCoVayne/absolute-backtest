@@ -42,11 +42,31 @@ fn first_line(text: &str) -> Option<String> {
     (!line.is_empty()).then(|| line.to_string())
 }
 
-/// What `git ARGS` prints in the tree at `root`; `None` when there is no
-/// `git` or it refuses. It takes no optional lock, so asking for the tree's
-/// status never rewrites the index of a tree someone works in.
+/// The variables that name git a repository, its work tree, its index and
+/// its objects in place of the ones it finds from the directory. Git exports
+/// them to a hook, so a build or a test started from one would otherwise ask
+/// (and the tests' own commits would write) the repository the hook belongs
+/// to, whatever directory `-C` names.
+pub const REPOSITORY_VARIABLES: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// What `git ARGS` prints in the tree at `root`, found from `root` alone
+/// (`REPOSITORY_VARIABLES` are not passed on); `None` when there is no `git`
+/// or it refuses. It takes no optional lock, so asking for the tree's status
+/// never rewrites the index of a tree someone works in.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(root).args(args).env("GIT_OPTIONAL_LOCKS", "0").stderr(Stdio::null()).output().ok()?;
+    let mut git = Command::new("git");
+    git.arg("-C").arg(root).args(args).env("GIT_OPTIONAL_LOCKS", "0").stderr(Stdio::null());
+    for name in REPOSITORY_VARIABLES {
+        git.env_remove(name);
+    }
+    let out = git.output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 

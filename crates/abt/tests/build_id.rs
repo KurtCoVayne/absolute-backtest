@@ -3,7 +3,9 @@
 //! names a build, what makes cargo run the script again, and that nothing
 //! but the two `--version` flags reads it (ERRATA E-133). `cli.rs` holds
 //! `abt --version` itself. The git cases make a repository of their own in a
-//! temporary directory and are skipped, with a note, where `git` is absent.
+//! temporary directory and are skipped, with a note, where `git` is absent;
+//! their git is found from that directory alone, whatever repository the
+//! environment names (a suite started from a git hook).
 
 #[allow(dead_code)]
 #[path = "../../../scripts/build_id.rs"]
@@ -28,17 +30,22 @@ fn has_git() -> bool {
 }
 
 /// `git ARGS` in `dir`, under no configuration but the test's own (a
-/// committer, no signing, no hooks); what it printed.
+/// committer, no signing, no hooks) and in no repository but the one found
+/// from `dir` (`build_id::REPOSITORY_VARIABLES` are not passed on: with
+/// `GIT_DIR` exported, `init` and `commit` would write the repository it
+/// names); what it printed.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut git = Command::new("git");
+    git.arg("-C")
         .arg(dir)
         .args(["-c", "user.name=abt", "-c", "user.email=abt@localhost", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("git runs");
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    for name in build_id::REPOSITORY_VARIABLES {
+        git.env_remove(name);
+    }
+    let out = git.output().expect("git runs");
     assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
@@ -179,6 +186,58 @@ fn a_directory_inside_a_git_tree_is_not_named_by_that_trees_commit() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Variables set in this process for the length of one test, as git sets
+/// them for a hook; removed when the test ends, however it ends.
+struct Exported(Vec<&'static str>);
+
+impl Exported {
+    fn new(variables: &[(&'static str, &Path)]) -> Exported {
+        for (name, value) in variables {
+            std::env::set_var(name, value);
+        }
+        Exported(variables.iter().map(|(name, _)| *name).collect())
+    }
+}
+
+impl Drop for Exported {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            std::env::remove_var(name);
+        }
+    }
+}
+
+/// A build or a suite started from a git hook inherits `GIT_DIR` and the
+/// hook's work tree. A tree is still named by its own commit and watched in
+/// its own files, and the repositories these tests make are their own: the
+/// repository the environment names is neither asked nor written.
+#[test]
+fn a_tree_is_named_by_its_own_commit_whatever_repository_the_environment_names() {
+    if !has_git() {
+        eprintln!("skipped: git is not installed");
+        return;
+    }
+    let dir = scratch("exported");
+    let (theirs, ours) = (dir.join("theirs"), dir.join("ours"));
+    fs::create_dir_all(&theirs).unwrap();
+    fs::create_dir_all(&ours).unwrap();
+    repository(&theirs);
+    let their_commit = git(&theirs, &["rev-parse", "HEAD"]);
+    let exported = Exported::new(&[("GIT_DIR", theirs.join(".git").as_path()), ("GIT_WORK_TREE", theirs.as_path())]);
+    repository(&ours);
+    fs::write(ours.join("tracked.txt"), "ours\n").unwrap();
+    git(&ours, &["commit", "-q", "-a", "-m", "ours"]);
+    let our_commit = git(&ours, &["rev-parse", "HEAD"]);
+    let found = identity(None, &ours);
+    drop(exported);
+    assert_ne!(our_commit, their_commit);
+    assert!(our_commit.starts_with(&found.id), "{} is not the start of {}", found.id, our_commit);
+    assert!(!found.read.is_empty() && found.read.iter().all(|p| p.starts_with(&ours)), "{:?}", found.read);
+    assert_eq!(git(&theirs, &["rev-parse", "HEAD"]), their_commit, "the repository the environment named was written");
+    assert_eq!(git(&theirs, &["status", "--porcelain"]), "", "the repository the environment named was written");
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
@@ -193,8 +252,9 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 /// E-133: nothing of the make enters a run's outputs, its run id or a
 /// digest. The identity reaches a crate's sources only as the compile-time
 /// variable `ABT_BUILD`, and the only sources that name it are the two
-/// programs' entry files, which print it for `--version`; the two crates
-/// with a build script are the only ones it is defined for.
+/// programs' entry files, each once, in the line that prints the answer to
+/// `--version`; the two crates with a build script are the only ones it is
+/// defined for.
 #[test]
 fn nothing_but_the_two_version_flags_reads_the_builds_identity() {
     let crates = abt_tests::repo_root().join("crates");
@@ -209,14 +269,21 @@ fn nothing_but_the_two_version_flags_reads_the_builds_identity() {
             let mut files = Vec::new();
             sources(&c.join("src"), &mut files);
             for f in files {
-                if fs::read_to_string(&f).unwrap().contains("ABT_BUILD") {
-                    readers.push(f.strip_prefix(&crates).unwrap().to_string_lossy().replace('\\', "/"));
+                let text = fs::read_to_string(&f).unwrap();
+                let naming: Vec<&str> = text.lines().filter(|l| l.contains("ABT_BUILD")).collect();
+                if !naming.is_empty() {
+                    let prints = naming.iter().all(|l| l.trim_start().starts_with("println!("));
+                    readers.push((f.strip_prefix(&crates).unwrap().to_string_lossy().replace('\\', "/"), naming.len(), prints));
                 }
             }
         }
     }
     readers.sort();
     scripts.sort();
-    assert_eq!(readers, ["abt-data/src/bin/abt-data.rs", "abt/src/main.rs"]);
+    assert_eq!(
+        readers,
+        [("abt-data/src/bin/abt-data.rs".to_string(), 1, true), ("abt/src/main.rs".to_string(), 1, true)],
+        "(file, lines naming ABT_BUILD, all of them a println!)"
+    );
     assert_eq!(scripts, ["abt", "abt-data"]);
 }
