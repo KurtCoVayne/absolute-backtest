@@ -1119,6 +1119,7 @@ abt-kernel CMD ...  the kernel's program: `abt kernel CMD ...` as `abt-kernel ke
 abt-query CMD ...   the query layer's program: serve, plan, metrics, lineage, dispute, test, claim, feed, activation, briefs, over --data SOCKET and --kernel SOCKET only
 abt plan|metrics|test|claim|feed|activation|lineage|dispute ... --query SOCKET   (asked of the query service)
 abt briefs report --briefs DIR --attempts DIR [--out FILE] [--kernels N] <files...>
+abt --version | -V        the build: one line, `abt 0.2.0 (COMMIT)`; `abt-data --version | -V` prints the data layer's program's
 ```
 
 The executor is the program's `execution` block and the reporting its
@@ -1130,6 +1131,19 @@ explained. `show`, `graph`, the coverage report every `run` prints,
 the compiler's `ir`, `rewrite-log`, `plan` and `verify` are described
 under "Observing a run" above; the compiler itself in
 `docs/compiler-design.md`.
+
+`abt --version` and `abt-data --version` say which build answers: the
+crate's version and, in parentheses, the build's identity, which a build
+script hands each program (`scripts/build_id.rs`). The identity is the
+first of: the environment variable `ABT_BUILD_COMMIT` when the builder sets
+it (a deployment's build, a tree sent to a machine without its `.git`);
+twelve digits of the tree's git commit, with `-dirty` when a tracked file
+differs from it; the first line of a file `BUILD_COMMIT` at the workspace
+root; `unknown`. Cargo runs the script again when the variable changes,
+`HEAD` moves or `BUILD_COMMIT` is rewritten, not on every build, so `-dirty`
+is the tree's state when the script last ran: an edit made after it under
+the same `HEAD` does not add the mark. No command reads the identity: it is
+in no run's outputs, run id or digest (`docs/spec/ERRATA.md`, E-133).
 
 `<files...>` are `.dsl` files or directories searched recursively; a run
 needs the catalog, the library modules the program uses and the program
@@ -1269,7 +1283,7 @@ the ranges with a note without one.
 | `corpus-v2/strategies/`, `company/`, `negative/` | 24 strategies that must check clean; MW14 and R8L as V-9 gives them; 35 negative cases, one or more per judgment code, each file's `# expect:` header asserted by `crates/abt-tests/tests/corpus_v2.rs`. |
 | `crates/*/tests/`, `crates/abt-tests/` | Each crate's own suites, and the suites that span layers with the fixtures they share (`crates/abt-tests/src/lib.rs`: the catalog and the library as the base workspace, a strategy skeleton, crafted markets). Those that drive the `abt` binary are the front's, `crates/abt/tests/`. |
 | `reference/`, `briefs/`, `experiments/` | The pandas reference engine, the plain-language briefs, and the material of the two model studies (records). |
-| `scripts/` | `parity/` holds the books' comparisons with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake and their editor; `bench.sh` the performance ladder and A-7.3's table; `synth/` writes the first formulation's layouts and is kept for the record. |
+| `scripts/` | `parity/` holds the books' comparisons with their references; `reviewed/` the reviewed exceptions of the S&P 500 lake and their editor; `bench.sh` the performance ladder and A-7.3's table; `build_id.rs` is the module of the two build scripts (`crates/abt/build.rs`, `crates/abt-data/build.rs`): the identity `--version` prints; `synth/` writes the first formulation's layouts and is kept for the record. |
 
 ## Development
 

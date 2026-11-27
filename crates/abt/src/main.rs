@@ -8,10 +8,19 @@
 //! commands (`check`, `run`, `query`, `show`, ...) to the kernel's.
 //! `abt::install` registers the in-process data services the kernel reaches
 //! a dataset or a store directory through.
+//!
+//! `abt --version` (`-V`) prints `abt VERSION (BUILD)` and nothing else: the
+//! crate's version and the build's identity, the commit the binary was built
+//! from (`scripts/build_id.rs`). No command reads the identity, so it is in
+//! no run's outputs (ERRATA E-133).
 
 fn main() {
-    abt::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("abt {} ({})", env!("CARGO_PKG_VERSION"), env!("ABT_BUILD"));
+        return;
+    }
+    abt::install();
     if args.first().map(String::as_str) == Some("data") {
         if let Some(code) = abt::loose_ingest(&args[1..]) {
             std::process::exit(code);
