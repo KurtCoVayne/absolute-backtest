@@ -449,7 +449,7 @@ fn short(h: &str) -> &str {
 
 fn plan_usage(io: &mut dyn Io) -> i32 {
     complain!(io,
-        "usage:\n  abt plan check  PLAN [SOURCES...] [--study NAME] [--json]   (the plan's normal form, its hash H(Π), its steps in order and the trials it will count)\n  abt plan run    PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json]   (every step but the reveals; the runs, trials and outcomes written to the data layer)\n  abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json]   (one reveal step: the committed point over the whole sample, the embargoed bars reported)\n  abt plan report PLAN [SOURCES...] [--study NAME] [--json]   (the latest execution's outcomes, from the data layer)\n  abt plan drop   PLAN [SOURCES...] [--study NAME]   (the plan leaves query.plans; its bindings are unpinned; its trials stay)\n  (--store DIR | --data SOCKET) [--kernel SOCKET | --kernels N]: the data layer, and the kernels the runs are spread over; or --query SOCKET, the query service (abt query serve) that runs the command"
+        "usage:\n  abt plan check  PLAN [SOURCES...] [--study NAME] [--json]   (the plan's normal form, its hash H(Π), its steps in order and the trials it will count)\n  abt plan run    PLAN [SOURCES...] [--study NAME] [--threads N] [--dry-run] [--json]   (every step but the reveals; the runs, trials and outcomes written to the data layer)\n  abt plan reveal PLAN STEP [SOURCES...] [--study NAME] [--json]   (one reveal step: the committed point over the whole sample, the embargoed bars reported)\n  abt plan report PLAN [SOURCES...] [--study NAME] [--json]   (the latest execution's outcomes, from the data layer)\n  abt plan drop   PLAN [SOURCES...] [--study NAME]   (the plan leaves query.plans; its bindings are unpinned; its trials stay)\n  (--store DIR | --data SOCKET) [--kernel SOCKET | --kernels N]: the data layer, and the kernels the runs are spread over; or --query SOCKET, the query service (abt query serve) that runs the command\n  --threads N: the runs asked for at once, each held with its history while it runs (default: as many as the kernels, one with --kernels 1)"
     );
     2
 }
@@ -624,13 +624,16 @@ fn plan_on(cmd: &str, a: &Args, reveal: Option<String>, p: Plan, prog: Program, 
                 );
                 return Ok(0);
             }
+            // As many runs at once as the plan has kernels, unless
+            // `--threads` says otherwise (E-179): a run is held with its
+            // history while it runs, so a plan on one kernel holds one.
             let opts = exec::Options {
                 threads: a
                     .opts
                     .get("threads")
                     .map(|n| n.parse().map_err(|_| format!("--threads: `{}` is not a count", n)))
                     .transpose()?
-                    .unwrap_or_else(|| exec::Options::default().threads),
+                    .unwrap_or(kernels.len()),
                 reveal,
                 ..exec::Options::default()
             };

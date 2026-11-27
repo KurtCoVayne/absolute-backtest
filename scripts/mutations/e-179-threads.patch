@@ -1,0 +1,16 @@
+# proposition: E-179 (without --threads, a plan asks for as many runs at once as it has kernels)
+# mutation: the runs asked for at once are the machine's cores up to four, whatever the kernels
+# test: cargo test -p abt-tests --test plan_exec a_plan_run_holds_as_many_runs_at_once_as_it_has_kernels
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-query/src/cli.rs b/crates/abt-query/src/cli.rs
+--- a/crates/abt-query/src/cli.rs
++++ b/crates/abt-query/src/cli.rs
+@@ -633,7 +633,7 @@
+                     .get("threads")
+                     .map(|n| n.parse().map_err(|_| format!("--threads: `{}` is not a count", n)))
+                     .transpose()?
+-                    .unwrap_or(kernels.len()),
++                    .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4)),
+                 reveal,
+                 ..exec::Options::default()
+             };

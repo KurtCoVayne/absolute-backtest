@@ -988,7 +988,10 @@ check PLAN` prints the plan's normal form, its hash H(Π), its steps in order
 and the trials it will count. `abt plan run` asks the kernels for every run
 with its step's identity π, spreads a grid over them, truncates every run
 before a trailing hold-out and masks a block hold-out out of the metrics and
-the ledgers. It writes every run as a trial row of `query.trials`, the
+the ledgers. It asks for as many runs at once as it has kernels (one with
+`--kernels 1`, the front's default), since a kernel holds a run with the
+history it reads; `--threads N` asks for N whatever the kernels (ERRATA
+E-179). It writes every run as a trial row of `query.trials`, the
 plan's outcomes under `query.<hash>.outcomes` and the plan, which pins its
 bindings, in `query.plans`. `abt plan reveal PLAN STEP` runs one committed
 point over the whole sample and reports the embargoed bars; `abt plan

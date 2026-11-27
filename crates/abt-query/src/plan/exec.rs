@@ -34,7 +34,10 @@ pub struct Endpoints<'a> {
 /// How a plan runs.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Runs asked for at once (each held by a kernel while it runs).
+    /// Runs asked for at once, over the whole pool (each held by a kernel
+    /// while it runs, with the history it reads). The command line asks for
+    /// as many as the pool has kernels unless `--threads` says otherwise
+    /// (ERRATA E-179).
     pub threads: usize,
     /// The reveal step to run (`abt plan reveal`); a plain execution runs
     /// none.
@@ -45,12 +48,11 @@ pub struct Options {
 }
 
 impl Default for Options {
+    /// One run at a time: the default knows no pool, and one is the count
+    /// no pool is too small for. A caller that has its pool says how many
+    /// of its runs may be held at once (E-179).
     fn default() -> Options {
-        Options {
-            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(4),
-            reveal: None,
-            now: now(),
-        }
+        Options { threads: 1, reveal: None, now: now() }
     }
 }
 
@@ -386,7 +388,9 @@ impl<'a> Executor<'a> {
 
     /// The runs, on `threads` workers over the kernel pool, in the asks'
     /// order (so that the trials are written in grid order whatever
-    /// finishes first). The kernel of the i-th ask is the (i mod pool)-th.
+    /// finishes first). The kernel of the i-th ask is the (i mod pool)-th,
+    /// whichever worker takes it: the pool holds at most `threads` runs at
+    /// once, and with one kernel that kernel holds them all.
     fn run_all(&self, asks: &[Ask]) -> Result<Vec<(Outcome, usize)>, Error> {
         let pool = self.ends.kernels.len();
         let workers = self.opts.threads.max(1).min(asks.len()).max(1);
