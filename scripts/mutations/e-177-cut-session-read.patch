@@ -1,0 +1,16 @@
+# proposition: E-177 (the pass's bucket at a session's label is read only where it is the session: no other instrument's label inside it)
+# mutation: the pass's answer at a session's label is read whatever the labels inside the session
+# test: cargo test -p abt-tests --test session_level a_session_aggregate_is_its_instruments_own_session_beside_one_that_closes_earlier
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/bind.rs b/crates/abt-kernel/src/kernel/bind.rs
+--- a/crates/abt-kernel/src/kernel/bind.rs
++++ b/crates/abt-kernel/src/kernel/bind.rs
+@@ -1918,7 +1918,7 @@
+                     let Some(session) = k.sessions.get(sym).and_then(|own| super::pushdown::own_session(own, *t)) else {
+                         return false;
+                     };
+-                    answer.error |= !super::pushdown::whole_session(session, &session_labels);
++                    let _ = (session, &answer);
+                     true
+                 });
+             }

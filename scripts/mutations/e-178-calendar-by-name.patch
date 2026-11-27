@@ -1,0 +1,16 @@
+# proposition: E-178 (the calendar `sessions of "ROOT"` is that of the instrument carrying the root's ticker)
+# mutation: the calendar's instrument is the symbol of the root's name
+# test: cargo test -p abt-tests --test session_level sessions_of_a_root_are_those_of_the_instrument_carrying_its_ticker
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-kernel/src/kernel/mod.rs b/crates/abt-kernel/src/kernel/mod.rs
+--- a/crates/abt-kernel/src/kernel/mod.rs
++++ b/crates/abt-kernel/src/kernel/mod.rs
+@@ -3174,7 +3174,7 @@
+                 Cal::Base => base_bars.clone(),
+                 Cal::Sessions => sessions.values().flat_map(|v| v.iter().map(|(_, l)| *l)).collect(),
+                 Cal::SessionsOf(root) => {
+-                    let sym = sessions_root(&securities, &symbols, root, as_of.unwrap_or(0));
++                    let sym = symbols.get(root);
+                     sym.and_then(|s| sessions.get(&s)).map(|v| v.iter().map(|(_, l)| *l).collect()).unwrap_or_default()
+                 }
+                 civil => {

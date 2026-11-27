@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use abt_data::adapter::Security;
-use abt_data::adapters::databento::{equities, futures, Databento, Locator, Options, Raw, Roll};
+use abt_data::adapters::databento::{equities, futures, Databento, Locator, Options, Raw, Roll, Window};
 use abt_data::adapters::databento_live::{cram, Gateway};
 use abt_data::adapters::dbn::{self, rtype, Decoded, Header, InstrumentDef, Metadata, Record};
 use abt_data::adapters::http::Historical;
@@ -527,6 +527,108 @@ fn the_daily_break_ends_a_session_in_every_era_of_cme_hours() {
     assert_eq!(report.roots["ES"].sessions, 9, "{:?}", report.roots["ES"]);
     let opens: Vec<i64> = eras.iter().flat_map(|&(_, days, open, _)| days.map(|day| t(day) + open * MIN)).collect();
     assert_eq!(times(relation(&f, "future.session"), "Open"), opens);
+}
+
+/// E-176: a root given session windows keeps the bars inside its day's
+/// window, and its session of a day opens when the window does. The corn
+/// window of the book this was written for: 10:30 to 14:15 New York until
+/// 2012-04-09, 09:30 to 14:20 from that day. New York is five hours behind
+/// UTC on 2012-03-09 and four from 2012-03-11.
+#[test]
+fn a_root_with_session_windows_keeps_its_windows_bars_and_opens_with_the_window() {
+    let mut records = vec![def_of(1, "ZCK2", "ZC", b'F', "2012-05-14T17:00:00", 0.25), def(2, "ESM2", b'F', "2012-06-15T13:30:00")];
+    let at = |day: &str, h: i64, m: i64| t(day) + (h * 60 + m) * MIN;
+    // (the bar's start in UTC, whether its window holds it)
+    let corn = [
+        // Winter time: the window is 15:30 to 19:15 UTC.
+        (at("2012-03-09", 15, 29), false),
+        (at("2012-03-09", 15, 30), true),
+        (at("2012-03-09", 19, 14), true),
+        // The evening session of the next trade date.
+        (at("2012-03-11", 23, 0), false),
+        // Summer time: 14:30 to 18:15 UTC. The first bar prints 17 minutes
+        // after the open; the last one inside closes with the window.
+        (at("2012-03-12", 14, 29), false),
+        (at("2012-03-12", 14, 47), true),
+        (at("2012-03-12", 15, 0), true),
+        (at("2012-03-12", 18, 14), true),
+        (at("2012-03-12", 18, 15), false),
+        // The last day of the first window: 13:30 UTC is before it.
+        (at("2012-04-05", 13, 30), false),
+        (at("2012-04-05", 14, 30), true),
+        // The second window, 13:30 to 18:20 UTC.
+        (at("2012-04-09", 13, 30), true),
+        (at("2012-04-09", 18, 19), true),
+    ];
+    for (k, &(start, _)) in corn.iter().enumerate() {
+        records.push(bar(1, start, 650.0 + k as f64 * 0.25, 10));
+    }
+    // A root with no window: one session across the evening and the day.
+    records.push(bar(2, at("2012-03-11", 23, 0), 1370.0, 10));
+    records.push(bar(2, at("2012-03-12", 14, 0), 1371.0, 10));
+    let mut raw = Raw::default();
+    raw.add_dbn(&dbn::encode(&meta(Some(6), vec![]), &records), "zc").unwrap();
+    let day = |d: &str| t(d).div_euclid(DAY);
+    let windows = vec![
+        Window {
+            from: i64::MIN,
+            open: (10 * 60 + 30) * MIN,
+            close: (14 * 60 + 15) * MIN,
+        },
+        Window {
+            from: day("2012-04-09"),
+            open: (9 * 60 + 30) * MIN,
+            close: (14 * 60 + 20) * MIN,
+        },
+    ];
+    let opts = Options {
+        session_windows: BTreeMap::from([("ZC".to_string(), windows.clone())]),
+        ..Options::default()
+    };
+    let (f, report) = futures(&raw, &opts).unwrap();
+    assert_eq!(report.dropped["outside_session_window"], corn.iter().filter(|(_, kept)| !kept).count());
+    let close = relation(&f, "future.close");
+    let keys = strings(close, "A");
+    let kept: Vec<i64> = times(close, "T").into_iter().zip(&keys).filter(|(_, k)| k.starts_with("ZC")).map(|(t, _)| t).collect();
+    assert_eq!(kept, corn.iter().filter(|(_, kept)| *kept).map(|(start, _)| start + MIN).collect::<Vec<_>>());
+    // Four sessions of corn, each open at its window's first instant and
+    // closed at its last bar; one of ES, from its bars' gaps.
+    let sessions = relation(&f, "future.session");
+    let of = |root: &str, col: &str| -> Vec<i64> {
+        times(sessions, col)
+            .into_iter()
+            .zip(strings(sessions, "A"))
+            .filter(|(_, k)| k.starts_with(root))
+            .map(|(t, _)| t)
+            .collect()
+    };
+    assert_eq!(
+        of("ZC", "Open"),
+        vec![at("2012-03-09", 15, 30), at("2012-03-12", 14, 30), at("2012-04-05", 14, 30), at("2012-04-09", 13, 30)]
+    );
+    assert_eq!(
+        of("ZC", "S"),
+        vec![at("2012-03-09", 19, 15), at("2012-03-12", 18, 15), at("2012-04-05", 14, 31), at("2012-04-09", 18, 20)]
+    );
+    assert_eq!((of("ES", "Open"), of("ES", "S")), (vec![at("2012-03-11", 23, 0)], vec![at("2012-03-12", 14, 1)]));
+    assert_eq!((report.roots["ZC"].sessions, report.roots["ES"].sessions), (4, 1));
+    // The setting, as an ingest writes it.
+    let setting = |v: &str| Databento::from_settings(&BTreeMap::from([("files".to_string(), "/nowhere".to_string()), ("session_windows".to_string(), v.to_string())]));
+    let read = setting("ZC=10:30-14:15,09:30-14:20@2012-04-09;ES=09:30-16:00").unwrap();
+    assert_eq!(read.options().session_windows["ZC"], windows);
+    assert_eq!(read.options().session_windows["ES"].len(), 1);
+    // A window outside 03:00 to 19:00 New York, a later window without its
+    // date, a first window with one, dates out of order: each refused.
+    for bad in [
+        "ES=18:00-17:00",
+        "ES=02:30-10:00",
+        "ES=09:30-19:01",
+        "ES=09:30-16:00,08:30-16:00",
+        "ES=09:30-16:00@2012-01-01",
+        "ES=09:30-16:00,08:30-16:00@2012-04-09,08:00-16:00@2012-04-09",
+    ] {
+        assert!(setting(bad).is_err(), "{}", bad);
+    }
 }
 
 #[test]

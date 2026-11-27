@@ -946,6 +946,170 @@ Three things they met, none of them new with this tree:
   unscoped run counts 135 (three days on which only other instruments
   have a bar), so its per-period metrics differ in the third digit.
 
+*MW14 on the real Russell 3000 (Nov 26).* The lake's own Russell
+memberships, the book's rules unchanged (`docs/handoff/benchmark.md`, "A
+wider universe"): 12,373 assets from 1990 to 2026-10-26, about 3,000 at
+a time. At `3c10fc5` with `--evaluator block` on the benchmark machine
+the run takes **164.8 s**, inside the owner's bound of 3 minutes for a
+universe of that size: 5,115 decisions, the run's process at 2.57 GB,
+the data service at 8.54 GB and ready after 18.0 s. The stream is
+135.2 s (decide 63.6, fill 23.0, insert 20.0, decode 7.3, trim 6.8), the
+checks 25.0 s and the pushed aggregates 17.6 s. The store is 3.7 GB,
+staged in 19 spans of two years in 46 minutes. There is no canon for
+it.
+
+*R8L on each root's primary session (Nov 26; E-176, E-177).* The
+Databento adapter takes a root's session windows (E-176) and
+`scripts/r8l-store.sh` stages the 26 roots with the book's: 33.2
+million minute bars to the session of 2026-11-26, 3.1 GB where the
+whole-day store is 19 GB (120.2 of the 252.8 million bars read lie
+outside the windows; `gc` after each root evicts the versions its
+ingest superseded, which were 10 GB of the 19), in 25 minutes on disk.
+`r8l.dsl` runs on it to the end: 462.5 s, 16,353 legs, the kernel at
+8.1 GB and the service at 5.5 GB, a barrier 0.14 ms on average and a
+decision barrier 5.2 ms (p99 13.3 ms, max 21.4 ms). These and the
+numbers below are of Nov 27, on the store staged from the pulls as
+repaired (two paragraphs down).
+
+The first run on that store was wrong, and found the engine fault of
+E-177. Its legs were 87.6% of the book's with 5,001 the book does not
+make, most of them short sidecar legs, at 1.45 to 1.5 times the book's
+P&L a matched leg: a risk unit an eighth to a quarter too small. ES's
+20-session mean true range on 2024-04-02 is 43.66 points from the
+store's bars and was 33.86 in the run; it is 43.66 again in a run of ES
+alone or of ES and NQ, 33.86 beside ZN and 36.73 beside GC, and exact
+with `--no-pushdown`. The data layer's pass buckets every instrument's
+rows by one list of labels, and the kernel's list for the sessions
+calendar is every root's session closes together, so ES's `high@session`
+and `low@session` were those of its last hour, after the treasuries'
+15:00 close. The kernel now reads the pass's answer only where it is the
+instrument's whole session and evaluates the others itself. That costs
+R8L about 70 s of 450 and 4 ms a decision barrier, until the pass is
+given a list of labels per instrument.
+
+With it R8L on Databento's history stands beside the Python book on
+TradeStation's (`scripts/parity/r8l_legs.py`), over 2011-05-25 to
+2026-08-14: 15,555 legs in the book and 15,493 in abt, 14,749 the same
+market and day (94.8% of the book's), 99.92% of those in the same
+direction, leg P&L correlation 0.973. On ES's 3,910 session days at the
+book's fixed base the book returns 22.35% a year at a Sharpe of 1.365
+with a 19.2% drawdown, and abt 21.31% at 1.326 with 17.7%; the daily
+series correlate 0.964. SB and KC (79% and 80% of the book's legs), HE
+(84%), LE and PL (87%) are the roots where the two vendors' sessions
+differ most.
+The run's own report had no periods at first: `sessions of "ES"` looked
+for a symbol named `ES`, and a vendor store's series is `ES.v.0`
+(E-178, which names it by its ticker as an instruments table does). On
+ES's 4,234 sessions from 2010-06-07 it gives an additive annual return
+of 20.88%, a Sharpe of 1.302 and a drawdown of 22.90%. Its total P&L,
+$3,507,482, is under the sum of the fills' cash flows ($3,537,607): a
+report on a calendar counts that calendar's days, and $30,124 falls on
+14 days with no ES session (Good Fridays on which the treasuries trade,
+two days of Oct 2012, four of 2014 the vendor has no ES bar of, the two
+national days of mourning, a Sunday on which ETH trades).
+
+That difference was $34,478 on 14 days in the first run with a report,
+and two of the 14 were Sep 1 and Oct 1, 2026, ordinary sessions. The
+pull of Nov 26 had cut them: the pipeline's month-chunked pull writes a
+session day's file from the first chunk that holds any of it and skips
+the day in the next, so a session that opens before midnight UTC on a
+month's last day keeps its first two hours. 116 day files in 59 of the
+pull's 81 roots were cut that way, and the store had no primary session
+on those two days for 16 of R8L's 26 roots. `scripts/r8l-repair.py`
+asked the vendor for the days again through the pulls' cost gate and
+replaced the files; `scripts/r8l-views.py` now takes the file with more
+rows where two pulls hold a day; R8L on the store staged again from
+them, in memory and to the session of Nov 25, took 441.7 s and made
+16,348 legs at a Sharpe of 1.301 on 4,233 sessions, 21.22% a year at
+1.321 beside the book's 22.35% at 1.365 (before: 439.0 s, 16,347 legs,
+1.310 on 4,231 sessions, 21.33% at 1.329 beside 22.07% at 1.347). The other weekdays on which some roots had no session were
+asked for too: Feb 28, 2020 was cut in the history and the vendor holds
+more of it, whole for the equity indices, the yen and the livestock
+and without the hours from 14:00 to 20:00 UTC for the treasuries, the
+metals, the energies and the grains; fourteen days of 2012 and 2014
+are the vendor's own gaps.
+
+On Nov 27 the pulls were held against the vendor two more ways, and
+both found more. A day file's first and last bar must belong to the
+day it is named for: KC's and SB's do not from 2026-06-22. The pulls'
+writer drops the vendor's duplicate bars and then groups the frame by a
+day series numbered from zero, which pandas aligns by row label, so
+every row after a duplicate takes the day of a later row: each file
+holds the end of the day before and lacks its own, and a chunk's last
+rows are written nowhere (KC lacked 6,195 of its 303,233 bars from Aug
+3 to Nov 25, the last hours of four month ends). Both roots are asked
+for again from June 2026, a row's day taken by position. The other
+check is the vendor's own record count, a year of a root at a time and
+by halves down to the day where it differs from the files: for the 24
+CME roots every year agrees except on 17 days, among them the two
+national days of mourning (2018-12-05 and 2025-01-09), of which no
+pull held a file, and the dataset's first evening. 100 root-days are
+written whole, with eight more that a check of the files' footers had
+found (2020-06-30 cut at 14:10 UTC for six roots). The vendor held the session of Nov
+26 by the morning of Nov 27, and it is in: Thanksgiving, on which 16
+of the 26 roots trade. The store staged from all of it is on the
+pipeline machine's disk, where the room was made by the engine's own
+`gc` on the whole-day store (20.9 GB to 10.0 GB in 6.5 minutes), and
+the numbers of this section are R8L on it. The pipeline's own pulls
+carry the first and the third fault and are left as they are; its days
+are written whole beside them (`docs/handoff/benchmark.md`, "What the
+pulls lacked").
+
+*The store's `gc` on real data.* On a copy of the folded MW14 store,
+`abt data gc --disk-budget 0` evicted 58 superseded versions in 9.2 s
+(76 version manifests to 18), and MW14 on the result gave the same
+returns in 65.2 s.
+
+*The agents again, and a plan's threads (Nov 26).* Two more posts
+through the pipeline's runner, one at a time, on the committed binaries
+($0.47): neither reached a full backtest. The equity post met the
+whole-history check run again (package 7 (a) and (b)). The NQ post's
+development plan, a base run and a grid, was killed at the slot's
+14 GB, where the day's earlier NQ post had finished with another
+program. Run by hand, that plan peaks at 15.3 GB on either build: `abt
+plan run --kernels 1` bounds the kernels and not the work, since the
+executor runs `threads` steps at a time on them (4 by default,
+`abt-query/src/plan/exec.rs`), and each step's run holds the store's
+history. With `--threads 1` the same plan peaks at 4.1 GB and takes
+2:44 where it took about 1:45. The pipeline's tool passes `--kernels 1`
+alone (`agents-harness/agents_harness/local.py`), so a grid on a minute
+store needs `--threads 1` beside it there, or package 7 (a). A third
+post on the build with E-177, with that flag added to its `plan run`
+by a wrapper beside the unmodified runner ($0.27), did not reach its
+plan: the agent wrote `commission per_contract 3.75`, the store states
+the book's 2.297 for NQ, and its translation check refused the
+difference (E-71 and E-96's open call, as on the ES post before). The
+stores staged here carry R8L's commissions, so an agent's house program
+cannot be checked on them until the precedence is settled or a store
+is staged without them.
+
+A fourth, on the build with E-178 and an NQ store staged the pipeline's
+way, with no commission stated ($0.22): its check plan ran, 19
+decisions over four months, with no memory kill and no commission
+refused. The agent then stopped at its translation check: it read the
+fills through the pipeline's `query_run`, `ledger fill`, and found each
+`moc` fill one session after its signal. The run's events have the fill
+at the decision's own close (2026-06-03T21:00 at 31,093.00, the
+session's close); `ledger fill` prints the program's `fill` relation,
+whose row is at the bar the program first sees the fill, the next one.
+The deployed engine keys that relation the same way (`sim/mod.rs`), so
+this is not a change of this branch: the skill or the tool has to say
+which time that column is, or read the run's events.
+
+A fifth run, both posts again, on the same build and the NQ store
+staged from the repaired pulls ($0.61). The NQ post ran to a full
+backtest and was submitted: 986 s, 16 trials (a run, a grid of 12 and
+3 claims), the check, the development plan, the reveal and the verdict
+written, nothing killed. Its agent met the same ledger and went on. It
+is the first full backtest through the pipeline's runner on the final
+build, with `--threads 1` added to its `plan run`. The equity post's
+translation run was killed for memory again, one step at a time or
+four: a check on the equity store holds the store's whole history in
+the kernel (package 7 (a) and (b)), which no option of the plan
+changes. The agent's notes name one more thing of the pipeline's: its
+`plan_check` refused the forward plan the skill prescribes (`holdout
+after H` without a window, then with one).
+
 ### The panel
 
 (This first record was made before the rule above: three of its four

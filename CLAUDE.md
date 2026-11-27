@@ -1,6 +1,6 @@
 # absolute-backtest: the three-layer engine
 
-This tree is the newest code of `absolute-backtest` (`abt`), a backtesting engine in Rust. Pull request #80 (`perf/m8-parallel`) was merged into `spec/three-layer-split` on Nov 25; each later package is a branch off it with a pull request of its own.
+This tree is the newest code of `absolute-backtest` (`abt`), a backtesting engine in Rust. Pull request #80 (`perf/m8-parallel`) was merged into `spec/three-layer-split` on Nov 25, and packages 1 to 6 (pull requests #81 to #90) on Nov 27; a later package is a branch off it with a pull request of its own.
 
 **Read `docs/handoff/README.md` before anything else.** It gives the state of the project on Nov 24, 2026, the goal and the first steps. The rest of `docs/handoff/` holds the approach, the ledger of what is and is not built, the roadmap and the benchmark recipe.
 
@@ -24,7 +24,7 @@ Three programs that share only a protocol:
 - **No commit, push, merge, or edit of a pull request or issue unless the owner asks.** The roadmap lists commits and a merge as steps; that is a list of work, not permission.
 - **Do not `git stash`.** This tree is a worktree, and the stash list it shares with the other engine trees already holds unfinished work. The `SmallVec` experiment of Nov 6 was measured and kept on Nov 25 (package 1, `docs/assessment.md`): `Tuple` is a `SmallVec` in the tree and the patch file is gone.
 - **Other AWS profiles** (`default`, `production`, `john-root`) are other accounts: never touch them. In `signos`, ask before stopping `hermes-prod` or `absolute-pipeline`.
-- **A deviation from the spec gets an erratum.** E-138 to E-175 are written or held by open branches (E-140 and E-143 are unused); the next free number is E-176. Update `docs/spec/TRACE.md` in the same change.
+- **A deviation from the spec gets an erratum.** E-138 to E-178 are written or held by open branches (E-140 and E-143 are unused); the next free number is E-179. Update `docs/spec/TRACE.md` in the same change.
 
 ## Cadence
 

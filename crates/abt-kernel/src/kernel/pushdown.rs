@@ -21,6 +21,22 @@
 //! then exactly what the pass read. Otherwise, and for an instrument the
 //! aggregation itself binds, it evaluates the window locally.
 //!
+//! A session is its instrument's own, and the pass walks one list of labels
+//! for every instrument: the sessions calendar's are every instrument's
+//! sessions together (ERRATA E-177). Beside a root whose session closes at
+//! 15:00, the pass's bucket for one that trades until 16:00 is its last
+//! hour, and its hours before are a bucket at a label that is no session of
+//! its own. So of a bucket of that calendar the pass's answer for an
+//! instrument is read only at a label of the instrument's own
+//! (`own_session`), and there only where no other label falls inside the
+//! session (`whole_session`). Any other answer at an own label is marked as
+//! one the pass could not give, and its window is evaluated here; an answer
+//! at another label is no answer (`bind::push_down`). Such a bucket is
+//! delivered only when every session of every instrument is whole. No
+//! other window steps that calendar's labels: a stored relation is read at
+//! a session's label through its bar view alone (WF-16), whose window's
+//! time is on the base calendar.
+//!
 //! A literal is delivered instead (ERRATA E-157) when its function meets no
 //! partial arithmetic, its rule is on the decision calendar and its window
 //! is that calendar's bucket at the rule's own label (the fold evaluates
@@ -30,8 +46,9 @@
 //! before the barrier of its label, held in a store of the kernel's own and
 //! read with no receipt test and no local window.
 
-use super::hash::FxHashMap;
+use std::collections::BTreeSet;
 
+use super::hash::FxHashMap;
 use super::{Sym, Value};
 use crate::check::Program;
 use crate::ir::{BinOp, Cal, Expr, Kind, Lit, Literal, Term, WindowKind};
@@ -397,6 +414,22 @@ pub fn deliverable(shape: &Shape, prog: &Program) -> Result<(), String> {
         return Err("its bucket is not the decision calendar's at the rule's own label, so it can be read while it is open".into());
     }
     Ok(())
+}
+
+/// The instrument's session labelled `label`, of its sessions `own` (open
+/// and label, by label): none at a label of the sessions calendar that is
+/// another instrument's (ERRATA E-177).
+pub fn own_session(own: &[(i64, i64)], label: i64) -> Option<(i64, i64)> {
+    own.get(own.partition_point(|&(_, l)| l < label)).copied().filter(|&(_, l)| l == label)
+}
+
+/// Whether the pass's bucket at a session's label is the session (ERRATA
+/// E-177): the pass closes a bucket at every label of the calendar,
+/// `labels`, every instrument's together, so the bucket is the rows after
+/// the last of them before this one; the session's are those in
+/// `(open, label]` (`Kernel::window_times`).
+pub fn whole_session((open, label): (i64, i64), labels: &BTreeSet<i64>) -> bool {
+    open < label && labels.range(open + 1..label).next().is_none()
 }
 
 /// The aggregate literals of a program the stream can deliver, by (rule,
