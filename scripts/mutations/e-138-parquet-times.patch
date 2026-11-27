@@ -1,0 +1,16 @@
+# proposition: E-138 (a Parquet version's distinct times are its time column's inside the window)
+# mutation: a partition the window cuts answers every time it holds
+# test: cargo test -p abt-data --test column_reads distinct_times_of_a_parquet_relation
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/store_columns.rs b/crates/abt-data/src/store_columns.rs
+--- a/crates/abt-data/src/store_columns.rs
++++ b/crates/abt-data/src/store_columns.rs
+@@ -173,7 +173,7 @@
+                     return Ok(None);
+                 }
+                 for &x in times.values().iter() {
+-                    if f.t0.is_some_and(|t0| x < t0) || f.t1.is_some_and(|t1| x > t1) {
++                    if false {
+                         continue;
+                     }
+                     match last {

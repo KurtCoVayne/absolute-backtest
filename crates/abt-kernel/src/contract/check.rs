@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use super::{Contract, Status};
 use crate::check::{LimitKind, LimitPolicy, Program};
 use crate::ir::{Kind as RelKind, Lit, Term, WindowKind};
-use crate::kernel::bind::{Bound, DataClient};
+use crate::kernel::bind::{Bound, DataClient, ScanWant};
 use crate::kernel::events::{Book, EventKind, Fate, OrderId};
 use crate::kernel::time::format_timestamp;
 use crate::kernel::{ExecConfig, Kernel, RunError, RunResult, RunWarning, Sym, Value};
@@ -41,24 +41,7 @@ pub fn action_problems<K: Ord + Clone>(
             if let Some(p0) = prev {
                 let div = dividends.get(&(sym.clone(), t)).copied().unwrap_or(0.0);
                 let split = splits.get(&(sym.clone(), t)).copied();
-                let ratio = (p + div) * split.unwrap_or(1.0) / p0;
-                let problem = match split {
-                    Some(f) if (ratio - 1.0).abs() > 0.25 => Some(format!("{} at {}: a {}:1 split but the close moved from {} to {}", name(sym), format_timestamp(t), f, p0, p)),
-                    None if !(0.6..=1.67).contains(&ratio) => Some(if div > 0.0 {
-                        format!(
-                            "{} at {}: the close moved from {} to {} and a dividend of {} does not explain it",
-                            name(sym),
-                            format_timestamp(t),
-                            p0,
-                            p,
-                            div
-                        )
-                    } else {
-                        format!("{} at {}: the close moved from {} to {} with no action to explain it", name(sym), format_timestamp(t), p0, p)
-                    }),
-                    _ => None,
-                };
-                if let Some(problem) = problem {
+                if let Some(problem) = bar_problem(&|| name(sym), t, p0, p, div, split) {
                     if excused(sym, t) {
                         accepted += 1;
                     } else {
@@ -71,10 +54,79 @@ pub fn action_problems<K: Ord + Clone>(
     }
     for ((sym, t), f) in splits {
         if !closes.get(sym).is_some_and(|s| s.contains_key(t)) {
-            problems.push(format!("{} at {}: a {}:1 split on a bar with no close", name(sym), format_timestamp(*t), f));
+            problems.push(split_without_close(name(sym), *t, *f));
         }
     }
     (problems, accepted)
+}
+
+/// What a bar's close says against the one before it (`action_problems`):
+/// the problem, when the total-return ratio is outside its band, for the
+/// instrument `who` names.
+fn bar_problem(who: &dyn Fn() -> String, t: i64, p0: f64, p: f64, div: f64, split: Option<f64>) -> Option<String> {
+    let ratio = (p + div) * split.unwrap_or(1.0) / p0;
+    match split {
+        Some(f) if (ratio - 1.0).abs() > 0.25 => Some(format!("{} at {}: a {}:1 split but the close moved from {} to {}", who(), format_timestamp(t), f, p0, p)),
+        None if !(0.6..=1.67).contains(&ratio) => Some(if div > 0.0 {
+            format!(
+                "{} at {}: the close moved from {} to {} and a dividend of {} does not explain it",
+                who(),
+                format_timestamp(t),
+                p0,
+                p,
+                div
+            )
+        } else {
+            format!("{} at {}: the close moved from {} to {} with no action to explain it", who(), format_timestamp(t), p0, p)
+        }),
+        _ => None,
+    }
+}
+
+fn split_without_close(who: String, t: i64, f: f64) -> String {
+    format!("{} at {}: a {}:1 split on a bar with no close", who, format_timestamp(t), f)
+}
+
+/// An instrument's rows of a map keyed by (instrument, time), in time
+/// order.
+fn of_instrument(m: &BTreeMap<(Sym, i64), f64>, sym: Sym) -> std::iter::Peekable<impl Iterator<Item = (i64, f64)> + '_> {
+    m.range((sym, i64::MIN)..=(sym, i64::MAX)).map(|(k, v)| (k.1, *v)).peekable()
+}
+
+/// The value at `t` of rows walked in time order, for times asked in
+/// ascending order.
+fn at_time(walk: &mut std::iter::Peekable<impl Iterator<Item = (i64, f64)>>, t: i64) -> Option<f64> {
+    while walk.peek().is_some_and(|x| x.0 < t) {
+        walk.next();
+    }
+    walk.peek().filter(|x| x.0 == t).map(|x| x.1)
+}
+
+/// `action_problems` with no reviewed exception, over the closes held per
+/// instrument (its position) as `(time, close)` runs in time order, a time
+/// once: the same problems in the same order. An instrument's splits and
+/// dividends are walked beside its closes, not looked up bar by bar.
+fn action_problems_by_instrument(closes: &[Vec<(i64, f64)>], splits: &BTreeMap<(Sym, i64), f64>, dividends: &BTreeMap<(Sym, i64), f64>, name: &dyn Fn(&Sym) -> String) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (s, run) in closes.iter().enumerate() {
+        let sym = s as Sym;
+        let (mut split_walk, mut dividend_walk) = (of_instrument(splits, sym), of_instrument(dividends, sym));
+        let mut prev: Option<f64> = None;
+        for &(t, p) in run {
+            if let Some(p0) = prev {
+                let div = at_time(&mut dividend_walk, t).unwrap_or(0.0);
+                let split = at_time(&mut split_walk, t);
+                problems.extend(bar_problem(&|| name(&sym), t, p0, p, div, split));
+            }
+            prev = Some(p);
+        }
+    }
+    for ((sym, t), f) in splits {
+        if closes.get(*sym as usize).is_none_or(|run| run.binary_search_by_key(t, |x| x.0).is_err()) {
+            problems.push(split_without_close(name(sym), *t, *f));
+        }
+    }
+    problems
 }
 
 /// Delisting coverage: an instrument whose last listed bar precedes the
@@ -98,8 +150,75 @@ pub fn membership_problems<K: Ord + Clone>(members: &[(K, i64)], listed: &BTreeS
     members
         .iter()
         .filter(|(k, t)| !listed.contains(&(k.clone(), *t)))
-        .map(|(k, t)| format!("{} is a member at {} but not listed", name(k), format_timestamp(*t)))
+        .map(|(k, t)| member_not_listed(name(k), *t))
         .collect()
+}
+
+fn member_not_listed(who: String, t: i64) -> String {
+    format!("{} is a member at {} but not listed", who, format_timestamp(t))
+}
+
+/// The (instrument, time) pairs a check asks a relation for, and which of
+/// them the relation holds: per instrument (its position) the asked times
+/// ascending, a time once, and a mark each. It is as large as what is
+/// asked, not as the relation read against it: a membership of the
+/// program's lists probes a listing of every instrument's every bar, which
+/// was held as an ordered set of fifteen million pairs.
+struct Probes {
+    times: Vec<Vec<i64>>,
+    found: Vec<Vec<bool>>,
+    /// Per instrument, where the time last looked for is: the rows of an
+    /// instrument come in time order, so the next is beside it.
+    at: Vec<usize>,
+}
+
+impl Probes {
+    fn of(instruments: usize, asked: &[(Sym, i64)]) -> Probes {
+        let mut times: Vec<Vec<i64>> = vec![Vec::new(); instruments];
+        for &(s, t) in asked {
+            times[s as usize].push(t);
+        }
+        for v in &mut times {
+            if !v.windows(2).all(|w| w[0] < w[1]) {
+                v.sort_unstable();
+                v.dedup();
+            }
+        }
+        let found = times.iter().map(|v| vec![false; v.len()]).collect();
+        Probes {
+            times,
+            found,
+            at: vec![0; instruments],
+        }
+    }
+
+    /// The place of `t` among an instrument's asked times, when it is one
+    /// of them. `at` is brought to the first asked time not before `t`:
+    /// one step on for the next time of a run, a search otherwise.
+    fn place(&mut self, s: Sym, t: i64) -> Option<usize> {
+        let v = &self.times[s as usize];
+        let at = &mut self.at[s as usize];
+        if v.get(*at).is_some_and(|&x| x < t) {
+            *at += 1;
+            if v.get(*at).is_some_and(|&x| x < t) {
+                *at += v[*at..].partition_point(|&x| x < t);
+            }
+        } else if *at > 0 && v[*at - 1] >= t {
+            *at = v[..*at].partition_point(|&x| x < t);
+        }
+        (v.get(*at) == Some(&t)).then_some(*at)
+    }
+
+    /// The relation holds a row of `s` at `t`.
+    fn mark(&mut self, s: Sym, t: i64) {
+        if let Some(i) = self.place(s, t) {
+            self.found[s as usize][i] = true;
+        }
+    }
+
+    fn marked(&mut self, s: Sym, t: i64) -> bool {
+        self.place(s, t).is_some_and(|i| self.found[s as usize][i])
+    }
 }
 
 /// The first five problems and how many more, as a status's detail.
@@ -222,8 +341,179 @@ fn le_zero(column: &str) -> abt_wire::generated::abt::wire::Predicate {
 
 /// The preconditions at bind, before the first barrier (K-3.2): each
 /// clause's status in `c`; what a warn policy found, as run warnings; a
-/// refusal names its clause.
+/// refusal names its clause. The data checks read the columns they look
+/// at (E-139).
 pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &DataClient, cfg: &ExecConfig) -> Result<Vec<RunWarning>, RunError> {
+    checked(c, prog, bound, client, cfg, false)
+}
+
+/// `preconditions` with every data check read a `ScanRow` a row and judged
+/// by the bundle's functions, as before E-139: what the column reads'
+/// statuses and warnings are held equal to (`tests/contracts.rs`).
+pub fn preconditions_rows(c: &mut Contract, prog: &Program, bound: &Bound, client: &DataClient, cfg: &ExecConfig) -> Result<Vec<RunWarning>, RunError> {
+    checked(c, prog, bound, client, cfg, true)
+}
+
+/// The first row of a relation whose `column` is not positive, of an
+/// instrument without contract terms (a future's back-adjusted series may
+/// cross zero): its instrument and time.
+fn first_not_positive(bound: &Bound, client: &DataClient, relation: &str, column: &str, by_rows: bool) -> Result<Option<(Option<Sym>, i64)>, RunError> {
+    let judged = |sym: Option<Sym>| sym.is_some_and(|s| !bound.contracts.contains_key(&s));
+    if by_rows {
+        return Ok(bound.scan(client, relation, Some(le_zero(column)))?.iter().find(|r| judged(r.sym)).map(|r| (r.sym, r.t)));
+    }
+    // The instrument and the time of the rows the predicate keeps: a store
+    // that can tell none passes (a hot block's base, a row group's least
+    // value) reads no row for it.
+    let mut first = None;
+    bound.scan_columns(client, relation, Some(le_zero(column)), ScanWant::default(), &mut |sym, t, _, _| {
+        if first.is_none() && judged(sym) {
+            first = Some((sym, t));
+        }
+    })?;
+    Ok(first)
+}
+
+/// The problems of `pre.actions`, read a `ScanRow` a row.
+fn action_problems_rows(bound: &Bound, client: &DataClient, name: &dyn Fn(&Sym) -> String) -> Result<Vec<String>, RunError> {
+    let mut closes: BTreeMap<Sym, BTreeMap<i64, f64>> = BTreeMap::new();
+    for r in bound.scan(client, "close", None)? {
+        if let (Some(s), Some(Some(p))) = (r.sym, r.nums.first()) {
+            closes.entry(s).or_default().insert(r.t, *p);
+        }
+    }
+    let mut splits: BTreeMap<(Sym, i64), f64> = BTreeMap::new();
+    for r in bound.scan(client, "split", None)? {
+        if let (Some(s), Some(Some(f))) = (r.sym, r.nums.first()) {
+            splits.insert((s, r.t), *f);
+        }
+    }
+    let mut dividends: BTreeMap<(Sym, i64), f64> = BTreeMap::new();
+    for r in bound.scan(client, "dividend", None)? {
+        if let (Some(s), Some(Some(ex)), Some(Some(amount))) = (r.sym, r.times.first(), r.nums.first()) {
+            *dividends.entry((s, *ex)).or_insert(0.0) += amount;
+        }
+    }
+    Ok(action_problems(&closes, &splits, &dividends, &|_, _| false, name).0)
+}
+
+/// The problems of `pre.actions`, read as columns: the closes' instrument,
+/// time and price into a run per instrument, the splits' factor, the
+/// dividends' ex-date and amount. Every instrument's closes are read: a
+/// close that moves with no action to explain it is a problem of an
+/// instrument that has none.
+fn action_problems_columns(bound: &Bound, client: &DataClient, name: &dyn Fn(&Sym) -> String) -> Result<Vec<String>, RunError> {
+    let mut closes: Vec<Vec<(i64, f64)>> = vec![Vec::new(); bound.ids.len()];
+    bound.scan_columns(client, "close", None, ScanWant { nums: 1, times: 0 }, &mut |sym, t, nums, _| {
+        if let (Some(s), Some(Some(p))) = (sym, nums.first()) {
+            closes[s as usize].push((t, *p));
+        }
+    })?;
+    // In time order, the last row of a time kept: what a map by time holds.
+    for run in &mut closes {
+        if !run.windows(2).all(|w| w[0].0 < w[1].0) {
+            run.sort_by_key(|x| x.0);
+            let mut kept: Vec<(i64, f64)> = Vec::with_capacity(run.len());
+            for &x in run.iter() {
+                match kept.last_mut() {
+                    Some(last) if last.0 == x.0 => *last = x,
+                    _ => kept.push(x),
+                }
+            }
+            *run = kept;
+        }
+    }
+    let mut splits: BTreeMap<(Sym, i64), f64> = BTreeMap::new();
+    bound.scan_columns(client, "split", None, ScanWant { nums: 1, times: 0 }, &mut |sym, t, nums, _| {
+        if let (Some(s), Some(Some(f))) = (sym, nums.first()) {
+            splits.insert((s, t), *f);
+        }
+    })?;
+    let mut dividends: BTreeMap<(Sym, i64), f64> = BTreeMap::new();
+    bound.scan_columns(client, "dividend", None, ScanWant { nums: 1, times: 1 }, &mut |sym, _, nums, times| {
+        if let (Some(s), Some(Some(ex)), Some(Some(amount))) = (sym, times.first(), nums.first()) {
+            *dividends.entry((s, *ex)).or_insert(0.0) += amount;
+        }
+    })?;
+    Ok(action_problems_by_instrument(&closes, &splits, &dividends, name))
+}
+
+/// What the checks against the listing found: the problems of
+/// `pre.delistings` and of `pre.membership`, none where a check does not
+/// apply (no listing bound or none of its rows the binding's, no
+/// `delisted`, no `member`).
+type ListingProblems = (Option<Vec<String>>, Option<Vec<String>>);
+
+/// The listing's checks, read a `ScanRow` a row.
+fn listing_problems_rows(prog: &Program, bound: &Bound, client: &DataClient, name: &dyn Fn(&Sym) -> String) -> Result<ListingProblems, RunError> {
+    let listed: Vec<(Sym, i64)> = if bound.stored.contains_key("listed") {
+        bound.scan(client, "listed", None)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect()
+    } else {
+        Vec::new()
+    };
+    let delistings = if !listed.is_empty() && bound.stored.contains_key("delisted") {
+        let delisted: BTreeSet<Sym> = bound.scan(client, "delisted", None)?.into_iter().filter_map(|r| r.sym).collect();
+        Some(delisting_problems(&listed, &delisted, name))
+    } else {
+        None
+    };
+    let membership = if !listed.is_empty() && bound.stored.contains_key("member") {
+        // The program's lists' rows alone (E-120): a store's membership of
+        // every list is two orders larger.
+        let lists = labels_in(bound, "member", &prog.demand.lists);
+        let members: Vec<(Sym, i64)> = bound.scan(client, "member", lists)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect();
+        let on: BTreeSet<(Sym, i64)> = listed.iter().cloned().collect();
+        Some(membership_problems(&members, &on, name))
+    } else {
+        None
+    };
+    Ok((delistings, membership))
+}
+
+/// The listing's checks, read as columns, the listing once and never
+/// held: the membership is read first (the program's lists' rows alone,
+/// E-120, their instrument and time), then each listed row marks the
+/// member row it answers and moves its instrument's last listed bar,
+/// which is all the delisting check reads of it.
+fn listing_problems_columns(prog: &Program, bound: &Bound, client: &DataClient, name: &dyn Fn(&Sym) -> String) -> Result<ListingProblems, RunError> {
+    if !bound.stored.contains_key("listed") {
+        return Ok((None, None));
+    }
+    let with_members = bound.stored.contains_key("member");
+    let mut members: Vec<(Sym, i64)> = Vec::new();
+    if with_members {
+        let lists = labels_in(bound, "member", &prog.demand.lists);
+        bound.scan_columns(client, "member", lists, ScanWant::default(), &mut |sym, t, _, _| members.extend(sym.map(|s| (s, t))))?;
+    }
+    let mut probes = Probes::of(bound.ids.len(), &members);
+    let mut last: Vec<Option<i64>> = vec![None; bound.ids.len()];
+    bound.scan_columns(client, "listed", None, ScanWant::default(), &mut |sym, t, _, _| {
+        if let Some(s) = sym {
+            let seen = &mut last[s as usize];
+            *seen = Some(seen.map_or(t, |x| x.max(t)));
+            probes.mark(s, t);
+        }
+    })?;
+    // An instrument's last listed bar, in the instruments' order: the
+    // data's last bar is the latest of them.
+    let last_listed: Vec<(Sym, i64)> = last.iter().enumerate().filter_map(|(s, t)| t.map(|t| (s as Sym, t))).collect();
+    if last_listed.is_empty() {
+        return Ok((None, None));
+    }
+    let delistings = if bound.stored.contains_key("delisted") {
+        let mut delisted: BTreeSet<Sym> = BTreeSet::new();
+        bound.scan_columns(client, "delisted", None, ScanWant::default(), &mut |sym, _, _, _| delisted.extend(sym))?;
+        Some(delisting_problems(&last_listed, &delisted, name))
+    } else {
+        None
+    };
+    // The member rows no listed row answered, in the order they were read.
+    let membership = with_members.then(|| members.iter().filter(|(s, t)| !probes.marked(*s, *t)).map(|(s, t)| member_not_listed(name(s), *t)).collect());
+    Ok((delistings, membership))
+}
+
+fn checked(c: &mut Contract, prog: &Program, bound: &Bound, client: &DataClient, cfg: &ExecConfig, by_rows: bool) -> Result<Vec<RunWarning>, RunError> {
+    let mark = client.calls_made();
     let mut warnings = Vec::new();
     let refuse = |clause: &str, message: String| RunError::Precondition { clause: clause.into(), message };
     // The resolver answered the demand with versions that carry what it
@@ -319,10 +609,9 @@ pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &D
                     continue;
                 }
                 scanned += 1;
-                let bad = bound.scan(client, rel, Some(le_zero(&col.name)))?;
-                if let Some(row) = bad.iter().find(|r| r.sym.is_some_and(|s| !bound.contracts.contains_key(&s))) {
-                    let who = row.sym.map(|s| bound.symbols.name(s).to_string()).unwrap_or_default();
-                    return Err(refuse("pre.prices", format!("`{}` of {} at {} is not a positive price", rel, who, format_timestamp(row.t))));
+                if let Some((sym, t)) = first_not_positive(bound, client, rel, &col.name, by_rows)? {
+                    let who = sym.map(|s| bound.symbols.name(s).to_string()).unwrap_or_default();
+                    return Err(refuse("pre.prices", format!("`{}` of {} at {} is not a positive price", rel, who, format_timestamp(t))));
                 }
             }
         }
@@ -343,25 +632,11 @@ pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &D
     // The data checks (the former bundle tests).
     let name = |s: &Sym| bound.symbols.name(*s).to_string();
     if bound.stored.contains_key("close") && (bound.stored.contains_key("split") || bound.stored.contains_key("dividend")) {
-        let mut closes: BTreeMap<Sym, BTreeMap<i64, f64>> = BTreeMap::new();
-        for r in bound.scan(client, "close", None)? {
-            if let (Some(s), Some(Some(p))) = (r.sym, r.nums.first()) {
-                closes.entry(s).or_default().insert(r.t, *p);
-            }
-        }
-        let mut splits: BTreeMap<(Sym, i64), f64> = BTreeMap::new();
-        for r in bound.scan(client, "split", None)? {
-            if let (Some(s), Some(Some(f))) = (r.sym, r.nums.first()) {
-                splits.insert((s, r.t), *f);
-            }
-        }
-        let mut dividends: BTreeMap<(Sym, i64), f64> = BTreeMap::new();
-        for r in bound.scan(client, "dividend", None)? {
-            if let (Some(s), Some(Some(ex)), Some(Some(amount))) = (r.sym, r.times.first(), r.nums.first()) {
-                *dividends.entry((s, *ex)).or_insert(0.0) += amount;
-            }
-        }
-        let (problems, _) = action_problems(&closes, &splits, &dividends, &|_, _| false, &name);
+        let problems = if by_rows {
+            action_problems_rows(bound, client, &name)?
+        } else {
+            action_problems_columns(bound, client, &name)?
+        };
         warned_or_checked(c, "pre.actions", &problems, &mut warnings, "corporate-action");
     } else {
         c.set(
@@ -371,38 +646,28 @@ pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &D
             },
         );
     }
-    let listed: Vec<(Sym, i64)> = if bound.stored.contains_key("listed") {
-        bound.scan(client, "listed", None)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect()
+    let (delistings, membership) = if by_rows {
+        listing_problems_rows(prog, bound, client, &name)?
     } else {
-        Vec::new()
+        listing_problems_columns(prog, bound, client, &name)?
     };
-    if !listed.is_empty() && bound.stored.contains_key("delisted") {
-        let delisted: BTreeSet<Sym> = bound.scan(client, "delisted", None)?.into_iter().filter_map(|r| r.sym).collect();
-        let problems = delisting_problems(&listed, &delisted, &name);
-        warned_or_checked(c, "pre.delistings", &problems, &mut warnings, "delisting");
-    } else {
-        c.set(
+    match delistings {
+        Some(problems) => warned_or_checked(c, "pre.delistings", &problems, &mut warnings, "delisting"),
+        None => c.set(
             "pre.delistings",
             Status::NotApplicable {
                 why: "the binding holds no listing with delistings".into(),
             },
-        );
+        ),
     }
-    if !listed.is_empty() && bound.stored.contains_key("member") {
-        // The program's lists' rows alone (E-120): a store's membership of
-        // every list is two orders larger.
-        let lists = labels_in(bound, "member", &prog.demand.lists);
-        let members: Vec<(Sym, i64)> = bound.scan(client, "member", lists)?.into_iter().filter_map(|r| Some((r.sym?, r.t))).collect();
-        let on: BTreeSet<(Sym, i64)> = listed.iter().cloned().collect();
-        let problems = membership_problems(&members, &on, &name);
-        warned_or_checked(c, "pre.membership", &problems, &mut warnings, "survivorship");
-    } else {
-        c.set(
+    match membership {
+        Some(problems) => warned_or_checked(c, "pre.membership", &problems, &mut warnings, "survivorship"),
+        None => c.set(
             "pre.membership",
             Status::NotApplicable {
                 why: "the binding holds no membership with a listing".into(),
             },
-        );
+        ),
     }
     c.set("pre.option_inputs", Status::NotApplicable { why: "not an option program".into() });
     c.set(
@@ -411,6 +676,7 @@ pub fn preconditions(c: &mut Contract, prog: &Program, bound: &Bound, client: &D
             why: "no `margin published` model before M-7".into(),
         },
     );
+    crate::kernel::bind::print_calls(client, mark, "check");
     Ok(warnings)
 }
 

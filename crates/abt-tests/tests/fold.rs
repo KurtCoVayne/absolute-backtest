@@ -289,3 +289,83 @@ fn the_stream_carries_the_programs_primitives_in_receipt_order_with_its_barriers
     );
     assert!((5 * 16..7 * 5 * 16).contains(&expected), "what the book reads, not the seven primitives: {}", expected);
 }
+
+/// The events of a program's whole stream over a market as text (a label
+/// as the kernel's number for it, given in the order labels are first
+/// met): decoded by `Decoder::events`, or a cell at a time. And whether a
+/// batch interleaved the tuples of two relations (one relation's tuples
+/// on both sides of another's).
+fn decoded(p: &Program, ds: &Dataset, by_cell: bool) -> (Vec<String>, bool) {
+    let client = common::client(p, ds);
+    let bound = bind(p, &client).unwrap();
+    let mut k = Kernel::bound(p, &bound, ExecConfig::from_program(p)).unwrap();
+    let (spec, cal_of) = stream_spec(&k, &bound, &client, "test").unwrap();
+    let mut decoder = Decoder::new(&k, &bound, cal_of);
+    let mut sub = client.subscribe(spec, 1, None).unwrap();
+    let (mut out, mut interleaved) = (Vec::new(), false);
+    while let Some(b) = sub.next_batch().unwrap() {
+        let events = if by_cell {
+            decoder.events_by_cell(&mut k, &bound, &b)
+        } else {
+            decoder.events(&mut k, &bound, &b)
+        }
+        .unwrap();
+        let mut runs: Vec<usize> = Vec::new();
+        for e in &events {
+            if let StreamEvent::Tuple { rel, .. } = e {
+                if runs.last() != Some(rel) {
+                    runs.push(*rel);
+                }
+            }
+        }
+        interleaved |= runs.len() > runs.iter().collect::<std::collections::BTreeSet<_>>().len();
+        out.extend(events.iter().map(|e| format!("{:?}", e)));
+    }
+    (out, interleaved)
+}
+
+#[test]
+fn a_batch_decodes_to_the_same_events_with_its_relations_resolved_once() {
+    // Every corpus strategy's stream over its golden market, and a
+    // list-gated program's over the daily market (a membership's labels,
+    // a delisting's reason, a dividend's dates): the events `events` gives
+    // are those of the decoding that looked every tuple's relation up by
+    // name and every cell's type up at the cell, in the same order, with
+    // the same labels interned in the same order.
+    let gated = common::program(
+        &common::StrategyParts {
+            name: "gated".into(),
+            needs: "need bars @1d   need actions, listing   need lists \"SPX\"".into(),
+            universe: "universe(A, T) :- listed(A, T), traded@base(A, T), member(A, T, \"SPX\").".into(),
+            params: "    w : Scalar = 0.1".into(),
+            rules: "    rel paid(A: Equity, @T)\n    paid(A, T) :- dividend(A, T, Ex, Pay, Amount), Amount > 0 USD/share.\n    rel gone(A: Equity, @T)\n    gone(A, T) :- delisted(A, T, Why).".into(),
+            decides: "    decide(T, hold(A, w)) :- universe(A, T), not gone(A, T).".into(),
+            ..Default::default()
+        }
+        .render(),
+        "gated",
+    );
+    let mut streams: Vec<(Program, Dataset)> = common::golden_programs().iter().map(|f| common::golden_inputs(f).unwrap()).collect();
+    streams.push((gated, synthetic_daily(&SYMS, (2022, 1, 3), 120, 3)));
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut tuples, mut interleaved) = (0, false);
+    for (p, ds) in &streams {
+        let ((events, mixed), (by_cell, _)) = (decoded(p, ds, false), decoded(p, ds, true));
+        interleaved |= mixed;
+        assert_eq!(events.len(), by_cell.len(), "{}", p.strategy);
+        if let Some(i) = (0..events.len()).find(|&i| events[i] != by_cell[i]) {
+            panic!("{}: event {} is {} and was {}", p.strategy, i, events[i], by_cell[i]);
+        }
+        tuples += events.iter().filter(|e| e.starts_with("Tuple")).count();
+        // Two relations' tuples beside each other, and the kinds of value
+        // the streams carry.
+        for kind in ["Equity(", "Label(", "Time(", "Num(", "Count(", "NaN"] {
+            if events.iter().any(|e| e.starts_with("Tuple") && e.contains(kind)) {
+                seen.insert(kind);
+            }
+        }
+    }
+    assert!(tuples > 10_000, "{} tuples", tuples);
+    assert!(interleaved, "no batch interleaved two relations' tuples");
+    assert!(["Equity(", "Label(", "Time(", "Num("].iter().all(|k| seen.contains(k)), "{:?}", seen);
+}

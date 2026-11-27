@@ -14,8 +14,8 @@
 //! registers, which links the data layer the kernel may not depend on
 //! (ERRATA E-36).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use abt_wire::generated::abt::wire::{
     AggregateCall, AggregateRequest, Attribute, Binding, Budget, Catalog, ChainFilters, ColumnSpec, ColumnType, Demand, Distinct, DynamicNeed, Layer, Message, Need, ParamValue, PlanStep, Preference,
@@ -41,6 +41,170 @@ pub struct DataClient {
     /// How to open another connection to the same service, when the client
     /// knows (what reads a run's outputs beside the run, E-66).
     connector: Option<Connector>,
+    /// The calls made on the service, the last `CALLS_KEPT` of them: the
+    /// clock of what a run asks of the data layer before its stream. It is
+    /// the client's own; nothing stored or sent carries it (E-133).
+    calls: Mutex<CallLog>,
+}
+
+/// The calls a client's log keeps: a bind makes some tens, and a client
+/// that serves many runs must not grow with them.
+const CALLS_KEPT: usize = 4096;
+
+/// One call the kernel made on the data layer: what it was, the relation it
+/// named, what it asked of it, the rows of its answer (of what it sent, for
+/// a put) and the seconds until the answer was whole, the transport and
+/// the decoding of its batches included.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DataCall {
+    /// `resolve`, `schemas`, `stats`, `query`, `aggregate`, `put`, `get`,
+    /// `index` or `subscribe`.
+    pub call: &'static str,
+    /// The relation named, `-` when the call names none.
+    pub relation: String,
+    /// A query's form with its window, predicate and projection, an
+    /// aggregate's function and window; one word, `-` when there is none.
+    pub detail: String,
+    pub rows: u64,
+    pub secs: f64,
+}
+
+impl DataCall {
+    /// The call as `ABT_TIMING_RELS` prints it.
+    pub fn line(&self) -> String {
+        format!("data {} {} {} rows={} secs={:.3}", self.call, self.relation, self.detail, self.rows, self.secs)
+    }
+}
+
+#[derive(Default)]
+struct CallLog {
+    kept: VecDeque<DataCall>,
+    /// The calls made so far, those no longer kept included.
+    made: u64,
+}
+
+/// A window as a call's detail writes it: nothing for the whole history.
+fn window_detail(t0: i64, t1: i64) -> String {
+    if t0 == i64::MIN && t1 == i64::MAX {
+        return String::new();
+    }
+    let end = |t: i64| if t == i64::MIN || t == i64::MAX { "*".to_string() } else { time::format_timestamp(t) };
+    format!("@{}..{}", end(t0), end(t1))
+}
+
+/// A predicate as a call's detail writes it: each atom's column, operator
+/// and number of constants, `|` within a disjunction and `&` between them.
+fn predicate_detail(p: Option<&abt_wire::generated::abt::wire::Predicate>) -> String {
+    use abt_wire::generated::abt::wire::Op;
+    let Some(p) = p else { return String::new() };
+    let op = |o: Op| match o {
+        Op::Eq => "eq",
+        Op::Ne => "ne",
+        Op::Lt => "lt",
+        Op::Le => "le",
+        Op::Gt => "gt",
+        Op::Ge => "ge",
+        Op::In => "in",
+        Op::IsNull => "null",
+    };
+    p.all
+        .iter()
+        .flatten()
+        .map(|d| {
+            d.atoms
+                .iter()
+                .map(|a| format!("{}.{}({})", a.column, op(a.op), a.values.as_ref().map_or(0, |v| v.len())))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// An identity as a call's detail writes it: the instrument's id, or the
+/// label; `*` for every identity.
+fn identity_detail(id: Option<&Identity>) -> String {
+    match id.and_then(|i| i.values.first()) {
+        Some(c) if c.kind == ConstantKind::Label => c.text.clone().unwrap_or_default(),
+        Some(c) => c.int.to_string(),
+        None => "*".to_string(),
+    }
+}
+
+/// The relation a query form names and the form as one word: its kind, what
+/// it selects, its predicate and its window.
+fn form_detail(form: &QueryForm) -> (String, String) {
+    let filtered = |kind: &str, what: String, p: Option<&abt_wire::generated::abt::wire::Predicate>, t0: i64, t1: i64| {
+        let p = predicate_detail(p);
+        let inner = match (what.is_empty(), p.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!("({})", what),
+            (true, false) => format!("(where={})", p),
+            (false, false) => format!("({};where={})", what, p),
+        };
+        format!("{}{}{}", kind, inner, window_detail(t0, t1))
+    };
+    match form {
+        QueryForm::Point(p) => (p.relation.clone(), format!("point({})@{}", identity_detail(p.identity.as_deref()), time::format_timestamp(p.t))),
+        QueryForm::Latest(p) => (p.relation.clone(), format!("latest({}){}", identity_detail(p.identity.as_deref()), window_detail(i64::MIN, p.t_max))),
+        QueryForm::Series(p) => (p.relation.clone(), format!("series({}){}", identity_detail(p.identity.as_deref()), window_detail(p.t0, p.t1))),
+        QueryForm::Section(p) => (p.relation.clone(), format!("section@{}", time::format_timestamp(p.t))),
+        QueryForm::Scan(p) => (
+            p.relation.clone(),
+            filtered("scan", p.columns.as_ref().map(|c| c.join(",")).unwrap_or_default(), p.predicate.as_deref(), p.t0, p.t1),
+        ),
+        QueryForm::Exists(p) => (p.relation.clone(), filtered("exists", String::new(), p.predicate.as_deref(), p.t0, p.t1)),
+        QueryForm::CountRows(p) => (p.relation.clone(), filtered("count", String::new(), p.predicate.as_deref(), p.t0, p.t1)),
+        QueryForm::Distinct(p) => (p.relation.clone(), filtered("distinct", p.column.clone(), None, p.t0, p.t1)),
+        QueryForm::Catalog(p) => (p.relation.clone(), filtered("catalog", String::new(), p.predicate.as_deref(), i64::MIN, i64::MAX)),
+        QueryForm::Chain(p) => ("-".to_string(), format!("chain({})@{}", p.underlying, time::format_timestamp(p.t))),
+    }
+}
+
+/// An aggregate request as a call's detail writes it: the function over its
+/// columns, the window and the calendar its labels are walked on.
+fn aggregate_detail(r: &AggregateRequest) -> String {
+    use abt_wire::generated::abt::wire::WindowKind as W;
+    let columns = match &r.second_column {
+        Some(second) => format!("{},{}", r.column, second),
+        None => r.column.clone(),
+    };
+    let window = match r.window {
+        W::Rows => format!("rows:{}", r.n),
+        W::PriorRows => format!("prior_rows:{}", r.n),
+        W::Span | W::PriorSpan => {
+            let d = r.span.as_deref().map(|d| format!("{}m{}d{}ns", d.months, d.days, d.nanos)).unwrap_or_default();
+            format!("{}:{}", if r.window == W::Span { "span" } else { "prior_span" }, d)
+        }
+        W::Bucket => format!("bucket:{}", r.bucket.as_deref().unwrap_or("")),
+    };
+    format!("{}({})/{}@{}", r.function, columns, window, r.calendar.as_deref().unwrap_or("-")).replace(' ', "")
+}
+
+fn batch_rows(batches: &[RecordBatch]) -> u64 {
+    batches.iter().map(|b| b.num_rows() as u64).sum()
+}
+
+/// Under `ABT_TIMING_RELS`, the calls a stage of a run made on the data
+/// layer since `mark` (the client's `calls_made` when the stage began), on
+/// standard error: one line each, `data <call> <relation> <detail>
+/// rows=<n> secs=<s>`, then the stage's total. The stage's own seconds less
+/// that total are the kernel's.
+pub fn print_calls(client: &DataClient, mark: u64, stage: &str) {
+    if std::env::var_os("ABT_TIMING_RELS").is_none() {
+        return;
+    }
+    let calls = client.calls_since(mark);
+    for c in &calls {
+        eprintln!("{}", c.line());
+    }
+    eprintln!(
+        "data total {} calls={} rows={} secs={:.3}",
+        stage,
+        calls.len(),
+        calls.iter().map(|c| c.rows).sum::<u64>(),
+        calls.iter().map(|c| c.secs).sum::<f64>()
+    );
 }
 
 /// One barrier of a stream's index: its calendar, label, instant and seq.
@@ -69,7 +233,48 @@ impl DataClient {
         Ok(DataClient {
             client: Client::connect(conn, Layer::Kernel, "abt-kernel").map_err(wire)?,
             connector: None,
+            calls: Mutex::new(CallLog::default()),
         })
+    }
+
+    /// One call on the service, noted in the log with the seconds it took
+    /// and the rows `rows` counts in its answer (none when it failed).
+    fn timed<T>(&self, call: &'static str, relation: &str, detail: String, rows: impl Fn(&T) -> u64, f: impl FnOnce() -> Result<T, RunError>) -> Result<T, RunError> {
+        let started = std::time::Instant::now();
+        let out = f();
+        let entry = DataCall {
+            call,
+            relation: if relation.is_empty() { "-".to_string() } else { relation.to_string() },
+            // One word, whatever a label holds: a line of the log is read by its fields.
+            detail: if detail.is_empty() { "-".to_string() } else { detail.replace(char::is_whitespace, "_") },
+            rows: out.as_ref().map(&rows).unwrap_or(0),
+            secs: started.elapsed().as_secs_f64(),
+        };
+        let mut log = self.calls.lock().unwrap_or_else(|p| p.into_inner());
+        if log.kept.len() >= CALLS_KEPT {
+            log.kept.pop_front();
+        }
+        log.kept.push_back(entry);
+        log.made += 1;
+        out
+    }
+
+    /// The calls made on the service so far: a mark for `calls_since`.
+    pub fn calls_made(&self) -> u64 {
+        self.calls.lock().unwrap_or_else(|p| p.into_inner()).made
+    }
+
+    /// The calls the log keeps, oldest first.
+    pub fn calls(&self) -> Vec<DataCall> {
+        self.calls.lock().unwrap_or_else(|p| p.into_inner()).kept.iter().cloned().collect()
+    }
+
+    /// The calls made after the first `mark` (`calls_made` at an earlier
+    /// moment) that the log still keeps, oldest first.
+    pub fn calls_since(&self, mark: u64) -> Vec<DataCall> {
+        let log = self.calls.lock().unwrap_or_else(|p| p.into_inner());
+        let after = log.made.saturating_sub(mark).min(log.kept.len() as u64) as usize;
+        log.kept.iter().skip(log.kept.len() - after).cloned().collect()
     }
 
     /// A client over a connection `connector` opens, which can open more.
@@ -94,19 +299,36 @@ impl DataClient {
     }
 
     pub fn schemas(&self, class: Option<&str>) -> Result<Vec<RelationSchema>, RunError> {
-        match self.request(Message::SchemaRequest(Box::new(SchemaRequest {
-            class: class.map(str::to_string),
-            relation: None,
-        })))? {
-            Message::SchemaResponse(r) => Ok(r.schemas.unwrap_or_default()),
-            _ => Err(RunError::Config("the data service answered a schema request with another message".into())),
-        }
+        self.timed(
+            "schemas",
+            "",
+            class.unwrap_or_default().to_string(),
+            |s: &Vec<RelationSchema>| s.len() as u64,
+            || match self.request(Message::SchemaRequest(Box::new(SchemaRequest {
+                class: class.map(str::to_string),
+                relation: None,
+            })))? {
+                Message::SchemaResponse(r) => Ok(r.schemas.unwrap_or_default()),
+                _ => Err(RunError::Config("the data service answered a schema request with another message".into())),
+            },
+        )
     }
 
     /// The binding of a demand (D-7.2), with the plan's steps (the version
     /// each need's relations are bound at, its span and its attributes)
     /// and the resolver's notes (what it bought, what it could not cover).
     pub fn resolve(&self, demand: Demand) -> Result<(Binding, Vec<PlanStep>, Vec<String>), RunError> {
+        let detail = format!("needs={}", demand.needs.as_ref().map_or(0, |n| n.len()));
+        self.timed(
+            "resolve",
+            "",
+            detail,
+            |(b, _, _): &(Binding, Vec<PlanStep>, Vec<String>)| b.pairs.as_ref().map_or(0, |p| p.len() as u64),
+            || self.resolve_untimed(demand),
+        )
+    }
+
+    fn resolve_untimed(&self, demand: Demand) -> Result<(Binding, Vec<PlanStep>, Vec<String>), RunError> {
         let answer = self.client.request(Message::ResolveRequest(Box::new(ResolveRequest {
             demand: Box::new(demand),
             dry_run: false,
@@ -128,6 +350,17 @@ impl DataClient {
     /// An aggregate the data layer's pass computes (D-6) over a view: the
     /// cache key and the answer's rows.
     pub fn aggregate(&self, view: &View, request: AggregateRequest) -> Result<(String, Vec<RecordBatch>), RunError> {
+        let (relation, detail) = (request.relation.clone(), aggregate_detail(&request));
+        self.timed(
+            "aggregate",
+            &relation,
+            detail,
+            |(_, b): &(String, Vec<RecordBatch>)| batch_rows(b),
+            || self.aggregate_untimed(view, request),
+        )
+    }
+
+    fn aggregate_untimed(&self, view: &View, request: AggregateRequest) -> Result<(String, Vec<RecordBatch>), RunError> {
         let mut reply = self
             .client
             .call(Message::AggregateCall(Box::new(AggregateCall {
@@ -147,14 +380,23 @@ impl DataClient {
     }
 
     pub fn query(&self, view: &View, form: QueryForm) -> Result<Vec<RecordBatch>, RunError> {
-        self.table(Message::QueryRequest(Box::new(QueryRequest {
-            view: Some(Box::new(view.clone())),
-            form,
-            receipt_filter: None,
-            with_seq: false,
-            explain: false,
-            ticks: false,
-        })))
+        let (relation, detail) = form_detail(&form);
+        self.timed(
+            "query",
+            &relation,
+            detail,
+            |b: &Vec<RecordBatch>| batch_rows(b),
+            || {
+                self.table(Message::QueryRequest(Box::new(QueryRequest {
+                    view: Some(Box::new(view.clone())),
+                    form,
+                    receipt_filter: None,
+                    with_seq: false,
+                    explain: false,
+                    ticks: false,
+                })))
+            },
+        )
     }
 
     /// Stores rows as a cache object under `key` (D-3.5); returns the version.
@@ -170,11 +412,17 @@ impl DataClient {
             version: None,
             relation: None,
         }));
-        match self.client.request_table(m) {
-            Ok((_, b)) => Ok(Some(b)),
-            Err(WireError::Remote(e)) if e.code == abt_wire::ErrorCode::NotFound => Ok(None),
-            Err(e) => Err(wire(e)),
-        }
+        self.timed(
+            "get",
+            "",
+            "cache".to_string(),
+            |b: &Option<Vec<RecordBatch>>| b.as_deref().map_or(0, batch_rows),
+            || match self.client.request_table(m) {
+                Ok((_, b)) => Ok(Some(b)),
+                Err(WireError::Remote(e)) if e.code == abt_wire::ErrorCode::NotFound => Ok(None),
+                Err(e) => Err(wire(e)),
+            },
+        )
     }
 
     /// Writes rows under the kernel's namespace (D-3.6), added to the
@@ -190,6 +438,16 @@ impl DataClient {
     }
 
     fn put_as(&self, schema: RelationSchema, rows: &[RecordBatch], cache_key: Option<String>, replace: bool) -> Result<String, RunError> {
+        let detail = match (&cache_key, replace) {
+            (Some(_), _) => "cache",
+            (None, true) => "replace",
+            (None, false) => "add",
+        };
+        let (relation, sent) = (schema.name.clone(), batch_rows(rows));
+        self.timed("put", &relation, detail.to_string(), |_: &String| sent, || self.put_untimed(schema, rows, cache_key, replace))
+    }
+
+    fn put_untimed(&self, schema: RelationSchema, rows: &[RecordBatch], cache_key: Option<String>, replace: bool) -> Result<String, RunError> {
         let arrow_schema = rows.first().map(|b| b.schema()).ok_or_else(|| RunError::Internal("a put of no batch".into()))?;
         let relation = schema.name.clone();
         let mut reply = self
@@ -219,6 +477,11 @@ impl DataClient {
     /// A subscription; `paced`, a replay sent at the data layer's clock's
     /// pace (D-5.5).
     pub fn subscribe_paced(&self, spec: StreamSpec, from: u64, to: Option<u64>, paced: bool) -> Result<Subscription, RunError> {
+        let detail = format!("relations={}", spec.relations.as_ref().map_or(0, |r| r.len()));
+        self.timed("subscribe", "", detail, |_: &Subscription| 0, || self.subscribe_untimed(spec, from, to, paced))
+    }
+
+    fn subscribe_untimed(&self, spec: StreamSpec, from: u64, to: Option<u64>, paced: bool) -> Result<Subscription, RunError> {
         let mut reply = self
             .client
             .call(Message::SubscribeRequest(Box::new(SubscribeRequest {
@@ -240,6 +503,11 @@ impl DataClient {
     }
 
     pub fn stream_index(&self, spec: StreamSpec) -> Result<Vec<IndexRow>, RunError> {
+        let detail = format!("relations={}", spec.relations.as_ref().map_or(0, |r| r.len()));
+        self.timed("index", "", detail, |rows: &Vec<IndexRow>| rows.len() as u64, || self.stream_index_untimed(spec))
+    }
+
+    fn stream_index_untimed(&self, spec: StreamSpec) -> Result<Vec<IndexRow>, RunError> {
         let mut out = Vec::new();
         for b in self.table(Message::StreamIndexRequest(Box::new(StreamIndexRequest { spec: Box::new(spec) })))? {
             let cal = b.column(0).as_dictionary::<UInt32Type>();
@@ -261,7 +529,13 @@ impl DataClient {
 
     /// Every version's row count and span (the `stats` table).
     pub fn stats(&self) -> Result<Vec<RecordBatch>, RunError> {
-        self.table(Message::StatsRequest(Box::new(StatsRequest { relation: None })))
+        self.timed(
+            "stats",
+            "",
+            String::new(),
+            |b: &Vec<RecordBatch>| batch_rows(b),
+            || self.table(Message::StatsRequest(Box::new(StatsRequest { relation: None }))),
+        )
     }
 }
 
@@ -403,7 +677,101 @@ pub struct ScanRow {
     pub labels: Vec<Option<String>>,
 }
 
+/// How many of a relation's value columns after its time a column scan
+/// reads, by `ScanRow`'s numbering: the first `nums` numeric ones (a count
+/// as a number) and the first `times` times.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScanWant {
+    pub nums: usize,
+    pub times: usize,
+}
+
+/// What a column scan hands over per row: its instrument, its time, and
+/// the numbers and times asked for (fewer when the relation has fewer).
+pub type ScanVisitor<'a> = dyn FnMut(Option<Sym>, i64, &[Option<f64>], &[Option<i64>]) + 'a;
+
+/// A numeric value column of an answer, as it is stored.
+enum Numbers<'a> {
+    Num(&'a Float64Array),
+    Count(&'a Int64Array),
+}
+
 impl Bound {
+    /// A scan's predicate with the binding's scope: a scoped binding's
+    /// rows are its instruments' (E-120).
+    fn scoped(&self, schema: &RelationSchema, predicate: Option<abt_wire::generated::abt::wire::Predicate>) -> Option<abt_wire::generated::abt::wire::Predicate> {
+        match (predicate, self.scope.as_ref().and_then(|ids| entity_in(schema, ids))) {
+            (Some(mut p), Some(s)) => {
+                let mut all = p.all.take().unwrap_or_default();
+                all.extend(s.all.unwrap_or_default());
+                p.all = Some(all);
+                Some(p)
+            }
+            (p, s) => p.or(s),
+        }
+    }
+
+    /// `scan` read as columns (E-139): the same rows in the same order,
+    /// each handed to `each` instead of made a `ScanRow`. The query names
+    /// the instrument, the time and the value columns `want` counts, so the
+    /// data layer reads and sends those alone, and a row costs no
+    /// allocation here. A check over a relation of fifteen million rows
+    /// made that many `ScanRow`s, three vectors each, to read two columns.
+    pub fn scan_columns(&self, client: &DataClient, relation: &str, predicate: Option<abt_wire::generated::abt::wire::Predicate>, want: ScanWant, each: &mut ScanVisitor<'_>) -> Result<(), RunError> {
+        let Some((stored_rel, schema)) = self.stored.get(relation) else { return Ok(()) };
+        let by_id: super::hash::FxHashMap<u64, Sym> = self.ids.iter().enumerate().map(|(s, &id)| (id, s as Sym)).collect();
+        let entity = column_of(schema, Role::Entity).map(|c| c.name.clone());
+        let time = column_of(schema, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
+        let values = || schema.columns.iter().filter(|c| c.role == Role::Value);
+        let nums: Vec<&ColumnSpec> = values().filter(|c| matches!(c.ty, ColumnType::Num | ColumnType::Count)).take(want.nums).collect();
+        let tcols: Vec<&ColumnSpec> = values().filter(|c| c.ty == ColumnType::Time).take(want.times).collect();
+        let columns: Vec<String> = entity.iter().chain([&time]).chain(nums.iter().chain(&tcols).map(|c| &c.name)).cloned().collect();
+        let batches = client.query(
+            &self.view,
+            QueryForm::Scan(Box::new(Scan {
+                relation: stored_rel.clone(),
+                t0: i64::MIN,
+                t1: i64::MAX,
+                predicate: self.scoped(schema, predicate).map(Box::new),
+                columns: Some(columns),
+            })),
+        )?;
+        let mut num_row: Vec<Option<f64>> = vec![None; nums.len()];
+        let mut time_row: Vec<Option<i64>> = vec![None; tcols.len()];
+        for b in &batches {
+            let ts = col(b, &time)?.as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+            let ids = entity.as_ref().and_then(|e| b.column_by_name(e)).and_then(|c| c.as_primitive_opt::<arrow::datatypes::UInt64Type>());
+            let mut num_cols: Vec<Numbers<'_>> = Vec::with_capacity(nums.len());
+            for c in &nums {
+                let a = col(b, &c.name)?;
+                num_cols.push(match c.ty {
+                    ColumnType::Count => Numbers::Count(a.as_primitive::<arrow::datatypes::Int64Type>()),
+                    _ => Numbers::Num(a.as_primitive::<arrow::datatypes::Float64Type>()),
+                });
+            }
+            let mut time_cols = Vec::with_capacity(tcols.len());
+            for c in &tcols {
+                time_cols.push(col(b, &c.name)?.as_primitive::<arrow::datatypes::TimestampNanosecondType>());
+            }
+            for i in 0..ts.len() {
+                if ts.is_null(i) {
+                    continue;
+                }
+                for (x, c) in num_row.iter_mut().zip(&num_cols) {
+                    *x = match c {
+                        Numbers::Num(a) => (!a.is_null(i)).then(|| a.value(i)),
+                        Numbers::Count(a) => (!a.is_null(i)).then(|| a.value(i) as f64),
+                    };
+                }
+                for (x, a) in time_row.iter_mut().zip(&time_cols) {
+                    *x = (!a.is_null(i)).then(|| a.value(i));
+                }
+                each(ids.and_then(|c| by_id.get(&c.value(i)).copied()), ts.value(i), &num_row, &time_row);
+            }
+        }
+        Ok(())
+    }
+
     /// The rows of a program relation as the binding holds it (a `scan`,
     /// filtered by `predicate` when one is given); none when the relation
     /// is not bound.
@@ -413,16 +781,7 @@ impl Bound {
         let entity = column_of(schema, Role::Entity).map(|c| c.name.clone());
         let time = column_of(schema, Role::EventTime).map(|c| c.name.clone()).unwrap_or_default();
         let values: Vec<&ColumnSpec> = schema.columns.iter().filter(|c| c.role == Role::Value).collect();
-        // A scoped binding's rows are its instruments' (E-120).
-        let predicate = match (predicate, self.scope.as_ref().and_then(|ids| entity_in(schema, ids))) {
-            (Some(mut p), Some(s)) => {
-                let mut all = p.all.take().unwrap_or_default();
-                all.extend(s.all.unwrap_or_default());
-                p.all = Some(all);
-                Some(p)
-            }
-            (p, s) => p.or(s),
-        };
+        let predicate = self.scoped(schema, predicate);
         let batches = client.query(
             &self.view,
             QueryForm::Scan(Box::new(Scan {
@@ -517,6 +876,7 @@ pub fn point_of(prog: &Program, overrides: &[(String, crate::Lit)]) -> Vec<Param
 /// `source` names the versions bound first where it holds the relation
 /// (a live run's session, a replay's recording: A-D56).
 pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source: Option<&str>) -> Result<Bound, RunError> {
+    let mark = client.calls_made();
     let all = client.schemas(None)?;
     let by_name: BTreeMap<String, RelationSchema> = all.iter().map(|s| (s.name.clone(), s.clone())).collect();
     // The store's name of a relation: the program's class's, else the one
@@ -552,10 +912,13 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
     // current version has rows (a run warns of actions it holds and does
     // not load).
     let mut present: BTreeSet<String> = BTreeSet::new();
-    for b in client.stats()? {
-        let rel = strings(col(&b, "relation")?)?;
-        let current = col(&b, "current")?.as_boolean().clone();
-        let rows = col(&b, "rows")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
+    // The store's versions, asked once: what the class holds here, and the
+    // bound versions' last times below. The binding only reads in between.
+    let versions = client.stats()?;
+    for b in &versions {
+        let rel = strings(col(b, "relation")?)?;
+        let current = col(b, "current")?.as_boolean().clone();
+        let rows = col(b, "rows")?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
         for (i, r) in rel.iter().enumerate() {
             if let Some(r) = r {
                 if current.value(i) && rows.value(i) > 0 && r.starts_with(&format!("{}.", prog.class)) {
@@ -686,9 +1049,9 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
     // The bundle date: the last time of any bound relation of the data.
     let bound_versions: BTreeSet<&String> = pairs.iter().filter(|(r, _)| !matches!(r.as_str(), "instrument" | "vendor_id" | "ticker")).map(|(_, v)| v).collect();
     let mut last_time: Option<i64> = None;
-    for b in client.stats()? {
-        let v = strings(col(&b, "version")?)?;
-        let to = times(col(&b, "to")?);
+    for b in &versions {
+        let v = strings(col(b, "version")?)?;
+        let to = times(col(b, "to")?);
         for i in 0..b.num_rows() {
             if v[i].as_ref().is_some_and(|v| bound_versions.contains(v)) {
                 if let Some(t) = to[i] {
@@ -1021,6 +1384,7 @@ pub fn bind_at(prog: &Program, client: &DataClient, point: &[ParamValue], source
         }
         out.into_iter().collect()
     });
+    print_calls(client, mark, "bind");
     Ok(Bound {
         binding,
         view,
@@ -1785,13 +2149,77 @@ pub enum StreamEvent {
 pub struct Decoder {
     converters: HashMap<String, Converter>,
     cal_of: BTreeMap<String, Cal>,
-    entity_syms: HashMap<u64, Sym>,
+    entity_syms: super::hash::FxHashMap<u64, Sym>,
     label_syms: HashMap<String, Sym>,
+}
+
+/// An argument of a relation's tuples in one event batch: the tuple's key,
+/// or the batch's column as the type the argument reads it at, found once
+/// for the batch.
+enum Cell<'a> {
+    Key,
+    Entity(&'a arrow::array::UInt64Array),
+    /// A label column: its codes, their texts, and the kernel's label of
+    /// each code met in the batch (a text is looked up once a batch, not
+    /// once a row).
+    Label {
+        codes: &'a arrow::array::UInt32Array,
+        texts: &'a StringArray,
+        syms: super::hash::FxHashMap<u32, Sym>,
+    },
+    Time(&'a TimestampNanosecondArray),
+    Count(&'a Int64Array),
+    CountOfNumber(&'a Float64Array),
+    /// A number, a null one read as NaN when `nan` (E-71).
+    Number {
+        values: &'a Float64Array,
+        nan: bool,
+    },
+    NumberOfCount {
+        values: &'a Int64Array,
+        nan: bool,
+    },
+    /// A column stored as another type than its argument's readers know:
+    /// read a cell at a time, as `Decoder::value` reads it.
+    Other(&'a ArrayRef, Ty),
+}
+
+impl<'a> Cell<'a> {
+    fn of(column: &'a ArrayRef, ty: &Ty) -> Cell<'a> {
+        let nan = matches!(ty, Ty::Quantity(_) | Ty::IntLit);
+        let typed = match ty {
+            Ty::Entity => column.as_primitive_opt::<arrow::datatypes::UInt64Type>().map(Cell::Entity),
+            Ty::Label => column.as_dictionary_opt::<UInt32Type>().and_then(|d| {
+                d.values().as_string_opt::<i32>().map(|texts| Cell::Label {
+                    codes: d.keys(),
+                    texts,
+                    syms: Default::default(),
+                })
+            }),
+            Ty::Timestamp => column.as_primitive_opt::<arrow::datatypes::TimestampNanosecondType>().map(Cell::Time),
+            Ty::Count => match column.data_type() {
+                DataType::Int64 => column.as_primitive_opt::<arrow::datatypes::Int64Type>().map(Cell::Count),
+                _ => column.as_primitive_opt::<arrow::datatypes::Float64Type>().map(Cell::CountOfNumber),
+            },
+            _ => match column.data_type() {
+                DataType::Int64 => column.as_primitive_opt::<arrow::datatypes::Int64Type>().map(|values| Cell::NumberOfCount { values, nan }),
+                _ => column.as_primitive_opt::<arrow::datatypes::Float64Type>().map(|values| Cell::Number { values, nan }),
+            },
+        };
+        typed.unwrap_or_else(|| Cell::Other(column, ty.clone()))
+    }
+}
+
+/// What one batch's rows of a relation become: the kernel's relation and
+/// its arguments' cells.
+struct Tuples<'a> {
+    rel: usize,
+    cells: Vec<Cell<'a>>,
 }
 
 impl Decoder {
     pub fn new(k: &Kernel, bound: &Bound, cal_of: BTreeMap<String, Cal>) -> Decoder {
-        let mut entity_syms = HashMap::new();
+        let mut entity_syms = super::hash::FxHashMap::default();
         for (bound_sym, id) in bound.ids.iter().enumerate() {
             entity_syms.insert(*id, k.remap_syms[bound_sym]);
         }
@@ -1828,8 +2256,160 @@ impl Decoder {
         self.converters.get(stored_rel)
     }
 
-    /// The events of a batch, in order.
+    /// The events of a batch, in order. A relation's converter and its
+    /// columns' types are found once for the batch (at its first tuple, as
+    /// the converter always was), so a tuple costs neither a copy of its
+    /// relation's name nor a lookup by it nor a copy of its arguments' plan
+    /// (E-139): the stream of a book run carries some sixty million.
     pub fn events(&mut self, k: &mut Kernel, bound: &Bound, b: &RecordBatch) -> Result<Vec<StreamEvent>, RunError> {
+        let bad = |m: &str| RunError::Internal(format!("an event batch {}", m));
+        let stamps = |name: &str, missing: &str| {
+            b.column_by_name(name)
+                .map(|c| c.as_primitive::<arrow::datatypes::TimestampNanosecondType>())
+                .ok_or_else(|| bad(missing))
+        };
+        let seq = b.column_by_name("seq").ok_or_else(|| bad("without seq"))?.as_primitive::<arrow::datatypes::UInt64Type>();
+        let kind = b.column_by_name("kind").ok_or_else(|| bad("without kind"))?.as_dictionary::<arrow::datatypes::UInt8Type>();
+        // Per kind of the batch's dictionary: a tuple, a barrier, or an
+        // event the fold does not read.
+        let kinds: Vec<Option<bool>> = strings(kind.values())?
+            .iter()
+            .map(|name| match name.as_deref() {
+                Some("tuple") => Some(true),
+                Some("barrier") => Some(false),
+                _ => None,
+            })
+            .collect();
+        let relation = b.column_by_name("relation").ok_or_else(|| bad("without relation"))?.as_dictionary::<UInt32Type>();
+        let rel_names = strings(relation.values())?;
+        let (t, r) = (stamps("t", "without t")?, stamps("r", "without r")?);
+        let calendar = b.column_by_name("calendar").ok_or_else(|| bad("without calendar"))?.as_dictionary::<UInt32Type>();
+        let cal_names = strings(calendar.values())?;
+        let (label, at) = (stamps("label", "without label")?, stamps("at", "without at")?);
+        let stamp = |a: &TimestampNanosecondArray, i: usize| (!a.is_null(i)).then(|| a.value(i));
+        // Per relation of the batch's dictionary: not met yet, not a
+        // relation the kernel reads, or its tuples' plan.
+        let mut tuples: Vec<Option<Option<Tuples<'_>>>> = rel_names.iter().map(|_| None).collect();
+        let mut out = Vec::with_capacity(b.num_rows());
+        for i in 0..b.num_rows() {
+            let s = seq.value(i);
+            match kinds[kind.keys().value(i) as usize] {
+                Some(true) => {
+                    let code = relation.keys().value(i) as usize;
+                    let Some(stored_rel) = rel_names.get(code).and_then(|n| n.as_deref()) else { continue };
+                    let (key, rt) = (stamp(t, i).ok_or_else(|| bad("tuple without t"))?, stamp(r, i).unwrap_or(i64::MIN));
+                    let plan = match &mut tuples[code] {
+                        Some(plan) => plan,
+                        unmet => unmet.insert(self.converter(k, bound, b, stored_rel).map(|conv| Tuples {
+                            rel: conv.rel,
+                            cells: conv.args.iter().map(|a| a.as_ref().map_or(Cell::Key, |(c, ty)| Cell::of(b.column(*c), ty))).collect(),
+                        })),
+                    };
+                    let Some(plan) = plan else { continue };
+                    let mut tuple: Tuple = smallvec::SmallVec::with_capacity(plan.cells.len());
+                    for cell in &mut plan.cells {
+                        tuple.push(self.cell(k, cell, i, key)?);
+                    }
+                    out.push(StreamEvent::Tuple {
+                        seq: s,
+                        rel: plan.rel,
+                        key,
+                        r: rt,
+                        tuple,
+                    });
+                }
+                Some(false) => {
+                    let name = cal_names
+                        .get(calendar.keys().value(i) as usize)
+                        .and_then(|n| n.as_deref())
+                        .ok_or_else(|| bad("barrier without a calendar"))?;
+                    let cal = self.cal_of.get(name).cloned().ok_or_else(|| bad("barrier of an unknown calendar"))?;
+                    let l = stamp(label, i).ok_or_else(|| bad("barrier without a label"))?;
+                    out.push(StreamEvent::Barrier {
+                        seq: s,
+                        cal,
+                        label: l,
+                        at: stamp(at, i).unwrap_or(l),
+                    });
+                }
+                None => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Row `i` of an argument's cell as the kernel's value: what `value`
+    /// gives for the column and the argument's type.
+    fn cell(&mut self, k: &mut Kernel, cell: &mut Cell<'_>, i: usize, key: i64) -> Result<Value, RunError> {
+        let null = || RunError::Internal("a null in a stored relation's column the kernel reads".into());
+        Ok(match cell {
+            Cell::Key => Value::Time(key),
+            Cell::Entity(ids) => {
+                if ids.is_null(i) {
+                    return Err(null());
+                }
+                let id = ids.value(i);
+                Value::Equity(*self.entity_syms.get(&id).ok_or_else(|| RunError::Internal(format!("instrument {} is not in the binding", id)))?)
+            }
+            Cell::Label { codes, texts, syms } => {
+                if codes.is_null(i) {
+                    return Err(null());
+                }
+                let code = codes.value(i);
+                let sym = match syms.get(&code) {
+                    Some(&s) => s,
+                    None => {
+                        let text = texts.value(code as usize);
+                        let s = match self.label_syms.get(text) {
+                            Some(&s) => s,
+                            None => {
+                                let s = k.labels.intern(text);
+                                self.label_syms.insert(text.to_string(), s);
+                                s
+                            }
+                        };
+                        syms.insert(code, s);
+                        s
+                    }
+                };
+                Value::Label(sym)
+            }
+            Cell::Time(times) => {
+                if times.is_null(i) {
+                    return Err(null());
+                }
+                Value::Time(times.value(i))
+            }
+            Cell::Count(counts) => {
+                if counts.is_null(i) {
+                    return Err(null());
+                }
+                Value::Count(counts.value(i))
+            }
+            Cell::CountOfNumber(numbers) => {
+                if numbers.is_null(i) {
+                    return Err(null());
+                }
+                Value::Count(numbers.value(i) as i64)
+            }
+            Cell::Number { values, nan } => match (values.is_null(i), *nan) {
+                (false, _) => Value::Num(values.value(i)),
+                (true, true) => Value::Num(f64::NAN),
+                (true, false) => return Err(null()),
+            },
+            Cell::NumberOfCount { values, nan } => match (values.is_null(i), *nan) {
+                (false, _) => Value::Num(values.value(i) as f64),
+                (true, true) => Value::Num(f64::NAN),
+                (true, false) => return Err(null()),
+            },
+            Cell::Other(column, ty) => self.value(k, column, i, ty)?,
+        })
+    }
+
+    /// `events` with every tuple's relation looked up by its name and every
+    /// cell's type found at the cell, as before E-139: what `events` is
+    /// held equal to (`tests/fold.rs`).
+    pub fn events_by_cell(&mut self, k: &mut Kernel, bound: &Bound, b: &RecordBatch) -> Result<Vec<StreamEvent>, RunError> {
         let bad = |m: &str| RunError::Internal(format!("an event batch {}", m));
         let seq = b.column_by_name("seq").ok_or_else(|| bad("without seq"))?.as_primitive::<arrow::datatypes::UInt64Type>().clone();
         let kind = b.column_by_name("kind").ok_or_else(|| bad("without kind"))?.as_dictionary::<arrow::datatypes::UInt8Type>().clone();

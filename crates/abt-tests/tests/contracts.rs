@@ -7,8 +7,10 @@
 
 #![allow(clippy::result_large_err)]
 
-use abt_kernel::contract::{contract, Kind, Status};
-use abt_kernel::kernel::{EventKind, ExecConfig, RunError};
+use abt_kernel::contract::check::{preconditions, preconditions_rows};
+use abt_kernel::contract::{contract, Contract, Kind, Status};
+use abt_kernel::kernel::bind::{bind_at, point_of};
+use abt_kernel::kernel::{DataClient, EventKind, ExecConfig, RunError, RunWarning, Value};
 use abt_tests as common;
 use abt_tests::{golden_inputs, golden_programs, run, StrategyParts};
 
@@ -246,4 +248,200 @@ fn a_limit_written_wrong_is_refused_by_the_checker() {
         let text = common::text(&diags);
         assert!(text.contains(want), "{}: {}", limits, text);
     }
+}
+
+/// A program holding a tenth of each name of its universe, over daily bars
+/// with the actions, the listing and the SPX list: what the data checks
+/// of the preconditions read.
+fn checked_program(name: &str, universe: &str, rules: &str) -> abt_kernel::check::Program {
+    let src = StrategyParts {
+        name: name.into(),
+        needs: "need bars @1d   need actions, listing   need lists \"SPX\"".into(),
+        universe: universe.into(),
+        params: "    w : Scalar = 0.1".into(),
+        rules: rules.into(),
+        decides: "    decide(T, hold(A, w)) :- universe(A, T).".into(),
+        ..Default::default()
+    }
+    .render();
+    common::program(&src, name)
+}
+
+/// The preconditions of a program over a dataset, read as columns and read
+/// a row at a time: each one's contract, and its warnings or its refusal.
+type Preconditions = (Contract, Result<Vec<RunWarning>, String>);
+
+fn both_ways(prog: &abt_kernel::check::Program, ds: &abt_kernel::kernel::Dataset) -> (Preconditions, Preconditions, Vec<abt_kernel::kernel::bind::DataCall>) {
+    common::init();
+    let svc = abt::serve_dataset(ds, prog).unwrap();
+    let client = DataClient::connect(abt_data::service::inproc(&svc)).unwrap();
+    let bound = bind_at(prog, &client, &point_of(prog, &[]), None).unwrap();
+    let cfg = ExecConfig::from_program(prog);
+    let mark = client.calls_made();
+    let mut by_columns = contract(prog);
+    let columns = preconditions(&mut by_columns, prog, &bound, &client, &cfg).map_err(|e| format!("{:?}", e));
+    let calls = client.calls_since(mark);
+    let mut by_rows = contract(prog);
+    let rows = preconditions_rows(&mut by_rows, prog, &bound, &client, &cfg).map_err(|e| format!("{:?}", e));
+    ((by_columns, columns), (by_rows, rows), calls)
+}
+
+#[test]
+fn the_preconditions_give_the_same_statuses_and_warnings_from_columns_as_from_rows() {
+    let gated = checked_program("gated", "universe(A, T) :- listed(A, T), traded@base(A, T), member(A, T, \"SPX\").", "");
+    // The same universe through a derived relation: its binding is not
+    // scoped to the list's instruments.
+    let open = checked_program(
+        "open",
+        "universe(A, T) :- listed(A, T), traded@base(A, T), in_spx(A, T).",
+        "    rel in_spx(A: Equity, @T)\n    in_spx(A, T) :- member(A, T, \"SPX\").",
+    );
+    // A market whose actions, delisting and membership are in order: every
+    // data check holds, read either way.
+    let sound = abt_kernel::data::synthetic_daily(&["AAA", "BBB", "CCC", "DDD", "EEE"], (2022, 1, 3), 120, 3);
+    for prog in [&gated, &open] {
+        let (columns, rows, calls) = both_ways(prog, &sound);
+        assert_eq!(columns, rows, "{}", prog.strategy);
+        assert_eq!(columns.1, Ok(vec![]));
+        for id in ["pre.actions", "pre.delistings", "pre.membership"] {
+            assert!(
+                matches!(columns.0.get(id).unwrap().status, Status::Checked { times: 1 }),
+                "{}: {}",
+                id,
+                columns.0.get(id).unwrap().status
+            );
+        }
+        // Every price column was asked for its rows at or below zero, the
+        // instrument and the time of each: none came back.
+        let prices: Vec<&abt_kernel::kernel::bind::DataCall> = calls.iter().filter(|c| c.detail.contains("where=") && c.detail.contains(".le(1)")).collect();
+        assert!(matches!(columns.0.get("pre.prices").unwrap().status, Status::Checked { times } if times as usize == prices.len() && times >= 4));
+        assert!(
+            prices.iter().all(|c| c.detail.starts_with("scan(A,T;where=") && c.rows == 0),
+            "{:?}",
+            prices.iter().map(|c| c.line()).collect::<Vec<_>>()
+        );
+        // And no check read a column it does not look at.
+        let read = |relation: &str| {
+            calls
+                .iter()
+                .filter(|c| c.relation == relation && !c.detail.contains(".le(1)"))
+                .map(|c| c.detail.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(read("equity.close").len(), 1);
+        assert!(read("equity.close")[0].starts_with("scan(A,T,P"), "{:?}", read("equity.close"));
+        assert_eq!(read("equity.listed").len(), 1);
+        assert!(
+            read("equity.listed")[0].starts_with("scan(A,T") && !read("equity.listed")[0].starts_with("scan(A,T,"),
+            "{:?}",
+            read("equity.listed")
+        );
+        assert!(read("equity.member")[0].starts_with("scan(A,T;where=List.in(1)"), "{:?}", read("equity.member"));
+    }
+    // The same market with each check's problems in it. The bars and the
+    // instruments by their keys (E1 to E5).
+    let mut ds = sound.clone();
+    let sym = |ds: &abt_kernel::kernel::Dataset, key: &str| Value::Equity(ds.symbols.get(key).unwrap());
+    let bars: Vec<i64> = {
+        let first = sym(&ds, "E1");
+        ds.facts["close"]
+            .iter()
+            .filter(|tu| tu[0] == first)
+            .filter_map(|tu| if let Value::Time(t) = tu[1] { Some(t) } else { None })
+            .collect()
+    };
+    assert_eq!(bars.len(), 120);
+    // A split whose factor the closes do not show (E2 halves on a 3:1).
+    for tu in ds.facts.get_mut("split").unwrap().iter_mut() {
+        tu[2] = Value::Num(3.0);
+    }
+    // A close halved on a dividend's ex-date (E1, ten bars after the first
+    // announcement): the dividend does not explain it, and nothing explains
+    // the bar after.
+    let (e1, ex) = (sym(&ds, "E1"), Value::Time(bars[20]));
+    assert!(ds.facts["dividend"].iter().any(|tu| tu[0] == e1 && tu[2] == ex));
+    for tu in ds.facts.get_mut("close").unwrap().iter_mut().filter(|tu| tu[0] == e1 && tu[1] == ex) {
+        tu[2] = Value::Num(tu[2].as_f64().unwrap() / 2.0);
+    }
+    // A split on a bar with no close (E5 after its delisting).
+    let e5 = sym(&ds, "E5");
+    ds.add("split", abt_kernel::kernel::Tuple::from_iter([e5, Value::Time(bars[100]), Value::Num(4.0)]));
+    // An instrument that leaves the listing with no delisted record (E3
+    // from the 70th bar), still a member of the list on the fifty bars
+    // after.
+    let e3 = sym(&ds, "E3");
+    ds.facts.get_mut("listed").unwrap().retain(|tu| !(tu[0] == e3 && matches!(tu[1], Value::Time(t) if t >= bars[70])));
+    ds.available_at.remove("listed");
+    for prog in [&gated, &open] {
+        let (columns, rows, _) = both_ways(prog, &ds);
+        assert_eq!(columns, rows, "{}", prog.strategy);
+        let (c, warnings) = (columns.0, columns.1.unwrap());
+        assert_eq!(warnings.iter().map(|w| w.bias.as_str()).collect::<Vec<_>>(), vec!["corporate-action", "delisting", "survivorship"]);
+        let detail = |id: &str| match &c.get(id).unwrap().status {
+            Status::Warned { count, detail } => (*count, detail.clone()),
+            other => panic!("{}: {}", id, other),
+        };
+        let (count, actions) = detail("pre.actions");
+        assert_eq!(count, 4, "{}", actions);
+        for part in [
+            "E1 at 2022-01-31: the close moved from",
+            "does not explain it",
+            "E1 at 2022-02-01: the close moved from",
+            "with no action to explain it",
+            "E2 at 2022-03-10: a 3:1 split but the close moved from",
+            "E5 at 2022-05-23: a 4:1 split on a bar with no close",
+        ] {
+            assert!(actions.contains(part), "{}: {}", part, actions);
+        }
+        let (count, delistings) = detail("pre.delistings");
+        assert_eq!((count, delistings.as_str()), (1, "E3 leaves the listing at 2022-04-08 with no delisted record"));
+        let (count, membership) = detail("pre.membership");
+        assert_eq!(count, 50, "{}", membership);
+        assert!(
+            membership.starts_with("E3 is a member at 2022-04-11 but not listed; E3 is a member at 2022-04-12 but not listed;") && membership.ends_with("(+45 more)"),
+            "{}",
+            membership
+        );
+        assert!(warnings[2].message.contains("(50 found): E3 is a member at 2022-04-11 but not listed"), "{}", warnings[2].message);
+    }
+    // A price that is not positive refuses, naming the first such row of
+    // the first relation that has one: a zero close, and where the closes
+    // are sound a negative open.
+    let mut zero = sound.clone();
+    let e4 = sym(&zero, "E4");
+    for tu in zero
+        .facts
+        .get_mut("close")
+        .unwrap()
+        .iter_mut()
+        .filter(|tu| tu[0] == e4 && (tu[1] == Value::Time(bars[30]) || tu[1] == Value::Time(bars[31])))
+    {
+        tu[2] = Value::Num(0.0);
+    }
+    let mut negative = sound.clone();
+    let e2 = sym(&negative, "E2");
+    for tu in negative.facts.get_mut("open").unwrap().iter_mut().filter(|tu| tu[0] == e2 && tu[1] == Value::Time(bars[9])) {
+        tu[2] = Value::Num(-1.5);
+    }
+    for (ds, relation, who, day) in [(&zero, "close", "E4", "2022-02-14"), (&negative, "open", "E2", "2022-01-14")] {
+        for prog in [&gated, &open] {
+            let (columns, rows, _) = both_ways(prog, ds);
+            assert_eq!(columns, rows, "{}", prog.strategy);
+            let refusal = columns.1.unwrap_err();
+            assert!(
+                refusal.contains("pre.prices") && refusal.contains(&format!("`{}` of {} at {} is not a positive price", relation, who, day)),
+                "{}",
+                refusal
+            );
+        }
+    }
+    // Every program of the corpus on its golden market, read both ways.
+    let mut programs = 0;
+    for f in golden_programs() {
+        let (p, ds) = golden_inputs(&f).unwrap();
+        let (columns, rows, _) = both_ways(&p, &ds);
+        assert_eq!(columns, rows, "{}", p.strategy);
+        programs += 1;
+    }
+    assert!(programs >= 20, "{} programs", programs);
 }

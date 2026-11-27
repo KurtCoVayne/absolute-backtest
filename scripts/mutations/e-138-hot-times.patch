@@ -1,0 +1,16 @@
+# proposition: E-138 (a hot version's distinct times are its presence's labels and its appended rows')
+# mutation: the labels of the appended rows are not joined to the published ones
+# test: cargo test -p abt-data --test query distinct_times_of_a_hot_relation
+# Applied by scripts/mutate.sh; the test must fail under it.
+diff --git a/crates/abt-data/src/hot/version.rs b/crates/abt-data/src/hot/version.rs
+--- a/crates/abt-data/src/hot/version.rs
++++ b/crates/abt-data/src/hot/version.rs
+@@ -787,7 +787,7 @@
+             fresh: Vec::new(),
+         };
+         let mut ov = self.overlay.lock().unwrap_or_else(|p| p.into_inner());
+-        if !ov.is_empty() {
++        if false {
+             ov.for_each_label(t0, t1, &mut |label| times.note(label))?;
+         }
+         times.merge();
